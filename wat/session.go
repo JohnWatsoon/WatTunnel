@@ -888,7 +888,11 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 	}
 	needAck := s.ackPend > 0 && (s.ackPend >= s.ackEvery || now.Sub(s.ackSince) >= 2*time.Millisecond)
 	canData := s.cc.tokens > 0 && s.inflight < s.cc.cwnd() && !s.held
-	needBoot := s.cfg.Server && s.cfg.Boot != 0 && now.Sub(s.bootAt) >= time.Second
+	// The boot id lets a client notice a server restart; that needs the same cadence as the keepalive, not 1 Hz.
+	// At the old fixed 1 s it was over half the idle cost of an otherwise silent tunnel on a billed link
+	// (measured 2026-10-29: 8.2 of 15.5 MB/day). A shorter -ping-every keeps the old detection latency.
+	bootEvery := max(s.cfg.PingEvery, time.Second)
+	needBoot := s.cfg.Server && s.cfg.Boot != 0 && now.Sub(s.bootAt) >= bootEvery
 	if !canData && !needAck && !s.wantPing && len(s.ctrl) == 0 && !needBoot && !s.kexPending() {
 		if s.hasWork() {
 			s.cc.limited = true
@@ -1298,7 +1302,10 @@ func (s *Session) timers(now time.Time) {
 		s.masked.Store(!s.masked.Load()) // nothing answered yet: the peer may speak only the other header form
 		s.maskFlip = now
 	}
-	if !s.lastRecv.IsZero() && now.Sub(s.lastRecv) > 30*time.Second {
+	// Silence this long means the session is dead: reset it and let it rebuild. A raised -ping-every means longer
+	// legitimate silences (both ends ping on their own value), so scale with it like Server.IdleTimeout does -
+	// otherwise -ping-every 40/60 killed every open stream every 30 s (2026-10-29).
+	if !s.lastRecv.IsZero() && now.Sub(s.lastRecv) > max(30*time.Second, 3*s.cfg.PingEvery) {
 		if s.hk != nil && !s.cfg.Server {
 			s.masked.Store(!s.masked.Load()) // a peer downgraded or upgraded while we were silent
 			s.peerMaskOK.Store(false)
@@ -1374,6 +1381,13 @@ func (s *Session) timers(now time.Time) {
 
 func (s *Session) rebuildLanes() {
 	if !s.cfg.Server {
+		return
+	}
+	// Keep the last known set when every lane has aged out. A client quiet for longer than the laneSeen prune
+	// (20 s, see timers) used to leave a server with no lane at all, and build() then sent nothing - not even the
+	// boot frame - until the client spoke again. Never observed at the default 2 s ping, but it muted a server
+	// whose -ping-every was raised (2026-10-29).
+	if len(s.laneSeen) == 0 && len(s.lanes) > 0 {
 		return
 	}
 	s.lanes = s.lanes[:0]
