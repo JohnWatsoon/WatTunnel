@@ -369,12 +369,12 @@ T_CARRIER=tcp; T_PEER=198.51.100.1:443; T_SNI=example.com; T_PATH=/wat; T_KEY=k;
 at_prep() { AT_DIR="$AUTO_RUN/t.$$"; mkdir -p "$AT_DIR"; printf 'k' >"$AT_DIR/key"; return 0; }
 at_probe() { AR_OK[$1]=1; AR_DOWN[$1]=5; AR_UP[$1]=5; AR_RTT[$1]=10; return 0; }
 ac_matrix t1
-chk "matrix: variant count" "${#AV_LABEL[@]}" "13" # 1 base + 6 modes + 3 SNIs + 2 cloudflare + 1 auto-probe
+chk "matrix: variant count" "${#AV_LABEL[@]}" "14" # 1 base + 7 modes + 3 SNIs + 2 cloudflare + 1 auto-probe
 chk "matrix: baseline first" "${AV_LABEL[0]}" "base (no desync)"
 chk "matrix: seq present" "$(printf '%s\n' "${AV_FM[@]}" | grep -c '^seq$')" "1"
 chk "matrix: auto-probe present" "$(printf '%s\n' "${AV_FM[@]}" | grep -c '^auto$')" "1"
-chk "matrix: 12 desync rows carry fake-sni" "$(printf '%s\n' "${AV_FS[@]}" | grep -c .)" "12"
-chk "matrix: ranking fills" "${#AT_RANK[@]}" "13"
+chk "matrix: 13 desync rows carry fake-sni" "$(printf '%s\n' "${AV_FS[@]}" | grep -c .)" "13"
+chk "matrix: ranking fills" "${#AT_RANK[@]}" "14"
 
 # ac_matrix_apply writes the winner and strips desync keys for the baseline
 AT_SEL=("${AV_LABEL[*]}") # dummy to satisfy set -u shape; real selection below
@@ -530,6 +530,34 @@ set_port_limit t_lim 8080 10MB 0
 chk "set_port_limit updated limit" "$(grep -c '8080 rate=10MB' "$WAT_CONF/t_lim.yml" || true)" "1"
 chk "set_port_limit preserved ports after update" "$(grep -c '^[[:space:]]*- 8080$' "$WAT_CONF/t_lim.yml" || true)" "1"
 rm -f "$WAT_CONF/t_lim.yml"
+
+# 9. pe_from: the port rows of another tunnel can be copied, and the copy can move them off it
+cat >"$WAT_CONF/t_src.yml" <<'EOF'
+mode: client
+carrier: udp
+peer: 203.0.113.9:4443
+ports:
+  - 8443:443
+  - 9000
+EOF
+cat >"$WAT_CONF/t_dst.yml" <<'EOF'
+mode: client
+carrier: udp
+peer: 203.0.113.9:4443
+ports:
+  - 7000
+EOF
+confirm() { return 0; } # the "add these rows?" and "remove them from the source?" prompts
+PE_ROLE=Iran; PE_TUNNEL=t_dst; PE_ALLOW=(); PE_OWNED=(); PE_MSG=''
+load_maps t_dst
+pe_from t_src
+chk "pe_from: destination has all rows" "${#MAPS[@]}" "3"
+chk "pe_from: kept the row it had" "$(printf '%s\n' "${MAPS[@]}" | grep -c 7000 || true)" "1"
+chk "pe_from: copied 8443" "$(printf '%s\n' "${MAPS[@]}" | grep -c 8443 || true)" "1"
+chk "pe_from: copied 9000" "$(printf '%s\n' "${MAPS[@]}" | grep -c '^9000' || true)" "1"
+chk "pe_from: moved them off the source" "$(yml_maps t_src | grep -c . || true)" "0"
+chk "pe_from: source keeps its other keys" "$(grep -c '^peer:' "$WAT_CONF/t_src.yml" || true)" "1"
+rm -f "$WAT_CONF/t_src.yml" "$WAT_CONF/t_dst.yml"
 
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

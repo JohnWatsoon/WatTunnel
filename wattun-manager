@@ -1408,7 +1408,7 @@ pe_draw() {
   else
     hint "Type ports to add:  443, 8443, 53/udp   (empty list = any port)"
   fi
-  printf '  %s add  %s edit #  %s remove #  %s clear  %s done  %s cancel\n' "$(key_label a)" "$(key_label e)" "$(key_label r)" "$(key_label c)" "$(key_label Enter)" "$(key_label q)"
+  printf '  %s add  %s edit #  %s remove #  %s clear  %s from NAME  %s done  %s cancel\n' "$(key_label a)" "$(key_label e)" "$(key_label r)" "$(key_label c)" "$(key_label f)" "$(key_label Enter)" "$(key_label q)"
 }
 pe_bulk() {
   local line=$1 tok toks=() before=${#MAPS[@]} it
@@ -1469,6 +1469,44 @@ pe_remove() {
   MAPS=("${out[@]+"${out[@]}"}")
   pe_msg "${GRN}✔${RST} Removed."
 }
+pe_from() { # name : bring in the port rows of another tunnel, optionally moving them
+  local n=$1 it c L P who s added=0 held=0 bad=0 src=() keep=() save=()
+  [ -n "$n" ] || { pe_msg "Type: ${BOLD}from NAME${RST}   (NAME = another tunnel on this server)"; return 0; }
+  [ -f "$CONF/$n.yml" ] || { pe_msg "${RED}✘${RST} No tunnel named '$n'."; return 0; }
+  [ "$n" = "${PE_TUNNEL:-}" ] && { pe_msg "${YEL}!${RST} That is this tunnel."; return 0; }
+  while IFS= read -r it; do [ -n "$it" ] && src+=("$it"); done < <(yml_maps "$n")
+  [ "${#src[@]}" -gt 0 ] || { pe_msg "${YEL}!${RST} '$n' publishes no ports."; return 0; }
+  confirm "Add the ${#src[@]} port(s) of '$n' to this list? (the rows you already have stay)" y || return 0
+  for it in "${src[@]}"; do
+    L=$(spec_L "$it"); P=$(spec_P "$it"); c=0
+    for s in ${MAPS[@]+"${MAPS[@]}"}; do
+      [ "$(spec_L "$s")" = "$L" ] && [ "$(spec_P "$s")" = "$P" ] && c=1
+    done
+    [ "$c" = 1 ] && continue
+    who=$(tunnel_using_public "$L" "$P" "$PE_TUNNEL")
+    if [ -n "$who" ] && [ "$who" != "$n" ]; then
+      pe_msg "${RED}✘${RST} $L/$P is published by '$who'."; bad=$((bad+1)); continue
+    fi
+    MAPS+=("$it"); added=$((added+1)); held=$((held+1))
+  done
+  pe_msg "${GRN}✔${RST} $added port(s) copied from '$n'."
+  [ "$bad" -gt 0 ] && pe_msg "${YEL}!${RST} $bad skipped: another tunnel publishes them."
+  # the same Iran port cannot be published twice: offer to finish the move on the other tunnel
+  if [ "$held" -gt 0 ] && confirm "'$n' still publishes $held of them: remove them from '$n' now? (a move; both reload in 3 s)" y; then
+    save=("${MAPS[@]+"${MAPS[@]}"}")
+    load_maps "$n"; keep=()
+    for it in ${MAPS[@]+"${MAPS[@]}"}; do
+      c=0
+      for s in "${save[@]}"; do [ "$it" = "$s" ] && { c=1; break; }; done
+      [ "$c" = 0 ] && keep+=("$it")
+    done
+    MAPS=("${keep[@]+"${keep[@]}"}")
+    if write_ports "$n"; then ok "Moved $held port(s) off '$n'."
+    else err "Could not rewrite '$n'; its ports were left as they were."; fi
+    MAPS=("${save[@]+"${save[@]}"}")
+  fi
+}
+
 port_editor() { # rc 0 = done (MAPS ready), 1 = cancelled
   local line cmd arg msg
   if [ "$NONINTERACTIVE" = 1 ]; then # --map replaces what the token pre-filled; otherwise keep the pre-filled rows
@@ -1497,6 +1535,7 @@ port_editor() { # rc 0 = done (MAPS ready), 1 = cancelled
       e|edit) pe_edit "$arg" ;;
       r|rm|remove|del|delete) pe_remove "$arg" ;;
       c|clear) MAPS=(); pe_msg "Cleared." ;;
+      f|from|copy) pe_from "$arg" ;;
       '?'|h|help) pe_msg "Examples: 443   8443:443   8443->443/udp   53/both   (several at once: 443, 8443:443, 53/udp)"; pe_msg "Iran port = what users connect to on this server. Kharej port = your service." ;;
       *) if [[ "$line" == *[0-9]* ]]; then pe_bulk "$line"; else pe_msg "${YEL}!${RST} Not understood: '$line'. Type ports like 443 or 8443:443, or ? for help."; fi ;;
     esac
@@ -2988,7 +3027,7 @@ auto_widen() { # name : open every carrier of the token's plan again
 AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=()
 AV_FS=(); AV_FM=() # fake-sni / fake-mode per variant (anti-censor matrix, 2.10.2)
 AR_OK=(); AR_DOWN=(); AR_UP=(); AR_RTT=(); AR_WHY=()
-AT_QUIET=0; AT_MB=2; AT_DIR=''; AT_PID=''; AT_FW=''; AT_ADDR=''; AT_SKIP=''; AT_DLINK=0; AT_SECS=0
+AT_QUIET=0; AT_MB=2; AT_DIR=''; AT_PID=''; AT_FW=''; AT_ADDR=''; AT_SKIP=''; AT_DLINK=0; AT_SECS=0; AT_APPLIED=0
 AT_PRESET=normal; AT_STTY=''; AT_KEYS=0; AT_ACT=''; AT_STOP=0; AT_GSKIP=''
 AT_RANK=(); AT_SEL=(); AT_SEL_LABEL=''; AT_SEL_KEY=''; AT_EXTRA=''; AUTO_TOKEN=''
 av_add() { # label carrier kind(d|c|r) peer port sni [fp ech tls-frag [fake-sni fake-mode]] (the last three: CDN variants, wattun >= 2.2.0; last two: matrix)
@@ -3557,6 +3596,7 @@ auto_current_key() { # name -> carrier/kind of the running config (d direct, c C
 }
 auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, restart, wait for the link
   local n=$1 f="$CONF/$1.yml" ol oldrev=0 oldpool=0 l k v rport=''
+  AT_APPLIED=1
   ol=$(cfg "$n" listen); ol=${ol##*:}
   is_reverse "$n" && oldrev=1
   [ "$oldrev" = 1 ] && is_rpool "$(cfg "$n" carrier)" && oldpool=1
@@ -4876,11 +4916,28 @@ change_key() {
     local f="$CONF/$n.yml" oldrev=0 oldlisten='' oldproto='' keepres='' rport=''
     ask_ok "Paste the new token from Kharej" "" v_token || return 1
     t=$REPLY_V; read_token "$t"
-    if [ "$T_CARRIER" = auto ]; then # new auto token: keep the key and token, the variant is chosen by the test
+    if [ "$T_CARRIER" = auto ]; then # auto token: the type is chosen by testing, so test now and apply the winner
+      local oldkey oldauto=0
+      [ -f "$CONF/$n.auto" ] && oldauto=1
+      oldkey=$(cat "$CONF/$n.key" 2>/dev/null || true)
       ( umask 077; printf '%s\n' "$T_KEY" >"$CONF/$n.key" )
       ( umask 077; printf '%s\n' "$t" >"$CONF/$n.auto" ); chmod 600 "$CONF/$n.auto"
-      step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n"
-      hint "This is an auto token. Test again and pick the best connection: $SELF auto-test $n"
+      ok "Token accepted: Kharej is ${T_PEER}."
+      hint "The running tunnel is left alone while each connection type is tested."
+      if [ "$NONINTERACTIVE" = 1 ]; then
+        hint "Now pick the type that works: $SELF auto-test $n"
+        return 0
+      fi
+      AT_APPLIED=0
+      auto_test_cmd "$n" || true
+      if [ "$AT_APPLIED" = 1 ]; then
+        wait_link "$n" 10 && ok "Now using the new Kharej." || warn "Switched, but not connected yet (d = diagnose)."
+        return 0
+      fi
+      # nothing was chosen: put the old key back, or the next restart would use a key the old Kharej rejects
+      [ -n "$oldkey" ] && ( umask 077; printf '%s\n' "$oldkey" >"$CONF/$n.key" )
+      [ "$oldauto" = 1 ] || rm -f "$CONF/$n.auto"
+      hint "'$n' still points at the Kharej it was using; nothing changed."
       return 0
     fi
     [ "$T_REV" = 1 ] && is_rpool "$T_CARRIER" && { v_port "${T_PEER##*:}" || return 1; }
@@ -4911,6 +4968,14 @@ change_key() {
     [ "$T_CARRIER" = icmp ] && [ "$T_REV" = 1 ] && kreply_offer
     [ "$oldrev" = 1 ] && { [ "$T_REV" != 1 ] || [ "$T_CARRIER" != icmp ]; } && { kreply_users_left || kreply_restore; }
     wait_link "$n" 20 && ok "CONNECTED (RTT ${LINK_RTT} ms)" || warn "Not connected yet."
+    # the new Kharej may allow a different set of targets: name the published rows it will refuse
+    local missing='' it
+    allow_to_array "$T_PORTS"
+    load_maps "$n"
+    for it in ${MAPS[@]+"${MAPS[@]}"}; do
+      allowed_has "$(spec_T "$it")" "$(spec_P "$it")" || missing="$missing $(spec_T "$it")/$(spec_P "$it")"
+    done
+    [ -n "$missing" ] && warn "Kharej does not allow:${missing//\/tcp/} — those ports will be refused until you list them on Kharej (tunnel page, p)."
   fi
 }
 delete_tunnel() {
@@ -6340,7 +6405,7 @@ tunnel_page() {
       is_reverse "$n" && [ -z "$(companion_of "$n")" ] && printf '                                           %s Change Iran Address\n' "$(key_label h)"
     else
       printf '                                           %s Auto Mode & SLA Settings\n' "$(key_label a)"
-      printf '                                           %s Paste New Token from Kharej\n' "$(key_label t)"
+      printf '                                           %s Change Kharej (paste token)\n' "$(key_label t)"
       if is_reverse "$n"; then
         [ "$(cfg "$n" carrier)" != icmp ] && printf '                                           %s Change Listen Port\n' "$(key_label h)"
       else
@@ -6382,7 +6447,10 @@ tunnel_page() {
            if [ -n "$par" ]; then say "  '$n' is the reverse side of '$par'; its token and key come from '$par'."
            else say "  Paste this on the Iran server ($SELF → n → Iran):"; fi
            echo; show_token "${par:-$n}"; echo; warn "The token contains the key. Share it privately."
-         else page "New token" "$n"; echo; run_flow change_key "$n"; fi
+         else page "Kharej server" "$n"; echo
+               say "  Paste the token from the ${BOLD}new Kharej${RST} server to move this tunnel there."
+               hint "Its key, connection type and address are replaced. The ports you publish here stay."
+               echo; run_flow change_key "$n"; fi
          pause ;;
       k|K) if [ "$r" = Kharej ]; then
            par=$(companion_of "$n"); page "New key" "$n"
@@ -6401,7 +6469,7 @@ tunnel_page() {
          sleep 1 ;;
       x|X) page "Delete tunnel" "$n"; echo; run_flow delete_tunnel "$n"; pause ;;
       0|esc) return 0 ;;
-      \?|\/|help) flash "Keys: l=logs, m=monitor, v=speedtest, d=diagnostics, p=ports, c=carrier, b=bonding, q=limits, t=token, h=address, k=key, r=restart, s=stop, x=delete, 0=back" ;;
+      \?|\/|help) flash "Keys: l=logs, m=monitor, v=speedtest, d=diagnostics, p=ports, c=carrier, b=bonding, q=limits, t=Kharej/token, h=address, k=key, r=restart, s=stop, x=delete, 0=back" ;;
       *) : ;;
     esac
   done
