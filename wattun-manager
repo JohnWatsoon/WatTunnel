@@ -38,7 +38,7 @@ else
   MGR=/usr/local/bin/wattun-manager
 fi
 REPO=${WAT_REPO:-JohnWatsoon/WatTunnel}
-MGR_VERSION=2026102805   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026103001   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -165,6 +165,18 @@ err()  { ERRN=$((ERRN+1)); if [ "$NONINTERACTIVE" = 1 ]; then printf 'error: %s\
 hint() { printf '  %s%s%s\n' "$GRY" "$*" "$RST"; }
 hr()   { printf '  %s%s%s\n' "$GRY" "$(rep ─ 74)" "$RST"; }
 key_label() { printf '%s[%s]%s' "$CYN" "$1" "$RST"; }
+menu_line() { # key label [key label...] : rows of "[k] label" items, wrapped at 74 columns
+  local out='' w=0 iw
+  while [ $# -ge 2 ]; do
+    iw=$(( ${#1} + 3 + ${#2} ))
+    if [ "$w" -gt 0 ] && [ $((w + 2 + iw)) -gt 74 ]; then printf '  %s
+' "$out"; out=''; w=0; fi
+    [ "$w" -gt 0 ] && { out+='  '; w=$((w+2)); }
+    out+="$(key_label "$1") $2"; w=$((w+iw)); shift 2
+  done
+  printf '  %s
+' "$out"
+}
 
 # ---- gradient banner (cyan -> blue -> magenta), kite on the left ----
 GR_N=(51 45 39 33 63 99 135 171)
@@ -180,76 +192,22 @@ WATTUN_BANNER=(
   '██ ▄█▄ ██ ██▀██  ██     ██   ██ ██ ███▄██ ███▄██ '
   ' ▀██▀██▀  ██▀██  ██     ██   ▀███▀ ██ ▀██ ██ ▀██ '
 )
-META_GITHUB='https://github.com/JohnWatsoon'
 META_TELEGRAM='@WatxDev'
 
-banner() { # [1 = animated reveal]
-  local i cols GFG
+banner() { # [1 = animated reveal] : logo, links beside it when the terminal is wide enough, else below
+  local i cols side=("github.com/JohnWatsoon" "t.me/${META_TELEGRAM#@}" '')
   cols=$(tput cols 2>/dev/null || echo 80)
-  if [ "$cols" -ge 84 ]; then
-    local side=(
-      "┌─ WatTun Community ─────────┐"
-      "│ GitHub:   github.com/JohnWatsoon"
-      "│ Telegram: @WatxDev"
-      "└────────────────────────────┘"
-    )
-    for i in 0 1 2; do
-      gfg "$i"
-      local left="${WATTUN_BANNER[$i]}"
-      local right="${side[$i]}"
-      if [ "$USE_COLOR" = 1 ]; then
-        case "$i" in
-          0) right="${GRY}┌─ ${CYN}WatTun Community${GRY} ─────────┐${RST}" ;;
-          1) right="${GRY}│${RST} ${CYN}GitHub:${RST}   github.com/JohnWatsoon" ;;
-          2) right="${GRY}│${RST} ${CYN}Telegram:${RST} ${BOLD}@WatxDev${RST}" ;;
-        esac
-      fi
-      printf '  %s%s%s  %s\n' "$GFG" "$left" "$RST" "$right"
-      [ "${1:-0}" = 1 ] && sleep 0.03
-    done
-    printf '  %*s  %s\n' 49 '' "${GRY}└────────────────────────────┘${RST}"
-  elif [ "$cols" -ge 80 ]; then
-    local side=(
-      "┌─ WatTun Community ──────┐"
-      "│ GitHub:   JohnWatsoon   │"
-      "│ Telegram: @WatxDev      │"
-      "└─────────────────────────┘"
-    )
-    for i in 0 1 2; do
-      gfg "$i"
-      local left="${WATTUN_BANNER[$i]}"
-      local right="${side[$i]}"
-      if [ "$USE_COLOR" = 1 ]; then
-        case "$i" in
-          0) right="${GRY}┌─ ${CYN}WatTun Community${GRY} ──────┐${RST}" ;;
-          1) right="${GRY}│${RST} ${CYN}GitHub:${RST}   JohnWatsoon   ${GRY}│${RST}" ;;
-          2) right="${GRY}│${RST} ${CYN}Telegram:${RST} ${BOLD}@WatxDev${RST}      ${GRY}│${RST}" ;;
-        esac
-      fi
-      printf ' %s%s%s %s\n' "$GFG" "$left" "$RST" "$right"
-      [ "${1:-0}" = 1 ] && sleep 0.03
-    done
-    printf ' %*s %s\n' 49 '' "${GRY}└─────────────────────────┘${RST}"
-  else
-    for i in 0 1 2; do
-      gfg "$i"
-      printf '  %s%s%s\n' "$GFG" "${WATTUN_BANNER[$i]}" "$RST"
-      [ "${1:-0}" = 1 ] && sleep 0.03
-    done
-    printf '  %sGitHub:%s %s  •  %sTelegram:%s %s\n' "$CYN" "$RST" "$META_GITHUB" "$CYN" "$RST" "$META_TELEGRAM"
-  fi
+  for i in 0 1 2; do
+    gfg "$i"
+    if [ "$cols" -ge 78 ]; then printf '  %s%s%s  %s%s%s\n' "$GFG" "${WATTUN_BANNER[$i]}" "$RST" "$GRY" "${side[$i]}" "$RST"
+    else printf '  %s%s%s\n' "$GFG" "${WATTUN_BANNER[$i]}" "$RST"; fi
+    [ "${1:-0}" = 1 ] && sleep 0.03
+  done
+  [ "$cols" -ge 78 ] || printf '  %s%s · %s%s\n' "$GRY" "${side[0]}" "${side[1]}" "$RST"
   return 0
 }
 
 VER=''
-LOGO=''
-make_logo() {
-  local w=WatTun i
-  LOGO=''
-  for ((i=0; i<${#w}; i++)); do gfg $((i*8/${#w})); LOGO+="$GFG${w:i:1}"; done
-  LOGO+=$RST
-}
-make_logo
 
 EL=''; [ "$IS_TTY" = 1 ] && EL=$'\e[K'
 clear_screen() { [ "$IS_TTY" = 1 ] && printf '\e[H\e[2J'; return 0; }
@@ -259,39 +217,14 @@ render_header() { # title [subtitle] [animated=0]
   clear_screen; echo
   banner "${3:-0}"
   echo
-  printf '  %s◆%s %s%s%s %s›%s %s%s%s%s\n' "$CYN" "$RST" "$LOGO" "${VER:+ $GRY$VER$RST}" "" "$GRY" "$RST" "$BOLD" "$1" "$RST" "${2:+   ${GRY}$2${RST}}"
+  printf '  %s%s%s%s\n' "$BOLD" "$1" "$RST" "${2:+  ${GRY}$2${RST}}"
   hr; echo
 }
 
-render_subpage_header() { # title [subtitle]
+render_subpage_header() { # title [subtitle] : one line, "WatTun 3.1.2 · title  subtitle"
   if [ "$NONINTERACTIVE" = 1 ]; then printf '== %s%s ==\n' "$1" "${2:+ ($2)}"; return 0; fi
   clear_screen; echo
-  local cols w ctx pad
-  cols=$(tput cols 2>/dev/null || echo 80)
-  w=$((cols - 4))
-  [ "$w" -gt 74 ] && w=74
-  [ "$w" -lt 56 ] && w=56
-  
-  local ver_tag="WatTun"
-  [ -n "$VER" ] && ver_tag="WatTun v$VER"
-  local top_left="╭─ ${CYN}${BOLD}${ver_tag}${RST} "
-  local top_mid="${GRY}── @WatxDev ── "
-  local top_right="github.com/JohnWatsoon ─╮${RST}"
-  
-  local raw_left="╭─ ${ver_tag} "
-  local raw_mid="── @WatxDev ── "
-  local raw_right="github.com/JohnWatsoon ─╮"
-  local fill_len=$((w - ${#raw_left} - ${#raw_mid} - ${#raw_right}))
-  [ "$fill_len" -lt 1 ] && fill_len=1
-  
-  ctx="Context: $1${2:+ ($2)}"
-  vlen "$ctx"
-  pad=$((w - 2 - VLEN))
-  [ "$pad" -lt 0 ] && pad=0
-
-  printf '  %s%s%s%s\n' "$top_left" "${GRY}$(rep ─ $fill_len)${RST}" "$top_mid" "$top_right"
-  printf '  %s│%s %s%s%s%*s %s│%s\n' "$GRY" "$RST" "$BOLD" "$ctx" "$RST" "$pad" '' "$GRY" "$RST"
-  printf '  %s╰%s╯%s\n\n' "$GRY" "$(rep ─ "$w")" "$RST"
+  printf '  %sWatTun%s ·%s %s%s%s%s\n\n' "$GRY" "${VER:+ $VER}" "$RST" "$BOLD" "$1" "$RST" "${2:+  ${GRY}$2${RST}}"
 }
 
 page_full() { # title [subtitle]
@@ -307,7 +240,10 @@ page() { # title [subtitle]
 
 # ---- boxes ----
 BOXW=74
-box_top() { printf '  %s╭─ %s%s%s%s %s╮%s\n' "$GRY" "$RST" "$BOLD$1" "$RST" "$GRY" "$(rep ─ $((BOXW-${#1}-3)))" "$RST"; }
+box_top() { # [title]
+  if [ -z "${1:-}" ]; then printf '  %s╭%s╮%s\n' "$GRY" "$(rep ─ "$BOXW")" "$RST"; return 0; fi
+  printf '  %s╭─ %s%s%s %s╮%s\n' "$GRY" "$RST" "$1" "$GRY" "$(rep ─ $((BOXW-${#1}-3)))" "$RST"
+}
 box_mid() { printf '  %s├%s┤%s\n' "$GRY" "$(rep ─ "$BOXW")" "$RST"; }
 box_row() { vlen "$1"; local pad=$((BOXW-2-VLEN)); [ "$pad" -lt 0 ] && pad=0; printf '  %s│%s %s%*s %s│%s\n' "$GRY" "$RST" "$1" "$pad" '' "$GRY" "$RST"; }
 row_2col() {
@@ -317,6 +253,7 @@ row_2col() {
   [ "$pad" -lt 0 ] && pad=0
   box_row "${left}$(rep ' ' "$pad")  ${right}"
 }
+kv() { printf '%s%-11s%s %s' "$GRY" "$1" "$RST" "$2"; } # label value, for the tunnel card
 box_bot() { printf '  %s╰%s╯%s\n' "$GRY" "$(rep ─ "$BOXW")" "$RST"; }
 
 # ---- spinner / progress ----
@@ -351,17 +288,7 @@ bar() { # cur max width -> [████░░░░]
   printf '%s%s%s' "$(rep █ "$f")" "$GRY" "$(rep ░ $((w-f)))$RST"
 }
 
-celebrate() { # text : short success flourish
-  local t=$1 i col
-  if [ "$ANIM" != 1 ]; then ok "$t"; return 0; fi
-  cur_hide
-  for i in 0 1 2 3 4 5 6 7; do
-    gfg "$i"; col=$GFG
-    if [ $((i%2)) -eq 0 ]; then printf '\r\e[K  %s✦ ˚ %s ˚ ✧%s' "$col" "$t" "$RST"; else printf '\r\e[K  %s✧ · %s · ✦%s' "$col" "$t" "$RST"; fi
-    sleep 0.06
-  done
-  printf '\r\e[K'; cur_show; ok "$t"
-}
+celebrate() { ok "$1"; }
 
 # ---- input ----
 # shellcheck disable=SC2120
@@ -933,14 +860,10 @@ v_nonempty() { [ -n "$1" ] && return 0; err "This value is required."; return 1;
 #  Diagrams
 # ======================================================================================
 step_diagram() { # [1|2 highlight]
-  local hl=${1:-0} c1=$BOLD c2=$BOLD e=$RST
-  [ "$hl" = 2 ] && c1=$GRY; [ "$hl" = 1 ] && c2=$GRY
-  [ "$hl" = 1 ] && c1=$BOLD$CYN; [ "$hl" = 2 ] && c2=$BOLD$CYN
-  local top bot; top=$(rep ─ 27); bot=$top
-  printf '  %s┌%s┐%s          %s┌%s┐%s\n' "$c1" "$top" "$e" "$c2" "$top" "$e"
-  printf '  %s│ %-25s │%s %s─token─►%s %s│ %-25s │%s\n' "$c1" "STEP 1  Kharej (outside)" "$e" "$GRY" "$e" "$c2" "STEP 2  Iran (inside)" "$e"
-  printf '  %s│ %-25s │%s          %s│ %-25s │%s\n' "$c1" "do this one FIRST" "$e" "$c2" "paste the token here" "$e"
-  printf '  %s└%s┘%s          %s└%s┘%s\n' "$c1" "$bot" "$e" "$c2" "$bot" "$e"
+  local hl=${1:-0} c1=$BOLD c2=$BOLD
+  [ "$hl" = 1 ] && c2=$GRY; [ "$hl" = 2 ] && c1=$GRY
+  printf '  %s1 Kharej%s %s(outside, first)%s  %s──token──►%s  %s2 Iran%s %s(inside)%s\n' \
+    "$c1" "$RST" "$GRY" "$RST" "$GRY" "$RST" "$c2" "$RST" "$GRY" "$RST"
 }
 conn_diagram() { # carrier canonical... : users ──► Iran :8443 ══ icmp ══► Kharej ──► 127.0.0.1:443
   local cr=$1 it n=0 L T P sfx; shift
@@ -1020,10 +943,10 @@ tinfo() { # name -> TI_*  (state: up | degraded | down | stopped)
 SC_COL=''; SC_TXT=''; SC_DOT='●'
 state_cell() { # role state
   case "$2" in
-    up) SC_COL=$GRN; SC_DOT='●'; SC_TXT=UP ;;
-    degraded) SC_COL=$YEL; SC_DOT='◐'; SC_TXT=DEGRADED ;;
-    down) SC_COL=$RED; SC_DOT='○'; if [ "$1" = Kharej ]; then SC_TXT=WAITING; else SC_TXT=DOWN; fi ;;
-    *) SC_COL=$GRY; SC_DOT='◌'; SC_TXT=STOPPED ;;
+    up) SC_COL=$GRN; SC_DOT='●'; SC_TXT=up ;;
+    degraded) SC_COL=$YEL; SC_DOT='◐'; SC_TXT=degraded ;;
+    down) SC_COL=$RED; SC_DOT='○'; if [ "$1" = Kharej ]; then SC_TXT=waiting; else SC_TXT=down; fi ;;
+    *) SC_COL=$GRY; SC_DOT='◌'; SC_TXT=stopped ;;
   esac
 }
 ports_summary() { # name [maxlen] -> "443 · 8443→443 · 53/udp"
@@ -1050,7 +973,7 @@ dash_row() { # idx name
   tinfo "$n"; state_cell "$r" "$TI_STATE"
   load=''; rtt=''
   if [ "$TI_STATE" != stopped ]; then
-    if [ "$r" = Kharej ]; then load="$TI_SESS clients"; else load="$TI_STREAMS streams"; fi
+    if [ "$r" = Kharej ]; then load="$TI_SESS client"; [ "$TI_SESS" = 1 ] || load+=s; else load="$TI_STREAMS stream"; [ "$TI_STREAMS" = 1 ] || load+=s; fi
     { [ "$TI_STATE" = up ] || [ "$TI_STATE" = degraded ]; } && rtt="$(printf '%.0f' "$TI_RTT") ms"
   fi
   tr='-'; [ "$TI_STATE" != stopped ] && tr="↓$(human "$TI_IN") ↑$(human "$TI_OUT")"
@@ -1077,7 +1000,7 @@ dash_row() { # idx name
     car_display="${cr:0:8}"
   fi
 
-  printf ' %s%2s%s  %-13s %-6s %-10s %s%s%s %s%-9s%s %6s  %s\n' "$BOLD$CYN" "$i" "$RST" "${n:0:13}" "$r" "$car_display" \
+  printf ' %s%2s%s  %-13s %-6s %-10s %s%s%s %s%-9s%s %6s  %s\n' "$CYN" "$i" "$RST" "${n:0:13}" "$r" "$car_display" \
     "$SC_COL" "$SC_DOT" "$RST" "$SC_COL" "$SC_TXT" "$RST" "$rtt" "$load"
   printf '     %s%s   %s%s\n' "$GRY" "$tr" "$pl" "$RST"
 }
@@ -1085,27 +1008,21 @@ dash_table() {
   local n i=0; DASH_N=()
   for n in $(tunnels); do DASH_N+=("$n"); done
   if [ "${#DASH_N[@]}" -eq 0 ]; then
-    printf '  %sWelcome! No tunnels yet. A tunnel needs two servers, set up in this order:%s\n\n' "$BOLD" "$RST"
+    printf '  No tunnels yet. A tunnel joins two servers, in this order:\n\n'
     step_diagram
-    printf '\n  %sStep 1%s  on Kharej: run %s%s%s, press %s[n]%s, choose Kharej.\n' "$BOLD" "$RST" "$CYN" "$SELF" "$RST" "$CYN" "$RST"
-    printf '  %sStep 2%s  on Iran: press %s[n]%s, choose Iran, paste the token from step 1.\n\n' "$BOLD" "$RST" "$CYN" "$RST"
-    printf '  Press %s[n]%s to create your first tunnel.\n' "$CYN$BOLD" "$RST"
+    printf '\n  Press %s on each server to create its side.\n' "$(key_label n)"
     return 0
   fi
-  printf ' %s%2s  %-13s %-6s %-10s   %-9s %6s  %s%s\n' "$GRY" '#' NAME ROLE CARRIER STATE RTT LOAD "$RST"
-  printf ' %s%s%s\n' "$GRY" "$(rep ─ 74)" "$RST"
+  printf ' %s%2s  %-13s %-6s %-10s   %-9s %6s  %s%s\n' "$GRY" '#' name role carrier state rtt load "$RST"
   for n in "${DASH_N[@]}"; do i=$((i+1)); dash_row "$i" "$n"; done
 }
 dash_actions() {
-  local cnt=${#DASH_N[@]} range
-  echo
-  if [ "$cnt" -gt 0 ]; then
-    [ "$cnt" -eq 1 ] && range=1 || range="1-$cnt"
-    printf '  %s▸ Press %s%s%s%s to manage a tunnel%s %s(status, ports, token, logs, restart)%s\n' "$BOLD" "$CYN" "$range" "$RST" "$BOLD" "$RST" "$GRY" "$RST"
-  fi
-  hr
-  printf '  %s new tunnel   %s batch actions   %s live monitor   %s update   %s settings   %s quit\n' \
-    "$(key_label n)" "$(key_label a)" "$(key_label m)" "$(key_label u)" "$(key_label s)" "$(key_label q)"
+  local cnt=${#DASH_N[@]} open=()
+  [ "$cnt" -eq 1 ] && open=(1 open)
+  [ "$cnt" -gt 1 ] && open=("1-$cnt" open)
+  echo; hr
+  menu_line "${open[@]}" n new a batch m monitor
+  menu_line u update s settings q quit
 }
 
 # ======================================================================================
@@ -1593,12 +1510,11 @@ summary_line() { printf '    %s%-14s%s %s\n' "$GRY" "$1" "$RST" "$2"; }
 
 wizard_kharej() {
   local name cr listen='' path='' sni='' itype='' mbps='' fec='' addr key m peer allow t rev='' iranip='' advdef=n udpdns='' lisip='' ask=''
-  page "New tunnel" "STEP 1 · Kharej (outside server)"
+  page "New tunnel" "1 · Kharej, outside server"
   step_diagram 1
   echo
-  say "  Run this on the server where your ${BOLD}real service${RST} lives (Xray, a panel...)."
-  say "  It creates a ${BOLD}token${RST}; you paste that token on the Iran server next."
-  hint "Ctrl+C cancels at any time."
+  say "  Run this where the service lives (Xray, a panel). It prints a token for the Iran server."
+  hint "Ctrl+C cancels."
   echo
   name=$(suggest_name kharej); [ -n "$NI_NAME" ] && name=$NI_NAME
   pick_carrier auto || return 1
@@ -1612,8 +1528,7 @@ wizard_kharej() {
     ask=1
     if [ "$NI_UDPDNS" != 1 ]; then
       echo
-      hint "Some routes cut every UDP flow after its first packets, but let DNS-looking UDP on port 53 through."
-      hint "DNS-shaped udp starts every packet like a DNS message and listens on port 53. Both ends need wattun 3.0.0 or newer."
+      hint "Some routes cut UDP flows but pass DNS-looking UDP on port 53. Needs wattun 3.0.0+ on both ends."
       confirm "Use DNS-shaped UDP on port 53? (only if plain udp does not work on your route)" n || ask=0
     fi
     if [ "$ask" = 1 ]; then
@@ -1630,7 +1545,7 @@ wizard_kharej() {
   if [ -n "$NI_PORTS" ]; then ni_kharej_ports || return 1; allow=$(maps_allow_str); fi
 
   # address Iran connects to
-  page "New tunnel" "STEP 1 · Kharej (outside server)"
+  page "New tunnel" "1 · Kharej, outside server"
   if [ -n "$NI_ADDR" ]; then addr=$NI_ADDR
   else spin_start "Detecting this server's public IP"; addr=$(public_ip); spin_stop; fi
   if [ -z "$NI_ADDR" ] && [ -n "$addr" ] && ip_is_private "$addr"; then
@@ -1654,8 +1569,8 @@ wizard_kharej() {
 
   # advanced
   echo
-  hint "Automatic: name $name, address $addr${listen:+, port $listen}${path:+, path $path}, no speed limit, FEC off."
-  if confirm "Change advanced settings? (Enter = no, keep the automatic ones)" "$advdef"; then
+  hint "Defaults: name $name, address $addr${listen:+, port $listen}${path:+, path $path}, no speed limit, FEC off."
+  if confirm "Change advanced settings?" "$advdef"; then
     ask_ok "Tunnel name" "$name" v_name && name=$REPLY_V || return 1
     ask_ok "Address Iran connects to (IP or domain)" "$addr" v_host || return 1; addr=$REPLY_V
     if [ "$cr" = icmp ]; then
@@ -1746,15 +1661,14 @@ wizard_kharej() {
   echo
   celebrate "Kharej tunnel '$name' is ready"
   echo
-  say "  ${BOLD}Your connection token${RST} (copy the whole line):"
+  say "  Token ${GRY}(copy the whole line)${RST}"
   echo
   printf '%s%s%s\n\n' "$BOLD$YEL" "$(cat "$CONF/$name.token")" "$RST"
   step_diagram 2
   echo
-  say "  ${BOLD}Now, STEP 2${RST}: on the ${BOLD}Iran${RST} server run ${CYN}${SELF}${RST}, press ${CYN}[n]${RST},"
-  say "  choose Iran and paste the token."
-  hint "Show it again any time: $SELF token $name"
-  warn "The token contains the key — treat it like a password: anyone who sees it can use the tunnel. Share it only over a private channel."
+  say "  Next, on the Iran server: run ${CYN}${SELF}${RST}, press $(key_label n), choose Iran, paste the token."
+  hint "Show it again: $SELF token $name"
+  warn "The token contains the key. Share it only over a private channel."
   [ "$NONINTERACTIVE" = 1 ] && printf 'TUNNEL=%s\nTOKEN=%s\n' "$name" "$(cat "$CONF/$name.token")"
   return 0
 }
@@ -2281,10 +2195,10 @@ apply_preset() { # tunnel preset
 wizard_iran() {
   local name tok have manual=0 bind='' mbps='' fec='' itype='' sni='' path='' m i allow_note it new_pub=() t=0 rport='' advdef=n linkok=1 askres
   local T_FAKESNI='' T_FAKEMODE='' T_FAKETTL='' T_POOLROT='' T_POOLBYTES='' T_ECH='' T_GOVERNOR='' T_DNSLISTEN='' T_SRCIP=''
-  page "New tunnel" "STEP 2 · Iran (inside server)"
+  page "New tunnel" "2 · Iran, inside server"
   step_diagram 2
   echo
-  say "  This is the server your ${BOLD}users connect to${RST}. It needs the token made on Kharej."
+  say "  Users connect here. Paste the token printed on Kharej."
   echo
   name=$(suggest_name iran); [ -n "$NI_NAME" ] && name=$NI_NAME
   mbps=$NI_MBPS; [ -n "$mbps" ] && advdef=y
@@ -2375,8 +2289,8 @@ wizard_iran() {
 
   # advanced
   echo
-  hint "Automatic: name $name, listen on all addresses, no speed limit, FEC off."
-  if confirm "Change advanced settings? (Enter = no, keep the automatic ones)" "$advdef"; then
+  hint "Defaults: name $name, all addresses, no speed limit, FEC off."
+  if confirm "Change advanced settings?" "$advdef"; then
     ask_ok "Tunnel name" "$name" v_name && name=$REPLY_V || return 1
     ask_ok "Bind address for the public ports" 0.0.0.0 v_bind || return 1; bind=$REPLY_V
     ask_ok "Speed ceiling in MB/s (empty = default 16)" "$mbps" v_mbps || return 1; mbps=$REPLY_V
@@ -2391,8 +2305,7 @@ wizard_iran() {
     local oip; oip=$(out_ip "${T_PEER%%[:,]*}")
     echo
     warn "This server has several IPv4 addresses: $(local_ips | paste -sd' ' -)"
-    hint "The tunnel leaves from ${oip:-the one the route picks}. If that is the address your users connect to, use the other one,"
-    hint "so a provider or filter that restricts the user-facing address never sees the tunnel."
+    hint "The tunnel leaves from ${oip:-the one the route picks}. If users connect to that one, pick another so its filter never sees the tunnel."
     ask_ok "IP the tunnel leaves from (Enter = ${oip:-the default route})" "" v_src_ip || return 1
     case "${REPLY_V,,}" in ''|off|0) ;; *) T_SRCIP=$REPLY_V ;; esac
   fi
@@ -2428,21 +2341,22 @@ wizard_iran() {
 
     askres=y
     if [ -z "$NI_FAKESNI$NI_FAKEMODE$NI_FAKETTL$NI_POOLROT$NI_POOLBYTES$NI_PRESET$NI_ECH$NI_GOVERNOR$NI_DNSLISTEN$NI_SRCIP$T_FAKESNI$T_FAKEMODE$T_FAKETTL$T_POOLROT$T_POOLBYTES$T_ECH$T_GOVERNOR$T_DNSLISTEN$T_SRCIP" ]; then
-      confirm "Configure anti-censorship / blackout resilience? Only for censored routes; Enter = no" n || askres=n
-      [ "$askres" = n ] && { hint "Without a profile this tunnel has no disguise: a busy direct tunnel can be filtered within an hour."; hint "Turn one on later without recreating it: tunnel page -> z."; }
+      confirm "Set up anti-censor (only for censored routes)?" n || askres=n
+      [ "$askres" = n ] && hint "No disguise: a busy direct tunnel can be filtered within an hour. Turn it on later with z on the tunnel page."
     fi
 
     if [ "$askres" = y ] && [ -z "$NI_FAKESNI$NI_PRESET" ] && [ -z "$T_FAKESNI" ]; then
       if is_pool_list "$T_CARRIER"; then
         echo
-        say "  ${BOLD}Anti-Censorship Profile${RST}:"
-        say "    ${CYN}1${RST}  Iran Whitelist - MCI          (mci.ir, rst mode, 30m / 500MB churn, ECH ladder)"
-        say "    ${CYN}2${RST}  Iran Whitelist - Irancell     (irancell.ir, seq mode, 20m / 300MB churn; SNI-allowlist filters only)"
-        say "    ${CYN}3${RST}  Emergency Blackout Mode       (mci.ir, rst mode, 90s / 100MB rapid churn, ECH ladder)"
-        say "    ${CYN}4${RST}  Conservative / Low-Churn      (mci.ir, seq mode, 4h / 4GB, ECH auto; SNI-allowlist filters only)"
-        say "    ${CYN}5${RST}  Custom Configuration          (select SNI, mode, and rotation step-by-step)"
-        say "    ${CYN}6${RST}  Skip                          (keep anti-censorship disabled)"
-        printf '  %s?%s Choose profile %s[1 = MCI]%s ' "$CYN" "$RST" "$GRY" "$RST"
+        say "  Anti-censor profile            ${GRY}sni          mode  churn          ech${RST}"
+        say "  $(key_label 1) MCI whitelist              ${GRY}mci.ir       rst   30m / 500MB    ladder${RST}"
+        say "  $(key_label 2) Irancell whitelist         ${GRY}irancell.ir  seq   20m / 300MB    ladder${RST}"
+        say "  $(key_label 3) Blackout                   ${GRY}mci.ir       rst   90s / 100MB    ladder${RST}"
+        say "  $(key_label 4) Low churn                  ${GRY}mci.ir       seq   4h / 4GB       auto${RST}"
+        say "  $(key_label 5) Custom                     ${GRY}pick each value${RST}"
+        say "  $(key_label 6) Skip                       ${GRY}no disguise${RST}"
+        hint "2 and 4 (seq mode) only help against SNI-allowlist filters."
+        printf '  %s?%s Profile %s[1]%s ' "$CYN" "$RST" "$GRY" "$RST"
         key_read
         case "$KEY" in
           1|enter) T_FAKESNI="mci.ir"; T_FAKEMODE="rst"; T_POOLROT="30m"; T_POOLBYTES="500MB"; T_ECH="ladder"; T_GOVERNOR="true" ;;
@@ -2598,7 +2512,7 @@ wizard_iran() {
   for ((i=0; i<${#MAPS[@]}; i++)); do new_pub+=("$(spec_L "${MAPS[$i]}")/$(spec_P "${MAPS[$i]}")"); done
   echo
   if wait_link "$name" 25; then
-    celebrate "CONNECTED (RTT ${LINK_RTT} ms)"
+    celebrate "Connected, rtt ${LINK_RTT} ms"
     echo
     say "  ${BOLD}Users can now connect to this server${RST}:"
     conn_diagram "$T_CARRIER" "${MAPS[@]}"
@@ -2833,16 +2747,16 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   echo
   celebrate "Kharej auto tunnel '$name' is ready"
   echo
-  say "  ${BOLD}Your connection token${RST} (copy the whole line):"
+  say "  Token ${GRY}(copy the whole line)${RST}"
   echo
   printf '%s%s%s\n\n' "$BOLD$YEL" "$(cat "$CONF/$name.token")" "$RST"
   step_diagram 2
   echo
-  say "  ${BOLD}Now paste this token on Iran.${RST} It tests every connection type by itself (about 2-3 minutes)."
-  hint "Show it again any time: $SELF token $name"
+  say "  Next, paste this token on Iran. It tests every connection type by itself (2-3 minutes)."
+  hint "Show it again: $SELF token $name"
   hint "When Iran runs on the carrier it picked, close the others here: tunnel page, u (or $SELF auto-narrow $name)."
   hint "If the reverse tests fail because this server never learned Iran's IP: $SELF auto-ip $name IRAN_IP"
-  warn "The token contains the key — treat it like a password: anyone who sees it can use the tunnel. Share it only over a private channel."
+  warn "The token contains the key. Share it only over a private channel."
   [ "$NONINTERACTIVE" = 1 ] && printf 'TUNNEL=%s\nTOKEN=%s\n' "$name" "$(cat "$CONF/$name.token")"
   return 0
 }
@@ -4309,13 +4223,10 @@ new_tunnel() { # [kharej|iran]
   local pick=${1:-}
   if [ -z "$pick" ]; then
     page "New tunnel" "which server is this?"
-    step_diagram
+    printf '  %s Kharej  %soutside server, where the service runs. Set it up first.%s\n' "$(key_label 1)" "$GRY" "$RST"
+    printf '  %s Iran    %sinside server users connect to. Needs the token from Kharej.%s\n' "$(key_label 2)" "$GRY" "$RST"
     echo
-    say "  A tunnel connects two nodes across international network boundaries:"
-    printf '    %s  %sKharej (Foreign VPS)%s   Where real service lives (Xray/panel)  %s[STEP 1 - DO FIRST]%s\n' "$(key_label 1)" "$BOLD" "$RST" "$YEL$BOLD" "$RST"
-    printf '    %s  %sIran (Domestic VPS)%s    Where users/clients connect            %s(Needs token from step 1)%s\n' "$(key_label 2)" "$BOLD" "$RST" "$GRY" "$RST"
-    echo
-    printf '  %s?%s Which role does THIS server perform? %s[1=Kharej, 2=Iran, b=back]%s ' "$CYN" "$RST" "$GRY" "$RST"
+    printf '  %s?%s This server is %s[1/2, b back]%s ' "$CYN" "$RST" "$GRY" "$RST"
     key_read; echo
     case "$KEY" in 1|k|K) pick=kharej ;; 2|i|I) pick=iran ;; *) return 0 ;; esac
   fi
@@ -4492,14 +4403,14 @@ test_tunnel() {
   fi
   s=$(stats "$n")
   if [ "$(jget "$s" alive)" = true ]; then
-    ok "Tunnel link is CONNECTED (RTT $(ms "$(jget "$s" srtt_ms)") ms)"
+    ok "Connected, rtt $(ms "$(jget "$s" srtt_ms)") ms"
     parse_carriers "$s"
     if [ "$CAR_COUNT" -gt 0 ]; then
-      say "  ${BOLD}Live Path Telemetry:${RST}"
+      say "  ${GRY}paths${RST}"
       local ci ccol cdot ctxt c_pct
       for ((ci=0; ci<CAR_COUNT; ci++)); do
-        [ "${CAR_ALIVE[$ci]}" = true ] && { ccol=$GRN; cdot='●'; ctxt="UP"; } || { ccol=$RED; cdot='○'; ctxt="DOWN"; }
-        [ "${CAR_MUTED[$ci]}" = true ] && { ccol=$GRY; cdot='○'; ctxt="MUTED"; }
+        [ "${CAR_ALIVE[$ci]}" = true ] && { ccol=$GRN; cdot='●'; ctxt="up"; } || { ccol=$RED; cdot='○'; ctxt="down"; }
+        [ "${CAR_MUTED[$ci]}" = true ] && { ccol=$GRY; cdot='○'; ctxt="muted"; }
         c_pct=$(awk -v sh="${CAR_SHARE[$ci]:-0}" 'BEGIN{printf "%.0f", sh*100}')
         printf '    %s%s %-6s%s %-10s  rtt: %4.0f ms  loss: %4.1f%%  share: %3s%%\n' \
           "$ccol" "$cdot" "$ctxt" "$RST" "${CAR_NAME[$ci]}" "${CAR_RTT[$ci]}" "$(awk -v l="${CAR_LOSS[$ci]:-0}" 'BEGIN{printf "%.1f", l*100}')" "$c_pct"
@@ -4507,7 +4418,7 @@ test_tunnel() {
       echo
     fi
   else
-    if [ "$r" = Kharej ]; then err "No Iran server is connected yet"; else err "Tunnel link is DISCONNECTED"; fi
+    if [ "$r" = Kharej ]; then err "No Iran server is connected yet"; else err "Link is down"; fi
     say "  ${GRY}Common causes: different key on the two sides, different carrier/icmp-type, the other side not running,${RST}"
     say "  ${GRY}or the carrier is filtered on this route. Paste the Kharej token on Iran again to be sure.${RST}"
     # the whitelist tell: TCP to the peer still connects but the tunnel stays dead — a filtering hop above
@@ -4683,9 +4594,8 @@ spark() { # "v1 v2 ..." -> ▁▂▃▅▇
 }
 mon_frame() {
   local n r any=0 sp rate pad
-  printf '\n  %s◆%s %s %s›%s %sLive monitor%s   %s%s · every 2 s · any key = back%s\e[K\n' "$CYN" "$RST" "$LOGO" "$GRY" "$RST" "$BOLD" "$RST" "$GRY" "$(date '+%H:%M:%S')" "$RST"
-  printf '  %s%s%s\e[K\n' "$GRY" "$(rep ─ 74)" "$RST"
-  printf '  %sNAME        STATE         RTT     RATE         HISTORY             LOAD%s\e[K\n' "$GRY" "$RST"
+  printf '\n  %sWatTun ·%s %sLive monitor%s  %s%s · every 2 s · any key goes back%s\e[K\n\e[K\n' "$GRY" "$RST" "$BOLD" "$RST" "$GRY" "$(date '+%H:%M:%S')" "$RST"
+  printf '  %sname        state         rtt     rate         history             load%s\e[K\n' "$GRY" "$RST"
   for n in $(tunnels); do
     any=1; r=$(role "$n"); tinfo "$n"; state_cell "$r" "$TI_STATE"
     hist_push "$n" "$TI_RATE"; sp=$(spark "${HIST[$n]}")
@@ -4733,86 +4643,83 @@ tunnel_card() {
   srv_up=$(uptime_of "$n")
   srv_en=$(systemctl is-enabled "${WAT_PREFIX}@$n" 2>/dev/null | head -1)
 
-  if [ "$r" = Kharej ]; then routing_txt="Allows: $(ports_summary "$n" 24)"; else routing_txt="Ports: $(ports_summary "$n" 25)"; fi
-  if [ -n "$par" ]; then box_top "Tunnel Overview: $n (reverse side of $par)"; else box_top "Tunnel Overview: $n"; fi
+  if [ "$r" = Kharej ]; then routing_txt="$(kv allows "$(ports_summary "$n" 26)")"; else routing_txt="$(kv ports "$(ports_summary "$n" 26)")"; fi
+  box_top "${par:+reverse side of $par}"
 
-  # Section 1: Overview & System
-  row_2col "Status:  ${SC_COL}${SC_DOT} ${SC_TXT}${RST}" "Role:      ${BOLD}$r${RST}"
-  row_2col "Service: ● ${srv_act} (${srv_up})" "Autostart: ${srv_en:-disabled}"
-  row_2col "Carrier: ${BOLD}$cr${RST}" "$routing_txt"
+  local boot='no start at boot'; [ "$srv_en" = enabled ] && boot='starts at boot'
+  box_row "${SC_COL}${SC_DOT} ${SC_TXT}${RST} ${GRY}· service ${srv_act}${srv_up:+ $srv_up} · $boot${RST}"
+  row_2col "$(kv carrier "$cr")" "$routing_txt"
 
   # Sub-role details
   if [ -n "$par" ]; then
-    box_row "  ${GRY}auto reverse → Iran $(cfg "$n" peer-icmp)${RST}"
+    box_row "$(kv reverse "auto, to Iran $(cfg "$n" peer-icmp)")"
   elif is_auto_kharej "$n"; then
     if [ -f "$CONF/$n-r.yml" ]; then sub="reverse side: $n-r (Iran $(cfg "$n-r" peer-icmp))"
     elif systemctl is-active -q "${WAT_PREFIX}-autowatch-$n.service" 2>/dev/null; then sub="watching for Iran's first connection (then $n-r is created)"
     else sub="Iran's IP not learned yet: $SELF auto-ip $n IRAN_IP"; fi
-    box_row "  ${GRY}$sub${RST}"
+    box_row "$(kv auto "$sub")"
     if auto_live "$n" && [ -n "$AN_D$AN_R" ]; then
       c=$(cfg "$n" carrier); c=${c//+/ }; x=0; for k in $c; do case " $AN_D " in *" $k "*) ;; *) x=$((x+1)) ;; esac; done
-      box_row "  ${GRY}Iran uses ${AN_D:+direct $AN_D}${AN_R:+reverse $AN_R}${RST}"
-      [ "$x" -gt 0 ] && box_row "  ${YEL}$x unused carrier(s) still open: press u to close them${RST}"
+      box_row "$(kv "Iran uses" "${AN_D:+direct $AN_D}${AN_R:+reverse $AN_R}")"
+      [ "$x" -gt 0 ] && box_row "${YEL}!${RST} $x unused carrier(s) still open: press u to close them"
     fi
   elif [ "$cr" = icmp ] && is_reverse "$n"; then
-    if [ "$r" = Iran ]; then box_row "  ${GRY}(reverse) ← pinged by ${peer:--}${RST}"; else box_row "  ${GRY}(reverse) → pings Iran ${peer:--}${RST}"; fi
+    if [ "$r" = Iran ]; then box_row "$(kv reverse "pinged by ${peer:--}")"; else box_row "$(kv reverse "pings Iran ${peer:--}")"; fi
   elif is_rpool "$cr" && is_reverse "$n"; then
-    if [ "$r" = Iran ]; then box_row "  ${GRY}(reverse) ← Kharej connects on ${lis:-:-}${RST}"; else box_row "  ${GRY}(reverse) → connects to Iran ${peer:--}${RST}"; fi
+    if [ "$r" = Iran ]; then box_row "$(kv reverse "Kharej connects on ${lis:-:-}")"; else box_row "$(kv reverse "connects to Iran ${peer:--}")"; fi
   elif [ "$r" = Iran ]; then
-    box_row "  ${GRY}→ remote peer: ${peer:--}${RST}"
+    box_row "$(kv Kharej "${peer:--}")"
   else
-    [ -n "$lis" ] && box_row "  ${GRY}listening on ${lis}${RST}"
+    [ -n "$lis" ] && box_row "$(kv listen "$lis")"
   fi
   if [ "$r" = Iran ] && [ "$(uname -s)" = Linux ] && ! { is_rpool "$cr" && is_reverse "$n"; }; then
     local oip nips; oip=$(cfg "$n" src-ip); nips=$(local_ips | wc -l)
-    if [ -n "$oip" ]; then box_row "  ${GRY}leaves from ${oip} (src-ip)${RST}"
+    if [ -n "$oip" ]; then box_row "$(kv source "$oip ${GRY}(src-ip)${RST}")"
     elif [ -n "$(out_ip "${peer%%[:,]*}")" ]; then
-      box_row "  ${GRY}leaves from $(out_ip "${peer%%[:,]*}")$([ "$nips" -gt 1 ] && echo " - this server has $nips IPs: src-ip picks one")${RST}"
+      box_row "$(kv source "$(out_ip "${peer%%[:,]*}")$([ "$nips" -gt 1 ] && echo "${GRY} · $nips IPs here, src-ip picks one${RST}")")"
     fi
   fi
 
-  sub=$(cdn_summary "$n"); [ -n "$sub" ] && box_row "  ${GRY}CDN: $sub${RST}"
+  sub=$(cdn_summary "$n"); [ -n "$sub" ] && box_row "$(kv cdn "$sub")"
   if ac_dialer "$n"; then
     local fks=$(cfg "$n" fake-sni) gov=$(cfg "$n" governor) rot=$(cfg "$n" pool-rotate) dl=$(cfg "$n" dns-listen)
     if [ -n "$fks" ] || [ "$gov" = true ] || [ -n "$rot" ] || [ -n "$dl" ]; then
-      box_row "  Anti-Censor: ${GRN}ON${RST} · $(detect_preset "$n")${fks:+ (fake-sni $fks)}${dl:+ (dns $dl)}"
+      box_row "$(kv anti-censor "${GRN}on${RST} · $(detect_preset "$n")${fks:+ · fake-sni $fks}${dl:+ · dns $dl}")"
     else
-      box_row "  Anti-Censor: ${GRY}OFF (normal tunnel, full speed)${RST}"
+      box_row "$(kv anti-censor "off ${GRY}(plain tunnel, full speed)${RST}")"
     fi
   elif [ "$(uname -s)" = Linux ] && is_pool_list "$(cfg "$n" carrier)" && is_reverse "$n"; then
-    box_row "  Anti-Censor: ${GRY}runs on the Kharej side (reverse)${RST}"
+    box_row "$(kv anti-censor "${GRY}set on the Kharej side (reverse)${RST}")"
   fi
   local bmode=$(cfg "$n" bond-mode)
-  [ -n "$bmode" ] && box_row "  Bond Mode: ${BOLD}$bmode${RST}"
+  [ -n "$bmode" ] && box_row "$(kv bond "$bmode")"
   if [ -f "$CONF/$n.sla" ]; then
     local min_r=$(grep '^sla_min_rate_kbps=' "$CONF/$n.sla" 2>/dev/null | cut -d= -f2)
     local max_rtt=$(grep '^sla_max_rtt_ms=' "$CONF/$n.sla" 2>/dev/null | cut -d= -f2)
     local max_l=$(grep '^sla_max_loss_pct=' "$CONF/$n.sla" 2>/dev/null | cut -d= -f2)
-    box_row "  SLA Target: min ${min_r:-0}kbps · max ${max_rtt:-0}ms · max ${max_l:-0}% loss"
+    box_row "$(kv sla "rate ≥ ${min_r:-0} kbps · rtt ≤ ${max_rtt:-0} ms · loss ≤ ${max_l:-0} %")"
   fi
 
   # Section 2: Real-time telemetry (when not stopped)
   if [ "$TI_STATE" != stopped ]; then
     box_mid
-    box_row "${BOLD}Real-Time Network Telemetry:${RST}"
-    row_2col "  Latency:     $(ms "$TI_RTT") ms (min $(ms "$(jget "$TI_RAW" min_rtt_ms)"))" "Throughput:  rate $(human "$TI_RATE")/s"
-    row_2col "  Packet Loss: $(jget "$TI_RAW" loss_pct)%" "Retrans:     $(jget "$TI_RAW" retrans) pkts"
-    row_2col "  Streams:     $TI_STREAMS active" "UDP Flows:   $(jget "$TI_RAW" dgram_flows) active"
-    row_2col "  Total Data:  ↓$(human "$TI_IN")  ↑$(human "$TI_OUT")" "Sessions:    $TI_SESS active"
+    row_2col "$(kv rtt "$(ms "$TI_RTT") ms ${GRY}(min $(ms "$(jget "$TI_RAW" min_rtt_ms)"))${RST}")" "$(kv rate "$(human "$TI_RATE")/s")"
+    row_2col "$(kv loss "$(jget "$TI_RAW" loss_pct) %")" "$(kv retrans "$(jget "$TI_RAW" retrans) packets")"
+    row_2col "$(kv streams "$TI_STREAMS")" "$(kv 'udp flows' "$(jget "$TI_RAW" dgram_flows)")"
+    row_2col "$(kv total "↓$(human "$TI_IN")  ↑$(human "$TI_OUT")")" "$(kv sessions "$TI_SESS")"
     if [ "$TI_CAR_COUNT" -gt 0 ]; then
       box_mid
-      box_row "${BOLD}Bonded Carrier Paths:${RST}"
       local ci ccol cdot ctxt c_pct
       for ((ci=0; ci<TI_CAR_COUNT; ci++)); do
         if [ "${CAR_MUTED[$ci]}" = true ]; then
-          ccol=$GRY; cdot='○'; ctxt="MUTED"
+          ccol=$GRY; cdot='○'; ctxt="muted"
         elif [ "${CAR_ALIVE[$ci]}" = true ]; then
-          ccol=$GRN; cdot='●'; ctxt="UP"
+          ccol=$GRN; cdot='●'; ctxt="up"
         else
-          ccol=$RED; cdot='○'; ctxt="DOWN"
+          ccol=$RED; cdot='○'; ctxt="down"
         fi
         c_pct=$(awk -v sh="${CAR_SHARE[$ci]:-0}" 'BEGIN{printf "%.0f", sh*100}')
-        box_row "  ${ccol}${cdot} ${ctxt}${RST} [path $ci] ${CAR_NAME[$ci]} · rtt $(ms "${CAR_RTT[$ci]}") ms · loss $(awk -v l="${CAR_LOSS[$ci]:-0}" 'BEGIN{printf "%.1f", l*100}')% · traffic share ${c_pct}%"
+        box_row "$(printf '%s%s %-5s%s %-8s %s' "$ccol" "$cdot" "$ctxt" "$RST" "${CAR_NAME[$ci]}" "rtt $(ms "${CAR_RTT[$ci]}") ms · loss $(awk -v l="${CAR_LOSS[$ci]:-0}" 'BEGIN{printf "%.1f", l*100}') % · share ${c_pct} %")"
       done
     fi
   fi
@@ -4821,7 +4728,7 @@ tunnel_card() {
 show_token() {
   if [ -f "$CONF/$1.token" ]; then refresh_token "$1"; printf '%s%s%s\n' "$BOLD$YEL" "$(cat "$CONF/$1.token")" "$RST"
   else err "No token stored for '$1' (tokens exist only on Kharej tunnels)."; return 1; fi
-  warn "The token contains the key — treat it like a password: anyone who sees it can use the tunnel."
+  warn "The token contains the key. Share it only over a private channel."
 }
 edit_ports() { # name
   local n=$1 r old=() it i pub=() before par
@@ -6081,11 +5988,11 @@ bonding_menu() { # name
       local ci ccol cdot ctxt c_pct
       for ((ci=0; ci<TI_CAR_COUNT; ci++)); do
         if [ "${CAR_MUTED[$ci]}" = true ]; then
-          ccol=$GRY; cdot='○'; ctxt="MUTED"
+          ccol=$GRY; cdot='○'; ctxt="muted"
         elif [ "${CAR_ALIVE[$ci]}" = true ]; then
-          ccol=$GRN; cdot='●'; ctxt="UP"
+          ccol=$GRN; cdot='●'; ctxt="up"
         else
-          ccol=$RED; cdot='○'; ctxt="DOWN"
+          ccol=$RED; cdot='○'; ctxt="down"
         fi
         c_pct=$(awk -v s="${CAR_SHARE[$ci]:-0}" 'BEGIN{printf "%.0f", s*100}')
         printf '  %s%4s%s  %-10s %s%s %-6s%s %6.0f ms %7.1f%% %11s%%\n' "$CYN" "$ci" "$RST" \
@@ -6387,42 +6294,31 @@ tunnel_page() {
   while :; do
     [ -f "$CONF/$n.yml" ] || return 0
     r=$(role "$n")
-    page "Tunnel $n" "$r"
+    page "$n" "$r"
     tunnel_card "$n"
     run=$(systemctl is-active "${WAT_PREFIX}@$n" 2>/dev/null)
-    local run_txt; [ "$run" = active ] && run_txt="Stop Tunnel Daemon" || run_txt="Start Tunnel Daemon"
+    local run_txt=start boot=off car; car=$(cfg "$n" carrier)
+    [ "$run" = active ] && run_txt=stop
+    systemctl is-enabled -q "${WAT_PREFIX}@$n" 2>/dev/null && boot=on
     echo
-    printf '  %s[Actions & Diagnostics]%s                 %s[Configuration & Network]%s\n' "$CYN$BOLD" "$RST" "$CYN$BOLD" "$RST"
-    printf '    %s Live Logs                           %s Port Forwarding Mappings\n' "$(key_label l)" "$(key_label p)"
-    printf '    %s Live Throughput Monitor             %s Connection Type & Desync Mode\n' "$(key_label m)" "$(key_label c)"
-    printf '    %s Built-in Speedtest                  %s Bonding Manager (Multi-Path)\n' "$(key_label v)" "$(key_label b)"
-    printf '    %s Full Link Diagnostics               %s Quotas & Bandwidth Ceilings\n' "$(key_label d)" "$(key_label q)"
+    menu_line l logs m monitor v 'speed test' d diagnose
+    local cfgm=(p ports c 'connection type' b bonding q limits)
+    if [ "$(uname -s)" = Linux ] && { is_pool_list "$car" || [ "$car" = icmp ]; }; then cfgm+=(z anti-censor); fi
+    menu_line "${cfgm[@]}"
+    local rolem=()
     if [ "$r" = Kharej ]; then
-      printf '                                           %s Show Emergency Token / Key\n' "$(key_label t)"
-      printf '                                           %s Generate New Key & Token\n' "$(key_label k)"
-      is_auto_kharej "$n" && printf '                                           %s Close carriers Iran does not use
-' "$(key_label u)"
-      is_reverse "$n" && [ -z "$(companion_of "$n")" ] && printf '                                           %s Change Iran Address\n' "$(key_label h)"
+      rolem=(t token k 'new key')
+      is_auto_kharej "$n" && rolem+=(u 'close unused carriers')
+      is_reverse "$n" && [ -z "$(companion_of "$n")" ] && rolem+=(h 'change Iran address')
     else
-      printf '                                           %s Auto Mode & SLA Settings\n' "$(key_label a)"
-      printf '                                           %s Change Kharej (paste token)\n' "$(key_label t)"
-      if is_reverse "$n"; then
-        [ "$(cfg "$n" carrier)" != icmp ] && printf '                                           %s Change Listen Port\n' "$(key_label h)"
-      else
-        printf '                                           %s Change Kharej Address\n' "$(key_label h)"
-      fi
+      rolem=(a 'auto mode' t 'move to another Kharej')
+      if is_reverse "$n"; then [ "$car" != icmp ] && rolem+=(h 'change listen port')
+      else rolem+=(h 'change Kharej address'); fi
     fi
-    echo
-    printf '  %s[Service Lifecycle]%s                     %s[Danger Zone]%s\n' "$CYN$BOLD" "$RST" "$RED$BOLD" "$RST"
-    printf '    %s Restart Tunnel Daemon               %s %sDelete Tunnel Permanently%s\n' "$(key_label r)" "$(key_label x)" "$RED" "$RST"
-    printf '    %s %-32s  %s Advanced YAML Settings\n' "$(key_label s)" "$run_txt" "$(key_label o)"
-    printf '    %s Toggle Autostart at Boot\n' "$(key_label e)"
-    if [ "$(uname -s)" = Linux ] && { is_pool_list "$(cfg "$n" carrier)" || [ "$(cfg "$n" carrier)" = icmp ]; }; then
-      printf '    %s Anti-Censor (on/off, presets, reverse)\n' "$(key_label z)"
-    fi
-    echo
+    menu_line "${rolem[@]}"
+    menu_line r restart s "$run_txt" e "start at boot: $boot" o advanced
     hr
-    printf '    %s Back to Dashboard                                        %s Help\n' "$(key_label 0)" "$(key_label '?')"
+    printf '  %s back  %s help%*s%s %sdelete%s\n' "$(key_label 0)" "$(key_label '?')" 49 '' "$(key_label x)" "$RED" "$RST"
     key_read
     case "$KEY" in
       d|D) page "Diagnose" "$n"; run_flow test_tunnel "$n"; pause ;;
@@ -6446,7 +6342,7 @@ tunnel_page() {
            page "Token" "$n"; echo
            if [ -n "$par" ]; then say "  '$n' is the reverse side of '$par'; its token and key come from '$par'."
            else say "  Paste this on the Iran server ($SELF → n → Iran):"; fi
-           echo; show_token "${par:-$n}"; echo; warn "The token contains the key. Share it privately."
+           echo; show_token "${par:-$n}"
          else page "Kharej server" "$n"; echo
                say "  Paste the token from the ${BOLD}new Kharej${RST} server to move this tunnel there."
                hint "Its key, connection type and address are replaced. The ports you publish here stay."
@@ -6469,7 +6365,7 @@ tunnel_page() {
          sleep 1 ;;
       x|X) page "Delete tunnel" "$n"; echo; run_flow delete_tunnel "$n"; pause ;;
       0|esc) return 0 ;;
-      \?|\/|help) flash "Keys: l=logs, m=monitor, v=speedtest, d=diagnostics, p=ports, c=carrier, b=bonding, q=limits, t=Kharej/token, h=address, k=key, r=restart, s=stop, x=delete, 0=back" ;;
+      \?|\/|help) flash "Press a key in brackets. 0 or Esc goes back." ;;
       *) : ;;
     esac
   done
@@ -6687,17 +6583,16 @@ uninstall_all() {
 settings_menu() {
   local heal_on anim_on
   while :; do
-    systemctl is-enabled -q "$HEAL_UNIT.timer" 2>/dev/null && heal_on="${GRN}[ON]${RST}" || heal_on="${GRY}[OFF]${RST}"
-    [ "$(conf_get anim 1)" = 1 ] && anim_on="${GRN}[ON]${RST}" || anim_on="${GRY}[OFF]${RST}"
+    systemctl is-enabled -q "$HEAL_UNIT.timer" 2>/dev/null && heal_on="${GRN}on${RST} " || heal_on="${GRY}off${RST}"
+    [ "$(conf_get anim 1)" = 1 ] && anim_on="${GRN}on${RST} " || anim_on="${GRY}off${RST}"
     page "Settings"
-    say "  Auto-heal   $heal_on   ${GRY}restarts an Iran tunnel whose link stays down for 3 minutes${RST}"
-    say "  Animations  $anim_on   ${GRY}spinners and the intro (WAT_NO_ANIM=1 also turns them off)${RST}"
+    printf '  %s auto-heal   %s  %srestarts an Iran tunnel down for 3 minutes%s\n' "$(key_label h)" "$heal_on" "$GRY" "$RST"
+    printf '  %s animations  %s  %sspinners and the intro%s\n' "$(key_label a)" "$anim_on" "$GRY" "$RST"
+    printf '  %s kernel speed boost\n' "$(key_label b)"
     echo
-    printf '  %s toggle auto-heal   %s toggle animations   %s kernel speed boost (/boost)\n' "$(key_label h)" "$(key_label a)" "$(key_label b)"
-    printf '  %s restart all tunnels\n' "$(key_label r)"
-    echo
-    say "  ${BOLD}Maintenance${RST}"
-    printf '  %s roll back to the previous version   %s uninstall WatTun   %s back\n' "$(key_label v)" "$(key_label x)" "$(key_label 0)"
+    menu_line r 'restart all tunnels' v 'roll back to the previous version'
+    hr
+    printf '  %s back%*s%s %suninstall WatTun%s\n' "$(key_label 0)" 47 '' "$(key_label x)" "$RED" "$RST"
     key_read
     case "$KEY" in
       v|V) page "Roll back"; echo; run_flow rollback; pause ;;
@@ -6719,11 +6614,11 @@ need_tunnel() { [ -f "$CONF/$1.yml" ] || { err "No tunnel named '$1'. See: $SELF
 main_menu() {
   local num d rest
   while :; do
-    page_full "Dashboard" "$([ -n "$VER" ] && echo "wattun $VER")"
+    local tn; tn=$(tunnels | wc -l); page_full "wattun${VER:+ $VER}" "$tn tunnel$([ "$tn" = 1 ] || echo s)"
     dash_table
     local st; st=$(stale_tunnels)
-    [ -n "$st" ] && printf '\n  %s!%s %s%s%s still run the old binary. Press its number, then %s[r]%s restart, to use wattun %s.\n' \
-      "$YEL" "$RST" "$BOLD" "${st% }" "$RST" "$CYN" "$RST" "$VER"
+    [ -n "$st" ] && printf '\n  %s!%s old binary still running: %s. Open it and press %s to load wattun %s.\n' \
+      "$YEL" "$RST" "${st% }" "$(key_label r)" "$VER"
     dash_actions
     while :; do
       printf '\r%s  %s▸%s %s%s%s' "$EL" "$CYN" "$RST" "$YEL" "$PMSG" "$RST"; PMSG=''

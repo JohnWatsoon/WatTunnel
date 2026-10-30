@@ -90,64 +90,18 @@ WATTUN_BANNER=(
   '██ ▄█▄ ██ ██▀██  ██     ██   ██ ██ ███▄██ ███▄██ '
   ' ▀██▀██▀  ██▀██  ██     ██   ▀███▀ ██ ▀██ ██ ▀██ '
 )
-META_GITHUB='https://github.com/JohnWatsoon'
 META_TELEGRAM='@WatxDev'
 
-banner() { # [1 = animated line-by-line reveal]
-  local i cols GFG
+banner() { # [1 = animated line-by-line reveal] : logo, links beside it when the terminal is wide enough, else below
+  local i cols side=("github.com/JohnWatsoon" "t.me/${META_TELEGRAM#@}" '')
   cols=$(tput cols 2>/dev/null || echo 80)
-  if [ "$cols" -ge 84 ]; then
-    local side=(
-      "┌─ WatTun Community ─────────┐"
-      "│ GitHub:   github.com/JohnWatsoon"
-      "│ Telegram: @WatxDev"
-      "└────────────────────────────┘"
-    )
-    for i in 0 1 2; do
-      gfg "$i"
-      local left="${WATTUN_BANNER[$i]}"
-      local right="${side[$i]}"
-      if [ "$USE_COLOR" = 1 ]; then
-        case "$i" in
-          0) right="${GRY}┌─ ${CYN}WatTun Community${GRY} ─────────┐${RST}" ;;
-          1) right="${GRY}│${RST} ${CYN}GitHub:${RST}   github.com/JohnWatsoon" ;;
-          2) right="${GRY}│${RST} ${CYN}Telegram:${RST} ${BOLD}@WatxDev${RST}" ;;
-        esac
-      fi
-      printf '  %s%s%s  %s\n' "$GFG" "$left" "$RST" "$right"
-      [ "${1:-0}" = 1 ] && sleep 0.03
-    done
-    printf '  %*s  %s\n' 49 '' "${GRY}└────────────────────────────┘${RST}"
-  elif [ "$cols" -ge 80 ]; then
-    local side=(
-      "┌─ WatTun Community ──────┐"
-      "│ GitHub:   JohnWatsoon   │"
-      "│ Telegram: @WatxDev      │"
-      "└─────────────────────────┘"
-    )
-    for i in 0 1 2; do
-      gfg "$i"
-      local left="${WATTUN_BANNER[$i]}"
-      local right="${side[$i]}"
-      if [ "$USE_COLOR" = 1 ]; then
-        case "$i" in
-          0) right="${GRY}┌─ ${CYN}WatTun Community${GRY} ──────┐${RST}" ;;
-          1) right="${GRY}│${RST} ${CYN}GitHub:${RST}   JohnWatsoon   ${GRY}│${RST}" ;;
-          2) right="${GRY}│${RST} ${CYN}Telegram:${RST} ${BOLD}@WatxDev${RST}      ${GRY}│${RST}" ;;
-        esac
-      fi
-      printf ' %s%s%s %s\n' "$GFG" "$left" "$RST" "$right"
-      [ "${1:-0}" = 1 ] && sleep 0.03
-    done
-    printf ' %*s %s\n' 49 '' "${GRY}└─────────────────────────┘${RST}"
-  else
-    for i in 0 1 2; do
-      gfg "$i"
-      printf '  %s%s%s\n' "$GFG" "${WATTUN_BANNER[$i]}" "$RST"
-      [ "${1:-0}" = 1 ] && sleep 0.03
-    done
-    printf '  %sGitHub:%s %s  •  %sTelegram:%s %s\n' "$CYN" "$RST" "$META_GITHUB" "$CYN" "$RST" "$META_TELEGRAM"
-  fi
+  for i in 0 1 2; do
+    gfg "$i"
+    if [ "$cols" -ge 78 ]; then printf '  %s%s%s  %s%s%s\n' "$GFG" "${WATTUN_BANNER[$i]}" "$RST" "$GRY" "${side[$i]}" "$RST"
+    else printf '  %s%s%s\n' "$GFG" "${WATTUN_BANNER[$i]}" "$RST"; fi
+    [ "${1:-0}" = 1 ] && sleep 0.03
+  done
+  [ "$cols" -ge 78 ] || printf '  %s%s · %s%s\n' "$GRY" "${side[0]}" "${side[1]}" "$RST"
   return 0
 }
 
@@ -156,16 +110,13 @@ page() { # title [subtitle]
   echo
   if [ "$ANIM" = 1 ]; then banner 1; else banner 0; fi
   echo
-  printf '  %s◆%s %sWatTun%s %s›%s %s%s%s%s\n' "$CYN" "$RST" "$BOLD" "$RST" "$GRY" "$RST" "$BOLD" "$1" "$RST" "${2:+   ${GRY}$2${RST}}"
+  printf '  %s%s%s%s\n' "$BOLD" "$1" "$RST" "${2:+  ${GRY}$2${RST}}"
   hr; echo
 }
 
 step_diagram() {
-  local top; top=$(rep ─ 27)
-  printf '  %s┌%s┐%s          %s┌%s┐%s\n' "$BOLD$CYN" "$top" "$RST" "$BOLD" "$top" "$RST"
-  printf '  %s│ %-25s │%s %s─token─►%s %s│ %-25s │%s\n' "$BOLD$CYN" "STEP 1  Kharej (outside)" "$RST" "$GRY" "$RST" "$BOLD" "STEP 2  Iran (inside)" "$RST"
-  printf '  %s│ %-25s │%s          %s│ %-25s │%s\n' "$BOLD$CYN" "do this one FIRST" "$RST" "$BOLD" "paste the token here" "$RST"
-  printf '  %s└%s┘%s          %s└%s┘%s\n' "$BOLD$CYN" "$top" "$RST" "$BOLD" "$top" "$RST"
+  printf '  %s1 Kharej%s %s(outside, first)%s  %s──token──►%s  %s2 Iran%s %s(inside)%s\n' \
+    "$BOLD" "$RST" "$GRY" "$RST" "$GRY" "$RST" "$BOLD" "$RST" "$GRY" "$RST"
 }
 
 # ---- step checklist: high-contrast status badges and animated spinners ----
@@ -179,7 +130,7 @@ cl_init() {
   local l
   CL_LABELS=("$@"); CL_N=$#
   [ "$ANIM" = 1 ] || return 0
-  for l in "$@"; do printf '  %s[◌ WAIT]%s %s\n' "$GRY" "$RST" "$l"; done
+  for l in "$@"; do printf '  %s·%s %s%s%s\n' "$GRY" "$RST" "$GRY" "$l" "$RST"; done
 }
 cl_start() { # idx
   [ "$ANIM" = 1 ] || return 0
@@ -188,7 +139,7 @@ cl_start() { # idx
   (
     local i=0 t0=$SECONDS up=$((CL_N - idx))
     while :; do
-      printf '\e[%dA\r\e[K  [%s%s%s RUN ] %s%s%s %s(%ds)%s\e[%dB\r' "$up" "$CYN" "${SPIN_FR[$i]}" "$RST" "$BOLD" "$label" "$RST" "$GRY" $((SECONDS-t0)) "$RST" "$up"
+      printf '\e[%dA\r\e[K  %s%s%s %-32s %s%ds%s\e[%dB\r' "$up" "$CYN" "${SPIN_FR[$i]}" "$RST" "$label" "$GRY" $((SECONDS-t0)) "$RST" "$up"
       i=$(( (i+1) % 10 )); sleep 0.1
     done
   ) &
@@ -197,9 +148,9 @@ cl_start() { # idx
 cl_end() { # idx rc
   local idx=$1 rc=$2 label=${CL_LABELS[$1]} line
   kill_spin
-  if [ "$rc" -eq 0 ]; then line=$(printf '  [%s✔ DONE%s] %s%s%s' "$GRN" "$RST" "$label" "${DETAIL:+   $GRY$DETAIL$RST}" "")
-  elif [ "$rc" -eq 2 ]; then line=$(printf '  [%s– SKIP%s] %s%s' "$GRY" "$RST" "$label" "${DETAIL:+   $GRY$DETAIL$RST}")
-  else line=$(printf '  [%s✘ FAIL%s] %s' "$RED" "$RST" "$label"); fi
+  if [ "$rc" -eq 0 ]; then line=$(printf '  %s✔%s %-32s %s' "$GRN" "$RST" "$label" "${DETAIL:+$GRY$DETAIL$RST}")
+  elif [ "$rc" -eq 2 ]; then line=$(printf '  %s–%s %-32s %s' "$GRY" "$RST" "$label" "${DETAIL:+$GRY$DETAIL$RST}")
+  else line=$(printf '  %s✘%s %s' "$RED" "$RST" "$label"); fi
   if [ "$ANIM" = 1 ]; then cl_row "$idx" "$line"; cur_show; else printf '%s\n' "$line"; fi
 }
 run_step() { # idx fn : rc 0 ok, 2 skipped (fn returns 2), else failure -> abort with ERRMSG
@@ -260,18 +211,17 @@ tunnel_list() { local f b; for f in "$CONF"/*.yml; do [ -e "$f" ] || continue; b
 uninstall() {
   local list=() n u a
   while IFS= read -r n; do [ -n "$n" ] && list+=("$n"); done < <(tunnel_list)
-  page "Uninstall" "Remove WatTun from this server"
+  page "Uninstall WatTun"
   if [ "${#list[@]}" -gt 0 ]; then
-    echo "  ${BOLD}Configured Tunnels Review:${RST}"
-    echo "  The following tunnel services will be stopped and deleted:"
+    echo "  These tunnels will be stopped and deleted:"
     echo
     for n in "${list[@]}"; do
       u="${GRY}stopped${RST}"; systemctl is-active -q "wattun@$n" 2>/dev/null && u="${GRN}running${RST}"
-      printf '    • %s%-18s%s [service wattun@%s: %s]\n' "$BOLD" "$n" "$RST" "$n" "$u"
+      printf '    %-18s %s\n' "$n" "$u"
     done
     echo
   else
-    hint "  No active tunnels currently configured."
+    hint "No tunnels configured."
     echo
   fi
   if [ "${WAT_YES:-0}" != 1 ] && [ -t 0 ]; then
@@ -280,18 +230,18 @@ uninstall() {
     case "$a" in y|Y) ;; *) warn "Uninstall cancelled. Nothing was changed."; exit 0 ;; esac
   fi
   echo
-  printf '  [%s✔ DONE%s] Stopping and disabling tunnel systemd units\n' "$GRN" "$RST"
+  ok "Stopped and disabled the tunnel units"
   for u in $(systemctl list-units --all --plain --no-legend 'wattun@*' 2>/dev/null | awk '{print $1}'); do
     systemctl disable --now "$u" >/dev/null 2>&1 || true
   done
   systemctl disable --now wattun-heal.timer >/dev/null 2>&1 || true
   systemctl disable --now wattun-auto-optimize.timer >/dev/null 2>&1 || true
 
-  printf '  [%s✔ DONE%s] Removing service unit templates\n' "$GRN" "$RST"
+  ok "Removed the unit files"
   rm -f "$UNIT" /etc/systemd/system/wattun-heal.service /etc/systemd/system/wattun-heal.timer /etc/systemd/system/wattun-auto-optimize.service /etc/systemd/system/wattun-auto-optimize.timer
   systemctl daemon-reload
 
-  printf '  [%s✔ DONE%s] Removing engine binaries and management tooling (%s, %s)\n' "$GRN" "$RST" "$BIN" "$MGR"
+  ok "Removed $BIN and $MGR"
   rm -f "$BIN" "$BIN.prev" "$BIN.new" "$MGR" "$MGR.new"
 
   if [ -d "$CONF" ]; then
@@ -302,12 +252,12 @@ uninstall() {
       IFS= read -rsn1 a || a=n; echo
     else a=n; fi
     case "$a" in
-      y|Y) rm -rf "$CONF"; printf '  [%s✔ DONE%s] Purged configuration directory %s\n' "$GRN" "$RST" "$CONF" ;;
-      *) hint "  Preserved $CONF (contains keys and YAML configs; remove manually if desired)." ;;
+      y|Y) rm -rf "$CONF"; ok "Deleted $CONF" ;;
+      *) hint "Kept $CONF (configs and keys). Delete it by hand if you want." ;;
     esac
   fi
   echo
-  ok "WatTun has been cleanly uninstalled from this system."
+  ok "WatTun is uninstalled."
 }
 if [ "$MODE" = uninstall ]; then uninstall; exit 0; fi
 
@@ -332,17 +282,9 @@ detect_env() {
   fi
   [ -n "$OS_DISTRO" ] || OS_DISTRO="$(uname -s) $(uname -r)"
 
-  KERNEL_VER="$(uname -r 2>/dev/null || echo '-')"
-  CPU_CORES="$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)"
   RAM_TOTAL="$(awk '/MemTotal/{printf "%.1f GB", $2/1048576}' /proc/meminfo 2>/dev/null || free -m 2>/dev/null | awk '/Mem:/{printf "%.1f GB", $2/1024}' || echo "-")"
   SYSTEMD_VER="systemd $(systemctl --version 2>/dev/null | awk 'NR==1{print $2}')"
   [ "$SYSTEMD_VER" = "systemd " ] && SYSTEMD_VER="systemd (active)"
-
-  if [ "$(id -u)" -eq 0 ]; then
-    PRIV_STATUS="root (uid 0) · ambient capabilities available"
-  else
-    PRIV_STATUS="non-root (uid $(id -u))"
-  fi
 }
 detect_env
 
@@ -395,7 +337,7 @@ PEM
 step_stage1_verify_env() {
   command -v curl >/dev/null || command -v wget >/dev/null || [ -f "$HERE/dist/$NAME" ] || { ERRMSG="curl or wget is required to retrieve WatTun"; return 1; }
   mkdir -p "$TMP" || { ERRMSG="cannot create temporary working directory"; return 1; }
-  DETAIL="linux/$ARCH, $OS_DISTRO, $RAM_TOTAL RAM, $SYSTEMD_VER"
+  DETAIL="$OS_DISTRO, $RAM_TOTAL RAM, $SYSTEMD_VER"
 }
 
 # Stage 2: Engine & Manager Retrieval
@@ -475,7 +417,7 @@ step_verify_sig() {
     got=$(sha256sum "$TMP/mgr" | awk '{print $1}')
     grep -qx -- "$got  wattun-manager" "$sums" || { ERRMSG="manager hash missing from signed SHA256SUMS"; return 1; }
   fi
-  DETAIL="$DETAIL, RSA signature verified"
+  DETAIL="$DETAIL, signature ok"
 }
 
 step_stage3_verify_crypto() {
@@ -572,21 +514,13 @@ EOF
 #  Main Execution
 # ======================================================================================
 TMP=$(mktemp -d)
-page "Installer" "WatTun Setup for linux/$ARCH"
-
-box "Environment Pre-Flight" \
-  "${CYN}Host OS:${RST}      $OS_DISTRO ($KERNEL_VER)" \
-  "${CYN}Architecture:${RST} linux/$ARCH ($CPU_CORES vCPU · $RAM_TOTAL RAM)" \
-  "${CYN}Init System:${RST}  $SYSTEMD_VER" \
-  "${CYN}Permissions:${RST}  $PRIV_STATUS"
-echo
-
+page "Installer" "linux/$ARCH"
 cl_init \
-  "Environment & Capability Verification" \
-  "Engine & Manager Retrieval" \
-  "Cryptographic Signature & SHA256 Verification" \
-  "Binary & Permission Installation" \
-  "Systemd Service Unit Generation"
+  "Check system" \
+  "Download wattun and the manager" \
+  "Verify signature and sha256" \
+  "Install files" \
+  "Write the systemd unit"
 
 run_step 0 step_stage1_verify_env
 run_step 1 step_stage2_retrieve_payload
@@ -616,27 +550,25 @@ done < <(tunnel_list)
 
 prev=''; [ -x "$BIN.prev" ] && prev=$("$BIN.prev" -version 2>/dev/null | awk '{print $2; exit}')
 if [ -n "$OLD" ] && [ "$OLD" = "$NEW" ] && [ "$FORCE" = 0 ]; then
-  title="[✔ UP TO DATE] WatTun $NEW"
+  title="Already on $NEW"
 elif [ -n "$OLD" ]; then
-  title="[✔ UPDATED] WatTun $OLD → $NEW"
+  title="Updated $OLD → $NEW"
 else
-  title="[✔ INSTALLED] WatTun $NEW"
+  title="Installed $NEW"
 fi
 
 box "$title" \
-  "${CYN}Binary:${RST}      $BIN ($NEW linux/$ARCH)" \
-  "${CYN}Manager:${RST}     $MGR (CLI shortcut: wattun)" \
-  "${CYN}Service:${RST}     $UNIT (active template)" \
-  "${CYN}Config Dir:${RST}  $CONF (mode 0700)" \
-  "${CYN}Tunnels:${RST}     $total configured · $running running" \
-  "${CYN}Rollback:${RST}    ${prev:-none}${prev:+   (roll back anytime from manager)}" \
-  "${CYN}GitHub:${RST}      $META_GITHUB" \
-  "${CYN}Telegram:${RST}    $META_TELEGRAM"
+  "${GRY}binary   ${RST} $BIN" \
+  "${GRY}manager  ${RST} $MGR ${GRY}(run: wattun)${RST}" \
+  "${GRY}unit     ${RST} $UNIT" \
+  "${GRY}config   ${RST} $CONF" \
+  "${GRY}tunnels  ${RST} $total configured · $running running" \
+  "${GRY}rollback ${RST} ${prev:-none}${prev:+ ${GRY}(Settings, then v)${RST}}"
 
 if [ -n "$stale_names" ]; then
   echo
-  warn "These running tunnels are still executing the previous binary in-memory:${stale_names}"
-  hint "Restart them to load $NEW: wattun → Settings → Restart all tunnels (open connections drop)."
+  warn "Still running the old binary:${stale_names}"
+  hint "Restart them to load $NEW: wattun, then s, then r (open connections drop)."
 fi
 echo
 
@@ -644,18 +576,16 @@ echo
 if [ "${WAT_FROM_MANAGER:-0}" = 1 ]; then exit 0; fi
 if [ -t 0 ] && [ -t 1 ]; then
   if [ "$total" -eq 0 ]; then
-    echo "  ${BOLD}What's Next? — Server Pairing Setup${RST}"
-    echo "  A WatTun tunnel connects two nodes across international network boundaries in 2 steps:"
+    echo "  A tunnel joins two servers, in this order:"
     echo
     step_diagram
     echo
-    echo "  Which role does THIS server perform?"
-    printf '    %s  %sKharej (Foreign VPS)%s   Where your real service lives (Xray/panel)  %s[STEP 1 - DO FIRST]%s\n' "$(key_label 1)" "$BOLD" "$RST" "$YEL$BOLD" "$RST"
-    printf '    %s  %sIran (Domestic VPS)%s    Where users connect (already have token)    %s[STEP 2]%s\n' "$(key_label 2)" "$BOLD" "$RST" "$GRY" "$RST"
-    printf '    %s  %sExit to shell%s          Configure later anytime via CLI\n' "$(key_label 3)" "$BOLD" "$RST"
+    printf '  %s Kharej  %soutside server, where the service runs. Set it up first.%s\n' "$(key_label 1)" "$GRY" "$RST"
+    printf '  %s Iran    %sinside server users connect to. Needs the token from Kharej.%s\n' "$(key_label 2)" "$GRY" "$RST"
+    printf '  %s later   %srun wattun when you are ready%s\n' "$(key_label 3)" "$GRY" "$RST"
     echo
     for t in 1 2 3; do
-      printf '  %s?%s Select option [1=Kharej, 2=Iran, 3=Exit, default: 3]: ' "$CYN" "$RST"
+      printf '  %s?%s This server is %s[1/2/3, Enter = 3]%s ' "$CYN" "$RST" "$GRY" "$RST"
       IFS= read -rsn1 side || { echo; side=3; }
       echo "$side"
       case "$side" in
@@ -666,7 +596,7 @@ if [ -t 0 ] && [ -t 1 ]; then
       esac
     done
   else
-    printf '  %s?%s Launch WatTun Manager now? %s[Y/n]%s ' "$CYN" "$RST" "$GRY" "$RST"
+    printf '  %s?%s Open the manager now? %s[Y/n]%s ' "$CYN" "$RST" "$GRY" "$RST"
     IFS= read -rsn1 a || a=y
     echo
     case "$a" in n|N) ;; *) cleanup; exec "$MGR" ;; esac
@@ -674,5 +604,4 @@ if [ -t 0 ] && [ -t 1 ]; then
 fi
 
 echo
-printf '  %s✔%s Setup complete. Manage tunnels anytime with: %s%swattun%s\n' "$GRN" "$RST" "$BOLD$CYN" "" "$RST"
-if [ "$total" -eq 0 ]; then hint "  Remember the sequence: Kharej first (creates token), then Iran (paste token)."; fi
+ok "Done. Run ${BOLD}wattun${RST} to manage tunnels."
