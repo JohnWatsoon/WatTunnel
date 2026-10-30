@@ -1021,7 +1021,7 @@ dash_actions() {
   [ "$cnt" -eq 1 ] && open=(1 open)
   [ "$cnt" -gt 1 ] && open=("1-$cnt" open)
   echo; hr
-  menu_line "${open[@]}" n new a batch m monitor
+  menu_line ${open[@]+"${open[@]}"} n new a batch m monitor
   menu_line u update s settings q quit
 }
 
@@ -2512,7 +2512,7 @@ wizard_iran() {
   for ((i=0; i<${#MAPS[@]}; i++)); do new_pub+=("$(spec_L "${MAPS[$i]}")/$(spec_P "${MAPS[$i]}")"); done
   echo
   if wait_link "$name" 25; then
-    celebrate "Connected, rtt ${LINK_RTT} ms"
+    celebrate "CONNECTED (RTT ${LINK_RTT} ms)"
     echo
     say "  ${BOLD}Users can now connect to this server${RST}:"
     conn_diagram "$T_CARRIER" "${MAPS[@]}"
@@ -4403,7 +4403,7 @@ test_tunnel() {
   fi
   s=$(stats "$n")
   if [ "$(jget "$s" alive)" = true ]; then
-    ok "Connected, rtt $(ms "$(jget "$s" srtt_ms)") ms"
+    ok "Tunnel link is CONNECTED (RTT $(ms "$(jget "$s" srtt_ms)") ms)"
     parse_carriers "$s"
     if [ "$CAR_COUNT" -gt 0 ]; then
       say "  ${GRY}paths${RST}"
@@ -4418,7 +4418,7 @@ test_tunnel() {
       echo
     fi
   else
-    if [ "$r" = Kharej ]; then err "No Iran server is connected yet"; else err "Link is down"; fi
+    if [ "$r" = Kharej ]; then err "No Iran server is connected yet"; else err "Tunnel link is DISCONNECTED"; fi
     say "  ${GRY}Common causes: different key on the two sides, different carrier/icmp-type, the other side not running,${RST}"
     say "  ${GRY}or the carrier is filtered on this route. Paste the Kharej token on Iran again to be sure.${RST}"
     # the whitelist tell: TCP to the peer still connects but the tunnel stays dead — a filtering hop above
@@ -4631,7 +4631,7 @@ status_row() {
   local n=$1 r cr load
   r=$(role "$n"); cr=$(carrier_label "$n"); tinfo "$n"; state_cell "$r" "$TI_STATE"
   load=''; [ "$TI_STATE" != stopped ] && { [ "$r" = Kharej ] && load="clients $TI_SESS" || load="streams $TI_STREAMS"; }
-  printf '  %-12s %-6s %-5s %s%s %-12s%s %-6s %-11s %s\n' "${n:0:12}" "$r" "$cr" "$SC_COL" "$SC_DOT" "$SC_TXT" "$RST" \
+  printf '  %-12s %-6s %-5s %s%s %-12s%s %-6s %-11s %s\n' "${n:0:12}" "$r" "$cr" "$SC_COL" "$SC_DOT" "${SC_TXT^^}" "$RST" \
     "$([ "$TI_STATE" = up ] && printf '%.0fms' "$TI_RTT" || echo -)" "$load" "$(ports_summary "$n" 17)"
 }
 tunnel_card() {
