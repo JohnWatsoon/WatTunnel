@@ -38,7 +38,7 @@ else
   MGR=/usr/local/bin/wattun-manager
 fi
 REPO=${WAT_REPO:-JohnWatsoon/WatTunnel}
-MGR_VERSION=2026103001   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026103002   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -165,6 +165,12 @@ err()  { ERRN=$((ERRN+1)); if [ "$NONINTERACTIVE" = 1 ]; then printf 'error: %s\
 hint() { printf '  %s%s%s\n' "$GRY" "$*" "$RST"; }
 hr()   { printf '  %s%s%s\n' "$GRY" "$(rep ─ 74)" "$RST"; }
 key_label() { printf '%s[%s]%s' "$CYN" "$1" "$RST"; }
+set_row() { # key label value [unit] [default] : one "[k] label  value" line of a settings page
+  local v=$3
+  if [ -n "$v" ]; then v="$v${4:+ $4}"
+  else case "${5:-}" in off|'default route'|'') v="$GRY${5:-}$RST" ;; *) v="$5 ${GRY}(default)${RST}" ;; esac; fi
+  printf '  %s %-13s %s\n' "$(key_label "$1")" "$2" "$v"
+}
 menu_line() { # key label [key label...] : rows of "[k] label" items, wrapped at 74 columns
   local out='' w=0 iw
   while [ $# -ge 2 ]; do
@@ -755,14 +761,14 @@ rproto() { [ "$1" = udp ] && echo udp || echo tcp; } # transport of the carrier 
 rev_capable() { [ "$1" = icmp ] || is_rpool "$1"; }
 reverse_hint() { # [carrier]
   if [ "${1:-}" = udp ]; then
-    hint "Reverse: Iran only listens and Kharej sends the first datagrams, so Iran never starts a flow towards Kharej."
-    hint "Use it when a filter punishes what an Iran server starts towards foreign IPs. Both sides must use it (wattun 3.0.0+)."
+    hint "Reverse: Kharej sends first and Iran only answers. For filters that punish flows Iran starts."
+    hint "Set it on both sides (wattun 3.0.0+)."
   elif is_pool "${1:-}"; then
-    hint "Reverse: Kharej connects out to Iran and Iran listens. Use it when Iran cannot reach Kharej's port but Kharej"
-    hint "can reach Iran. Both sides must use it."
+    hint "Reverse: Kharej connects to Iran. For when Iran cannot reach Kharej's port, but Kharej can reach Iran."
+    hint "Set it on both sides."
   else
-    hint "Reverse: Kharej sends the pings to Iran and Iran answers. Use it when Iran cannot ping Kharej but Kharej CAN"
-    hint "ping Iran (a one-way block on Iran's IP). Both sides must use it, and both need wattun 2.0.0 or newer."
+    hint "Reverse: Kharej pings Iran. For a one-way block where Iran cannot ping Kharej."
+    hint "Set it on both sides (wattun 2.0.0+)."
   fi
 }
 v_icmp() { case "$1" in echo|timestamp|info|mask) return 0 ;; esac; err "Use echo, timestamp, info or mask."; return 1; }
@@ -970,6 +976,7 @@ dash_row() { # idx name
   local i=$1 n=$2 r cr load rtt tr pl par cols car_display
   cols=$(tput cols 2>/dev/null || echo 80)
   r=$(role "$n"); cr=$(carrier_label "$n"); par=$(companion_of "$n")
+  if is_auto_kharej "$n"; then cr=$(in_use "$n"); cr=${cr:-auto}; fi # the type Iran picked, once it is connected
   tinfo "$n"; state_cell "$r" "$TI_STATE"
   load=''; rtt=''
   if [ "$TI_STATE" != stopped ]; then
@@ -1008,9 +1015,13 @@ dash_table() {
   local n i=0; DASH_N=()
   for n in $(tunnels); do DASH_N+=("$n"); done
   if [ "${#DASH_N[@]}" -eq 0 ]; then
-    printf '  No tunnels yet. A tunnel joins two servers, in this order:\n\n'
-    step_diagram
-    printf '\n  Press %s on each server to create its side.\n' "$(key_label n)"
+    case "$(server_side)" in
+      kharej) printf '  No tunnels yet. Press %s to make a token for the Iran server.\n' "$(key_label n)" ;;
+      iran) printf '  No tunnels yet. Press %s and paste the token from Kharej.\n' "$(key_label n)" ;;
+      *) printf '  No tunnels yet. A tunnel joins two servers, in this order:\n\n'
+         step_diagram
+         printf '\n  Press %s on each server to create its side.\n' "$(key_label n)" ;;
+    esac
     return 0
   fi
   printf ' %s%2s  %-13s %-6s %-10s   %-9s %6s  %s%s\n' "$GRY" '#' name role carrier state rtt load "$RST"
@@ -1174,21 +1185,20 @@ iran_fw_status() {
   if ipset list "$IRAN_IPSET" >/dev/null 2>&1; then
     local cnt
     cnt=$(ipset list "$IRAN_IPSET" 2>/dev/null | grep -c '^[0-9]' || echo 0)
-    say "  ${BOLD}Iran IPSet:${RST} ${GRN}Active${RST} ($cnt CIDR ranges loaded)"
+    say "  $(kv 'iran ipset' "${GRN}on${RST} ${GRY}($cnt ranges)${RST}")"
   else
-    say "  ${BOLD}Iran IPSet:${RST} ${GRY}Inactive${RST}"
+    say "  $(kv 'iran ipset' "${GRY}off${RST}")"
   fi
+  say "  $(kv 'client ports' "$(iran_fw_ports)")"
   echo
-  say "  ${BOLD}Active Port Protection Rules in iptables:${RST}"
+  say "  ${GRY}iptables rules${RST}"
   local rules
   rules=$(iptables -S INPUT 2>/dev/null | grep "$IRAN_IPSET" || true)
   if [ -n "$rules" ]; then
     printf '%s\n' "$rules" | sed "s/^/    $GRN/; s/\$/$RST/"
   else
-    say "    ${GRY}No active port restrictions found.${RST}"
+    say "    ${GRY}none${RST}"
   fi
-  echo
-  say "  ${BOLD}Detected Local Client Ports:${RST} $(iran_fw_ports)"
 }
 
 iran_firewall_cmd() {
@@ -1292,40 +1302,35 @@ pe_try_add() { # canonical [replace-index] : validate and add/replace ; rc 1 + m
 }
 pe_draw() {
   local i it L T P mark warned=0 bad
-  page "Port mappings" "${PE_TUNNEL:-new tunnel} · $PE_ROLE"
+  page "Ports" "${PE_TUNNEL:-new tunnel} · $PE_ROLE"
   if [ "$PE_ROLE" = Iran ]; then
-    printf '  %s%3s  %-19s      %-23s %s%s\n' "$GRY" '#' 'Iran port (users)' 'Kharej port (service)' proto "$RST"
-    printf '  %s%s%s\n' "$GRY" "$(rep ─ 70)" "$RST"
+    printf '  %s%3s  %-19s      %-23s %s%s\n' "$GRY" '#' 'users connect to' 'service on Kharej' proto "$RST"
   else
-    printf '  %s%3s  %-31s %s%s\n' "$GRY" '#' 'Port on this server (service)' proto "$RST"
-    printf '  %s%s%s\n' "$GRY" "$(rep ─ 70)" "$RST"
+    printf '  %s%3s  %-31s %s%s\n' "$GRY" '#' 'service port here' proto "$RST"
   fi
   if [ "${#MAPS[@]}" -eq 0 ]; then
-    printf '  %s  (empty)%s\n' "$GRY" "$RST"
-    [ "$PE_ROLE" = Kharej ] && printf '  %s  An empty list means Iran may reach ANY port on this server.%s\n' "$GRY" "$RST"
+    if [ "$PE_ROLE" = Kharej ]; then printf '  %s     none: Iran may reach any port here%s\n' "$GRY" "$RST"
+    else printf '  %s     none yet%s\n' "$GRY" "$RST"; fi
   fi
   for ((i=0; i<${#MAPS[@]}; i++)); do
     it=${MAPS[$i]}; L=$(spec_L "$it"); T=$(spec_T "$it"); P=$(spec_P "$it"); mark=' '
     if [ "$PE_ROLE" = Iran ]; then
       allowed_has "$T" "$P" || { mark="${YEL}!${RST}"; warned=1; }
-      printf '  %s%3s%s  %-19s ──►  %-23s %-5s %s\n' "$BOLD$CYN" $((i+1)) "$RST" "$L" "$T" "$P" "$mark"
+      printf '  %s%3s%s  %-19s ──►  %-23s %-5s %s\n' "$GRY" $((i+1)) "$RST" "$L" "$T" "$P" "$mark"
     else
-      printf '  %s%3s%s  %-31s %s\n' "$BOLD$CYN" $((i+1)) "$RST" "$T" "$P"
+      printf '  %s%3s%s  %-31s %s\n' "$GRY" $((i+1)) "$RST" "$T" "$P"
     fi
   done
-  [ "$warned" = 1 ] && hint "  ! = this target is not in Kharej's allowed ports (from the token)"
+  [ "$warned" = 1 ] && hint "! Kharej does not allow this port"
   if [ "$PE_ROLE" = Iran ] && [ "${#PE_ALLOW[@]}" -gt 0 ]; then
     bad=''; for it in "${PE_ALLOW[@]}"; do bad="$bad $(spec_T "$it")/$(spec_P "$it")"; done
-    hint "  Kharej allows:${bad//\/tcp/}"
+    hint "Kharej allows:${bad//\/tcp/}"
   fi
   echo
   if [ -n "$PE_MSG" ]; then printf '%b' "${PE_MSG}" | sed 's/^/  /'; echo; PE_MSG=''; fi
-  if [ "$PE_ROLE" = Iran ]; then
-    hint "Type ports to add:  443, 8443:443, 53/udp, 5353->53/udp   (users:service)"
-  else
-    hint "Type ports to add:  443, 8443, 53/udp   (empty list = any port)"
-  fi
-  printf '  %s add  %s edit #  %s remove #  %s clear  %s from NAME  %s done  %s cancel\n' "$(key_label a)" "$(key_label e)" "$(key_label r)" "$(key_label c)" "$(key_label f)" "$(key_label Enter)" "$(key_label q)"
+  if [ "$PE_ROLE" = Iran ]; then hint "Type ports to add: 443  8443:443  53/udp  (users:service)"
+  else hint "Type ports to add: 443  8443  53/udp"; fi
+  menu_line Enter save a add 'e #' edit 'r #' remove c clear 'f NAME' 'copy from' q cancel
 }
 pe_bulk() {
   local line=$1 tok toks=() before=${#MAPS[@]} it
@@ -1444,7 +1449,7 @@ port_editor() { # rc 0 = done (MAPS ready), 1 = cancelled
       ''|d|done|ok)
         if [ "$PE_ROLE" = Iran ] && [ "${#MAPS[@]}" -eq 0 ]; then pe_msg "${YEL}!${RST} Add at least one port first (example: 443)."; continue; fi
         if [ "$PE_ROLE" = Kharej ] && [ "${#MAPS[@]}" -eq 0 ]; then
-          if ! confirm "The list is empty: Iran can reach ANY port on this server. Continue?" n; then continue; fi
+          if ! confirm "No list: Iran can reach any port on this server. Save?" n; then continue; fi
         fi
         return 0 ;;
       q|quit|cancel|esc|b|back) return 1 ;;
@@ -1510,15 +1515,11 @@ summary_line() { printf '    %s%-14s%s %s\n' "$GRY" "$1" "$RST" "$2"; }
 
 wizard_kharej() {
   local name cr listen='' path='' sni='' itype='' mbps='' fec='' addr key m peer allow t rev='' iranip='' advdef=n udpdns='' lisip='' ask=''
-  page "New tunnel" "1 · Kharej, outside server"
-  step_diagram 1
-  echo
-  say "  Run this where the service lives (Xray, a panel). It prints a token for the Iran server."
-  hint "Ctrl+C cancels."
-  echo
+  page "New tunnel" "Kharej"
+  [ "$NONINTERACTIVE" = 1 ] || conf_set side kharej
   name=$(suggest_name kharej); [ -n "$NI_NAME" ] && name=$NI_NAME
-  pick_carrier auto || return 1
-  cr=$CARRIER
+  # by hand Kharej always opens every type and Iran picks one; a fixed type is for unattended runs (--carrier)
+  if [ "$NONINTERACTIVE" = 1 ]; then pick_carrier auto || return 1; cr=$CARRIER; else cr=auto; fi
   if [ "$cr" = auto ]; then wizard_kharej_auto "$name"; return; fi
   [ "$cr" != icmp ] && listen=$(default_listen "$cr")
   case "$cr" in ws|wss|grpc|h2|h2c) path=$(rand_path); [ -n "$NI_PATH" ] && path=$NI_PATH ;; esac
@@ -1851,16 +1852,16 @@ pick_preset() { # [default] -> REPLY_V
     REPLY_V=${NI_PRESET:-$def}
     return 0
   fi
-  say "  ${BOLD}Select Built-in Anti-Censorship Preset${RST}:"
-  say "    ${CYN}1${RST}  Cloudflare (field-tested)     (www.cloudflare.com, rst mode, no churn; passed a real CDN whitelist)"
-  say "    ${CYN}2${RST}  Iran Whitelist - MCI          (mci.ir, rst mode, 30m / 500MB churn, ECH ladder)"
-  say "    ${CYN}3${RST}  Iran Whitelist - Irancell     (irancell.ir, seq mode, 20m / 300MB churn; SNI-allowlist filters only)"
-  say "    ${CYN}4${RST}  Emergency Blackout Mode       (mci.ir, rst mode, 90s / 100MB rapid churn, ECH ladder)"
-  say "    ${CYN}5${RST}  Conservative / Low-Churn      (mci.ir, seq mode, 4h / 4GB, ECH auto; SNI-allowlist filters only)"
-  say "    ${CYN}6${RST}  Disabled / Clear              (normal tunnel, full speed)"
-  say "    ${CYN}7${RST}  rst-fast                      (www.cloudflare.com, rst, 4 sessions x 4 conns, 30m churn; fastest)"
+  say "  Preset              ${GRY}sni · mode · rotate${RST}"
+  say "  $(key_label 1) Cloudflare      ${GRY}www.cloudflare.com · rst · off, passed a CDN whitelist${RST}"
+  say "  $(key_label 2) MCI whitelist   ${GRY}mci.ir · rst · 30m / 500MB, ECH ladder${RST}"
+  say "  $(key_label 3) Irancell        ${GRY}irancell.ir · seq · 20m / 300MB, SNI-allowlist only${RST}"
+  say "  $(key_label 4) Blackout        ${GRY}mci.ir · rst · 90s / 100MB, ECH ladder${RST}"
+  say "  $(key_label 5) Low churn       ${GRY}mci.ir · seq · 4h / 4GB, ECH auto, SNI-allowlist only${RST}"
+  say "  $(key_label 6) Off             ${GRY}plain tunnel, full speed${RST}"
+  say "  $(key_label 7) Fast            ${GRY}www.cloudflare.com · rst · 30m, 4 × 4 conns${RST}"
   echo
-  printf '  %s?%s Press a number %s[1 = Cloudflare]%s ' "$CYN" "$RST" "$GRY" "$RST"
+  printf '  %s?%s %s[1 = Cloudflare]%s ' "$CYN" "$RST" "$GRY" "$RST"
   key_read
   case "$KEY" in
     1) REPLY_V="cloudflare" ;;
@@ -1884,21 +1885,21 @@ pick_sni_preset() { # [default] -> REPLY_V
     REPLY_V=${NI_FAKESNI:-$def}
     return 0
   fi
-  say "  ${BOLD}Select Allowlisted SNI Domain${RST} (curated presets):"
-  say "    ${CYN}0${RST}  off               Turn Fake-SNI OFF (disabled)"
-  say "    ${CYN}1${RST}  mci.ir            MCI / Hamrah Aval (Portal)"
-  say "    ${CYN}2${RST}  shop.mci.ir       MCI Online Store"
-  say "    ${CYN}3${RST}  irancell.ir       Irancell (Portal)"
-  say "    ${CYN}4${RST}  my.irancell.ir    MyIrancell"
-  say "    ${CYN}5${RST}  tci.ir            Mokhaberat (TCI)"
-  say "    ${CYN}6${RST}  rightel.ir        RighTel"
-  say "    ${CYN}7${RST}  divar.ir          Divar Classifieds"
-  say "    ${CYN}8${RST}  digikala.com      Digikala E-Commerce"
-  say "    ${CYN}9${RST}  bale.ai           Bale Messenger"
-  say "    ${CYN}s${RST}  srbiau.ac.ir      Academic / EDU Portal"
-  say "    ${CYN}c${RST}  Custom SNI        (type domain manually)"
+  say "  Fake SNI ${GRY}(a domain the filter lets through)${RST}"
+  say "  $(key_label 0) off"
+  say "  $(key_label 1) mci.ir            ${GRY}MCI${RST}"
+  say "  $(key_label 2) shop.mci.ir       ${GRY}MCI shop${RST}"
+  say "  $(key_label 3) irancell.ir       ${GRY}Irancell${RST}"
+  say "  $(key_label 4) my.irancell.ir    ${GRY}MyIrancell${RST}"
+  say "  $(key_label 5) tci.ir            ${GRY}TCI${RST}"
+  say "  $(key_label 6) rightel.ir        ${GRY}RighTel${RST}"
+  say "  $(key_label 7) divar.ir          ${GRY}Divar${RST}"
+  say "  $(key_label 8) digikala.com      ${GRY}Digikala${RST}"
+  say "  $(key_label 9) bale.ai           ${GRY}Bale${RST}"
+  say "  $(key_label s) srbiau.ac.ir      ${GRY}university portal${RST}"
+  say "  $(key_label c) other domain"
   echo
-  printf '  %s?%s Press a number %s[1 = mci.ir]%s ' "$CYN" "$RST" "$GRY" "$RST"
+  printf '  %s?%s %s[1 = mci.ir]%s ' "$CYN" "$RST" "$GRY" "$RST"
   key_read
   case "$KEY" in
     0) REPLY_V="off" ;;
@@ -1927,17 +1928,17 @@ pick_fake_mode() { # [default] -> REPLY_V
     REPLY_V=${NI_FAKEMODE:-$def}
     return 0
   fi
-  say "  ${BOLD}Select Fake Desync Mode${RST}:"
-  say "    ${CYN}1${RST}  auto    Probes the route at startup and picks a mode; needs up to ~18 s at startup (3.0.0 probe)"
-  say "    ${CYN}2${RST}  seqsum  Dual marker: seq desync + bad checksum (2.8.0+, SNI-allowlist filters)"
-  say "    ${CYN}3${RST}  sum     In-window segment, bad TCP checksum (2.7.1+, stateful NATs)"
-  say "    ${CYN}4${RST}  seq     Out-of-window sequence marker (2.7.0+, standard default)"
-  say "    ${CYN}5${RST}  ttl     Hop-count distance calibration (2.7.0+)"
-  say "    ${CYN}6${RST}  rst     Corrupted-checksum RST packet (2.9.0+, clears the filter's flow state; recommended)"
-  say "    ${CYN}7${RST}  synrst  Corrupted-checksum SYN|RST (2.10.5+, fallback when rst is filtered)"
-  say "    ${CYN}8${RST}  paws    In-window + valid checksum + stale timestamp (RFC 7323 PAWS discard; checksum-enforcing DPIs)"
+  say "  Desync mode"
+  say "  $(key_label 1) auto    ${GRY}tests the route at start, up to 18 s (3.0.0+)${RST}"
+  say "  $(key_label 2) seqsum  ${GRY}seq + bad checksum, SNI-allowlist filters (2.8.0+)${RST}"
+  say "  $(key_label 3) sum     ${GRY}bad checksum, stateful NATs (2.7.1+)${RST}"
+  say "  $(key_label 4) seq     ${GRY}out-of-window sequence (2.7.0+)${RST}"
+  say "  $(key_label 5) ttl     ${GRY}short TTL (2.7.0+)${RST}"
+  say "  $(key_label 6) rst     ${GRY}bad-checksum RST, recommended (2.9.0+)${RST}"
+  say "  $(key_label 7) synrst  ${GRY}when rst is filtered (2.10.5+)${RST}"
+  say "  $(key_label 8) paws    ${GRY}stale timestamp, filters that check checksums${RST}"
   echo
-  printf '  %s?%s Press a number %s[Enter = %s]%s ' "$CYN" "$RST" "$GRY" "$def" "$RST"
+  printf '  %s?%s %s[Enter = %s]%s ' "$CYN" "$RST" "$GRY" "$def" "$RST"
   key_read
   case "$KEY" in
     1) REPLY_V="auto" ;;
@@ -1962,16 +1963,16 @@ pick_pool_rotate() { # [default] -> REPLY_V
     REPLY_V=${NI_POOLROT:-$def}
     return 0
   fi
-  say "  ${BOLD}Select Pool Rotation Lifetime${RST} (recycles connections to avoid long-lived flows):"
-  say "    ${CYN}1${RST}  off   Disabled (connections stay open indefinitely)"
-  say "    ${CYN}2${RST}  30m   30 minutes (recommended / standard)"
-  say "    ${CYN}3${RST}  90s   90 seconds (aggressive / blackout evasion)"
-  say "    ${CYN}4${RST}  10m   10 minutes"
-  say "    ${CYN}5${RST}  2h    2 hours"
-  say "    ${CYN}6${RST}  4h    4 hours (conservative)"
-  say "    ${CYN}c${RST}  Custom lifetime (e.g. 15m, 1h)"
+  say "  Rotate connections every"
+  say "  $(key_label 1) off"
+  say "  $(key_label 2) 30m   ${GRY}recommended${RST}"
+  say "  $(key_label 3) 90s   ${GRY}blackout${RST}"
+  say "  $(key_label 4) 10m"
+  say "  $(key_label 5) 2h"
+  say "  $(key_label 6) 4h"
+  say "  $(key_label c) other ${GRY}(15m, 1h ...)${RST}"
   echo
-  printf '  %s?%s Press a number %s[Enter = %s]%s ' "$CYN" "$RST" "$GRY" "$def" "$RST"
+  printf '  %s?%s %s[Enter = %s]%s ' "$CYN" "$RST" "$GRY" "$def" "$RST"
   key_read
   case "$KEY" in
     1) REPLY_V="off" ;;
@@ -1995,15 +1996,15 @@ pick_pool_rotate_bytes() { # [default] -> REPLY_V
     REPLY_V=${NI_POOLBYTES:-$def}
     return 0
   fi
-  say "  ${BOLD}Select Pool Rotation Byte Budget${RST} (recycles after traffic volume):"
-  say "    ${CYN}1${RST}  off    Disabled (byte limit off)"
-  say "    ${CYN}2${RST}  500MB  500 Megabytes (recommended / standard)"
-  say "    ${CYN}3${RST}  100MB  100 Megabytes (aggressive / blackout evasion)"
-  say "    ${CYN}4${RST}  1GB    1 Gigabyte"
-  say "    ${CYN}5${RST}  4GB    4 Gigabytes (conservative)"
-  say "    ${CYN}c${RST}  Custom byte count (e.g. 250MB, 2GB)"
+  say "  Rotate connections after"
+  say "  $(key_label 1) off"
+  say "  $(key_label 2) 500MB  ${GRY}recommended${RST}"
+  say "  $(key_label 3) 100MB  ${GRY}blackout${RST}"
+  say "  $(key_label 4) 1GB"
+  say "  $(key_label 5) 4GB"
+  say "  $(key_label c) other ${GRY}(250MB, 2GB ...)${RST}"
   echo
-  printf '  %s?%s Press a number %s[Enter = %s]%s ' "$CYN" "$RST" "$GRY" "$def" "$RST"
+  printf '  %s?%s %s[Enter = %s]%s ' "$CYN" "$RST" "$GRY" "$def" "$RST"
   key_read
   case "$KEY" in
     1) REPLY_V="off" ;;
@@ -2026,13 +2027,13 @@ pick_ech() { # [default] -> REPLY_V
     REPLY_V=${NI_ECH:-$def}
     return 0
   fi
-  say "  ${BOLD}Select Encrypted Client Hello (ECH) Mode${RST}:"
-  say "    ${CYN}1${RST}  ladder  ECH Bootstrap Ladder (2.9.0+, DoH queries relayed via Kharej DNS)"
-  say "    ${CYN}2${RST}  auto    Direct DoH parallel race (Cloudflare/Google/Quad9)"
-  say "    ${CYN}3${RST}  off     Disabled"
-  say "    ${CYN}c${RST}  Custom  Base64 ECHConfigList"
+  say "  ECH"
+  say "  $(key_label 1) ladder  ${GRY}looks up ECH through Kharej (2.9.0+)${RST}"
+  say "  $(key_label 2) auto    ${GRY}looks up ECH directly (Cloudflare, Google, Quad9)${RST}"
+  say "  $(key_label 3) off"
+  say "  $(key_label c) other   ${GRY}a base64 ECHConfigList${RST}"
   echo
-  printf '  %s?%s Press a number %s[1 = ladder]%s ' "$CYN" "$RST" "$GRY" "$RST"
+  printf '  %s?%s %s[1 = ladder]%s ' "$CYN" "$RST" "$GRY" "$RST"
   key_read
   case "$KEY" in
     1) REPLY_V="ladder" ;;
@@ -2053,14 +2054,14 @@ pick_dns_listen() { # [default] -> REPLY_V
     REPLY_V=${NI_DNSLISTEN:-$def}
     return 0
   fi
-  say "  ${BOLD}Select DNS Forwarder Listener${RST} (in-band relay to bypass domestic DNS hijacking):"
-  say "    ${CYN}1${RST}  off            Disabled"
-  say "    ${CYN}2${RST}  127.0.0.1:53   Standard local DNS resolver"
-  say "    ${CYN}3${RST}  127.0.0.1:5353 Alternative unprivileged local port"
-  say "    ${CYN}4${RST}  0.0.0.0:53     LAN-wide DNS relay for home/office devices"
-  say "    ${CYN}c${RST}  Custom         Enter custom address:port"
+  say "  DNS forwarder ${GRY}(answers DNS through the tunnel)${RST}"
+  say "  $(key_label 1) off"
+  say "  $(key_label 2) 127.0.0.1:53   ${GRY}this server${RST}"
+  say "  $(key_label 3) 127.0.0.1:5353 ${GRY}this server, other port${RST}"
+  say "  $(key_label 4) 0.0.0.0:53     ${GRY}every device on the LAN${RST}"
+  say "  $(key_label c) other address:port"
   echo
-  printf '  %s?%s Press a number %s[1 = off]%s ' "$CYN" "$RST" "$GRY" "$RST"
+  printf '  %s?%s %s[1 = off]%s ' "$CYN" "$RST" "$GRY" "$RST"
   key_read
   case "$KEY" in
     1) REPLY_V="off" ;;
@@ -2082,21 +2083,21 @@ pick_src_ip() { # [default] -> REPLY_V
     REPLY_V=${NI_SRCIP:-$def}
     return 0
   fi
-  say "  ${BOLD}Select Carrier Source IP Binding${RST} (for multi-WAN / cellular APN routing):"
-  say "    ${CYN}0${RST}  off  Default kernel routing (system routing table)"
+  say "  Source IP ${GRY}(which local address the tunnel leaves from)${RST}"
+  say "  $(key_label 0) off  ${GRY}the route picks${RST}"
   local ips=() idx=1
   if command -v ip >/dev/null 2>&1; then
     while read -r _ ifn _ ifa _; do
       local clean_ip="${ifa%%/*}"
       [ "$clean_ip" = "127.0.0.1" ] && continue
       ips+=("$clean_ip ($ifn)")
-      printf '    %s%d%s  %s\n' "$CYN" "$idx" "$RST" "$clean_ip ($ifn)"
+      printf '  %s %s\n' "$(key_label "$idx")" "$clean_ip ($ifn)"
       idx=$((idx+1))
     done < <(ip -4 -o addr show scope global 2>/dev/null)
   fi
-  printf '    %sc%s  Custom IPv4 address\n' "$CYN" "$RST"
+  printf '  %s other address\n' "$(key_label c)"
   echo
-  printf '  %s?%s Press a number %s[0 = off]%s ' "$CYN" "$RST" "$GRY" "$RST"
+  printf '  %s?%s %s[0 = off]%s ' "$CYN" "$RST" "$GRY" "$RST"
   key_read
   case "$KEY" in
     0) REPLY_V="off" ;;
@@ -2195,63 +2196,28 @@ apply_preset() { # tunnel preset
 wizard_iran() {
   local name tok have manual=0 bind='' mbps='' fec='' itype='' sni='' path='' m i allow_note it new_pub=() t=0 rport='' advdef=n linkok=1 askres
   local T_FAKESNI='' T_FAKEMODE='' T_FAKETTL='' T_POOLROT='' T_POOLBYTES='' T_ECH='' T_GOVERNOR='' T_DNSLISTEN='' T_SRCIP=''
-  page "New tunnel" "2 · Iran, inside server"
-  step_diagram 2
-  echo
-  say "  Users connect here. Paste the token printed on Kharej."
-  echo
+  page "New tunnel" "Iran"
+  [ "$NONINTERACTIVE" = 1 ] || conf_set side iran
   name=$(suggest_name iran); [ -n "$NI_NAME" ] && name=$NI_NAME
   mbps=$NI_MBPS; [ -n "$mbps" ] && advdef=y
   T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''
   AUTO_TOKEN=''; AT_EXTRA=''; CT_DESC=''
-  confirm "Do you have the token from the Kharej server?" y && have=y || have=n
-  if [ "$have" = n ]; then
-    echo
-    say "  ${BOLD}Get the token first${RST}"
-    say "    1. Log in to the ${BOLD}Kharej${RST} (outside) server"
-    say "    2. Run  ${CYN}${SELF}${RST}  then press ${CYN}[n]${RST} and choose ${BOLD}Kharej${RST}"
-    say "    3. Copy the token it prints (one long line starting with ${BOLD}wat1:${RST})"
-    echo
-    printf '  %s[Enter]%s I have it now   %s[m]%s enter the details by hand (advanced)   %s[q]%s go back\n  ' "$CYN" "$RST" "$CYN" "$RST" "$CYN" "$RST"
-    key_read; echo
-    case "$KEY" in m|M) manual=1 ;; enter) ;; *) return 1 ;; esac
-  fi
-  if [ "$manual" = 0 ]; then
-    echo
-    ask_ok "Paste the connection token" "$NI_TOKEN" v_token || return 1
-    tok=$REPLY_V; read_token "$tok"
-    echo
-    ok "Token accepted"
-    if [ "$T_CARRIER" = auto ]; then
-      auto_iran_front "$tok" || return 1
-    else
-      summary_line "Carrier" "$T_CARRIER${T_ICMP:+ ($T_ICMP)}"
-      summary_line "Kharej" "$T_PEER"
-      summary_line "Kharej allows" "${T_PORTS:-any port}"
-      if [ "$T_REV" = 1 ]; then
-        if is_rpool "$T_CARRIER"; then summary_line "Direction" "reverse (Kharej connects to this server on port ${T_PEER##*:})"
-        else summary_line "Direction" "reverse: Kharej sends the pings, this server answers"; fi
-      fi
-      cdn_wizard_tune # CDN carrier + domain: automatic edge / TLS tuning (wattun >= 2.2.0), silent otherwise
-    fi
+  [ "$NONINTERACTIVE" = 1 ] || hint "No token yet? On the Kharej server run $SELF and press n. It prints one line starting with wat1:"
+  echo
+  ask_ok "Token from Kharej" "$NI_TOKEN" v_token || return 1
+  tok=$REPLY_V; read_token "$tok"
+  ok "Token accepted"
+  if [ "$T_CARRIER" = auto ]; then
+    auto_iran_front "$tok" || return 1
   else
-    echo
-    pick_carrier || return 1; T_CARRIER=$CARRIER
-    ask_ok "Kharej address (IP or domain)" "" v_host || return 1; T_PEER=$REPLY_V
-    if [ "$T_CARRIER" != icmp ]; then
-      ask_ok "Kharej listen port" "$(default_listen "$T_CARRIER")" v_port || return 1; T_PEER="$T_PEER:$((10#$REPLY_V))"
+    summary_line "Carrier" "$T_CARRIER${T_ICMP:+ ($T_ICMP)}"
+    summary_line "Kharej" "$T_PEER"
+    summary_line "Kharej allows" "${T_PORTS:-any port}"
+    if [ "$T_REV" = 1 ]; then
+      if is_rpool "$T_CARRIER"; then summary_line "Direction" "reverse (Kharej connects to this server on port ${T_PEER##*:})"
+      else summary_line "Direction" "reverse: Kharej sends the pings, this server answers"; fi
     fi
-    ask_ok "Key (the same as on Kharej)" "" v_key || return 1; T_KEY=$REPLY_V
-    case "$T_CARRIER" in ws|wss|grpc|h2|h2c) ask_ok "URL path" /wat v_path || return 1; T_PATH=$REPLY_V ;; esac
-    if [ "$T_CARRIER" = udp ] && confirm "DNS-shaped UDP (the Kharej tunnel was made with it)?" n; then T_PATH=dns; fi
-    case "$T_CARRIER" in wss|tls|grpc|h2) ask "Domain / SNI (empty = none; used by Kharej when reverse)" ""; T_SNI=$REPLY_V ;; esac
-    if [ "$T_CARRIER" = icmp ]; then
-      ask_ok "ICMP type (must match Kharej)" echo v_icmp || return 1; T_ICMP=$REPLY_V
-      confirm "Reverse direction (only if Kharej is set to reverse too)?" n && T_REV=1
-    elif is_rpool "$T_CARRIER"; then
-      echo; reverse_hint "$T_CARRIER"
-      confirm "Reverse direction (only if Kharej is set to reverse too)?" n && T_REV=1
-    fi
+    cdn_wizard_tune # CDN carrier + domain: automatic edge / TLS tuning (wattun >= 2.2.0), silent otherwise
   fi
   rport=''
   if [ "$T_REV" = 1 ] && is_rpool "$T_CARRIER"; then
@@ -2267,8 +2233,7 @@ wizard_iran() {
   PE_MSG=''
   if [ "${#PE_ALLOW[@]}" -gt 0 ]; then
     local skipped=0
-    PE_MSG="${GRN}✔${RST} Pre-filled from the token: every port Kharej allows is published on the same port here."$'\n'
-    PE_MSG+="  Edit a row to publish it on another Iran port (e.g. users on 8443, service on 443)."$'\n'
+    PE_MSG="${GRN}✔${RST} Filled from the token. Enter keeps them; e # puts one on another port here."$'\n'
     # same checks as a hand-typed row: busy port, another tunnel publishing it
     for it in "${PE_ALLOW[@]}"; do pe_try_add "$(spec_T "$it"):$(spec_T "$it")/$(spec_P "$it")" || skipped=$((skipped+1)); done
     [ "$skipped" -gt 0 ] && pe_msg "${YEL}!${RST} $skipped port(s) from the token were skipped because they conflict (see above). Add each one on another Iran port (e.g. 8443:443)."
@@ -2289,8 +2254,8 @@ wizard_iran() {
 
   # advanced
   echo
-  hint "Defaults: name $name, all addresses, no speed limit, FEC off."
-  if confirm "Change advanced settings?" "$advdef"; then
+  [ "$NONINTERACTIVE" = 1 ] && hint "Defaults: name $name, all addresses, no speed limit, FEC off."
+  if [ "$NONINTERACTIVE" = 1 ] && confirm "Change advanced settings?" "$advdef"; then
     ask_ok "Tunnel name" "$name" v_name && name=$REPLY_V || return 1
     ask_ok "Bind address for the public ports" 0.0.0.0 v_bind || return 1; bind=$REPLY_V
     ask_ok "Speed ceiling in MB/s (empty = default 16)" "$mbps" v_mbps || return 1; mbps=$REPLY_V
@@ -2304,10 +2269,7 @@ wizard_iran() {
   if [ "$T_REV" != 1 ] && [ -z "$T_AUTO" ] && [ -z "$T_SRCIP" ] && [ "$NONINTERACTIVE" != 1 ] && [ "$(uname -s)" = Linux ]      && [ "$(local_ips | wc -l)" -gt 1 ]; then
     local oip; oip=$(out_ip "${T_PEER%%[:,]*}")
     echo
-    warn "This server has several IPv4 addresses: $(local_ips | paste -sd' ' -)"
-    hint "The tunnel leaves from ${oip:-the one the route picks}. If users connect to that one, pick another so its filter never sees the tunnel."
-    ask_ok "IP the tunnel leaves from (Enter = ${oip:-the default route})" "" v_src_ip || return 1
-    case "${REPLY_V,,}" in ''|off|0) ;; *) T_SRCIP=$REPLY_V ;; esac
+    hint "This server has several IPs; the tunnel leaves from ${oip:-the one the route picks}. Change it: tunnel page, z, 9."
   fi
   # Resilience options (2.6.0-2.8.1): fake-sni (name, mode, ttl) and pool-rotate churn — the
   # blackout/whitelisting survival kit (docs/TECHNICAL.md). Strictly for censored routes, so NOT part
@@ -2341,8 +2303,10 @@ wizard_iran() {
 
     askres=y
     if [ -z "$NI_FAKESNI$NI_FAKEMODE$NI_FAKETTL$NI_POOLROT$NI_POOLBYTES$NI_PRESET$NI_ECH$NI_GOVERNOR$NI_DNSLISTEN$NI_SRCIP$T_FAKESNI$T_FAKEMODE$T_FAKETTL$T_POOLROT$T_POOLBYTES$T_ECH$T_GOVERNOR$T_DNSLISTEN$T_SRCIP" ]; then
-      confirm "Set up anti-censor (only for censored routes)?" n || askres=n
-      [ "$askres" = n ] && hint "No disguise: a busy direct tunnel can be filtered within an hour. Turn it on later with z on the tunnel page."
+      if [ "$NONINTERACTIVE" = 1 ]; then
+        confirm "Set up anti-censor (only for censored routes)?" n || askres=n
+        [ "$askres" = n ] && hint "No disguise: a busy direct tunnel can be filtered within an hour. Turn it on later with z on the tunnel page."
+      else askres=n; fi # by hand: tunnel page, z
     fi
 
     if [ "$askres" = y ] && [ -z "$NI_FAKESNI$NI_PRESET" ] && [ -z "$T_FAKESNI" ]; then
@@ -2419,9 +2383,8 @@ wizard_iran() {
   valid_name "$name" || { err "The name '$name' is not available."; return 1; }
 
   # summary
-  page "New tunnel" "review"
-  say "  ${BOLD}Ready to create${RST}"
-  summary_line "Name" "$name  (Iran, tunnel client)"
+  echo
+  summary_line "Name" "$name"
   summary_line "Carrier" "$T_CARRIER${T_ICMP:+ ($T_ICMP)}"
   summary_line "Kharej" "$T_PEER"
   [ -n "$CT_DESC" ] && summary_line "CDN tuning" "$CT_DESC"
@@ -2458,8 +2421,7 @@ wizard_iran() {
       fi ;;
   esac
   echo
-  confirm "Create this tunnel?" y || { warn "Nothing was created."; return 1; }
-  echo
+  if [ "$NONINTERACTIVE" = 1 ]; then confirm "Create this tunnel?" y || { warn "Nothing was created."; return 1; }; fi
 
   m=$(free_metrics_port)
   write_client() {
@@ -2514,7 +2476,7 @@ wizard_iran() {
   if wait_link "$name" 25; then
     celebrate "CONNECTED (RTT ${LINK_RTT} ms)"
     echo
-    say "  ${BOLD}Users can now connect to this server${RST}:"
+    say "  Users connect here:"
     conn_diagram "$T_CARRIER" "${MAPS[@]}"
   else
     linkok=0
@@ -2524,14 +2486,12 @@ wizard_iran() {
   echo
   fw_open "${new_pub[*]}"
   if ! systemctl is-enabled -q "$HEAL_UNIT.timer" 2>/dev/null; then
-    heal_enable >/dev/null && ok "Auto-heal enabled (turn off: $SELF → s settings → h)"
+    heal_enable >/dev/null && ok "Auto-heal on (Settings, h)"
   fi
-  echo
-  hint "Manage this tunnel any time: $SELF"
   if [ "$linkok" = 1 ] && is_pool_list "$T_CARRIER" && [ "$(uname -s)" = Linux ] && [ -z "$T_FAKESNI$T_POOLROT$T_POOLBYTES" ] \
      && ! grep -q '^fake-sni:' <<<"${AT_EXTRA:-}"; then
-    if [ "$T_REV" = 1 ]; then hint "If a censor starts blocking this tunnel: on Kharej (the side that dials), tunnel page -> z."
-    else hint "If a censor starts blocking this tunnel: tunnel page -> z (presets, fake-SNI, pool-rotate)."; fi
+    if [ "$T_REV" = 1 ]; then hint "If a censor blocks it: anti-censor is set on Kharej (the side that dials), tunnel page, z."
+    else hint "If a censor blocks it: tunnel page, z."; fi
   fi
   if [ "$NONINTERACTIVE" = 1 ]; then
     printf 'LINK=%s\nTUNNEL=%s\n' "$([ "$linkok" = 1 ] && echo up || echo down)" "$name"
@@ -2601,6 +2561,11 @@ companion_of() { # name -> parent name when NAME is an auto reverse companion (N
   local p=${1%-r}
   [ "$p" != "$1" ] && [ -f "$CONF/$p.yml" ] && is_auto_kharej "$p" && echo "$p"
   return 0
+}
+in_use() { # auto Kharej name -> the types Iran is connected through ("udp", "tcp+wss", "r:icmp"), empty before it connects
+  local u
+  auto_live "$1"
+  u=$(echo $AN_D ${AN_R:+r:$AN_R}); echo "${u// /+}"
 }
 carrier_label() { # name -> short carrier text for lists
   if is_auto_kharej "$1"; then echo auto; elif [ -n "$(companion_of "$1")" ]; then echo auto-r; else cfg "$1" carrier; fi
@@ -2686,13 +2651,8 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
     { [ -e "$CONF/$name.yml" ] || [ -e "$CONF/$name-r.yml" ]; } && { err "A tunnel named '$name' (or '$name-r') already exists."; return 1; }
   fi
   while { [ -e "$CONF/$name.yml" ] || [ -e "$CONF/$name-r.yml" ]; } && [ "$n" -lt 99 ]; do n=$((n+1)); name="kharej-$n"; done
-  echo
-  say "  ${BOLD}Auto${RST}: Iran tests every connection type against this server and keeps the best one."
-  hint "This server opens one port per carrier. A second unit, ${name}-r, is added by itself once Iran connects."
-  echo
-  hint "Cloudflare-proxied domain for the CDN tests (optional; used only to test wss/grpc through Cloudflare."
-  hint "Point it at this server with the orange cloud on, SSL mode Full). Press Enter to skip."
-  ask_ok "CDN domain (optional)" "$NI_CDN" v_domain_opt || return 1; cdn=$REPLY_V
+  cdn=$NI_CDN # by hand Iran adds the Cloudflare domain when it tests
+  [ -n "$cdn" ] && { v_domain_opt "$cdn" || return 1; }
   auto_pick_ports || { err "Could not find a free port for $AUTO_FAIL on this server."; hint "Check what listens there: ss -ltnup"; return 1; }
 
   MAPS=(); PE_ROLE=Kharej; PE_TUNNEL=$name; PE_ALLOW=(); PE_OWNED=(); PE_MSG=''
@@ -2702,18 +2662,7 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   ask_public_addr || return 1
   plan="d=$AUTO_D;r=$AUTO_RPLAN"
 
-  page "New tunnel" "review"
-  say "  ${BOLD}Ready to create${RST}"
-  summary_line "Name" "$name  (Kharej, auto: all carriers at once)"
-  line=''; for c in ${AUTO_D//,/ }; do line="$line ${c%%:*} ${c##*:} ·"; done
-  summary_line "Ports" "icmp ·${line% ·}"
-  [ -n "$AUTO_NOTE" ] && printf '%s' "$AUTO_NOTE" | sed "s/^/    $GRY/; s/\$/$RST/"
-  summary_line "Address" "$AUTO_ADDR"
-  summary_line "CDN domain" "${cdn:-none (CDN tests skipped)}"
-  summary_line "Allowed ports" "${allow:-any (no allow list: everything on 127.0.0.1 of this server is reachable through the tunnel)}"
-  echo
-  confirm "Create this tunnel?" y || { warn "Nothing was created."; return 1; }
-  echo
+  [ -n "$AUTO_NOTE" ] && printf '%s' "$AUTO_NOTE" | sed "s/^/  $GRY/; s/\$/$RST/"
 
   key=$(new_key); m=$(free_metrics_port); apath=$(rand_path)
   for c in ${AUTO_D//,/ }; do cars="$cars+${c%%:*}"; done
@@ -2740,23 +2689,16 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
     p=${c##*:}; fwl="$fwl $p/$([ "${c%%:*}" = udp ] && echo udp || echo tcp)"
   done
   fw_open "${fwl# }"
-  hint "ICMP: this server must answer ping. Do not block ICMP in the cloud firewall."
-  start_watcher "$name" && ok "Watching for Iran (creates ${name}-r by itself, no action needed)" \
-    || warn "Could not start the watcher. After Iran connects run: $SELF auto-ip $name IRAN_IP"
-
+  start_watcher "$name" || warn "Could not start the watcher. After Iran connects run: $SELF auto-ip $name IRAN_IP"
+  line=''; for c in ${AUTO_D//,/ }; do line="$line · ${c%%:*} ${c##*:}"; done
+  ok "Tunnel '$name' is ready"
+  hint "Open: icmp$line. Keep ICMP allowed in the cloud firewall."
   echo
-  celebrate "Kharej auto tunnel '$name' is ready"
-  echo
-  say "  Token ${GRY}(copy the whole line)${RST}"
+  say "  Token for the Iran server ${GRY}(copy the whole line)${RST}"
   echo
   printf '%s%s%s\n\n' "$BOLD$YEL" "$(cat "$CONF/$name.token")" "$RST"
-  step_diagram 2
-  echo
-  say "  Next, paste this token on Iran. It tests every connection type by itself (2-3 minutes)."
-  hint "Show it again: $SELF token $name"
-  hint "When Iran runs on the carrier it picked, close the others here: tunnel page, u (or $SELF auto-narrow $name)."
-  hint "If the reverse tests fail because this server never learned Iran's IP: $SELF auto-ip $name IRAN_IP"
-  warn "The token contains the key. Share it only over a private channel."
+  say "  On Iran: run ${CYN}${SELF}${RST}, press $(key_label n), paste it. Iran tests each type and picks one."
+  hint "Show it again: $SELF token $name. It contains the key: share it only privately."
   [ "$NONINTERACTIVE" = 1 ] && printf 'TUNNEL=%s\nTOKEN=%s\n' "$name" "$(cat "$CONF/$name.token")"
   return 0
 }
@@ -3377,14 +3319,13 @@ at_choose() { # rc 0 = chosen (T_* ready), 1 = cancelled
   printf -v bd '%.1f' "${AR_DOWN[$best]:-0}"
   printf -v bu '%.1f' "${AR_UP[$best]:-0}"
   echo
-  printf '  %s use the best (%s%s%s, %s/%s MB/s)\n' "$(key_label Enter)" "$BOLD" "${AV_LABEL[$best]}" "$RST" "$bd" "$bu"
-  [ "${#bond[@]}" -ge 2 ] && printf '  %s bond all working direct carriers (%d: survives any one being blocked)\n' "$(key_label b)" "${#bond[@]}"
-  [ "$n" -gt 1 ] && printf '  %s pick another from the table\n' "$(key_label "1-$n")"
-  [ "$n" -gt 1 ] && printf '  %s custom: join the rows you choose into one tunnel (it keeps working while any of them passes)\n' "$(key_label c)"
-  at_failed >/dev/null && printf '  %s use a type that failed the test anyway\n' "$(key_label f)"
+  printf '  %s %s%s%s  %s%s / %s MB/s%s\n' "$(key_label Enter)" "$BOLD" "${AV_LABEL[$best]}" "$RST" "$GRY" "$bd" "$bu" "$RST"
+  [ "${#bond[@]}" -ge 2 ] && printf '  %s bond all %d direct types  %s(keeps working while one passes)%s\n' "$(key_label b)" "${#bond[@]}" "$GRY" "$RST"
+  [ "$n" -gt 1 ] && printf '  %s that row   %s join rows you pick\n' "$(key_label "1-$n")" "$(key_label c)"
+  at_failed >/dev/null && printf '  %s use a type that failed\n' "$(key_label f)"
   printf '  %s cancel\n' "$(key_label q)"
   for t in 1 2 3 4 5; do
-    printf '  %s?%s Choice %s[Enter]%s ' "$CYN" "$RST" "$GRY" "$RST"
+    printf '  %s?%s %s[Enter]%s ' "$CYN" "$RST" "$GRY" "$RST"
     key_read
     case "$KEY" in
       enter) AT_SEL=("$best") ;;
@@ -3460,24 +3401,24 @@ at_none() { # nothing worked
   fi
   hint "Also check: the Kharej tunnel is running, the key is current (paste the token again), and Kharej's cloud firewall."
 }
-at_preset_ask() { # -> AT_PRESET normal|anti (--test in unattended runs) ; rc 1 = cancelled
+at_preset_ask() { # -> AT_PRESET normal|anti (--test in unattended runs), T_SNI (CDN domain, d) ; rc 1 = cancelled
   AT_PRESET=${NI_TEST:-normal}
   [ "$NONINTERACTIVE" = 1 ] && return 0
   local t
   echo
-  say "  ${BOLD}What should be tested?${RST}"
-  printf '  %s normal: every connection type (direct, CDN, reverse), no anti-censor variants. About 2-3 minutes.\n' "$(key_label Enter)"
-  printf '  %s anti-censor: the normal tests plus EVERY anti-censor variant (all desync modes and SNIs, TLS fragments,\n' "$(key_label a)"
-  printf '      fingerprints, ECH) on every direct carrier. Can take 30-60 minutes; skip a variant, a carrier or stop at any time.\n'
-  printf '  %s cancel\n' "$(key_label q)"
-  for t in 1 2 3 4 5; do
-    printf '  %s?%s Choice %s[Enter]%s ' "$CYN" "$RST" "$GRY" "$RST"
+  say "  Test every connection type from here (2-3 min, up to 400 MB). Nothing is published while it runs."
+  for t in 1 2 3 4 5 6; do
+    printf '  %s test  %s also anti-censor variants %s(30-60 min)%s  %s %s  %s cancel\n' "$(key_label Enter)" "$(key_label a)" "$GRY" "$RST" \
+      "$(key_label d)" "${T_SNI:+CDN domain: $T_SNI}${T_SNI:-add a Cloudflare domain}" "$(key_label q)"
+    printf '  %s?%s ' "$CYN" "$RST"
     key_read
     case "$KEY" in
       enter) AT_PRESET=normal; echo; return 0 ;;
       a|A) AT_PRESET=anti; echo; return 0 ;;
+      d|D) echo; hint "A domain proxied to Kharej through Cloudflare (orange cloud, SSL Full). Empty = none."
+           ask_ok "Cloudflare domain" "$T_SNI" v_domain_opt || continue; T_SNI=$REPLY_V; echo ;;
       q|Q|esc) echo; return 1 ;;
-      *) echo; warn "Press Enter, a or q." ;;
+      *) echo ;;
     esac
   done
   return 1
@@ -3485,14 +3426,8 @@ at_preset_ask() { # -> AT_PRESET normal|anti (--test in unattended runs) ; rc 1 
 auto_iran_front() { # token : test everything, ranked table, choose. Leaves T_* ready for the normal flow
   AUTO_TOKEN=$1
   [ -n "$T_AUTO" ] || { err "This auto token has no test plan. Make a new token on Kharej (wattun 2.1.0 or newer)."; return 1; }
-  summary_line "Mode" "auto: tests every connection type"
-  summary_line "Kharej" "$T_PEER"
-  summary_line "CDN domain" "${T_SNI:-none (CDN tests skipped)}"
-  summary_line "Kharej allows" "${T_PORTS:-any port}"
-  echo
+  hint "Kharej ${T_PEER%%[:,]*} · allows ${T_PORTS:-any port}"
   at_preset_ask || { warn "Cancelled."; return 1; }
-  hint "Testing from this server. Nothing is published and no tunnel is touched."
-  echo
   AT_QUIET=0; AT_MB=8; AT_NOTE=""; AT_SKIP=''; AT_AGAIN=''
   auto_test || { err "Could not prepare the test (is $AUTO_RUN writable?)."; return 1; }
   at_rank; auto_refine
@@ -4219,17 +4154,29 @@ cdn_summary() { # name [short]
   if [ "${2:-}" = short ]; then echo "$out"; else echo "$c · $out"; fi
 }
 
+server_side() { # -> kharej | iran | nothing: saved at install (or the first tunnel), else read from the tunnels here
+  local s n k=0 i=0
+  s=$(conf_get side '')
+  case "$s" in kharej|iran) echo "$s"; return 0 ;; esac
+  for n in $(tunnels); do [ -n "$(companion_of "$n")" ] && continue; [ "$(role "$n")" = Kharej ] && k=1 || i=1; done
+  [ "$k$i" = 10 ] && echo kharej
+  [ "$k$i" = 01 ] && echo iran
+  return 0
+}
+ask_side() { # -> SIDE kharej|iran, saved ; rc 1 = back
+  page "This server"
+  printf '  %s Kharej  %soutside server, where the service runs. Makes the token.%s\n' "$(key_label 1)" "$GRY" "$RST"
+  printf '  %s Iran    %sinside server users connect to. Takes the token.%s\n' "$(key_label 2)" "$GRY" "$RST"
+  echo
+  printf '  %s?%s This server is %s[1/2, b back]%s ' "$CYN" "$RST" "$GRY" "$RST"
+  key_read; echo
+  case "$KEY" in 1|k|K) SIDE=kharej ;; 2|i|I) SIDE=iran ;; *) return 1 ;; esac
+  conf_set side "$SIDE"
+}
 new_tunnel() { # [kharej|iran]
   local pick=${1:-}
-  if [ -z "$pick" ]; then
-    page "New tunnel" "which server is this?"
-    printf '  %s Kharej  %soutside server, where the service runs. Set it up first.%s\n' "$(key_label 1)" "$GRY" "$RST"
-    printf '  %s Iran    %sinside server users connect to. Needs the token from Kharej.%s\n' "$(key_label 2)" "$GRY" "$RST"
-    echo
-    printf '  %s?%s This server is %s[1/2, b back]%s ' "$CYN" "$RST" "$GRY" "$RST"
-    key_read; echo
-    case "$KEY" in 1|k|K) pick=kharej ;; 2|i|I) pick=iran ;; *) return 0 ;; esac
-  fi
+  [ -z "$pick" ] && pick=$(server_side)
+  if [ -z "$pick" ]; then ask_side || return 0; pick=$SIDE; fi
   local rc=0
   case "$pick" in
     kharej) run_flow wizard_kharej; rc=$? ;;
@@ -4371,32 +4318,32 @@ test_tunnel() {
   if [[ "$cr" == *"+"* ]]; then
     local -a car_list
     IFS='+' read -ra car_list <<<"$cr"
-    say "  ${BOLD}Multi-Carrier Bond Diagnostics (${#car_list[@]} paths):${RST}"
+    say "  ${GRY}${#car_list[@]} paths${RST}"
     local c_idx=0 cp cpeer chost cport
     for cp in "${car_list[@]}"; do
       c_idx=$((c_idx+1))
       cpeer=$(cfg "$n" "peer-$cp")
       [ -z "$cpeer" ] && cpeer=$peer
       chost=${cpeer%:*}; cport=${cpeer##*:}
-      printf '    • Path #%d [%s]: ' "$c_idx" "$cp"
+      printf '    %s%d%s %-6s ' "$GRY" "$c_idx" "$RST" "$cp"
       if [ "$r" = Iran ]; then
         if [ "$cp" = icmp ]; then
           if ping -c 1 -W 2 -q "$chost" >/dev/null 2>&1; then
-            printf '%sICMP ping OK%s\n' "$GRN" "$RST"
+            printf '%s✔ ping ok%s\n' "$GRN" "$RST"
           else
-            printf '%sICMP ping failed%s\n' "$RED" "$RST"
+            printf '%s✘ ping fails%s\n' "$RED" "$RST"
           fi
         elif [ "$cp" != udp ] && [ -n "$cport" ]; then
           if timeout 3 bash -c "</dev/tcp/$chost/$cport" 2>/dev/null; then
-            printf '%sTCP %s:%s reachable%s\n' "$GRN" "$chost" "$cport" "$RST"
+            printf '%s✔ tcp %s:%s open%s\n' "$GRN" "$chost" "$cport" "$RST"
           else
-            printf '%sTCP %s:%s blocked / unreachable%s\n' "$RED" "$chost" "$cport" "$RST"
+            printf '%s✘ tcp %s:%s closed or filtered%s\n' "$RED" "$chost" "$cport" "$RST"
           fi
         else
-          printf '%sconfigured%s\n' "$CYN" "$RST"
+          printf '%sconfigured%s\n' "$GRY" "$RST"
         fi
       else
-        printf '%sactive on server%s\n' "$CYN" "$RST"
+        printf '%sactive on server%s\n' "$GRY" "$RST"
       fi
     done
     echo
@@ -4557,10 +4504,8 @@ speed_test() { # name [mb]
 
 logs_menu() {
   local n=$1
-  echo
-  printf '  %s last 100 lines  %s follow live (Ctrl+C stops)\n' "$(key_label 1)" "$(key_label 2)"
-  printf '  %s problems only   %s since boot\n' "$(key_label 3)" "$(key_label 4)"
-  printf '  %s?%s Choice %s[1]%s ' "$CYN" "$RST" "$GRY" "$RST"
+  menu_line 1 'last 100 lines' 2 'follow live' 3 'errors only' 4 'since boot'
+  printf '  %s?%s %s[1]%s ' "$CYN" "$RST" "$GRY" "$RST"
   key_read; echo; echo
   case "$KEY" in
     1|enter) journalctl -u "${WAT_PREFIX}@$n" -n 100 --no-pager -o short-iso ;;
@@ -4648,20 +4593,23 @@ tunnel_card() {
 
   local boot='no start at boot'; [ "$srv_en" = enabled ] && boot='starts at boot'
   box_row "${SC_COL}${SC_DOT} ${SC_TXT}${RST} ${GRY}· service ${srv_act}${srv_up:+ $srv_up} · $boot${RST}"
-  row_2col "$(kv carrier "$cr")" "$routing_txt"
+  if is_auto_kharej "$n"; then
+    auto_live "$n"; c=$(echo $AN_D ${AN_R:+r:$AN_R}); c=${c// /+}; x=$(cfg "$n" carrier | tr '+' ' ' | wc -w)
+    if [ -n "$c" ]; then k="picked by Iran"; else k="$x open"; fi
+    row_2col "$(kv carrier "${c:-auto} ${GRY}($k)${RST}")" "$routing_txt"
+  else row_2col "$(kv carrier "$cr")" "$routing_txt"; fi
 
   # Sub-role details
   if [ -n "$par" ]; then
     box_row "$(kv reverse "auto, to Iran $(cfg "$n" peer-icmp)")"
   elif is_auto_kharej "$n"; then
     if [ -f "$CONF/$n-r.yml" ]; then sub="reverse side: $n-r (Iran $(cfg "$n-r" peer-icmp))"
-    elif systemctl is-active -q "${WAT_PREFIX}-autowatch-$n.service" 2>/dev/null; then sub="watching for Iran's first connection (then $n-r is created)"
-    else sub="Iran's IP not learned yet: $SELF auto-ip $n IRAN_IP"; fi
-    box_row "$(kv auto "$sub")"
-    if auto_live "$n" && [ -n "$AN_D$AN_R" ]; then
+    elif systemctl is-active -q "${WAT_PREFIX}-autowatch-$n.service" 2>/dev/null; then sub="waiting for Iran to connect"
+    else sub="Iran's IP not known: $SELF auto-ip $n IRAN_IP"; fi
+    [ -f "$CONF/$n-r.yml" ] || [ -n "$AN_D$AN_R" ] || box_row "$(kv auto "$sub")"
+    if [ -n "$AN_D$AN_R" ]; then
       c=$(cfg "$n" carrier); c=${c//+/ }; x=0; for k in $c; do case " $AN_D " in *" $k "*) ;; *) x=$((x+1)) ;; esac; done
-      box_row "$(kv "Iran uses" "${AN_D:+direct $AN_D}${AN_R:+reverse $AN_R}")"
-      [ "$x" -gt 0 ] && box_row "${YEL}!${RST} $x unused carrier(s) still open: press u to close them"
+      [ "$x" -gt 0 ] && box_row "$(kv unused "$x types still open ${GRY}(u closes them)${RST}")"
     fi
   elif [ "$cr" = icmp ] && is_reverse "$n"; then
     if [ "$r" = Iran ]; then box_row "$(kv reverse "pinged by ${peer:--}")"; else box_row "$(kv reverse "pings Iran ${peer:--}")"; fi
@@ -4809,19 +4757,19 @@ change_peer() {
 change_key() {
   local n=$1 k t
   if [ "$(role "$n")" = Kharej ]; then
-    warn "A new key disconnects every Iran server until it gets the new token."
-    confirm "Generate a NEW key and token?" n || return 0
+    warn "Every Iran server on this tunnel disconnects until it gets the new token."
+    confirm "Make a new key and token?" n || return 0
     k=$(new_key); ( umask 077; printf '%s\n' "$k" >"$CONF/$n.key" )
     if [ -f "$CONF/$n.token" ] && read_token "$(cat "$CONF/$n.token")"; then
       make_token "$T_CARRIER" "$T_PEER" "$k" "$T_PATH" "$T_SNI" "$T_ICMP" "$T_PORTS" "$T_REV" "$T_AUTO" >"$CONF/$n.token"
     fi
     step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n"
     [ -f "$CONF/$n-r.yml" ] && is_auto_kharej "$n" && step "Restarting ${WAT_PREFIX}@$n-r" systemctl restart "${WAT_PREFIX}@$n-r"
-    echo; ok "New token (paste it on every Iran server):"; echo
+    echo; ok "New token. Paste it on each Iran server (tunnel page, t):"; echo
     show_token "$n"
   else
     local f="$CONF/$n.yml" oldrev=0 oldlisten='' oldproto='' keepres='' rport=''
-    ask_ok "Paste the new token from Kharej" "" v_token || return 1
+    ask_ok "Token from Kharej" "" v_token || return 1
     t=$REPLY_V; read_token "$t"
     if [ "$T_CARRIER" = auto ]; then # auto token: the type is chosen by testing, so test now and apply the winner
       local oldkey oldauto=0
@@ -4829,8 +4777,7 @@ change_key() {
       oldkey=$(cat "$CONF/$n.key" 2>/dev/null || true)
       ( umask 077; printf '%s\n' "$T_KEY" >"$CONF/$n.key" )
       ( umask 077; printf '%s\n' "$t" >"$CONF/$n.auto" ); chmod 600 "$CONF/$n.auto"
-      ok "Token accepted: Kharej is ${T_PEER}."
-      hint "The running tunnel is left alone while each connection type is tested."
+      ok "Token accepted: Kharej ${T_PEER%%[:,]*}. The running tunnel stays up while the types are tested."
       if [ "$NONINTERACTIVE" = 1 ]; then
         hint "Now pick the type that works: $SELF auto-test $n"
         return 0
@@ -4838,13 +4785,13 @@ change_key() {
       AT_APPLIED=0
       auto_test_cmd "$n" || true
       if [ "$AT_APPLIED" = 1 ]; then
-        wait_link "$n" 10 && ok "Now using the new Kharej." || warn "Switched, but not connected yet (d = diagnose)."
+        wait_link "$n" 10 && ok "Connected to the new Kharej." || warn "Switched, not connected yet. Press d to diagnose."
         return 0
       fi
       # nothing was chosen: put the old key back, or the next restart would use a key the old Kharej rejects
       [ -n "$oldkey" ] && ( umask 077; printf '%s\n' "$oldkey" >"$CONF/$n.key" )
       [ "$oldauto" = 1 ] || rm -f "$CONF/$n.auto"
-      hint "'$n' still points at the Kharej it was using; nothing changed."
+      hint "Nothing changed: '$n' still uses its old Kharej."
       return 0
     fi
     [ "$T_REV" = 1 ] && is_rpool "$T_CARRIER" && { v_port "${T_PEER##*:}" || return 1; }
@@ -4889,7 +4836,7 @@ delete_tunnel() {
   local n=$1
   warn "This stops '$n' and deletes its config, key and token."
   if [ "$NONINTERACTIVE" = 1 ]; then REPLY_V=$n # --yes is the confirmation
-  else ask "Type the tunnel name to confirm (empty = cancel)" ""; fi
+  else ask "Type $n to delete it (Enter cancels)" ""; fi
   [ "$REPLY_V" = "$n" ] || { warn "Not deleted."; return 1; }
   if [ -f "$CONF/$n-r.yml" ] && is_auto_kharej "$n"; then # the auto reverse companion goes with its parent
     systemctl disable --now "${WAT_PREFIX}@$n-r" >/dev/null 2>&1
@@ -4974,49 +4921,34 @@ set_direction() { # name
     T_REV=''; is_reverse "$n" && T_REV=1
     make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "$T_PATH" "$T_SNI" "$T_ICMP" "$T_PORTS" "$T_REV" "$T_AUTO" >"$CONF/$n.token"
   fi
-  warn "Change the direction on the $([ "$r" = Kharej ] && echo Iran || echo Kharej) side too (Advanced settings → d), or the link stays down."
+  warn "Change it on the $([ "$r" = Kharej ] && echo Iran || echo Kharej) server too (Advanced, d), or the link stays down."
   return 0
 }
 adv_menu() { # name : max-mbps, fec, bind, icmp-type, direction
   local n=$1 r changed=0 v cr
   r=$(role "$n"); cr=$(cfg "$n" carrier)
   while :; do
-    page "Advanced settings" "$n"
-    summary_line "max-mbps" "$(cfg "$n" max-mbps | sed 's/^$/16 (default)/')"
-    summary_line "sessions" "$(cfg "$n" sessions | sed 's/^$/1 (default)/')"
-    summary_line "conns" "$(cfg "$n" conns | sed 's/^$/8 (default)/')"
-    summary_line "mtu" "$(cfg "$n" mtu | sed 's/^$/auto (default)/')"
-    summary_line "fec" "$(cfg "$n" fec | sed 's/^$/off (default)/')"
-    [ "$r" = Iran ] && summary_line "bind" "$(cfg "$n" bind | sed 's/^$/0.0.0.0 (default)/')"
-    [ "$cr" = icmp ] && summary_line "icmp-type" "$(cfg "$n" icmp-type | sed 's/^$/echo (default)/')"
-    case "$cr" in icmp|udp) summary_line "batch" "$(cfg "$n" batch | sed "s/^$/$([ "$cr" = icmp ] && echo on || echo off) (default)/")" ;; esac
+    page "Advanced" "$n"
+    set_row m 'speed limit' "$(cfg "$n" max-mbps)" 'MB/s' '16 MB/s'
+    set_row s sessions "$(cfg "$n" sessions)" '' 1
+    set_row c conns "$(cfg "$n" conns)" '' 8
+    set_row u mtu "$(cfg "$n" mtu)" '' auto
+    set_row f fec "$(cfg "$n" fec)" '' off
+    [ "$r" = Iran ] && set_row a bind "$(cfg "$n" bind)" '' 0.0.0.0
+    [ "$cr" = icmp ] && set_row i 'icmp type' "$(cfg "$n" icmp-type)" '' echo
+    case "$cr" in icmp|udp) set_row y batching "$(cfg "$n" batch)" '' "$([ "$cr" = icmp ] && echo on || echo off)" ;; esac
     if rev_capable "$cr"; then
-      if [ "$cr" = icmp ]; then summary_line "direction" "$(is_reverse "$n" && echo "reverse (Kharej sends the pings)" || echo "normal (Iran sends the pings)")"
-      else summary_line "direction" "$(is_reverse "$n" && echo "reverse (Kharej connects to Iran)" || echo "normal (Iran connects to Kharej)")"; fi
+      if is_reverse "$n"; then v="reverse ${GRY}($([ "$cr" = icmp ] && echo "Kharej sends the pings" || echo "Kharej connects to Iran"))${RST}"
+      else v="normal ${GRY}($([ "$cr" = icmp ] && echo "Iran sends the pings" || echo "Iran connects to Kharej"))${RST}"; fi
+      set_row d direction "$v"
     fi
     if ac_dialer "$n"; then
-      if is_pool_list "$cr"; then
-        local fks=$(cfg "$n" fake-sni) fkm=$(cfg "$n" fake-mode)
-        local fkl=${fks:-off}${fkm:+ ($fkm mode)}
-        [ "$fkm" = ttl ] && fkl="$fkl, ttl $(cfg "$n" fake-ttl || echo auto)"
-        summary_line "fake-sni" "$fkl"
-        summary_line "pool-rotate" "$(cfg "$n" pool-rotate | sed 's/^$/off (default)/')"
-        [ -n "$(cfg "$n" pool-rotate-bytes)" ] && summary_line "pool-rotate-bytes" "$(cfg "$n" pool-rotate-bytes)"
-        if has_ech_list "$cr"; then
-          [ -n "$(cfg "$n" ech)" ] && summary_line "ech" "$(cfg "$n" ech)"
-        fi
-      elif [ "$cr" = icmp ]; then
-        [ -n "$(cfg "$n" governor)" ] && summary_line "governor" "$([ "$(cfg "$n" governor)" = true ] && echo on || echo off)"
-      fi
+      v=off; [ -n "$(cfg "$n" fake-sni)$(cfg "$n" pool-rotate)$(cfg "$n" ech)" ] || [ "$(cfg "$n" governor)" = true ] && v=on
+      set_row k anti-censor "$v"
     fi
     echo
-    printf '  %s  speed   %s  sessions   %s  conns   %s  MTU   %s  FEC   ' "$(key_label m)" "$(key_label s)" "$(key_label c)" "$(key_label u)" "$(key_label f)"
-    [ "$r" = Iran ] && printf '%s  bind   ' "$(key_label a)"
-    [ "$cr" = icmp ] && printf "%s  ICMP type   " "$(key_label i)"
-    case "$cr" in icmp|udp) printf '%s  batching   ' "$(key_label y)" ;; esac
-    rev_capable "$cr" && printf "%s  direction   " "$(key_label d)"
-    ac_dialer "$n" && printf '%s  resilience   ' "$(key_label k)"
-    printf '%s  back\n' "$(key_label b)"
+    hint "Changes restart the tunnel when you leave this page."
+    menu_line 0 back
     key_read
     case "$KEY" in
       m) echo; ask_ok "Speed ceiling in MB/s (- or 0 or default = unset)" "$(cfg "$n" max-mbps)" v_mbps_adv || continue
@@ -5057,8 +4989,7 @@ adv_menu() { # name : max-mbps, fec, bind, icmp-type, direction
   done
   # Every setting here needs a restart; apply it automatically (an unapplied change only logs "restart needed").
   if [ "$changed" = 1 ]; then
-    hint "Applying: restarting '$n' (open connections drop and reconnect)."
-    step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n"
+    step "Restarting ${WAT_PREFIX}@$n to apply" systemctl restart "${WAT_PREFIX}@$n"
   fi
   return 0
 }
@@ -5072,35 +5003,34 @@ anticensor_test() {
   r=$(role "$n"); cr=$(cfg "$n" carrier); peer=$(cfg "$n" peer)
   ac_dialer "$n" || { err "'$n' does not dial the carrier (anti-censorship verification runs on the dialing end)."; return 1; }
   echo
-  say "  ${BOLD}Anti-Censorship & Link Verification for '$n'${RST} ($r · $cr)"
+  say "  ${BOLD}Anti-censor test${RST}  ${GRY}$n · $r · $cr${RST}"
   echo
 
   if ! systemctl is-active -q "${WAT_PREFIX}@$n" 2>/dev/null; then
-    warn "Service ${WAT_PREFIX}@$n is stopped. Starting it now..."
+    warn "$n is stopped. Starting it."
     systemctl start "${WAT_PREFIX}@$n" 2>/dev/null
     sleep 1
   fi
 
   # Active profile report
-  say "  ${BOLD}Active Anti-Censorship Settings:${RST}"
   local fks=$(cfg "$n" fake-sni) fkm=$(cfg "$n" fake-mode) fkt=$(cfg "$n" fake-ttl)
   local rot=$(cfg "$n" pool-rotate) rbytes=$(cfg "$n" pool-rotate-bytes)
   local ech=$(cfg "$n" ech) gov=$(cfg "$n" governor)
   local dl=$(cfg "$n" dns-listen) sip=$(cfg "$n" src-ip)
 
   if [ -n "$fks" ]; then
-    printf '    • Fake-SNI:     %s (%s mode%s)\n' "$fks" "${fkm:-seq}" "${fkt:+, ttl $fkt}"
+    say "  $(kv 'fake sni' "$fks · ${fkm:-seq}${fkt:+ · ttl $fkt}")"
   else
-    printf '    • Fake-SNI:     %s\n' "${GRY}disabled${RST}"
+    say "  $(kv 'fake sni' "${GRY}off${RST}")"
   fi
-  [ -n "$rot" ] && printf '    • Pool-Rotate:  %s%s\n' "$rot" "${rbytes:+ / $rbytes}"
-  [ -n "$ech" ] && printf '    • ECH:          %s\n' "$ech"
-  [ "$gov" = true ] && printf '    • Governor:     %s\n' "active"
-  [ -n "$dl" ] && printf '    • DNS Relay:    %s\n' "$dl"
-  [ -n "$sip" ] && printf '    • Source IP:    %s\n' "$sip"
+  [ -n "$rot" ] && say "  $(kv rotate "$rot${rbytes:+ / $rbytes}")"
+  [ -n "$ech" ] && say "  $(kv ech "$ech")"
+  [ "$gov" = true ] && say "  $(kv governor on)"
+  [ -n "$dl" ] && say "  $(kv 'dns relay' "$dl")"
+  [ -n "$sip" ] && say "  $(kv 'source ip' "$sip")"
   echo
 
-  spin_start "Probing tunnel connection & DPI filter bypass"
+  spin_start "Waiting for the link"
   local wait_sec=${ANTICENSOR_TEST_WAIT:-6}
   for ((i=0; i<wait_sec; i++)); do
     s=$(stats "$n" 2>/dev/null)
@@ -5118,11 +5048,11 @@ anticensor_test() {
     fprof=$(jget "$s" filter_profile)
     ech_st=$(jget "$s" ech)
 
-    ok "FILTER BYPASS CONFIRMED: Tunnel is CONNECTED"
-    printf '    %s%-18s%s %s ms\n' "$GRY" "RTT:" "$RST" "$(ms "$srtt")"
-    printf '    %s%-18s%s in: %s pkts, out: %s pkts\n' "$GRY" "Traffic:" "$RST" "${pkts_in:-0}" "${pkts_out:-0}"
-    [ -n "$fprof" ] && printf '    %s%-18s%s %s\n' "$GRY" "Filter Profile:" "$RST" "$fprof"
-    [ -n "$ech_st" ] && printf '    %s%-18s%s %s\n' "$GRY" "ECH Status:" "$RST" "$ech_st"
+    ok "Connected: the filter lets it through"
+    say "  $(kv rtt "$(ms "$srtt") ms")"
+    say "  $(kv packets "${pkts_in:-0} in · ${pkts_out:-0} out")"
+    [ -n "$fprof" ] && say "  $(kv filter "$fprof")"
+    [ -n "$ech_st" ] && say "  $(kv ech "$ech_st")"
 
     # Forwarded port check
     load_maps "$n"
@@ -5133,32 +5063,25 @@ anticensor_test() {
       if [ -n "$lport" ] && [[ "$lport" =~ ^[0-9]+$ ]]; then
         if [ "$proto" = tcp ]; then
           if timeout 2 bash -c "</dev/tcp/127.0.0.1/$lport" 2>/dev/null; then
-            ok "Forwarded port $lport/$proto is listening and accessible"
+            ok "Port $lport/$proto answers"
           fi
         elif port_busy "$lport" "$proto"; then
-          ok "Forwarded port $lport/$proto is active"
+          ok "Port $lport/$proto is open"
         fi
       fi
     fi
-    echo
-    ok "Anti-censorship profile verified successfully."
     return 0
   else
-    err "FILTER BYPASS FAILED: Tunnel could not establish link"
-    echo
-    say "  ${BOLD}Troubleshooting & Recommendations:${RST}"
+    err "Not connected within ${wait_sec} s"
     if [ -n "$fks" ]; then
-      warn "The current allowlisted SNI ($fks) or fake-mode ($fkm) may be blocked by this provider."
-      hint "1. Try Emergency Blackout Mode: $SELF blackout $n blackout"
-      hint "2. Or switch mode to 'rst' or 'synrst' (menu: tunnel page -> o -> k -> 3)."
-      hint "3. Or try another allowlisted SNI: 'irancell.ir', 'tci.ir', 'divar.ir'."
+      hint "This provider may block $fks or mode ${fkm:-seq}. Try in order:"
+      hint "  $SELF blackout $n blackout"
+      hint "  mode rst or synrst: tunnel page, o, k"
+      hint "  another SNI: irancell.ir, tci.ir, divar.ir"
     else
-      warn "No Fake-SNI is active. If your provider enforces an SNI allowlist, connections will be dropped."
-      hint "Turn on resilience: $SELF blackout $n mci"
+      hint "Fake SNI is off. If this provider allows only listed SNIs: $SELF blackout $n mci"
     fi
-    if [ "$cr" = icmp ]; then
-      hint "ICMP may be filtered or rerouted. Ensure 'governor: true' is enabled."
-    fi
+    [ "$cr" = icmp ] && hint "ICMP may be filtered or rerouted. Turn the governor on."
     return 1
   fi
 }
@@ -5172,15 +5095,14 @@ anticensor_menu() {
   cr=$(cfg "$n" carrier); r=$(role "$n")
   [ "$(uname -s)" = Linux ] || return 0
   if ! ac_dialer "$n"; then # the listening end has nothing to configure
-    page "Anti-Censorship & Resilience" "$n ($cr)"
-    say "  '$n' is a ${BOLD}$(is_reverse "$n" && echo reverse || echo normal)${RST} tunnel: the ${BOLD}$([ "$r" = Iran ] && echo Kharej || echo Iran)${RST} server dials the carrier,"
-    say "  so anti-censor is switched on and tuned there. Open this screen on that server."
-    hint "To change who dials: Advanced settings, then d (direction), on both servers."
+    page "Anti-censor" "$n · $cr"
+    say "  The $([ "$r" = Iran ] && echo Kharej || echo Iran) server dials this $(is_reverse "$n" && echo reverse || echo normal) tunnel, so anti-censor is set there."
+    hint "To change who dials: Advanced, d, on both servers."
     pause; return 0
   fi
   local changed=0 k v
   while :; do
-    page "Anti-Censorship & Resilience" "$n ($cr)"
+    page "Anti-censor" "$n · $cr"
     local fs fm ft pr pb ech gov dl sip
     fs=$(cfg "$n" fake-sni)
     fm=$(cfg "$n" fake-mode); [ -n "$fm" ] || fm=seq
@@ -5192,36 +5114,25 @@ anticensor_menu() {
     dl=$(cfg "$n" dns-listen)
     sip=$(cfg "$n" src-ip)
 
-    say "  ${BOLD}Anti-Censorship Configuration for '$n'${RST}"
+    if [ -n "$fs" ] || [ "$gov" = true ] || [ -n "$pr" ]; then set_row 1 anti-censor "${GRN}on${RST} · $(detect_preset "$n")"
+    else set_row 1 anti-censor "off ${GRY}(plain tunnel, full speed)${RST}"; fi
+    set_row r direction "$(is_reverse "$n" && echo "reverse ${GRY}(Kharej dials Iran)${RST}" || echo "normal ${GRY}(Iran dials Kharej)${RST}")"
     echo
-    if [ -n "$fs" ] || [ "$gov" = true ] || [ -n "$pr" ]; then
-      printf '    %s  Anti-Censor            %s ON  %s(press to turn off)%s  %s\n' "$(key_label 1)" "$GRN" "$GRY" "$RST" "$(detect_preset "$n")"
-    else
-      printf '    %s  Anti-Censor            %sOFF%s (normal tunnel, full speed)  press to turn on\n' "$(key_label 1)" "$GRY" "$RST"
-    fi
-    printf '    %s  Direction              %s\n' "$(key_label r)" "$(is_reverse "$n" && echo "reverse (Kharej dials Iran)" || echo "normal (Iran dials Kharej)")"
     if is_pool_list "$cr"; then
-      printf '    %s  Fake SNI               %s\n' "$(key_label 2)" "${fs:-${GRY}off (disabled)${RST}}"
-      printf '    %s  Fake Desync Mode       %s\n' "$(key_label 3)" "$([ -n "$fs" ] && echo "$fm" || echo "${GRY}n/a (fake-sni off)${RST}")"
-      printf '    %s  Fake TTL Hop Count     %s\n' "$(key_label 4)" "$([ -n "$fs" ] && [ "$fm" = ttl ] && echo "${ft:-auto}" || echo "${GRY}n/a${RST}")"
-      printf '    %s  Pool Rotate (Time)     %s\n' "$(key_label 5)" "${pr:-${GRY}off (disabled)${RST}}"
-      printf '    %s  Pool Rotate (Bytes)    %s\n' "$(key_label 6)" "${pb:-${GRY}off (disabled)${RST}}"
+      set_row 2 'fake sni' "$fs" '' off
+      [ -n "$fs" ] && set_row 3 'desync mode' "$fm"
+      [ -n "$fs" ] && [ "$fm" = ttl ] && set_row 4 'fake ttl' "$ft" '' auto
+      set_row 5 'rotate every' "$pr" '' off
+      set_row 6 'rotate after' "$pb" '' off
     elif [ "$cr" = icmp ]; then
-      printf '    %s  Volume Governor        %s\n' "$(key_label 2)" "$([ "$gov" = true ] && echo "${GRN}ON (active)${RST}" || echo "${GRY}OFF${RST}")"
+      set_row 2 governor "$([ "$gov" = true ] && echo on)" '' off
     fi
-    if has_ech_list "$cr"; then
-      printf '    %s  ECH Mode               %s\n' "$(key_label 7)" "${ech:-${GRY}off (disabled)${RST}}"
-    fi
-    printf '    %s  DNS Forwarder          %s\n' "$(key_label 8)" "${dl:-${GRY}off (disabled)${RST}}"
-    printf '    %s  Carrier Source IP      %s\n' "$(key_label 9)" "${sip:-${GRY}off (default route)${RST}}"
+    has_ech_list "$cr" && set_row 7 ech "$ech" '' off
+    set_row 8 'dns forwarder' "$dl" '' off
+    set_row 9 'source ip' "$sip" '' 'default route'
     echo
-    printf '    %s  Choose Another Preset\n' "$(key_label w)"
-    printf '    %s  Edit Any Key           (fake-ip, fp, tls-small-ch, conns ...)\n' "$(key_label e)"
-    printf '    %s  Test Filter Bypass & Link Status\n' "$(key_label t)"
-    printf '    %s  Anti-Censor Matrix      (test every combination, apply the best)\n' "$(key_label m)"
-    printf '    %s  Save Current as Custom Profile\n' "$(key_label p)"
-    printf '    %s  Back to Advanced Settings\n' "$(key_label b)"
-    echo
+    menu_line w presets t 'test now' m 'test all modes' p 'save as profile' e 'edit any key'
+    menu_line 0 back
     key_read
     case "$KEY" in
       1) # Toggle: on -> plain tunnel, off -> preset (apply_preset restarts the tunnel itself)
@@ -5639,7 +5550,7 @@ profile_cmd() { # profile save|list|show|del|apply NAME [tunnel]
       echo "  blackout     Emergency Blackout Mode (mci.ir, rst, 90s, 100MB, ECH ladder)"
       echo "  conservative Conservative / Low-Churn (mci.ir, seq, 4h, 4GB, ECH auto)"
       echo
-      say "  ${BOLD}Saved Custom Profiles:${RST}"
+      say "  ${GRY}saved profiles${RST}"
       names=$(prof_names)
       if [ -n "$names" ]; then
         echo "$names" | while read -r x; do echo "  $x"; done
@@ -5759,22 +5670,18 @@ change_type() { # name : one place to change how the two servers connect, whatev
   echo
   if [ "$(role "$n")" = Iran ]; then
     if [ -f "$CONF/$n.auto" ]; then
-      hint "Every type is tested again; pick any that works, join several (c), or force one that failed (f)."
       auto_test_cmd "$n"; return
     fi
-    say "  Current: ${BOLD}$c${RST}. This tunnel was made with a fixed-type token, so the Kharej side decides the type."
-    hint "1. On the Kharej server, make a new tunnel and choose Auto ($SELF, n, Kharej, 1); Kharej then accepts every type."
-    hint "2. Paste its token here with t. From then on, m on this page tests every type and lets you switch any time."
+    say "  In use: $c. Kharej fixed this type when it made the token."
+    hint "To choose freely: on Kharej press n, then paste the new token here with t."
     return 0
   fi
   if is_auto_kharej "$n"; then
-    say "  This is an ${BOLD}Auto${RST} tunnel: it accepts every connection type at once."
-    hint "Choose the type on the Iran server: its tunnel page, m. It can switch, or join several types into one tunnel."
+    say "  In use: $(in_use "$n" | sed 's/^$/none yet/'). Iran chooses the type: on Iran, tunnel page, c."
     return 0
   fi
-  say "  Current: ${BOLD}$c${RST}, fixed when the tunnel was made."
-  hint "To switch freely: make a new tunnel here with Auto ($SELF, n, Kharej, 1), paste its token on the Iran server,"
-  hint "then delete this one. After that the type is chosen and changed on the Iran side (tunnel page, m)."
+  say "  In use: $c, fixed when the tunnel was made."
+  hint "To let Iran choose: press n here, paste the token on Iran with t, then delete this tunnel."
 }
 # ======================================================================================
 #  Kernel Speed Boost (/boost)
@@ -5793,19 +5700,14 @@ boost_status() {
   qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || cat /proc/sys/net/core/default_qdisc 2>/dev/null || echo unknown)
   rmax=$(sysctl -n net.core.rmem_max 2>/dev/null || cat /proc/sys/net/core/rmem_max 2>/dev/null || echo 0)
   wmax=$(sysctl -n net.core.wmem_max 2>/dev/null || cat /proc/sys/net/core/wmem_max 2>/dev/null || echo 0)
-  say "  Kernel Speed Boost Status:"
-  if [ -f "$BOOST_SYSCTL" ]; then
-    say "    • Configuration File: ${GRN}$BOOST_SYSCTL active${RST}"
-  else
-    say "    • Configuration File: ${GRY}none ($BOOST_SYSCTL not present)${RST}"
-  fi
-  say "    • Congestion Control: ${BOLD}$cc${RST} $([ "$cc" = bbr ] && printf '%s(optimal)%s' "$GRN" "$RST")"
-  say "    • Queue Discipline:   ${BOLD}$qdisc${RST} $([ "$qdisc" = fq ] && printf '%s(optimal)%s' "$GRN" "$RST")"
-  say "    • Max Read Buffer:    ${BOLD}$(human "$rmax")${RST} ($rmax B)"
-  say "    • Max Write Buffer:   ${BOLD}$(human "$wmax")${RST} ($wmax B)"
-  if is_container; then
-    warn "Running inside a container/namespace with restricted sysctl permissions."
-  fi
+  if [ -f "$BOOST_SYSCTL" ]; then say "  $(kv boost "${GRN}on${RST} ${GRY}($BOOST_SYSCTL)${RST}")"
+  else say "  $(kv boost "${GRY}off${RST}")"; fi
+  say "  $(kv congestion "$cc")$([ "$cc" = bbr ] || printf '  %s(bbr is faster)%s' "$GRY" "$RST")"
+  say "  $(kv qdisc "$qdisc")$([ "$qdisc" = fq ] || printf '  %s(fq is faster)%s' "$GRY" "$RST")"
+  say "  $(kv 'rmem max' "$(human "$rmax")")"
+  say "  $(kv 'wmem max' "$(human "$wmax")")"
+  is_container && warn "This is a container: some kernel settings cannot be changed here."
+  return 0
 }
 boost_apply() {
   if is_container; then
@@ -5854,15 +5756,14 @@ boost_cmd() {
 }
 boost_menu() {
   while :; do
-    page "Kernel Speed Boost (/boost)"
+    page "Kernel speed boost"
     boost_status
     echo
-    printf '  %s apply boost tunables   %s undo / restore defaults   %s back\n' \
-      "$(key_label a)" "$(key_label u)" "$(key_label b)"
+    menu_line a 'turn on (bbr, fq, bigger buffers)' u 'turn off' 0 back
     key_read
     case "$KEY" in
       a) boost_apply; pause ;;
-      u) confirm "Rollback boost tunables?" y && boost_undo; pause ;;
+      u) confirm "Turn the boost off and restore the kernel defaults?" y && boost_undo; pause ;;
       b|0|q|enter|esc) return 0 ;;
     esac
   done
@@ -5949,12 +5850,10 @@ stop_all() {
 }
 batch_actions_menu() {
   while :; do
-    page "Batch Tunnel Actions"
-    say "  ${BOLD}Select a bulk operation:${RST}"
-    echo
-    printf '  %s start all tunnels      %s stop all tunnels       %s restart all tunnels\n' "$(key_label 1)" "$(key_label 2)" "$(key_label 3)"
-    printf '  %s status of all tunnels  %s backup all configs     %s restore configs\n' "$(key_label 4)" "$(key_label 5)" "$(key_label 6)"
-    printf '  %s back\n' "$(key_label b)"
+    page "All tunnels"
+    menu_line 1 start 2 stop 3 restart 4 status
+    menu_line 5 'back up configs' 6 'restore configs'
+    menu_line 0 back
     key_read
     case "$KEY" in
       1) start_all; pause ;;
@@ -5977,14 +5876,13 @@ bonding_menu() { # name
   [ "$r" = Iran ] && [ -f "$CONF/$n.auto" ] && read_token "$(cat "$CONF/$n.auto")" && [ -n "$T_AUTO" ] && isauto=1
   while :; do
     cr=$(cfg "$n" carrier)
-    page "Bonding Manager" "$n"
+    page "Bonding" "$n · $cr"
     tinfo "$n"
     local bmode=$(cfg "$n" bond-mode)
-    say "  Bond Carrier:  ${BOLD}$cr${RST}"
-    say "  Bond Mode:     ${BOLD}${bmode:-balanced}${RST} ${GRY}(balanced | active-backup | replicate)${RST}"
+    set_row m mode "${bmode:-balanced}"
     echo
     if [ "$TI_CAR_COUNT" -gt 0 ]; then
-      printf '  %s%4s  %-10s %-8s %8s %8s %12s%s\n' "$GRY" '#' PATH STATE RTT LOSS SHARE "$RST"
+      printf '  %s%4s  %-10s %-8s %8s %8s %12s%s\n' "$GRY" '#' path state rtt loss share "$RST"
       local ci ccol cdot ctxt c_pct
       for ((ci=0; ci<TI_CAR_COUNT; ci++)); do
         if [ "${CAR_MUTED[$ci]}" = true ]; then
@@ -5999,11 +5897,11 @@ bonding_menu() { # name
           "${CAR_NAME[$ci]}" "$ccol" "$cdot" "$ctxt" "$RST" "${CAR_RTT[$ci]}" "$(awk -v l="${CAR_LOSS[$ci]:-0}" 'BEGIN{printf "%.1f", l*100}')" "$c_pct"
       done
     else
-      say "  ${GRY}No multi-carrier telemetry active yet (tunnel stopped or single carrier).${RST}"
+      hint "No path data: the tunnel is stopped or has one carrier."
     fi
     echo
-    printf '  %s toggle/mute path   %s change bond mode   %s add carrier   %s remove carrier   %s back\n' \
-      "$(key_label t)" "$(key_label m)" "$(key_label a)" "$(key_label d)" "$(key_label b)"
+    menu_line t 'mute or unmute a path' a 'add carrier' d 'remove carrier'
+    menu_line 0 back
     key_read
     case "$KEY" in
       t)
@@ -6107,31 +6005,25 @@ auto_menu() { # name
   sla_f="$CONF/$n.sla"
   [ -f "$CONF/$n.auto" ] && read_token "$(cat "$CONF/$n.auto")" && [ -n "$T_AUTO" ] && isauto=1
   while :; do
-    page "Auto Mode Settings & SLA" "$n"
+    page "Auto mode" "$n"
     cur=$(auto_current_key "$n" 2>/dev/null || cfg "$n" carrier)
     pol=$(cat "$CONF/$n.policy" 2>/dev/null || echo speed)
-    say "  Current Variant:  ${BOLD}${cur:--}${RST}"
-    say "  Selection Policy: ${BOLD}$pol${RST} ${GRY}(speed | latency | direct | bond)${RST}"
-    [ "$isauto" != 1 ] && say "  ${GRY}This tunnel was made with a fixed type: policy and retest apply to auto tunnels.${RST}"
-    echo
-    say "  ${BOLD}Service Level Agreement (SLA) Thresholds:${RST}"
+    [ "$isauto" != 1 ] && { hint "Fixed-type token: policy and retest need a new token (tunnel page, t)."; echo; }
+    printf '      %-13s %s\n' 'in use' "${cur:--}"
+    set_row p policy "$pol"
+    local sla_v=''
     if [ -f "$sla_f" ]; then
       local min_r=$(grep '^sla_min_rate_kbps=' "$sla_f" 2>/dev/null | cut -d= -f2)
       local max_rtt=$(grep '^sla_max_rtt_ms=' "$sla_f" 2>/dev/null | cut -d= -f2)
       local max_l=$(grep '^sla_max_loss_pct=' "$sla_f" 2>/dev/null | cut -d= -f2)
-      say "    • Min Throughput: ${min_r:-0} kbps"
-      say "    • Max Latency:    ${max_rtt:-0} ms"
-      say "    • Max Loss:       ${max_l:-0} %"
-    else
-      say "    ${GRY}No SLA configured (heal only triggers on complete link disconnect).${RST}"
+      sla_v="rate ≥ ${min_r:-0} kbps · rtt ≤ ${max_rtt:-0} ms · loss ≤ ${max_l:-0} %"
     fi
+    set_row s 'heal when' "$sla_v" '' 'the link is down'
+    local opt_timer_st=''
+    systemctl is-active -q "$WAT_PREFIX-auto-optimize.timer" 2>/dev/null && opt_timer_st="${GRN}on${RST} ${GRY}(retests once a day off-peak)${RST}"
+    set_row o 'daily retest' "$opt_timer_st" '' off
     echo
-    local opt_timer_st="off"
-    systemctl is-active -q "$WAT_PREFIX-auto-optimize.timer" 2>/dev/null && opt_timer_st="${GRN}active${RST}"
-    say "  Off-Peak Auto-Optimize Timer: $opt_timer_st ${GRY}(daily scheduled re-evaluations)${RST}"
-    echo
-    printf '  %s change policy   %s configure SLA   %s retest & re-rank now   %s toggle timer   %s back\n' \
-      "$(key_label p)" "$(key_label s)" "$(key_label r)" "$(key_label o)" "$(key_label b)"
+    menu_line r 'retest now' 0 back
     key_read
     case "$KEY" in
       p)
@@ -6210,10 +6102,10 @@ limits_menu() { # name
   local n=$1 r cr
   r=$(role "$n"); cr=$(cfg "$n" carrier)
   while :; do
-    page "Bandwidth Quotas & Rate Limits" "$n"
-    say "  Global Speed Ceiling (max-mbps): $(cfg "$n" max-mbps | sed 's/^$/16 (default)/') MB/s"
+    page "Limits" "$n"
+    set_row m 'speed limit' "$(cfg "$n" max-mbps)" 'MB/s' '16 MB/s'
     echo
-    say "  ${BOLD}Configured Per-Port Limits & Quotas:${RST}"
+    say "  ${GRY}per port${RST}"
     local -a p_limits=()
     mapfile -t p_limits < <(grep -E '^[[:space:]]*-[[:space:]]+[0-9]+' "$CONF/$n.yml" | grep -E 'rate=|quota=' || true)
     if [ "${#p_limits[@]}" -gt 0 ]; then
@@ -6222,7 +6114,7 @@ limits_menu() { # name
         say "    $it"
       done
     else
-      say "    ${GRY}No per-port rate limits or quotas active.${RST}"
+      say "    ${GRY}none${RST}"
     fi
     echo
     local m=$(cfg "$n" metrics)
@@ -6230,7 +6122,7 @@ limits_menu() { # name
       local prt_json
       prt_json=$(curl -fs --noproxy '*' --max-time 2 "http://$m/ports" 2>/dev/null)
       if [ -n "$prt_json" ]; then
-        say "  ${BOLD}Live Port Quota Usage:${RST}"
+        say "  ${GRY}quota used${RST}"
         local pobj
         while read -r pobj; do
           [ -n "$pobj" ] || continue
@@ -6240,14 +6132,13 @@ limits_menu() { # name
           ql=$(jget "$pobj" quota_limit)
           qe=$(jget "$pobj" quota_exceeded)
           if [ "${ql:-0}" -gt 0 ]; then
-            say "    Port $lp: used $(human "$qu") / $(human "$ql") $([ "$qe" = true ] && printf '%s[EXCEEDED]%s' "$RED$BOLD" "$RST")"
+            say "    $lp  $(human "$qu") of $(human "$ql")$([ "$qe" = true ] && printf '  %s✘ used up%s' "$RED" "$RST")"
           fi
         done < <(grep -o '{[^{}]*}' <<<"$prt_json")
       fi
     fi
     echo
-    printf '  %s speed ceiling   %s add/edit port limit   %s reset port quota   %s back\n' \
-      "$(key_label m)" "$(key_label e)" "$(key_label r)" "$(key_label b)"
+    menu_line e 'set a port limit' r 'reset a port quota' 0 back
     key_read
     case "$KEY" in
       m)
@@ -6311,7 +6202,7 @@ tunnel_page() {
       is_auto_kharej "$n" && rolem+=(u 'close unused carriers')
       is_reverse "$n" && [ -z "$(companion_of "$n")" ] && rolem+=(h 'change Iran address')
     else
-      rolem=(a 'auto mode' t 'move to another Kharej')
+      rolem=(a 'auto mode' t 'new token from Kharej')
       if is_reverse "$n"; then [ "$car" != icmp ] && rolem+=(h 'change listen port')
       else rolem+=(h 'change Kharej address'); fi
     fi
@@ -6340,12 +6231,11 @@ tunnel_page() {
       t|T) if [ "$r" = Kharej ]; then
            par=$(companion_of "$n")
            page "Token" "$n"; echo
-           if [ -n "$par" ]; then say "  '$n' is the reverse side of '$par'; its token and key come from '$par'."
-           else say "  Paste this on the Iran server ($SELF → n → Iran):"; fi
+           [ -n "$par" ] && hint "'$n' is the reverse side of '$par'; this is the token of '$par'."
+           say "  Paste it on the Iran server: new tunnel (n), or t on an existing tunnel."
            echo; show_token "${par:-$n}"
-         else page "Kharej server" "$n"; echo
-               say "  Paste the token from the ${BOLD}new Kharej${RST} server to move this tunnel there."
-               hint "Its key, connection type and address are replaced. The ports you publish here stay."
+         else page "New token" "$n"
+               hint "Replaces the Kharej, key and connection type. The ports published here stay."
                echo; run_flow change_key "$n"; fi
          pause ;;
       k|K) if [ "$r" = Kharej ]; then
@@ -6589,6 +6479,8 @@ settings_menu() {
     printf '  %s auto-heal   %s  %srestarts an Iran tunnel down for 3 minutes%s\n' "$(key_label h)" "$heal_on" "$GRY" "$RST"
     printf '  %s animations  %s  %sspinners and the intro%s\n' "$(key_label a)" "$anim_on" "$GRY" "$RST"
     printf '  %s kernel speed boost\n' "$(key_label b)"
+    local sd; sd=$(server_side)
+    printf '  %s this server %s%s%s\n' "$(key_label w)" "$BOLD" "${sd:-not set}" "$RST"
     echo
     menu_line r 'restart all tunnels' v 'roll back to the previous version'
     hr
@@ -6601,6 +6493,7 @@ settings_menu() {
       r|R) echo; if confirm "Restart all tunnels? Open connections drop." n; then restart_all; sleep 1; fi ;;
       a|A) if [ "$(conf_get anim 1)" = 1 ]; then conf_set anim 0; ANIM=0; else conf_set anim 1; [ "$IS_TTY" = 1 ] && [ "${WAT_NO_ANIM:-0}" != 1 ] && ANIM=1; fi ;;
       b|B) boost_menu ;;
+      w|W) ask_side || true ;;
       0|q|enter|esc) return 0 ;;
       *) : ;;
     esac

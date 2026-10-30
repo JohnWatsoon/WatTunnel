@@ -203,6 +203,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+save_side() { # kharej|iran : the manager reads it so it never asks again (key "side" in its settings file)
+  mkdir -p "$CONF"; touch "$CONF/.manager.conf"; chmod 600 "$CONF/.manager.conf"
+  sed -i '/^side=/d' "$CONF/.manager.conf"; echo "side=$1" >>"$CONF/.manager.conf"
+}
 tunnel_list() { local f b; for f in "$CONF"/*.yml; do [ -e "$f" ] || continue; b=${f##*/}; echo "${b%.yml}"; done; }
 
 # ======================================================================================
@@ -589,8 +593,8 @@ if [ -t 0 ] && [ -t 1 ]; then
       IFS= read -rsn1 side || { echo; side=3; }
       echo "$side"
       case "$side" in
-        1) cleanup; exec "$MGR" kharej ;;
-        2) cleanup; exec "$MGR" iran ;;
+        1) save_side kharej; cleanup; exec "$MGR" kharej ;;
+        2) save_side iran; cleanup; exec "$MGR" iran ;;
         3|''|q|Q) break ;;
         *) warn "Please press 1, 2 or 3." ;;
       esac
