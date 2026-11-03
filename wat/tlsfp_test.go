@@ -820,6 +820,7 @@ func TestSmallClientHello(t *testing.T) {
 	}
 	c.Close()
 }
+
 // -tls-small-ch must shrink the browser presets too: they offer X25519MLKEM768, which pushes the hello past 1 KB.
 func TestSmallClientHelloUnderFingerprint(t *testing.T) {
 	helloLen := func(fp string, noPQ bool) int {

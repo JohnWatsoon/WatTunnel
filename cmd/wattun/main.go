@@ -1,6 +1,6 @@
 // wattun: TCP port forwarding over ICMP echo with its own transport (see ../../README.md).
 //
-//	server:  wattun -mode server -key SECRET
+//	server:  wattun -mode server -key SECRET -allow-ports 20030
 //	client:    wattun -mode client -key SECRET -peer 203.0.113.10 -map 20030:20030
 //
 // -map is listenPort:serverPort[,...]; the server connects each stream to 127.0.0.1:serverPort.
@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	rdebug "runtime/debug"
@@ -84,7 +85,7 @@ func main() {
 	pingEvery := flag.Int("ping-every", 2, "idle keepalive interval, seconds (raise on paths whose filter rate-limits steady periodic packets into a penalty box: live 2026-10-22 saw 30 echo req/min collapse to 95% loss until a ~5 min cooldown; both ends use their own value)")
 	dnsUpstream := flag.String("dns-relay-upstream", "8.8.8.8:53", "Kharej recursive resolver used by the internal DNS relay (port 53, -ech ladder); empty = 8.8.8.8:53")
 	icmpType := flag.String("icmp-type", "echo", "icmp carrier: echo|timestamp|info|mask - the ICMP request type the client sends (the server answers with the matching reply: 8/0, 13/14, 15/16, 17/18); both ends must use the same")
-	carrier := flag.String("carrier", "icmp", "icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip (gre/ipip: IP protocol 47/4 on a raw socket, root and Linux, -peer is a bare IP like icmp, 3.2.0 on both ends; all but icmp/gre/ipip: client dials -peer host:port, server listens on -listen; h2 through Cloudflare: not supported, use grpc or wss); join several with '+' (icmp+udp+tcp) to bond them into ONE session that survives any one being blocked; then -peer / -listen are the defaults and -peer-NAME / -listen-NAME (e.g. -peer-udp, -listen-tcp, also keys in the config file) override them per carrier")
+	carrier := flag.String("carrier", "icmp", "icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip (gre/ipip: IP protocol 47/4 on a raw socket, root and Linux, -peer is a bare IP like icmp, 3.2.0 on both ends; all but icmp/gre/ipip: client dials -peer host:port, server listens on -listen; h2 through Cloudflare: not supported, use grpc or wss); join several with '+' (icmp+udp+tcp) to bond them into ONE session that survives any one being blocked; then -peer / -listen are the defaults and -peer-NAME / -listen-NAME (e.g. -peer-udp, -listen-tcp, also keys in the config file) override them per carrier; fortress = alias the manager writes for blackout mode (icmp+tcp+tls+wss+udp on ports 80/443/8443/53)")
 	udpListen := flag.String("listen", ":4443", "server, udp carrier: address to listen on")
 	conns := flag.Int("conns", 0, "client, tcp/tls carrier: connections in the pool (0 = auto-tuned from host hardware: 8 on lean VPS, 16 on 2-CPU/2GB+, 24-32 on 4+ cores)")
 	poolRotate := flag.String("pool-rotate", "0", "client, pool carriers (tcp|tls|ws|wss|h2|grpc): recycle each healthy pool connection after this long, so no flow shows a months-stable lifetime; accepts 30m, 4h or seconds; jittered +/-40% per connection so the redials never line up; 0 = off (2.8.0; a -reverse server dials too, so it honours it since 3.0.2)")
@@ -603,18 +604,6 @@ func main() {
 			log.Printf("-sessions is a client option, ignored on the server")
 		}
 		srv = wat.NewServer(cfg, raw)
-		revEngine := wat.NewReviveEngine(k, func(action uint8, src net.Addr) {
-			log.Printf("emergency revive: action 0x%02x signal from %s", action, src)
-			switch action {
-			case wat.ReviveReloadListeners:
-				log.Printf("emergency revive: cycling listeners")
-			case wat.ReviveReverseCompanion:
-				log.Printf("emergency revive: reverse companion trigger from %s", src)
-			case wat.ReviveFlushRateLimits:
-				log.Printf("emergency revive: flushing rate limits")
-			}
-		})
-		srv.SetRevive(revEngine)
 	} else {
 		pios := []wat.PacketIO{pio}
 		for k := 1; k < *nSess; k++ { // -sessions: more independent carriers to the same peer(s)
@@ -724,8 +713,18 @@ func main() {
 			mux.HandleFunc("/ports", func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(portReg.snapshot(side))
 			})
-			mux.HandleFunc("/quota/reset", quotaResetHandler)
+			mux.HandleFunc("/quota/reset", func(w http.ResponseWriter, r *http.Request) {
+				if crossSiteRequest(r) {
+					http.Error(w, "cross-site request refused", http.StatusForbidden)
+					return
+				}
+				quotaResetHandler(w, r) // keeps its own loopback + POST checks
+			})
 			mux.HandleFunc("/carrier/toggle", func(w http.ResponseWriter, r *http.Request) {
+				if crossSiteRequest(r) {
+					http.Error(w, "cross-site request refused", http.StatusForbidden)
+					return
+				}
 				pStr := r.URL.Query().Get("path")
 				cName := r.URL.Query().Get("carrier")
 				idx := -1
@@ -758,7 +757,14 @@ func main() {
 				fmt.Fprintf(w, `{"path":%d,"carrier":%q,"muted":%t}`+"\n", idx, names[idx], muted)
 			})
 			if tun != nil {
-				mux.HandleFunc("/speedtest", speedTestHandler(tun))
+				speedH := speedTestHandler(tun)
+				mux.HandleFunc("/speedtest", func(w http.ResponseWriter, r *http.Request) {
+					if crossSiteRequest(r) {
+						http.Error(w, "cross-site request refused", http.StatusForbidden)
+						return
+					}
+					speedH(w, r)
+				})
 			}
 			mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 				st := stats()
@@ -769,6 +775,9 @@ func main() {
 					"fec_sent": st.FecSent, "fec_recovered": st.FecRecovered, "retrans": st.Retrans, "send_errors": st.Dropped, "ack_late": st.AckLate, "dup_recv": st.RxDup, "rx_too_old": st.RxTooOld, "rate_bps": st.RateBps,
 					"ceiling_bps": st.CeilingBps, "loss_pct": st.LossPct,
 					"srtt_ms": float64(st.SRTT) / 1e6, "min_rtt_ms": float64(st.MinRTT) / 1e6,
+					// Flat aliases for the aggregates: encoding/json sorts the nested carriers/session_list before
+					// these keys, and the manager's grep|head -1 parser would otherwise read a nested value (M6).
+					"rtt_ms": float64(st.SRTT) / 1e6, "streams_total": st.Streams,
 					"streams": st.Streams, "inflight": st.Inflight, "alive": alive(), "last_rx_age_ms": rxAge(), "version": wat.Version, "draining": srv != nil && srv.Draining(),
 					"sessions": func() int {
 						if srv != nil {
@@ -846,6 +855,11 @@ func main() {
 			al.setUDPPorts(fileCfg.udpPorts())
 		} else {
 			al = newAllow(*allowList, *allowFile)
+		}
+		// M4: a flag-run server with no explicit allowlist source forwards every 127.0.0.1 port. Warn once and
+		// keep the documented default (the operator opts in with -allow-ports or a `ports:` list).
+		if (fileCfg == nil || !fileCfg.PortsSet) && *allowList == "" && *allowFile == "" && *allowLo <= 1 && *allowHi >= 65535 {
+			log.Printf("warning: server allows every target port 1-65535; set -allow-ports (or ports: in the config) to limit which localhost services a client can reach")
 		}
 		if *cfgPath != "" {
 			w := &cfgWatcher{path: *cfgPath, known: known, skip: func(k string) bool { return explicit[k] }, interval: 3 * time.Second,
@@ -1118,6 +1132,29 @@ func loopbackMetricsAddr(addr string) (string, bool) {
 		return addr, false
 	}
 	return net.JoinHostPort("127.0.0.1", port), true
+}
+
+// crossSiteRequest reports whether r was started by a web page on another origin. The metrics server is
+// loopback-bound, but a browser page can still issue a plain GET at 127.0.0.1:port with no preflight.
+// Browsers send Sec-Fetch-Site (and an Origin header for CORS-relevant requests); curl/the manager send
+// neither, so absent headers stay allowed.
+func crossSiteRequest(r *http.Request) bool {
+	if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" && s != "none" {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return true // an unparseable Origin cannot be proven to be this host
+	}
+	if strings.EqualFold(u.Hostname(), "localhost") {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip == nil || !ip.IsLoopback()
 }
 
 func serve(sess *wat.Session, lo, hi int, al *allow) {

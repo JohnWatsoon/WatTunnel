@@ -24,15 +24,15 @@ type TLSClientOptions struct {
 	PinSHA256  []byte // if set, the server's leaf certificate DER must hash to this
 
 	// Client-side tuning, engine 2.2.0 (the server and the wire format are unchanged); see tlsfp.go and ech.go.
-	Fingerprint string                // go (default), chrome, firefox, safari, edge, random
-	ECH         string                // off (default), auto, ladder, or a base64 ECHConfigList
-	ECHCache    string                // ech auto: file keeping the last good ECHConfigList across restarts (2.2.3)
-	ECHLadder   func([]byte) ([]byte, error) // ech ladder (2.9.0): raw DNS query in, answer out, through the tunnel
+	Fingerprint string                           // go (default), chrome, firefox, safari, edge, random
+	ECH         string                           // off (default), auto, ladder, or a base64 ECHConfigList
+	ECHCache    string                           // ech auto: file keeping the last good ECHConfigList across restarts (2.2.3)
+	ECHLadder   func([]byte) ([]byte, error)     // ech ladder (2.9.0): raw DNS query in, answer out, through the tunnel
 	DialHook    func(net.Conn) (net.Conn, error) // dial hook on the raw TCP socket before TLS handshake (fake-SNI)
 	LocalAddr   net.Addr                         // client local address for multi-homing / dual-WAN bonding
 	Frag        int                              // split the ClientHello into this many bytes per TCP segment (0 = off)
 	NoPQ        bool                             // skip the post-quantum hybrid key share, keeping the ClientHello small (2.10.4; also under -fp chrome|edge, 2.10.8)
-	Logf        func(string, ...any) // optional: one-time notes (ECH lookups, fallbacks)
+	Logf        func(string, ...any)             // optional: one-time notes (ECH lookups, fallbacks)
 }
 
 func (o TLSClientOptions) config() *tls.Config {
@@ -126,7 +126,7 @@ func SelfSignedCertDomain(domain string) (tls.Certificate, error) {
 	}
 	tpl := &x509.Certificate{
 		SerialNumber: serial, Subject: pkix.Name{CommonName: domain},
-		DNSNames: []string{domain},
+		DNSNames:  []string{domain},
 		NotBefore: time.Now().Add(-24 * time.Hour), NotAfter: time.Now().Add(90 * 24 * time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,

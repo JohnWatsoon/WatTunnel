@@ -42,5 +42,7 @@ func setUserTimeout(tc *net.TCPConn, d time.Duration) {
 	if err != nil {
 		return
 	}
-	rc.Control(func(fd uintptr) { unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(d.Milliseconds())) })
+	rc.Control(func(fd uintptr) {
+		unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(d.Milliseconds()))
+	})
 }

@@ -16,14 +16,14 @@ import (
 
 // poolRig is a real Server on a loopback tcp/tls pool listener (same stream protocol as udpRig).
 type poolRig struct {
-	srv  *Server
-	ps   *TCPPoolServer
-	addr string
-	tap  *sizeTap
-	key  []byte
-	mtu  int
+	srv    *Server
+	ps     *TCPPoolServer
+	addr   string
+	tap    *sizeTap
+	key    []byte
+	mtu    int
 	tlsOpt TLSClientOptions
-	tls  bool
+	tls    bool
 }
 
 func newPoolRig(t *testing.T, mtu int, useTLS bool) *poolRig {
@@ -676,4 +676,68 @@ func TestTCPPoolRedialsWhenAllConnsStall(t *testing.T) {
 		t.Fatalf("upload after the redial: err=%v", err)
 	}
 	t.Logf("carries data after %v", time.Since(t0))
+}
+
+// A pool listener must not let a stranger hold a slot forever: a connection that sends only the 8-byte pool id
+// and then idles used to live until its TCP stack died (audit 2026-11-03).
+func TestPoolReapsNeverUsedConns(t *testing.T) {
+	oldIdle := poolIdleNever
+	poolIdleNever = 100 * time.Millisecond
+	t.Cleanup(func() { poolIdleNever = oldIdle })
+
+	srv, err := NewTCPPoolServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	c, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte("id000000")); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatal("the listener kept an unused pool connection open")
+	}
+}
+
+// One source address cannot take every pool slot: conns beyond poolMaxPerIP from the same IP are refused
+// (audit 2026-11-03).
+func TestPoolPerIPCap(t *testing.T) {
+	old := poolMaxPerIP
+	poolMaxPerIP = 2
+	t.Cleanup(func() { poolMaxPerIP = old })
+
+	srv, err := NewTCPPoolServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	var conns []net.Conn
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	for i := 0; i < 3; i++ {
+		c, err := net.Dial("tcp", srv.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+		id := []byte("id000000")
+		id[7] = byte('0' + i)
+		if _, err := c.Write(id); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond) // let the server accept it
+	}
+	last := conns[2]
+	_ = last.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := last.Read(make([]byte, 1)); err == nil {
+		t.Fatal("listener accepted more conns than poolMaxPerIP from one IP")
+	}
 }

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest release (`2.x` from the
+Only the latest release (`3.x` from the
 [releases page](https://github.com/JohnWatsoon/WatTunnel/releases)) is supported. Update both servers — old and
 new versions are wire-compatible, but a fix only helps the end that runs it.
 

@@ -166,7 +166,13 @@ func TestClientRestart(t *testing.T) {
 	for j := 0; j < 3; j++ { // stream ids restart at 1 in the new process: must not collide with the old one's
 		echoOnce(t, b, 300000, byte(j+5))
 	}
-	time.Sleep(6 * time.Second)
+	// The old session (a) must expire on its own; keep b authenticated for the same 6 s. A silent b can lose a
+	// 2 %-loss keepalive and exceed the rig's 3 s idle timeout, which flaked this test ~7 % on the release gate
+	// (audit 2026-11-03). A ping every second makes that impossible without changing what the test checks.
+	for i := 0; i < 6; i++ {
+		echoOnce(t, b, 300000, byte(0x10+i))
+		time.Sleep(time.Second)
+	}
 	if n := srv.Sessions(); n != 1 {
 		t.Fatalf("server still holds %d sessions after the old one went idle, want 1", n)
 	}

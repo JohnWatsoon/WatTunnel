@@ -18,11 +18,11 @@ func NewICMPIO(server bool, peerIP string, key []byte) (*ICMPIO, error) {
 	return nil, errors.New("the icmp carrier needs Linux")
 }
 
-func (*ICMPIO) Send([]byte, int) error                       { return net.ErrClosed }
-func (*ICMPIO) Recv() ([]byte, int, net.Addr, error)         { return nil, 0, nil, net.ErrClosed }
-func (*ICMPIO) SendTo([]byte, int, net.Addr) error           { return net.ErrClosed }
-func (*ICMPIO) SetPeer(net.Addr)                             {}
-func (*ICMPIO) Close() error                                 { return nil }
+func (*ICMPIO) Send([]byte, int) error               { return net.ErrClosed }
+func (*ICMPIO) Recv() ([]byte, int, net.Addr, error) { return nil, 0, nil, net.ErrClosed }
+func (*ICMPIO) SendTo([]byte, int, net.Addr) error   { return net.ErrClosed }
+func (*ICMPIO) SetPeer(net.Addr)                     {}
+func (*ICMPIO) Close() error                         { return nil }
 
 func NewICMPIOType(server bool, peerIP string, key []byte, kind string) (*ICMPIO, error) {
 	return nil, errors.New("the icmp carrier needs Linux")

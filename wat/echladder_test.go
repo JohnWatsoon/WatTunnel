@@ -84,7 +84,7 @@ func TestECHLadderDirectFirst(t *testing.T) {
 	seen := echServe(ln)
 	e, _ := newTLSEngine(TLSClientOptions{ServerName: "inner.example", ECH: "ladder",
 		ECHLadder: func([]byte) ([]byte, error) { relayed.Add(1); return nil, errNoECH },
-		Logf: func(string, ...any) {}}, "")
+		Logf:      func(string, ...any) {}}, "")
 	c, err := e.dial(context.Background(), addr)
 	if err != nil {
 		t.Fatal(err)

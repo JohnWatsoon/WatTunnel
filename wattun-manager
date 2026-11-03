@@ -770,7 +770,7 @@ is_pool() { case "$1" in tcp|tls|ws|wss|h2|h2c|grpc) return 0 ;; esac; return 1;
 is_pool_list() { local c; for c in ${1//+/ }; do is_pool "$c" && return 0; done; return 1; }
 has_ech_list() { local c; for c in ${1//+/ }; do case "$c" in tls|wss|h2|grpc) return 0 ;; esac; done; return 1; }
 undisguised_legs() { local c out=''; for c in ${1//+/ }; do is_pool "$c" || out="${out:+$out }$c"; done; echo "$out"; }
-carrier_ok() { case "$1" in icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc) return 0 ;; esac; return 1; }
+carrier_ok() { case "$1" in icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip) return 0 ;; esac; return 1; }
 # Which address a connection to HOST leaves from, and the global IPv4 addresses this server holds (3.0.0). A server with
 # two addresses sends the tunnel from the one the route picks, which can be the address the users connect to.
 out_ip() { ip -4 route get "$1" 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1; }
@@ -1500,16 +1500,18 @@ pick_carrier() { # [auto] : with "auto" (Kharej wizard) the first choice is the 
     opts+=(auto); descs+=("${BOLD}Auto (recommended)${RST}: this server accepts every type; the Iran server tests them all and
         keeps the best. Later, on the Iran server, you can switch to another type or join several (tunnel page, m).")
   fi
-  opts+=(icmp udp tcp tls wss ws grpc h2)
+  opts+=(icmp udp tcp tls wss ws grpc h2 gre ipip)
+  # gre/ipip: raw-IP like icmp; peer must be a bare IP
   descs+=("icmp  ping packets; works when everything else is blocked (the usual case on filtered routes)"
     "udp   fastest and lowest latency, if UDP passes" "tcp   plain TCP, if TCP passes"
     "tls   TCP that looks like a normal HTTPS site" "wss   WebSocket over TLS; works behind Cloudflare or another CDN"
-    "ws    WebSocket without TLS (CDN on port 80, or a proxy that adds TLS)" "grpc  gRPC, for CDNs that allow it" "h2    HTTP/2")
+    "ws    WebSocket without TLS (CDN on port 80, or a proxy that adds TLS)" "grpc  gRPC, for CDNs that allow it" "h2    HTTP/2"
+    "gre   GRE (IP protocol 47); raw-IP like icmp, root and Linux only" "ipip  IP-in-IP (protocol 4); raw-IP like icmp, root and Linux only")
   n=${#opts[@]}
   if [ "$NONINTERACTIVE" = 1 ]; then
     CARRIER=${NI_CARRIER:-${opts[0]}}
     for t in "${opts[@]}"; do [ "$t" = "$CARRIER" ] && { echo "  carrier: $CARRIER"; return 0; }; done
-    [ "$CARRIER" = h2c ] && { echo "  carrier: $CARRIER"; return 0; } # tenth type: its own key, see below
+    [ "$CARRIER" = h2c ] && { echo "  carrier: $CARRIER"; return 0; } # h2c: its own key, see below
     err "Carrier '$CARRIER' is not available here (use: ${opts[*]} h2c)"; return 1
   fi
   say "  ${BOLD}Connection type${RST}: how the two servers talk to each other"
@@ -6056,7 +6058,7 @@ bonding_menu() { # name
         local pd=$(plan_part "$T_AUTO" d)
         ask_ok "Carrier name to add (in the plan: ${pd:-none})" "tls" v_nonempty || continue
         local ncar=$REPLY_V cur_car=$(cfg "$n" carrier) p
-        if ! carrier_ok "$ncar"; then err "Unknown carrier '$ncar' (use icmp, udp, tcp, tls, ws, wss, h2, h2c or grpc)."; pause; continue; fi
+        if ! carrier_ok "$ncar"; then err "Unknown carrier '$ncar' (use icmp, udp, tcp, tls, ws, wss, h2, h2c, grpc, gre or ipip)."; pause; continue; fi
         if [[ "+$cur_car+" == *"+$ncar+"* ]]; then
           warn "Carrier '$ncar' is already in carrier list '$cur_car'."
         else

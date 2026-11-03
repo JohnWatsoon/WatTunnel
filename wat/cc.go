@@ -99,7 +99,7 @@ const bwWin = 10 // delivery-rate window, samples of >= 1 RTT each (~1 s): its m
 const (
 	// relBWGain: pace this far above the estimate, to keep probing for more. 1.5 since 2.4.18 (was 1.2): on a lossy
 	// path each TCP connection's retransmit stalls make delivery lumpy, and 1.2 climbed too slowly to ever fill it.
-	relBWGain  = 1.5
+	relBWGain = 1.5
 	// relStartGain: a direct carrier paces this far above the estimate until the estimate stops growing by 25 % within
 	// relStartWait (at least 3 srtt). Each step waits a whole srtt for its delivery sample, and with TCP's retransmit
 	// stalls srtt is 150-250 ms, so at 1.5x a fresh tunnel took seconds to fill: a first 200 MB download ran at 42-45
@@ -107,7 +107,7 @@ const (
 	// backpressure (Backlogger) holds the session once its queues fill, so the higher gain cannot flood a connection.
 	relStartGain = 2.5
 	relStartWait = 500 * time.Millisecond
-	relCwndBDP = 3 // inflight ceiling, in bandwidth-delay products
+	relCwndBDP   = 3 // inflight ceiling, in bandwidth-delay products
 )
 
 // Direct reliable carriers (Config.Direct): window in seconds of delivery, and the loss timer / PTO floors. A datagram

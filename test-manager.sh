@@ -38,7 +38,7 @@ profile_cmd apply p1 t1
 chk "apply keeps seqsum" "$(grep '^fake-mode:' "$WAT_CONF/t1.yml")" "fake-mode: seqsum"
 chk "apply keeps pool-rotate" "$(grep '^pool-rotate:' "$WAT_CONF/t1.yml")" "pool-rotate: 30m"
 
-profile_cmd save p1 >/dev/null 2>&1; [ $? = 0 ] && echo "ok   save without a tunnel name: exactly one pool tunnel -> t1"
+profile_cmd save p1 >/dev/null 2>&1 && echo "ok   save without a tunnel name: exactly one pool tunnel -> t1" || { echo "FAIL save without a tunnel name: exactly one pool tunnel -> t1"; fail=1; }
 
 printf '# cleared elsewhere\nFAKESNI=\nFAKEMODE=\nFAKETTL=\nPOOLROT=\nPOOLBYTES=\n' >"$WAT_CONF/profiles/blank.env"
 profile_cmd apply blank t1

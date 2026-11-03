@@ -99,13 +99,21 @@ func TestKexGraceDrop(t *testing.T) {
 		t.Fatal(err)
 	}
 	kexWait(t, "both switches", func() bool {
-		cli.mu.Lock(); c := cli.kexDone && cli.oldAead != nil; cli.mu.Unlock()
-		srv.mu.Lock(); s := srv.kexDone && srv.oldAead != nil; srv.mu.Unlock()
+		cli.mu.Lock()
+		c := cli.kexDone && cli.oldAead != nil
+		cli.mu.Unlock()
+		srv.mu.Lock()
+		s := srv.kexDone && srv.oldAead != nil
+		srv.mu.Unlock()
 		return c && s
 	})
 	kexWait(t, "the old keys to expire", func() bool {
-		cli.mu.Lock(); c := cli.oldAead == nil; cli.mu.Unlock()
-		srv.mu.Lock(); s := srv.oldAead == nil; srv.mu.Unlock()
+		cli.mu.Lock()
+		c := cli.oldAead == nil
+		cli.mu.Unlock()
+		srv.mu.Lock()
+		s := srv.oldAead == nil
+		srv.mu.Unlock()
 		return c && s
 	})
 }
@@ -146,7 +154,8 @@ func TestKexOldPeer(t *testing.T) {
 	st.CloseWrite()
 	kexWait(t, "the data to arrive", func() bool { return atomic.LoadInt64(&total) == 1000 })
 	kexWait(t, "the client to re-arm with fresh keys", func() bool {
-		cli.mu.Lock(); defer cli.mu.Unlock()
+		cli.mu.Lock()
+		defer cli.mu.Unlock()
 		return cli.kexPriv != nil && !cli.kexDone && !bytes.Equal(cli.kexPub, oldPub)
 	})
 	cli.mu.Lock()
@@ -313,8 +322,12 @@ func TestKexFalseProbeThenRestart(t *testing.T) {
 	}
 	st.Write(make([]byte, 100))
 	kexWait(t, "both switches and the old keys to expire", func() bool {
-		cli.mu.Lock(); c := cli.kexDone && cli.oldAead == nil; cli.mu.Unlock()
-		srv.mu.Lock(); s := srv.kexDone && srv.oldAead == nil; srv.mu.Unlock()
+		cli.mu.Lock()
+		c := cli.kexDone && cli.oldAead == nil
+		cli.mu.Unlock()
+		srv.mu.Lock()
+		s := srv.kexDone && srv.oldAead == nil
+		srv.mu.Unlock()
 		return c && s
 	})
 
@@ -322,7 +335,8 @@ func TestKexFalseProbeThenRestart(t *testing.T) {
 	drop.Store(true)
 	st.Write(make([]byte, 100)) // unanswered sends (retransmits) are what start the probe
 	kexWait(t, "the client to start the restart probe", func() bool {
-		cli.mu.Lock(); defer cli.mu.Unlock()
+		cli.mu.Lock()
+		defer cli.mu.Unlock()
 		return !cli.probeUntil.IsZero()
 	})
 	drop.Store(false)
@@ -333,7 +347,8 @@ func TestKexFalseProbeThenRestart(t *testing.T) {
 		t.Fatalf("data took %v to reach a live server during the probe: it was sealed with the PSK key", d)
 	}
 	kexWait(t, "the probe to end", func() bool {
-		cli.mu.Lock(); defer cli.mu.Unlock()
+		cli.mu.Lock()
+		defer cli.mu.Unlock()
 		return cli.probeUntil.IsZero() && cli.kexDone
 	})
 
@@ -361,7 +376,8 @@ func TestKexFalseProbeThenRestart(t *testing.T) {
 		t.Fatalf("restarted server got %d/1000 B in 10 s: the client never re-keyed with it", n)
 	}
 	kexWait(t, "the client to re-key with the restarted server", func() bool {
-		cli.mu.Lock(); defer cli.mu.Unlock()
+		cli.mu.Lock()
+		defer cli.mu.Unlock()
 		return cli.kexDone && cli.aead != firstKey
 	})
 }

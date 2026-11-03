@@ -257,7 +257,7 @@ func TestFecLenOverflow(t *testing.T) {
 	defer snd.Close()
 	defer rcv.Close()
 	frame := appendUv(appendUv(appendUv(appendUv(nil, 1), 0), 0), 1<<63) // n=1 base=0 pn+0 len=2^63
-	frame = append(frame, 0xAA)                                         // 1 byte of parity
+	frame = append(frame, 0xAA)                                          // 1 byte of parity
 	rcv.mu.Lock()
 	defer rcv.mu.Unlock()
 	r := &reader{b: frame}

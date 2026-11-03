@@ -351,6 +351,25 @@ func newMultiSubIO(base *subIO, mr *MultiRaw, tm PathTimings, admittingIdx int) 
 	return m
 }
 
+// addrsEqual compares two peer addresses by value, without formatting or allocating for the common types.
+func addrsEqual(a, b net.Addr) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	switch x := a.(type) {
+	case *net.UDPAddr:
+		y, ok := b.(*net.UDPAddr)
+		return ok && x.Port == y.Port && x.Zone == y.Zone && x.IP.Equal(y.IP)
+	case *net.TCPAddr:
+		y, ok := b.(*net.TCPAddr)
+		return ok && x.Port == y.Port && x.Zone == y.Zone && x.IP.Equal(y.IP)
+	case *net.IPAddr:
+		y, ok := b.(*net.IPAddr)
+		return ok && x.Zone == y.Zone && x.IP.Equal(y.IP)
+	}
+	return a.String() == b.String()
+}
+
 func (m *multiSubIO) SetPeer(a net.Addr) {
 	t, ok := a.(*TaggedAddr)
 	if !ok || t.Idx < 0 || t.Idx >= len(m.slots) {
@@ -359,9 +378,11 @@ func (m *multiSubIO) SetPeer(a net.Addr) {
 	m.subIO.peer.Store(a) // newest source, for Server.Clients (Send is overridden here, so nothing else reads it)
 	// Fast path: nothing changed. handle() calls this for every authenticated packet; this
 	// goroutine is the only writer of dst/lanes, so the check needs no lock (Send only reads
-	// them under m.mu). The old code took m.mu and scanned for every packet (audit 2026-10-22).
+	// them under m.mu). Compare the address by value: readLoop allocates a fresh *TaggedAddr per
+	// datagram, so the old pointer comparison could never match (audit 2026-11-03).
 	s := &m.slots[t.Idx]
-	if s.dst == t && (containsLane(s.lanes, t.Lane) || len(s.lanes) >= 8) {
+	if s.dst != nil && s.dst.Idx == t.Idx && s.dst.Lane == t.Lane && addrsEqual(s.dst.Addr, t.Addr) &&
+		(containsLane(s.lanes, t.Lane) || len(s.lanes) >= 8) {
 		m.ps.markPresent(t.Idx)
 		return
 	}

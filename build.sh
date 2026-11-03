@@ -1,6 +1,7 @@
 #!/bin/sh
 # Reproducible WatTunnel build: static linux/amd64 and linux/arm64 binaries, and windows/amd64 (wattun-windows-amd64.exe,
 # no ICMP), in dist/ with a .sha256 next to each.
+# Also builds the wprobe path prober as wattun-wprobe-linux-{amd64,arm64} and wattun-wprobe-windows-amd64.exe.
 # Usage: build.sh [amd64|arm64|windows ...]   (default: all three)
 # Go: `go` on PATH (or $GO).
 # Prints one line per binary and "BUILD_OK <version>" at the end, or "BUILD_FAIL <step>".
@@ -26,6 +27,17 @@ for a in $ARCHES; do
   if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$out" | cut -d' ' -f1); else sum=$(shasum -a 256 "$out" | cut -d' ' -f1); fi
   printf '%s  %s\n' "$sum" "${out##*/}" > "$out.sha256"
   echo "wattun $VER $os/$arch $sum"
+done
+# The ICMP path prober (cmd/wprobe) ships too, same OS/arch set; the SHA256SUMS glob below picks it up.
+for a in amd64 arm64 windows; do
+  case "$a" in
+    amd64|arm64) os=linux; arch=$a; out="dist/wattun-wprobe-linux-$a" ;;
+    windows) os=windows; arch=amd64; out="dist/wattun-wprobe-windows-amd64.exe" ;;
+  esac
+  GOOS=$os GOARCH=$arch "$GO" build -trimpath -ldflags "-s -w -buildid=" -o "$out" ./cmd/wprobe || { echo "BUILD_FAIL build wprobe $a"; exit 1; }
+  if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$out" | cut -d' ' -f1); else sum=$(shasum -a 256 "$out" | cut -d' ' -f1); fi
+  printf '%s  %s\n' "$sum" "${out##*/}" > "$out.sha256"
+  echo "wprobe $VER $os/$arch $sum"
 done
 # The manager is a release asset too: install.sh installs only the copy whose hash is in the signed list, so keep it
 # in dist/ before the checksums are made.

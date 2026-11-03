@@ -324,7 +324,10 @@ func emuRun(t *testing.T, cli *Session, srv *Server) {
 
 func emuInit() float64 { n, _ := strconv.ParseFloat(os.Getenv("EMU_INIT"), 64); return n * 1e6 }
 
-func emuSlack() time.Duration { n, _ := strconv.Atoi(os.Getenv("EMU_SLACK")); return time.Duration(n) * time.Millisecond }
+func emuSlack() time.Duration {
+	n, _ := strconv.Atoi(os.Getenv("EMU_SLACK"))
+	return time.Duration(n) * time.Millisecond
+}
 
 // emuMax is the pace ceiling for both ends (EMU_MAX MB/s); default 1250, the wattun default for non-ICMP carriers
 // (the session's own default of 16 would cap the emulated link far below its rate).
@@ -401,7 +404,7 @@ func (r *emuRaw) Recv() ([]byte, int, net.Addr, error) {
 func (r *emuRaw) SendTo(p []byte, lane int, dst net.Addr) error {
 	return r.io.Send(p, lane)
 }
-func (r *emuRaw) Close() error { return r.io.Close() }
+func (r *emuRaw) Close() error     { return r.io.Close() }
 func (r *emuRaw) Profile() Profile { return r.io.prof }
 
 func emuSize() int {

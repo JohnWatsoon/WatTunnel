@@ -72,7 +72,7 @@ type DesyncConfig struct {
 	FakeIP string // fakeip mode: whitelisted destination (v4 or v6) the fake flow names; must match the connection's
 	// own family or the matching default is used instead ("" or a mismatched family = 104.16.0.1 for a v4
 	// connection, 2606:4700::6810:1 for a v6 one, both Cloudflare edges)
-	Split  int    // split/ff mode: TCP segment count (0 = 3 for split, 11 for ff)
+	Split int // split/ff mode: TCP segment count (0 = 3 for split, 11 for ff)
 }
 
 // splitSNIs splits a comma-separated list of SNIs into trimmed domain names.
@@ -821,27 +821,27 @@ type desyncTracker struct {
 }
 
 type desyncConn struct {
-	synSeq    uint32 // the ISN as the wire sees it (updated when a NAT rewrite is detected)
-	isnKnown  bool   // early mode: the ISN is known before any data fires
-	synAckSeq uint32 // seq of the server's SYN-ACK
-	synAckAck uint32 // ack field of the server's SYN-ACK (== ISN+1)
-	sumSeq    uint32 // sum/seqsum: seq of the outbound data segment being mirrored (0 = none yet)
-	tcpOpts   []byte // kernel TCP options observed on outbound non-SYN segments (e.g. timestamps)
-	fakeSent  bool   // fake packet has been injected
-	waitAck   uint32 // duplicate ACK expected from server (isn+1 / SND.NXT)
+	synSeq    uint32   // the ISN as the wire sees it (updated when a NAT rewrite is detected)
+	isnKnown  bool     // early mode: the ISN is known before any data fires
+	synAckSeq uint32   // seq of the server's SYN-ACK
+	synAckAck uint32   // ack field of the server's SYN-ACK (== ISN+1)
+	sumSeq    uint32   // sum/seqsum: seq of the outbound data segment being mirrored (0 = none yet)
+	tcpOpts   []byte   // kernel TCP options observed on outbound non-SYN segments (e.g. timestamps)
+	fakeSent  bool     // fake packet has been injected
+	waitAck   uint32   // duplicate ACK expected from server (isn+1 / SND.NXT)
 	sent      [][]byte // needsAck modes: the markers sent at once on fire, kept for one retransmit (resend)
 	at        time.Time
 }
 
 // desyncHS is what the sniffer saw of one handshake toward the peer before anyone announced it.
 type desyncHS struct {
-	isn      uint32 // our SYN's seq
-	srvSeq   uint32 // the SYN-ACK's seq
-	srvAck   uint32 // the SYN-ACK's ack field (our ISN+1 as the server sees it, so a NAT rewrite is followed)
-	haveSyn  bool
-	haveSA   bool
-	opts     []byte // kernel TCP options of our first non-SYN segment (timestamps)
-	at       time.Time
+	isn     uint32 // our SYN's seq
+	srvSeq  uint32 // the SYN-ACK's seq
+	srvAck  uint32 // the SYN-ACK's ack field (our ISN+1 as the server sees it, so a NAT rewrite is followed)
+	haveSyn bool
+	haveSA  bool
+	opts    []byte // kernel TCP options of our first non-SYN segment (timestamps)
+	at      time.Time
 }
 
 // hopTTL turns the TTL a packet arrived with into the TTL that makes our packet die one hop short of that peer:

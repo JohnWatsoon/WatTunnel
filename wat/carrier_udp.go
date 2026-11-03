@@ -81,6 +81,7 @@ func (u *UDPClient) Recv() ([]byte, int, net.Addr, error) {
 }
 
 func (u *UDPClient) CopiesOnSend() bool { return true }
+
 // SendBatch sends a burst in one system call where the platform has sendmmsg, else one write each.
 func (u *UDPClient) SendBatch(ps [][]byte, lanes []int) error {
 	if u.dns {

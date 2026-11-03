@@ -60,9 +60,11 @@ func TestGovernorLearnsCeiling(t *testing.T) {
 
 // TestGovernorOffByDefault: without SetGovernor(true), nothing is learned and nothing caps the rate.
 func TestGovernorOffByDefault(t *testing.T) {
-	if governorOn.Load() {
-		t.Skip("governor enabled by another test; run alone")
-	}
+	// Own the global switch instead of skipping when another test left it on: a skip here was a silent hole
+	// in the suite and made the test order-dependent (audit 2026-11-03).
+	old := governorOn.Load()
+	governorOn.Store(false)
+	t.Cleanup(func() { governorOn.Store(old) })
 	now := time.Now()
 	g := &govState{}
 	for i := 0; i < 100; i++ {

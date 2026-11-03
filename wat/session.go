@@ -1618,7 +1618,7 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 				return
 			}
 			if s.fec == nil || !s.fec.inRec { // a rebuilt packet's ack is stale: it would skew the RTT sample
-				s.onAck(largest, time.Duration(delayUs)*time.Microsecond, rangeSet(rs), now)
+				s.onAck(largest, ackDelay(delayUs), rangeSet(rs), now)
 			}
 			s.ackRs = rs[:0]
 		case frWindow:
@@ -1651,6 +1651,14 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 			if s.peerBoot != 0 && boot != s.peerBoot { // the server restarted: our streams exist only on our side now
 				s.cfg.Logf("server restarted, resetting %d streams", len(s.streams))
 				s.resetAll(ErrReset)
+				// Accept the new run's packet numbers even if its wall clock is behind the old run's. Without
+				// this, every packet below the old replay watermark was dropped and the tunnel stayed dead
+				// until the client process restarted (audit 2026-11-03). The nonce-uniqueness caveat stays
+				// operator-side: keep NTP on (docs/TECHNICAL.md, security model).
+				s.rxAny, s.rxLargest = false, 0
+				for i := range s.rxRing {
+					s.rxRing[i] = 0
+				}
 			}
 			s.peerBoot = boot
 		case frPing:

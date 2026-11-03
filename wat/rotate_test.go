@@ -43,7 +43,11 @@ func TestRollRotateJitterBounds(t *testing.T) {
 // TestRotateDueSemantics: a connection recycles when EITHER axis of its budget is hit, and not before.
 func TestRotateDueSemantics(t *testing.T) {
 	pc := newPoolConn(nil)
-	defer func() { if pc.c != nil { pc.c.Close() } }()
+	defer func() {
+		if pc.c != nil {
+			pc.c.Close()
+		}
+	}()
 	now := time.Now()
 	// no budget: never due
 	if pc.rotateDue(now) {
@@ -98,7 +102,8 @@ func TestWriteLoopCountsBytes(t *testing.T) {
 	var wg sync.WaitGroup
 	go pc.serve(&wg, func([]byte) bool { return true })
 	defer func() { // LIFO: the conns close before the wait
-		pc.fail(); wg.Wait()
+		pc.fail()
+		wg.Wait()
 		select {
 		case c := <-srvC:
 			c.Close()

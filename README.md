@@ -6,7 +6,7 @@
 
 **Encrypted Iran ↔ Kharej port forwarding that keeps working when the network is filtered, even when only ping gets through.**
 
-[![Release](https://img.shields.io/badge/release-v3.2.0-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
+[![Release](https://img.shields.io/badge/release-v3.2.1-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go)](go.mod)
 ![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20windows-lightgrey?style=flat-square)
@@ -129,7 +129,8 @@ presets).
 
 - **Forward secrecy** on every session (X25519 key exchange, 2.10.0): recorded traffic stays unreadable even if a key
   file leaks later.
-- **Signed installer**: every download is checked against an RSA-signed checksum list, so a mirror cannot swap the binary.
+- **Signed installer**: `install.sh` requires `openssl` and verifies the RSA-signed checksum list before running
+  anything; a download whose signature is missing or invalid is refused, so a mirror cannot swap the binary.
 - **Reliability**: no stall after a short one-way blackout, no hang after a Kharej restart, honest `alive` in `/stats`,
   a header mask that no longer stays off when the client starts before its server, fixed data races and buffer reuse.
 - **Manager**: anti-censor toggle with presets (Cloudflare first, `rst-fast`), reverse switch, resilience profiles, DNS-shaped
@@ -230,9 +231,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/i
 WAT_PROXY=https://ghproxy.net/ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/install.sh)
 ```
 
-The proxy is a third-party mirror: it sees and could alter the bytes. `install.sh` therefore checks every download
-against an RSA-signed checksum list, with the public key baked into the script, and refuses a mismatch (`openssl`
-must be installed; it is everywhere).
+The proxy is a third-party mirror: it sees and could alter the bytes. `install.sh` therefore requires `openssl` and
+checks every download against an RSA-signed checksum list, with the public key baked into the script; a download
+whose signature is missing or invalid is refused, and so is a checksum mismatch.
 
 Or download `wattun-linux-amd64`, `install.sh` and `wattun-manager` from the
 [releases](https://github.com/JohnWatsoon/WatTunnel/releases) page, put the binary in `dist/` next to `install.sh`,

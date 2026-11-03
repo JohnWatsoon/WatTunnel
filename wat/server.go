@@ -48,8 +48,6 @@ type Server struct {
 
 	lastRx atomic.Int64 // unix nanoseconds of the newest authenticated packet of any session, kept after it closes
 
-	revive *ReviveEngine // optional handler for out-of-band emergency revival knocks
-
 	statMu  sync.Mutex
 	seen    map[*Session]Stats // each live session's counters at the last Stats call
 	retired Stats              // counters of sessions that have closed, so the totals never go backwards
@@ -209,9 +207,6 @@ func NewServer(cfg Config, raw RawIO) *Server {
 func (srv *Server) Drain() { srv.draining.Store(true) }
 
 func (srv *Server) Draining() bool { return srv.draining.Load() }
-
-// SetRevive attaches an emergency revive engine to handle out-of-band revival knocks.
-func (srv *Server) SetRevive(r *ReviveEngine) { srv.revive = r }
 
 func (srv *Server) Sessions() int {
 	srv.mu.Lock()
@@ -435,19 +430,6 @@ func (srv *Server) Close() {
 	srv.raw.Close()
 }
 
-// knock reports whether p is a valid revive knock (raw, or inside a DNS query) and hands it to the engine.
-func (srv *Server) knock(p []byte, src net.Addr) bool {
-	if len(p) >= 36 && binary.BigEndian.Uint32(p[:4]) == ReviveMagic {
-		_, err := srv.revive.VerifyKnock(p, src)
-		return err == nil
-	}
-	if k, ok := ParseDNSQueryKnock(p); ok {
-		_, err := srv.revive.VerifyKnock(k, src)
-		return err == nil
-	}
-	return false
-}
-
 func (srv *Server) run() {
 	var bo recvBackoff
 	for {
@@ -483,11 +465,6 @@ func (srv *Server) run() {
 				continue
 			}
 		} else {
-			// knocks only for packets of no live session: parsing every data packet as a DNS knock (base32 and
-			// upper-casing) was 15 % of a server's CPU at 130 MB/s upload (3.2.0)
-			if srv.revive != nil && srv.knock(p, src) {
-				continue
-			}
 			if srv.draining.Load() {
 				continue
 			}

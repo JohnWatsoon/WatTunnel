@@ -526,6 +526,7 @@ All carriers carry the same encrypted session. Pick one with `carrier:` (or `-ca
 | `grpc` | CDNs that allow gRPC. | 4096 | no | Requests go to `<path>/Tun`. `plain: true` for cleartext behind a proxy. |
 | `gre` | UDP is dropped but GRE (IP protocol 47) passes. | 1364 | yes (raw socket) | 3.2.0, both ends. `peer` is a bare IP like icmp. Each packet is GRE (with a key from the PSK) carrying an IPv4/UDP packet; a BPF filter keeps other GRE traffic out. No `-reverse`. |
 | `ipip` | Same, for IP-in-IP (protocol 4). | 1372 | yes (raw socket) | 3.2.0, both ends. Like `gre` without the GRE header. |
+| `fortress` | Blackout mode: `wattun-manager arm-blackout NAME` writes it. | — | yes (includes icmp) | Not a wire protocol: a manager-written alias expanded to `icmp+tcp+tls+wss+udp` with default listeners 80/tcp, 443/tcp, 8443/tcp and 53/udp. |
 
 Rules for every non-ICMP carrier: the client dials `peer` as `host:port`, and the server listens on `listen`
 (default `:4443`). `mtu` is 256 to 1400 for icmp and udp, and up to 16384 for the pool carriers.
@@ -1413,18 +1414,20 @@ Every flag can also be a config key. Flags win over the file.
 | `-mode client\|server` | | Role. |
 | `-key SECRET`, `-key-file FILE` | | Pre-shared key. |
 | `-config FILE` | | Config file (above). |
-| `-carrier NAME` | `icmp` | Transport, or `a+b+c` to bond several. |
+| `-carrier NAME` | `icmp` | Transport, or `a+b+c` to bond several; `fortress` is the manager alias `icmp+tcp+tls+wss+udp` (80/443/8443/53). |
 | `-peer-NAME ADDR`, `-listen-NAME ADDR` | | Bonded carriers: per-carrier peer / listen address. |
 | `-peer ADDR` | | Server IP (icmp, udp) or `host:port`. |
 | `-listen ADDR` | `:4443` | Listen address of non-ICMP carriers. |
 | `-reverse` | off | Swap dial and listen (pool carriers), or which side sends the ICMP requests (`icmp`, 2.0.0). |
+| `-bond-mode MODE` | `balanced` | Bonded carriers: `balanced`, `active-backup` or `replicate`. |
+| `-path-probe-max D` | 0 (30s) | Client, bonded carriers: maximum probe backoff for dead paths (default 30s; blackout mode 6s). |
 | `-map l:s[,...]` | | Client: listen port to server port. `l:s@127.0.0.1` keeps a port private. |
 | `-udp SPEC` | | Client: UDP forwards. |
 | `-udp-idle D` | `60s` | UDP flow idle timeout. |
 | `-bind ADDR` | `0.0.0.0` | Client listen address. |
 | `-port-offset N` | 0 | Added to every client listen port. |
 | `-lanes N` | 4 | ICMP identifiers. |
-| `-conns N` | 8 | Pool connections. |
+| `-conns N` | 0 (auto) | Pool connections. |
 | `-mtu N` | 0 | Datagram cap. |
 | `-max-mbps F` | 0 | Pace ceiling per direction and session; 0 = 16 with icmp, 1250 otherwise (2.4.18; 200 from 2.3.0). |
 | `-tcp-cc NAME` | `bbr` | Pool sockets' TCP congestion control, Linux (2.4.18). `system` keeps the kernel default. |
@@ -1434,7 +1437,9 @@ Every flag can also be a config key. Flags win over the file.
 | `-udp-dns` | false | udp carrier: DNS-shaped datagrams, for port 53 (3.0.0). |
 | `-tcp-mimic` | true | tcp carrier: ClientHello-shaped hello and masked frame lengths (3.0.0). |
 | `-shape` | true | Pad small packets and jitter the keepalive (3.0.0). |
-| `-sessions N` | 1 | Client: N independent sessions, udp and the pool carriers only (2.3.0, server unchanged). |
+| `-sessions N` | 0 (auto) | Client: N independent sessions, udp and the pool carriers only (2.3.0, server unchanged). |
+| `-dns-listen ADDR` | empty | Client: listen here for DNS queries and forward them through the tunnel's DNS relay, e.g. `127.0.0.1:53` (2.9.0). |
+| `-dns-relay-upstream ADDR` | `8.8.8.8:53` | Kharej: resolver the internal DNS relay queries (port 53, `-ech ladder`); empty = `8.8.8.8:53`. |
 | `-icmp-type T` | `echo` | ICMP carrier: `echo`, `timestamp`, `info`, `mask` (both ends the same). |
 | `-loss-ceiling` | off | Pacer: also cut the rate when loss jumps far above its learned baseline (opt-in). |
 | `-governor` | off | Pacer, ICMP paths: learn the path's volume ceiling from the reroute signature (a sudden base-RTT jump after sustained bulk) and hold the rate under it (opt-in, 2.9.0; see ICMP path limits). |
@@ -1534,6 +1539,8 @@ metrics port, even if the port is in the allowlist.
 | `draining` | Server: not accepting new sessions. |
 | `streams` | Open TCP streams. The drain timer waits for 0. |
 | `srtt_ms`, `min_rtt_ms` | Smoothed and minimum round-trip time. |
+| `rtt_ms` | Flat aggregate alias of `srtt_ms`, same value: `carriers` and `session_list` also contain `srtt_ms`, so a plain grep of the JSON would otherwise pick a per-carrier or per-session value. |
+| `streams_total` | Flat aggregate alias of `streams`, same value, for the same reason: `session_list` entries also carry `streams`. |
 | `rate_bps` | Current send rate in bytes per second. |
 | `ceiling_bps` | Loss-aware soft ceiling in bytes per second (0 = none active). |
 | `loss_pct` | Loss in the last judged 50 ms interval, percent (0 until 50 packets were sent in one). |
@@ -1864,7 +1871,7 @@ Raw TCP on the same path (8 BBR connections, no tunnel) moved 78 MB/s; 32 connec
   an SSH session that once pasted a large file turns interactive again once it goes quiet.
 - **Loss cuts off.** A direct pool no longer cuts its rate on loss (TCP's loss is not ours; `WAT_REL_LOSSCUT=1`
   restores it), and its window also covers 2 x srtt (`WAT_CWND_MINRTT=1` turns that off). CDN tunnels keep the
-  2.4.17 rules for both.
+  2.4.17 rules for both. `WAT_DIRECT_LOSS_MS=N` sets a loss-timer floor for direct carriers in ms (test/experiment only; off by default).
 - **Speed test** takes `streams=N` (1-32, default 8): `/speedtest?dir=down&mb=200&streams=16`. One stream rides one
   pool connection now, so a single-stream test shows one connection's speed.
 - **More connections.** `conns: 16` beat 8 on this path (73.8 against 51 MB/s); 32 fell to 26 MB/s from loss
@@ -1964,6 +1971,43 @@ counts these. It works with any peer version, because it only closes connections
 Field result, production CDN, 2026-10-12, measured back to back the same morning: the 30 s download loop averaged
 30.4 MB/s on 2.4.3 and 42.9 / 44.7 MB/s on 2.4.5, at 2 and 21 minutes after the restart. Kharej showed no connection
 in backoff, and the p95 of a small request during the loop fell from 1114 ms to 269-549 ms.
+
+## 3.2.1: audit hardening
+
+No wire-format change: an older peer keeps working, and either order of updating is fine. Found by a full audit of
+2026-11-03; this release fixes the operational edge cases it found, not the packet path.
+
+- **The pool listener cannot be squatted.** An unauthenticated connection that sent only the 8-byte pool id and then
+  idled used to hold its slot until the remote TCP stack died; enough of them filled every pool and a real client
+  could never rejoin. The listener now accepts at most 128 connections per source address, closes a connection it
+  never wrote a byte on after 5 minutes, and closes one silent in both directions for 30 minutes. All three run in
+  the health loop; a refused client redials through the normal path.
+- **A malformed ACK delay cannot fake mass loss.** The peer-reported delay becomes a `time.Duration` added to the
+  loss timer; a huge uvarint overflowed it negative and marked the whole in-flight window lost, which a hostile or
+  buggy *authenticated* peer could use for a retransmit storm. It is now clamped to zero for negative-encoded or
+  absurd values (up to ten times the protocol's own one-hour late-ACK sentinel stays accepted), and the ACK's ranges
+  are still applied — dropping the frame had stalled bulk transfers.
+- **The client resets its replay state when the server restarts with a lower clock.** After such a restart every
+  server->client packet was below the client's replay watermark and was dropped until the client process was
+  restarted too; the client now clears the window when the new server boot id arrives. The nonce-reuse caveat is
+  unchanged and still operator-side: keep NTP on.
+- **The metrics server refuses cross-site requests.** `/carrier/toggle`, `/speedtest` and `/quota/reset` answer 403
+  to a browser page on another origin (Sec-Fetch-Site / Origin checks). curl and the manager send neither header, so
+  they are unaffected.
+- **A flag-run server with no allowlist warns once.** The documented default (every port 1-65535 on 127.0.0.1) is
+  unchanged, but the server now says so at startup. Manager-written tunnels carry a `ports:` list and do not warn.
+- **`/stats` gains flat aggregate aliases** `rtt_ms` and `streams_total`: the nested `carriers` and `session_list`
+  objects also carry `srtt_ms`/`streams` and sort before the aggregate keys, so a plain grep of the JSON could read a
+  per-carrier value (the manager did).
+- **Removed the "emergency revive" engine.** It had 168 lines, a server receive-path hook and two tests, but nothing
+  could produce a knock and every action only logged, so it advertised a recovery channel that could not work. The
+  knock parse also leaves the server receive path.
+- **Anti-censorship CI, a safer installer, shipped `wprobe`.** New `.github/workflows/ci.yml` runs `go build`, `go vet`,
+  a `gofmt` gate, both test suites, the shell syntax checks plus `test-manager.sh`, the DPI-model self-test, Windows
+  and linux/arm64 cross builds, the ICMP/raw-socket tests under `sudo`, and a race subset. The release job now refuses
+  a tag that does not match `wat/version.go` and both README badges. `install.sh` requires `openssl` and refuses any
+  remote install whose `SHA256SUMS.sig` is missing or invalid (a local `dist/` build still installs). `build.sh` also
+  ships `cmd/wprobe` as `wattun-wprobe-<os>-<arch>`.
 
 ## 3.2.0: fast by default, bounded memory, gre/ipip
 
@@ -2225,7 +2269,9 @@ A restart cuts every connection. WatTunnel avoids restarts on a live system.
 - **Per session keys.** Each client session picks a random 8-byte id. The packet key is SHA-256 over a fixed module
   prefix, the secret and that id. Packet = `session id | packet number | ChaCha20-Poly1305(frames)`. The nonce is
   the packet number and is never reused: server numbers start at a time-based value with a direction bit set.
-  Since 3.0.0 the first 16 bytes are masked on the wire (see "Traffic shape").
+  Since 3.0.0 the first 16 bytes are masked on the wire (see "Traffic shape"). That "never reused" guarantee
+  assumes the server clock never goes backwards across restarts; if it does, the client now resets its replay
+  state when it sees a new boot id (the tunnel recovers), but keep NTP on as before.
 - **Forward secrecy (2.10.0, both ends).** The client offers an ephemeral X25519 key in its packets (re-offering
   about once a second until the switch is done; the `frKex` frame is always the last frame of a packet: an older
   peer stops parsing there and never sees it). The server answers with its own key and both derive a fresh session
@@ -2265,8 +2311,12 @@ GOOS=linux GOARCH=amd64 go vet ./... && GOOS=linux GOARCH=amd64 go build -o /dev
 sh build.sh                                                     # dist/ binaries
 ```
 
+CI (`.github/workflows/ci.yml`) runs `go build`, `go vet`, the `gofmt` gate, the `cmd` and `wat` suites, the shell
+syntax checks plus `test-manager.sh` and the DPI self-test. A separate job runs the ICMP/raw-IP tests under `sudo`,
+where they do not skip.
+
 Layout: `wat/` is the library (session, congestion control, streams, carriers), `cmd/wattun` the binary,
-`cmd/wprobe` a path probe. Bump `wat/version.go` for every shipped change, and
+`cmd/wprobe` a path probe (ships in `dist/` as `wattun-wprobe-<os>-<arch>`). Bump `wat/version.go` for every shipped change, and
 rebuild `dist/` (`sh build.sh`). A change that is slower on ICMP is not
 shipped.
 
@@ -2275,6 +2325,8 @@ shipped.
 Update **both** servers for every release, unless an entry says otherwise. Versions 2.4.9 to 2.4.16 were steps
 toward one fix for CDN tunnels that got slower over time. If you are on any of them, go straight to 2.4.17 or later.
 
+- **3.2.1: audit hardening.** Any order of updating works (no wire change). (1) The pool listener reaps connections it never used and caps connections per source address, so an unauthenticated peer can no longer hold every pool slot. (2) An out-of-range peer-reported ACK delay is clamped instead of overflowing the loss timer. (3) The client clears its replay window when the server restarts with a clock behind the previous run, so the tunnel recovers without restarting the client; keep NTP on. (4) The metrics server refuses state-changing cross-site requests. (5) A flag-run server with no allowlist logs a warning (the default is unchanged). (6) `/stats` has flat `rtt_ms`/`streams_total` aliases so a grepped value is not a per-carrier one. (7) The dead "emergency revive" engine is removed. (8) CI, the tag/version gate, the mandatory `openssl`/signature check in `install.sh`, and shipping `cmd/wprobe` in `dist/`. See "3.2.1: audit hardening".
+- **3.2.0: fast by default, bounded memory, gre/ipip.** Update both ends for the raw-IP carriers; the rest works in any order. (1) `max-mbps` 16 now applies to the icmp path only, so a server that lists `icmp` among its carriers no longer caps tcp/tls/wss clients at 16 MB/s. (2) Auto sessions are at most 2, and the manager no longer forces 4. (3) Send data is a queue of pooled 64 KB chunks; a process-wide `mem-budget` and a Go heap soft limit at a third of RAM bound memory. (4) A full server evicts the session silent for 10 s. (5) The bond loss penalty is `weight * (1-loss)^4`; new `gre` (IP protocol 47) and `ipip` (protocol 4) raw-IP carriers. (6) The auto test tunes sessions/conns/mtu/batch/loss-ceiling of the chosen carrier. See "3.2.0: fast by default, bounded memory, gre/ipip".
 - **3.1.2: cheaper idle tunnel, quiet-client fix.** Any order of updating works (timing only, no wire change). (1) The server's boot-id frame follows `-ping-every` instead of a fixed 1 Hz: 15.3 → 11.0 MB/day per idle session at the default, 8.9 → 4.0 at `-ping-every 20` (measured 2026-10-29). Restart detection is delayed by up to one keepalive interval; keep `-ping-every` at 20 s or less, because `wattun-heal` treats 35 s without a received packet as down. (2) A server whose client went quiet for 20 s keeps its lane set instead of sending nothing at all until the client speaks again. (3) The dead-session reset scales with `-ping-every`, so 40/60 no longer reset every open stream every 30 s. See "3.1.2: idle cost and quiet clients".
 - **3.1.1: machine-bound counters, bonded matrix, signed manager.** Any order of updating works. (1) Lifetime traffic totals are bound to the machine that wrote them, so a config copied to a new VPS starts from zero; `wattun-manager reset-traffic NAME` zeroes them on purpose and deleting a tunnel removes its counters and quota files. (2) The anti-censor matrix tests bonds leg by leg, offers only modes the installed binary supports, adds `paws`, and re-measures the top 3 at 20 MB. (3) The manager is shipped in the signed release checksums and verified by `install.sh`. (4) The server ages sessions by authenticated packets only; a captured packet can no longer revive or reopen one. (5) `-sessions` clones keep the `tcp-mimic` hello; each UDP flow pins its session; `-ping-every` is validated and liveness scales with it. See "3.1.1: authenticated session aging".
 - **3.1.0: defaults follow the host, two bug fixes.** Update both ends for the first fix (the server hang), any order for the rest. (1) Connections, sessions, window cap and socket low-water mark are chosen from the CPU count and RAM (cgroup limits included): `-conns` and `-sessions` default to 0 = auto, new `-win-max`. (2) The server's receive loop could block for good after the first speed test. (3) Bonded sessions no longer pin bulk streams to a lane that does not exist. See "3.1.0: host-aware defaults".

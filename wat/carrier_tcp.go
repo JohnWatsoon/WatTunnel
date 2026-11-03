@@ -107,6 +107,8 @@ type poolConn struct {
 	wbusy  atomic.Int64  // unix ns when the writer entered a socket write that has not returned yet, 0 when idle
 	rx     atomic.Uint64 // datagrams received
 	tx     atomic.Uint64 // datagrams handed to the socket
+	lastRx atomic.Int64  // unix ns of the newest received datagram (idle reaper; 0 = none yet)
+	lastTx atomic.Int64  // unix ns of the newest socket write (idle reaper; 0 = none yet)
 	txSize atomic.Uint64 // bytes handed to the socket (churn byte axis)
 	born   time.Time
 
@@ -143,6 +145,18 @@ func PoolTCPCCInUse() string {
 const (
 	poolStall     = 300 * time.Millisecond
 	poolStallKill = 5 * time.Second
+)
+
+// Anti-DoS bounds on the pool listener (audit 2026-11-03). A stranger can open a connection and send only the
+// 8-byte pool id: before these bounds, 4096 such conns held every pool slot forever (a 64 KB read slab and a
+// goroutine each means real memory), and every later conn from the real client failed add(). poolMaxPerIP bounds
+// one source address; poolIdleNever closes a conn the server never wrote a byte on (no session ever answered it);
+// poolIdleHard closes a conn silent in both directions long enough that a live session's keepalives must have
+// reached it. Vars, not consts, so the tests can shrink them.
+var (
+	poolMaxPerIP  = 128
+	poolIdleNever = 5 * time.Minute
+	poolIdleHard  = 30 * time.Minute
 )
 
 // poolLowat caps the unsent data the kernel queues per pool socket (TCP_NOTSENT_LOWAT). WAT_POOL_LOWAT (bytes, 3.0.0)
@@ -228,9 +242,6 @@ func PoolSlowKills() int64 { return poolSlowKills.Load() }
 
 // poolRotates counts connections recycled by the churn budget (client pools, SetRotate).
 var poolRotates atomic.Int64
-
-// PoolRotates is how many healthy pool connections this process recycled for churn.
-func PoolRotates() int64 { return poolRotates.Load() }
 
 // judgeSlow takes one window's delivery counts and returns the connection to close, if any. Only the pool's health
 // check calls it, so rxMark and lowWins need no lock.
@@ -428,6 +439,7 @@ func (pc *poolConn) writeLoop() {
 				putPkt(p) // bufio has copied it (or written it through)
 				pc.tx.Add(1)
 				pc.txSize.Add(uint64(len(p)))
+				pc.lastTx.Store(time.Now().UnixNano())
 				if err != nil {
 					pc.fail()
 					return
@@ -477,6 +489,7 @@ func (pc *poolConn) readLoop(push func([]byte) bool) {
 		p := buf[r+2 : r+2+n : r+2+n]
 		r += 2 + n
 		pc.rx.Add(1)
+		pc.lastRx.Store(time.Now().UnixNano())
 		if !push(p) {
 			return
 		}
@@ -508,9 +521,6 @@ func (pc *poolConn) fill(buf *[]byte, r, w *int, need int) (int, bool) {
 // ~20-25 MB/s whether 1, 4 or 8 streams ran, while 8 bare TCP connections moved 78 (field 2026-10-16). A pinned
 // connection that is write-stalled or half full falls back to the least-queued one. Other lanes are ignored, as before.
 const PinLaneBase = 1 << 24
-
-// PinLane is the lane that pins a packet to stream id's connection.
-func PinLane(id uint64) int { return PinLaneBase + int((id*0x9E3779B97F4A7C15)>>40) }
 
 // pinnedConn returns the pinned connection for lane, or nil when lane does not pin or that connection cannot take it.
 func pinnedConn(conns []*poolConn, lane int) *poolConn {
@@ -849,10 +859,6 @@ func newSlotClient(addrs []string, conns int, dial func(ctx context.Context, add
 		c.ps = ps
 	}
 	return c, err
-}
-
-func newPoolClient(dial PoolDialFunc, conns int) (*TCPPoolClient, error) {
-	return newSlotPoolClient(func(ctx context.Context, _ int) (net.Conn, error) { return dial(ctx) }, conns)
 }
 
 // TLSInfo reports the TLS fingerprint in use and whether the newest connection used ECH (ok false: not a TLS carrier).
@@ -1393,6 +1399,7 @@ type TCPPoolServer struct {
 	pools   map[string]map[*poolConn]struct{}
 	ordered map[string][]*poolConn // the same pools in born order, kept under mu by add/remove for the hot SendTo
 	all     map[net.Conn]struct{}  // every accepted conn, so Close also reaches ones still in their hello
+	perIP   map[string]int         // accepted conns per remote IP (anti-DoS cap; owned by mu)
 	merge   atomic.Bool            // reverse mode: every conn joins one pool whatever its hello id says
 	keep    atomic.Bool            // never close a connection for delivering below its share (SetKeepSlow)
 	obfKey  atomic.Pointer[[]byte] // SetObfs: PSK that lets the listener recognise hello v2 (nil: only the plain pool id)
@@ -1419,7 +1426,8 @@ func NewTCPPoolServer(addr string) (*TCPPoolServer, error) {
 
 func newPoolServer(ln net.Listener) *TCPPoolServer {
 	s := &TCPPoolServer{ln: ln, rx: make(chan rxPkt, poolRxQueue), done: make(chan struct{}),
-		pools: map[string]map[*poolConn]struct{}{}, ordered: map[string][]*poolConn{}, all: map[net.Conn]struct{}{}}
+		pools: map[string]map[*poolConn]struct{}{}, ordered: map[string][]*poolConn{}, all: map[net.Conn]struct{}{},
+		perIP: map[string]int{}}
 	s.wg.Add(2)
 	go s.acceptLoop()
 	go s.healthLoop()
@@ -1449,6 +1457,18 @@ func (s *TCPPoolServer) healthLoop() {
 			for _, cs := range pools { // a write blocked for poolStallKill is a dead socket, whatever keep-slow says (3.0.1)
 				for _, pc := range cs {
 					if pc.stalledFor(now.UnixNano()) > poolStallKill {
+						pc.fail()
+					}
+				}
+			}
+			nowNano := now.UnixNano()
+			for _, cs := range pools { // idle conns: a stranger can hold a slot only for a bounded time (audit 2026-11-03)
+				for _, pc := range cs {
+					if pc.tx.Load() == 0 && now.Sub(pc.born) > poolIdleNever {
+						pc.fail() // no session ever sent on it: a handshake that never completed, or a slot squatter
+						continue
+					}
+					if last := max(pc.lastRx.Load(), pc.lastTx.Load(), pc.born.UnixNano()); nowNano-last > int64(poolIdleHard) {
 						pc.fail()
 					}
 				}
@@ -1485,6 +1505,7 @@ func (s *TCPPoolServer) acceptLoop() {
 			time.Sleep(50 * time.Millisecond) // transient (EMFILE...): do not spin
 			continue
 		}
+		ip := addrIP(c.RemoteAddr())
 		s.mu.Lock()
 		select {
 		case <-s.done:
@@ -1493,6 +1514,12 @@ func (s *TCPPoolServer) acceptLoop() {
 			return
 		default:
 		}
+		if s.perIP[ip] >= poolMaxPerIP {
+			s.mu.Unlock()
+			c.Close() // one source cannot hold every pool slot (audit 2026-11-03); the real client just redials
+			continue
+		}
+		s.perIP[ip]++
 		s.all[c] = struct{}{}
 		s.wg.Add(1)
 		s.mu.Unlock()
@@ -1502,9 +1529,15 @@ func (s *TCPPoolServer) acceptLoop() {
 
 func (s *TCPPoolServer) handle(c net.Conn) {
 	defer s.wg.Done()
+	ip := addrIP(c.RemoteAddr())
 	defer func() {
 		s.mu.Lock()
 		delete(s.all, c)
+		if n := s.perIP[ip]; n <= 1 {
+			delete(s.perIP, ip)
+		} else {
+			s.perIP[ip] = n - 1
+		}
 		s.mu.Unlock()
 	}()
 	c.SetReadDeadline(time.Now().Add(poolHelloWait)) // also bounds a TLS handshake

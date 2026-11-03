@@ -2133,10 +2133,10 @@ func TestDesyncParseEthIPv6(t *testing.T) {
 // which csum reports as 0.
 func verifyV6TCP(pkt []byte) bool {
 	ph := make([]byte, 0, 40+len(pkt))
-	ph = append(ph, pkt[8:24]...)  // source
-	ph = append(ph, pkt[24:40]...) // destination
+	ph = append(ph, pkt[8:24]...)                                    // source
+	ph = append(ph, pkt[24:40]...)                                   // destination
 	ph = append(ph, 0, 0, byte((len(pkt)-40)>>8), byte(len(pkt)-40)) // upper-layer length
-	ph = append(ph, 0, 0, 0, 6)                                        // zeros, next header TCP
+	ph = append(ph, 0, 0, 0, 6)                                      // zeros, next header TCP
 	return csum(append(ph, pkt[40:]...)) == 0
 }
 

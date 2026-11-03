@@ -115,7 +115,11 @@ func TestHdrMaskCompat(t *testing.T) {
 		cli, _ := maskRig(t, Config{NoMask: true}, Config{})
 		t0 := time.Now()
 		udpEcho(t, cli, 50000, 2)
-		t.Logf("first echo after %v", time.Since(t0))
+		if el := time.Since(t0); el > 5*time.Second {
+			// The client re-rolls its header form every 3 s until the first authenticated packet; an unbounded
+			// regression here used to be logged and ignored (audit 2026-11-03).
+			t.Fatalf("plain-header fallback took %v, want <= 5s", el)
+		}
 	})
 	t.Run("old client, new server", func(t *testing.T) {
 		cli, rec := maskRig(t, Config{}, Config{NoMask: true})

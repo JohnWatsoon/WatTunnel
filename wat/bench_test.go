@@ -4,8 +4,8 @@ import (
 	"io"
 	"net"
 	"sync"
-	"time"
 	"testing"
+	"time"
 )
 
 // memDir is a zero-delay, lossless one-way link with a fixed pool of buffers, so a benchmark over it measures the

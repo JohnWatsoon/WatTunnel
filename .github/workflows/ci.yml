@@ -1,0 +1,49 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: go build ./...
+      - run: go vet ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l cmd wat)"
+      - run: go test -count=1 ./cmd/...
+      - run: go test -count=1 ./wat/
+      - run: bash -n install.sh
+      - run: bash -n wattun-manager
+      - run: bash -n test-manager.sh
+      - run: bash test-manager.sh
+      - run: python3 testbench/emulate_dpi.py --self-test
+      - run: GOOS=windows GOARCH=amd64 go build ./...
+      - run: GOOS=linux GOARCH=arm64 go build ./...
+  icmp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      # The ICMP and raw-IP tests skip without root (icmp_linux_test.go, rawip_linux_test.go). They must not
+      # skip here: this job runs them under sudo so a real raw-socket regression fails CI.
+      - run: sudo -E env "PATH=$PATH" go test -count=1 -run 'TestICMP|TestRawIP' ./wat/
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: go test -race -count=1 ./cmd/...
+      - run: go test -race -count=1 -run 'TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback' ./wat/

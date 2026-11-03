@@ -29,13 +29,13 @@ func SetGovernor(on bool) { governorOn.Store(on) }
 
 // governorWindow is the observation window; the signature is judged per window.
 const (
-	govWindow      = 2 * time.Second
-	govArmWindows  = 3      // stable windows before armed
-	govJump        = 1.25   // base-RTT jump that counts as the reroute signature
-	govHold        = 60 * time.Second
-	govCreep       = 1.02
-	govPreWindow   = 4 * time.Second // rate history kept for the "rate before the jump" ceiling
-	govCut         = 0.80
+	govWindow     = 2 * time.Second
+	govArmWindows = 3    // stable windows before armed
+	govJump       = 1.25 // base-RTT jump that counts as the reroute signature
+	govHold       = 60 * time.Second
+	govCreep      = 1.02
+	govPreWindow  = 4 * time.Second // rate history kept for the "rate before the jump" ceiling
+	govCut        = 0.80
 )
 
 // govState is the per-session governor state inside cc (guarded by the session's cc lock discipline: all

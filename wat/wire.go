@@ -3,6 +3,7 @@ package wat
 import (
 	"encoding/binary"
 	"errors"
+	"time"
 )
 
 // Frame types inside the encrypted payload.
@@ -22,6 +23,25 @@ const (
 )
 
 var errBadFrame = errors.New("wat: malformed frame")
+
+// maxAckDelayUs is the largest peer-reported ACK delay kept as a duration. The field arrives from an authenticated
+// (but not necessarily benign) peer; it becomes a time.Duration added to the loss timer, and a huge uvarint used to
+// overflow that negative and mark the whole in-flight window lost (audit 2026-11-03). Normal delays are milliseconds,
+// but the protocol itself uses lateAckDelay (1 h, session.go) as the sentinel for a deliberately late ACK marker, so
+// the ceiling has to stay above it; ten times it is still far below the overflow range.
+const maxAckDelayUs = 10 * lateAckDelay
+
+// ackDelay decodes the wire's ACK-delay field. The sender writes uint64(now-rxAt / µs), which is a huge value when
+// that difference is negative (emulated clocks in tests, timer slack), and a hostile peer can send anything; both are
+// clamped to 0 rather than dropping the frame, because the ACK's ranges are still needed (rejecting the whole ACK
+// lost delivery information and stalled bulk UDP transfers). Values up to maxAckDelayUs — including the lateAckDelay
+// sentinel — pass through unchanged.
+func ackDelay(delayUs uint64) time.Duration {
+	if delayUs >= 1<<63 || delayUs > maxAckDelayUs {
+		return 0
+	}
+	return time.Duration(delayUs) * time.Microsecond
+}
 
 func appendUv(b []byte, v uint64) []byte { return binary.AppendUvarint(b, v) }
 

@@ -170,29 +170,12 @@ func (ps *pathSet) Mode() string {
 	return ps.mode
 }
 
-func (ps *pathSet) SetMode(m string) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if m != "" {
-		ps.mode = m
-	}
-}
-
 func (ps *pathSet) ToggleMute(i int) bool {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	if i >= 0 && i < len(ps.p) {
 		ps.p[i].muted = !ps.p[i].muted
 		return ps.p[i].muted
-	}
-	return false
-}
-
-func (ps *pathSet) isLive(i int) bool {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if i >= 0 && i < len(ps.p) {
-		return ps.p[i].present && ps.p[i].state == pLive && !ps.p[i].muted
 	}
 	return false
 }

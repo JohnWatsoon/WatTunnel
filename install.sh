@@ -7,7 +7,7 @@
 #   --uninstall        stop every tunnel and remove WatTun (asks before deleting /etc/wattun)
 # Environment:
 #   WAT_PROXY=https://ghproxy.net/   prefix for every GitHub URL (when github.com is blocked; untrusted: the
-#                                    release signature is then verified mandatorily)
+#                                    release signature is always verified, so a mirror cannot swap the binary)
 #   WAT_REPO=owner/name              fork to install from
 #   WAT_SIG_PUB=/path/to/pub.pem     another release-signing public key (forks)
 #   WAT_SKIP_CHECKSUM=1              install a local dist/ binary that has no .sha256 file
@@ -405,12 +405,10 @@ step_verify_sig() {
   local got=$1 sums="$TMP/SHA256SUMS" sig="$TMP/SHA256SUMS.sig" pub="$TMP/sigpub.pem"
   [ "$FROM_DIST" = 1 ] && { DETAIL="$DETAIL, local build (no remote sig)"; return 0; }
   if ! command -v openssl >/dev/null 2>&1; then
-    [ -n "$PROXY" ] && { ERRMSG="openssl is required to verify the release signature when WAT_PROXY is set"; return 1; }
-    DETAIL="$DETAIL, signature check skipped (no openssl)"; return 0
+    ERRMSG="openssl is required to verify the release signature (install openssl and retry)"; return 1
   fi
   if ! fetch "$DL_BASE/SHA256SUMS" "$sums" || ! fetch "$DL_BASE/SHA256SUMS.sig" "$sig"; then
-    [ -n "$PROXY" ] && { ERRMSG="could not download SHA256SUMS(.sig): refusing to install via proxy without signature"; return 1; }
-    DETAIL="$DETAIL, signature not published"; return 0
+    ERRMSG="release signature not available; refusing to install unverified (use a local dist/ build)"; return 1
   fi
   printf '%s\n' "$SIG_PUB" > "$pub"
   if ! openssl dgst -sha256 -verify "$pub" -signature "$sig" "$sums" >/dev/null 2>&1; then

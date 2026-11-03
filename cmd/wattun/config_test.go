@@ -44,17 +44,17 @@ func TestParseConfig(t *testing.T) {
 
 func TestParseConfigErrors(t *testing.T) {
 	for name, txt := range map[string]string{
-		"unknown key":    "mode: client\nbogus: 1\n",
-		"bad port":       "ports:\n  - 99999\n",
-		"zero port":      "ports:\n  - 0\n",
-		"non-numeric":    "ports:\n  - http\n",
-		"bad suffix":     "ports:\n  - 80/sctp\n",
-		"item no list":   "mode: client\n- 5\n",
-		"no colon":       "mode client\n",
-		"dup key":        "mode: client\nmode: server\n",
-		"inline ports":   "ports: 5\n",
-		"dup ports":      "ports:\n  - 1\nports:\n  - 2\n",
-		"item after key": "ports:\n  - 1\nmode: x\n  - 2\n",
+		"unknown key":          "mode: client\nbogus: 1\n",
+		"bad port":             "ports:\n  - 99999\n",
+		"zero port":            "ports:\n  - 0\n",
+		"non-numeric":          "ports:\n  - http\n",
+		"bad suffix":           "ports:\n  - 80/sctp\n",
+		"item no list":         "mode: client\n- 5\n",
+		"no colon":             "mode client\n",
+		"dup key":              "mode: client\nmode: server\n",
+		"inline ports":         "ports: 5\n",
+		"dup ports":            "ports:\n  - 1\nports:\n  - 2\n",
+		"item after key":       "ports:\n  - 1\nmode: x\n  - 2\n",
 		"indented key in list": "ports:\n  - 1\n  mode: client\n", // an indented key inside a list is a mistake, not a setting
 	} {
 		if _, err := parseConfig(txt, knownKeys); err == nil {

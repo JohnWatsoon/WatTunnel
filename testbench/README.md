@@ -68,7 +68,6 @@ runs must share a machine.
 | `measure.sh` | one-command driver: server → emulator → client → `/stats` + `/speedtest` → CSV |
 | `deploy.sh` | build + scp + `systemd-run` + collect on the live Iran/Kharej pair (Lead runs this) |
 | `hello_dump/main.go` | prints `sni <base64>` lines of the real `wat.FakeClientHello` for the emulator |
-| `results.md` | the measurements taken on 2026-10-22 with this bench, and what could not run here |
 | `out/` | logs, per-flow JSONL verdicts, raw `/stats` and `/speedtest` JSON, `measured*.csv` (git-ignored) |
 
 ## The emulator: rules
@@ -156,8 +155,8 @@ a 1000 B hello limit but not for a 256 B one.
 Does **not** prove: that the raw-socket injector (`wat/desync_linux.go`, AF_PACKET) is correct, or that the real
 Iranian filter behaves like any profile. Injection needs Linux + CAP_NET_RAW; on Windows `wat.NewDesync` fails at
 startup by design, so the local client here runs without `-fake-sni` and the emulator supplies the per-mode
-verdict. Run `deploy.sh` on the live pair for the real thing; see `results.md` for exactly which rows ran on this
-machine and which could not.
+verdict. Run `deploy.sh` on the live pair for the real thing; measurements are recorded in `docs/TECHNICAL.md`
+("Field numbers"), and this bench is a model, not the injector.
 
 ## Live-pair run (Lead)
 

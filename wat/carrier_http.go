@@ -28,10 +28,10 @@ import (
 
 // HTTPClientOptions configures the ws/h2/grpc client carriers.
 type HTTPClientOptions struct {
-	Path     string                          // request path (grpc: the service name, the request goes to <Path>/Tun)
-	Host     string                          // Host header / :authority (default: the peer address)
-	Headers  map[string]string               // extra request headers
-	Secure   bool                            // TLS (wss, h2, grpc over TLS); false = ws, h2c
+	Path     string                           // request path (grpc: the service name, the request goes to <Path>/Tun)
+	Host     string                           // Host header / :authority (default: the peer address)
+	Headers  map[string]string                // extra request headers
+	Secure   bool                             // TLS (wss, h2, grpc over TLS); false = ws, h2c
 	DialHook func(net.Conn) (net.Conn, error) // dial hook on raw TCP socket before TLS/framing (fake-SNI)
 	TLS      TLSClientOptions
 }
