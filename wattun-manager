@@ -38,7 +38,7 @@ else
   MGR=/usr/local/bin/wattun-manager
 fi
 REPO=${WAT_REPO:-JohnWatsoon/WatTunnel}
-MGR_VERSION=2026103002   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110301   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -165,6 +165,15 @@ err()  { ERRN=$((ERRN+1)); if [ "$NONINTERACTIVE" = 1 ]; then printf 'error: %s\
 hint() { printf '  %s%s%s\n' "$GRY" "$*" "$RST"; }
 hr()   { printf '  %s%s%s\n' "$GRY" "$(rep ─ 74)" "$RST"; }
 key_label() { printf '%s[%s]%s' "$CYN" "$1" "$RST"; }
+menu_grid() { # group key label [key label...] : one row of a menu grid, a muted group name then 16-column cells
+  local g=$1 out; shift
+  printf -v out '  %s%-9s%s' "$GRY" "$g" "$RST"
+  while [ $# -ge 2 ]; do
+    [ $# -gt 2 ] && printf -v out '%s%s %-12s' "$out" "$(key_label "$1")" "$2" || out+="$(key_label "$1") $2"
+    shift 2
+  done
+  printf '%s\n' "$out"
+}
 set_row() { # key label value [unit] [default] : one "[k] label  value" line of a settings page
   local v=$3
   if [ -n "$v" ]; then v="$v${4:+ $4}"
@@ -6289,24 +6298,23 @@ tunnel_page() {
     [ "$run" = active ] && run_txt=stop
     systemctl is-enabled -q "${WAT_PREFIX}@$n" 2>/dev/null && boot=on
     echo
-    menu_line l logs m monitor v 'speed test' d diagnose
-    local cfgm=(p ports c 'connection type' b bonding q limits)
-    if [ "$(uname -s)" = Linux ] && { is_pool_list "$car" || [ "$car" = icmp ]; }; then cfgm+=(z anti-censor); fi
-    menu_line "${cfgm[@]}"
-    local rolem=()
+    local linkm=(c type) tunem=(p ports b bonding q limits)
     if [ "$r" = Kharej ]; then
-      rolem=(t token k 'new key')
-      is_auto_kharej "$n" && rolem+=(u 'close unused carriers')
-      is_reverse "$n" && [ -z "$(companion_of "$n")" ] && rolem+=(h 'change Iran address')
+      linkm+=(t token k 'new key')
+      is_auto_kharej "$n" && linkm+=(u 'close unused')
+      is_reverse "$n" && [ -z "$(companion_of "$n")" ] && linkm+=(h 'Iran IP')
     else
-      rolem=(a 'auto mode' t 'new token from Kharej')
-      if is_reverse "$n"; then [ "$car" != icmp ] && rolem+=(h 'change listen port')
-      else rolem+=(h 'change Kharej address'); fi
+      linkm+=(a 'auto mode' t 'new token')
+      if is_reverse "$n"; then [ "$car" != icmp ] && linkm+=(h 'listen port')
+      else linkm+=(h 'Kharej IP'); fi
     fi
-    menu_line "${rolem[@]}"
-    menu_line r restart s "$run_txt" e "start at boot: $boot" o advanced
-    hr
-    printf '  %s back  %s help%*s%s %sdelete%s\n' "$(key_label 0)" "$(key_label '?')" 49 '' "$(key_label x)" "$RED" "$RST"
+    if [ "$(uname -s)" = Linux ] && { is_pool_list "$car" || [ "$car" = icmp ]; }; then tunem+=(z anti-censor); fi
+    menu_grid watch l logs m monitor v 'speed test' d diagnose
+    menu_grid link "${linkm[@]}"
+    menu_grid tune "${tunem[@]}"
+    menu_grid service r restart s "$run_txt" e "boot: $boot" o advanced
+    echo
+    printf '  %s back   %s help%*s%s %sdelete%s\n' "$(key_label 0)" "$(key_label '?')" 47 '' "$(key_label x)" "$RED" "$RST"
     key_read
     case "$KEY" in
       d|D) page "Diagnose" "$n"; run_flow test_tunnel "$n"; pause ;;
