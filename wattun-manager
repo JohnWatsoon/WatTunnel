@@ -13,7 +13,8 @@
 #   CDN carriers (ws, wss, h2, h2c, grpc via Cloudflare; wattun >= 2.2.0): cdn-tune NAME [full]
 #   Unattended (no tty, for scripts and test rigs): kharej --carrier C --name N --yes | iran --token T --map L:T --yes |
 #                   cdn-tune NAME --yes | auto-test NAME --yes | delete NAME --yes | uninstall --yes   (see: help)
-# Environment: WAT_NO_ANIM=1 (no animations), NO_COLOR=1 (no colours), WAT_REPO, WAT_PROXY, WAT_PREFIX (sandbox, see below).
+# Environment: WAT_NO_ANIM=1 (no animations), NO_COLOR=1 (no colours), WAT_REPO, WAT_PROXY, WAT_PREFIX (sandbox, see below),
+#   WAT_SIG_PUB (another release-signing key), WAT_ALLOW_UNSIGNED_UPDATE=1 (run install.sh from main unverified; not recommended).
 set -uo pipefail
 shopt -s extglob
 
@@ -38,6 +39,40 @@ else
   MGR=/usr/local/bin/wattun-manager
 fi
 REPO=${WAT_REPO:-JohnWatsoon/WatTunnel}
+# Release-signing public key. update() checks the installer it runs as root against the release's signed SHA256SUMS.
+# This PEM must stay byte-identical to SIG_PUB in install.sh; regenerate the key in both scripts together.
+SIG_PUB=$(cat <<'PEM'
+-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA0j+yK26CzKRD+am5rQZJ
+v8zChkZ5HuwQ4uBtj2mKfFRG8mrj7XN3iW60QEj7Le/fAYtk4hHvqsxb6Xhxw303
++rFCBxKr+mwc3GOB/zVh/fzNqN2pXzKCT+mSKiaDfwUmCizKFNUUCCnhNVpEx9hl
+A4B4n5iBgxW0G/ks4hOujx6teaKUN44+cZNgPshPSQ5KdiqQBi0rFCiSAKBCh1vL
+j07u5S/mvU8L8u9M6sUzST0mXcGw9WKQmAiIOCqAwLiyV1RtDodgaCIxLPJ93Qo/
+uK4DzYX3Ker8lW6MRKXgX3fAVXoyj/ZaE3oh1ZibVefAy6w7qB74JvQPv4nFvS/Y
+VJXpxiHiqE/YMdHbS9eCQnqjHVKmGWvBVPo/IlUiJFbl8nIEFZVij32Cp8A4awO2
+IORyD7iC8bA7AZHruzVfiUtrYA5XhBTRJplqws8kM0Ig4sLrws0HPOY4xOBRtSVh
+vgY6Qw/EWglth/K24PEC8AiuJYIRRkn/Kq+SBIRu8qVrAgMBAAE=
+-----END PUBLIC KEY-----
+PEM
+)
+if [ -n "${WAT_SIG_PUB:-}" ]; then SIG_PUB=$(cat "$WAT_SIG_PUB"); fi
+# Download helpers for update(): verify SHA256SUMS with the pinned key, then match one "<sha>  <name>" line.
+sig_pub_file() { # write the pinned key to a private temp file and print its path
+  local f
+  f=$(mktemp /tmp/wattun-sigpub.XXXXXX) || return 1
+  chmod 600 "$f" 2>/dev/null || { rm -f "$f"; return 1; }
+  printf '%s\n' "$SIG_PUB" >"$f" || { rm -f "$f"; return 1; }
+  printf '%s\n' "$f"
+}
+sums_verify() { # sums sig
+  local pub rc
+  command -v openssl >/dev/null 2>&1 || return 1
+  pub=$(sig_pub_file) || return 1
+  openssl dgst -sha256 -verify "$pub" -signature "$2" "$1" >/dev/null 2>&1; rc=$?
+  rm -f "$pub"
+  return "$rc"
+}
+sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
 MGR_VERSION=2026110301   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
@@ -403,6 +438,9 @@ role()    { [ "$(cfg "$1" mode)" = server ] && echo Kharej || echo Iran; }
 stats()   { local m; m=$(cfg "$1" metrics); [ -n "$m" ] && curl -fs --noproxy '*' --max-time 2 "http://$m/stats"; }
 ms()      { printf "%.1f" "${1:-0}"; }
 jget()    { grep -o "\"$2\": *[^,}]*" <<<"$1" | head -1 | sed 's/.*: *//; s/"//g'; }
+jget_flat() { # json flat-key legacy-key: the flat aggregate first, fall back for older binaries
+  local v; v=$(jget "$1" "$2"); [ -n "$v" ] || v=$(jget "$1" "$3"); printf '%s' "$v"
+}
 human()   { awk -v b="${1:-0}" 'BEGIN{s="B KB MB GB TB";split(s,u," ");i=1;while(b>=1024&&i<5){b/=1024;i++}printf "%.1f %s",b,u[i]}'; }
 ipv4_ok() { # is $1 a dotted IPv4 with every octet 0-255 ?
   local a b c d
@@ -791,7 +829,7 @@ reverse_hint() { # [carrier]
     hint "Set it on both sides (wattun 2.0.0+)."
   fi
 }
-v_icmp() { case "$1" in echo|timestamp|info|mask) return 0 ;; esac; err "Use echo, timestamp, info or mask."; return 1; }
+v_icmp() { case "$1" in echo|timestamp) return 0 ;; esac; err "Use echo or timestamp (Linux does not answer info/mask)."; return 1; }
 v_mbps_adv() { case "$1" in -|0|default) return 0 ;; esac; v_mbps "$1"; }
 v_mbps() { [ -z "$1" ] && return 0; [[ "$1" =~ ^[0-9]{1,4}$ ]] && [ "$1" -ge 1 ] && return 0; err "Enter a number of MB/s (1-9999)."; return 1; }
 v_sessions() { [ -z "$1" ] && return 0; case "$1" in -|0|default) return 0 ;; esac; [[ "$1" =~ ^[0-9]{1,3}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 64 ] && return 0; err "Enter sessions count 1-64 (or 0/default to unset)."; return 1; }
@@ -938,7 +976,7 @@ tinfo() { # name -> TI_*  (state: up | degraded | down | stopped)
   systemctl is-active -q "${WAT_PREFIX}@$1" 2>/dev/null || return 0
   TI_RAW=$(stats "$1")
   if [ "$(jget "$TI_RAW" alive)" = true ]; then TI_STATE=up; else TI_STATE=down; fi
-  TI_RTT=$(jget "$TI_RAW" srtt_ms); TI_STREAMS=$(jget "$TI_RAW" streams); TI_SESS=$(jget "$TI_RAW" sessions)
+  TI_RTT=$(jget_flat "$TI_RAW" rtt_ms srtt_ms); TI_STREAMS=$(jget_flat "$TI_RAW" streams_total streams); TI_SESS=$(jget "$TI_RAW" sessions)
   TI_IN=$(jget "$TI_RAW" bytes_in_total); TI_OUT=$(jget "$TI_RAW" bytes_out_total); TI_RATE=$(jget "$TI_RAW" rate_bps)
   [ -n "$TI_IN" ] || { TI_IN=$(jget "$TI_RAW" bytes_in); TI_OUT=$(jget "$TI_RAW" bytes_out); } # before 2.4.19: since the last restart
   awk -v r="${TI_RTT:-0}" 'BEGIN{exit !(r < 0.5)}' && TI_RTT=$(jget "$TI_RAW" min_rtt_ms) # a server between samples reports srtt 0
@@ -1275,7 +1313,7 @@ wait_link() { # name seconds : spinner + progress bar while waiting for the link
   while :; do
     if link_alive "$n"; then
       [ "$ANIM" = 1 ] && { printf '\r\e[K'; cur_show; }
-      LINK_RTT=$(ms "$(jget "$(stats "$n")" srtt_ms)"); return 0
+      LINK_RTT=$(ms "$(jget_flat "$(stats "$n")" rtt_ms srtt_ms)"); return 0
     fi
     el=$((SECONDS-t0))
     if [ "$el" -ge "$max" ] || ! systemctl is-active -q "${WAT_PREFIX}@$n" 2>/dev/null; then break; fi
@@ -1604,7 +1642,7 @@ wizard_kharej() {
     ask_ok "Address Iran connects to (IP or domain)" "$addr" v_host || return 1; addr=$REPLY_V
     if [ "$cr" = icmp ]; then
       hint "Keep echo unless ping echo is blocked on your route."
-      ask_ok "ICMP type (echo, timestamp, info, mask)" echo v_icmp || return 1; itype=$REPLY_V
+      ask_ok "ICMP type (echo, timestamp)" echo v_icmp || return 1; itype=$REPLY_V
       echo; reverse_hint icmp
       if confirm "Reverse direction (this server sends the pings to Iran)?" n; then
         ask_ok "Iran server IPv4 address" "" v_ipv4 || return 1; iranip=$REPLY_V; rev=1
@@ -3093,7 +3131,7 @@ at_measure() { # i metrics-port : speed test on a running client, fills AR_*[i]
     at_curl "$mp" up; r=$AT_R
     if [ "$(jget "$r" ok)" = true ]; then
       AR_UP[$i]=$(jget "$r" mb_per_s)
-      AR_RTT[$i]=$(jget "$(curl -fs --noproxy '*' --max-time 2 "http://127.0.0.1:$mp/stats" 2>/dev/null)" srtt_ms)
+      AR_RTT[$i]=$(jget_flat "$(curl -fs --noproxy '*' --max-time 2 "http://127.0.0.1:$mp/stats" 2>/dev/null)" rtt_ms srtt_ms)
       : "${AR_DOWN[$i]:=0}" "${AR_UP[$i]:=0}" "${AR_RTT[$i]:=0}"
       AR_OK[$i]=1
     fi
@@ -4445,7 +4483,7 @@ test_tunnel() {
   fi
   s=$(stats "$n")
   if [ "$(jget "$s" alive)" = true ]; then
-    ok "Tunnel link is CONNECTED (RTT $(ms "$(jget "$s" srtt_ms)") ms)"
+    ok "Tunnel link is CONNECTED (RTT $(ms "$(jget_flat "$s" rtt_ms srtt_ms)") ms)"
     parse_carriers "$s"
     if [ "$CAR_COUNT" -gt 0 ]; then
       say "  ${GRY}paths${RST}"
@@ -5150,7 +5188,7 @@ anticensor_test() {
   spin_stop
 
   if [ "$alive" = true ]; then
-    srtt=$(jget "$s" srtt_ms)
+    srtt=$(jget_flat "$s" rtt_ms srtt_ms)
     pkts_in=$(jget "$s" pkts_in)
     pkts_out=$(jget "$s" pkts_out)
     fprof=$(jget "$s" filter_profile)
@@ -6411,7 +6449,7 @@ heal() { # restart Iran tunnels whose link is down or breaches SLA 3 checks in a
         min_r=$(grep '^sla_min_rate_kbps=' "$sla_f" 2>/dev/null | cut -d= -f2)
         max_rtt=$(grep '^sla_max_rtt_ms=' "$sla_f" 2>/dev/null | cut -d= -f2)
         max_loss=$(grep '^sla_max_loss_pct=' "$sla_f" 2>/dev/null | cut -d= -f2)
-        rtt=$(jget "$s_raw" srtt_ms)
+        rtt=$(jget_flat "$s_raw" rtt_ms srtt_ms)
         loss=$(jget "$s_raw" loss_pct)
         rate_kbps=$(( $(jget "$s_raw" rate_bps) / 1000 ))
         [ -n "$max_rtt" ] && [ "$max_rtt" -gt 0 ] && [ "${rtt%.*}" -gt "$max_rtt" ] 2>/dev/null && breached=1
@@ -6496,24 +6534,52 @@ update() { # [installer args...]
   fi
   before=$(bin_ver); mbefore=$(cksum <"${imgr:-$MGR}" 2>/dev/null)
   tmp=$(mktemp /tmp/wattun-install.XXXXXX)
-  trap 'rm -f "$tmp" "$tmp.unit" ${mkeep:+"$mkeep"}' EXIT # a kill mid-update must not leave root-owned temp files
+  local sums=$tmp.SHA256SUMS sig=$tmp.SHA256SUMS.sig mkeep
+  trap 'rm -f ${tmp:+"$tmp"} ${tmp:+"$tmp.unit"} ${sums:+"$sums"} ${sig:+"$sig"} ${mkeep:+"$mkeep"}' EXIT # a kill mid-update must not leave root-owned temp files
   [ "$SANDBOX" = 1 ] && ienv=(WAT_BIN="$BIN" WAT_MGR="$imgr" WAT_CONF="$CONF" WAT_UNIT="$tmp.unit" WAT_REQUIRE_SANDBOX=1) # the installer's unit file goes to a throwaway path
-  # raw.githubusercontent.com caches main for minutes: resolve main to a commit sha and fetch everything by it
-  local sha mref="" mkeep
-  sha=$(curl -fsSL --max-time 10 "${WAT_PROXY:-}https://api.github.com/repos/$REPO/commits/main" 2>/dev/null | grep -m1 '"sha"' | sed -n 's/.*"sha"[^"]*"\([0-9a-f]\{40\}\)".*/\1/p')
-  if [ -n "$sha" ]; then url="https://raw.githubusercontent.com/$REPO/$sha/install.sh"; mref=$sha; ienv+=(WAT_MGR_REF="$sha")
-  else warn "Could not resolve the latest commit; using the main branch (GitHub's cache may be a few minutes old)."; fi
   # keep the current manager so a bad replacement can be undone
   mkeep=$(mktemp /tmp/wattun-mgr.XXXXXX); cp -f "${imgr:-$MGR}" "$mkeep" 2>/dev/null || { rm -f "$mkeep"; mkeep=""; }
-  spin_start "Downloading the installer"
-  curl -fsSL --max-time 60 --retry 2 -o "$tmp" "${WAT_PROXY:-}$url"; local rc=$?
-  spin_stop
-  if [ "$rc" -ne 0 ] || ! head -c 2 "$tmp" | grep -q '#!'; then
-    rm -f "$tmp" "$mkeep"; err "Update failed (could not download the installer). If GitHub is blocked: WAT_PROXY=https://ghproxy.net/ $SELF update"; return 1
+  if [ "${WAT_ALLOW_UNSIGNED_UPDATE:-0}" = 1 ]; then
+    warn "WAT_ALLOW_UNSIGNED_UPDATE=1: fetching the installer without a signature check (only if you trust the source)."
+    # raw.githubusercontent.com caches main for minutes: resolve main to a commit sha and fetch everything by it
+    local sha mref="" rc
+    sha=$(curl -fsSL --max-time 10 "${WAT_PROXY:-}https://api.github.com/repos/$REPO/commits/main" 2>/dev/null | grep -m1 '"sha"' | sed -n 's/.*"sha"[^"]*"\([0-9a-f]\{40\}\)".*/\1/p')
+    if [ -n "$sha" ]; then url="https://raw.githubusercontent.com/$REPO/$sha/install.sh"; mref=$sha; ienv+=(WAT_MGR_REF="$sha")
+    else warn "Could not resolve the latest commit; using the main branch (GitHub's cache may be a few minutes old)."; fi
+    spin_start "Downloading the installer"
+    curl -fsSL --max-time 60 --retry 2 -o "$tmp" "${WAT_PROXY:-}$url"; rc=$?
+    spin_stop
+    if [ "$rc" -ne 0 ] || ! head -c 2 "$tmp" | grep -q '#!'; then
+      rm -f "$tmp" "$mkeep"; err "Update failed (could not download the installer). If GitHub is blocked: WAT_PROXY=https://ghproxy.net/ $SELF update"; return 1
+    fi
+    ok "Installer downloaded UNSIGNED${mref:+ (${mref:0:7})}"
+  else
+    # Release assets are immutable: verify the installer against the release's RSA-signed SHA256SUMS, then run it.
+    local base="${WAT_PROXY:-}https://github.com/$REPO/releases/latest/download" rc got verified=0
+    local refusal="Cannot verify the installer against the signed release; refusing to run it unverified. Install manually from https://github.com/$REPO/releases or set WAT_ALLOW_UNSIGNED_UPDATE=1 to override."
+    if command -v openssl >/dev/null 2>&1; then
+      spin_start "Downloading the installer and its signature"
+      curl -fsSL --max-time 60 --retry 2 -o "$tmp" "$base/install.sh" \
+        && curl -fsSL --max-time 60 --retry 2 -o "$sums" "$base/SHA256SUMS" \
+        && curl -fsSL --max-time 60 --retry 2 -o "$sig" "$base/SHA256SUMS.sig"
+      rc=$?
+      spin_stop
+      if [ "$rc" -eq 0 ] && sums_verify "$sums" "$sig"; then
+        got=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
+        if [ -n "$got" ] && sums_has "$sums" install.sh "$got"; then verified=1; fi
+      fi
+    else
+      warn "openssl is required to check the release signature."
+    fi
+    if [ "$verified" != 1 ]; then
+      rm -f "$tmp" "$sums" "$sig" "$mkeep"
+      hint "The latest release must ship install.sh with SHA256SUMS and SHA256SUMS.sig signed by the pinned key."
+      err "$refusal"; return 1
+    fi
+    ok "Installer verified against the signed release"
   fi
-  ok "Installer downloaded${mref:+ (${mref:0:7})}"
   env ${ienv[@]+"${ienv[@]}"} WAT_FROM_MANAGER=1 bash "$tmp" "$@"; rc=$?
-  rm -f "$tmp" "$tmp.unit"
+  rm -f "$tmp" "$tmp.unit" "$sums" "$sig"
   trap - EXIT
   [ "$rc" -eq 0 ] || { rm -f "$mkeep"; err "The installer reported an error. Nothing was changed: still wattun ${before:-?}."; return 1; }
   # self-check: in a sandbox the new manager must understand WAT_PREFIX, or it would drive the production paths
@@ -6794,6 +6860,7 @@ or NONINTERACTIVE=1). Plain output, errors on stderr, exit code 0 = done, 1 = fa
   Flags also accept --flag=value.
 
 Environment: WAT_NO_ANIM=1 (no animations)  NO_COLOR=1 (no colours)  WAT_PROXY=https://ghproxy.net/
+  WAT_ALLOW_UNSIGNED_UPDATE=1 runs install.sh from main without checking the release signature (not recommended)
 
 Sandbox: WAT_PREFIX=wattest wattun-manager ... keeps everything under /etc/wattest, /opt/wattest and wattest@ units.
   Other overrides: WAT_CONF, WAT_BIN, WAT_RUN, WAT_AUTO_RUN (single paths). The first run needs: WAT_PREFIX=wattest wattun-manager update

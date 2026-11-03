@@ -121,12 +121,17 @@ func (b *subIO) Close() error {
 		close(b.done)
 		b.srv.mu.Lock()
 		ss := b.srv.sessions[b.sid]
-		delete(b.srv.sessions, b.sid)
-		if ss != nil {
+		// Only retire the entry that is still this IO's own session. evictStaleLocked removes the victim under the
+		// lock but closes it in a goroutine, and admit can insert a NEW session under the same sid before that
+		// goroutine runs; deleting by sid alone would then orphan the live session (its streams and clients hang).
+		// An absent entry means eviction already retired it.
+		owned := ss != nil && ss.io == b
+		if owned {
+			delete(b.srv.sessions, b.sid)
 			b.srv.retireLocked(b.sid, max(ss.pn, ss.s.LastPN()))
 		}
 		b.srv.mu.Unlock()
-		if ss != nil { // keep Server.LastRecv monotonic: the session no longer feeds it once it leaves the map
+		if owned { // keep Server.LastRecv monotonic: the session no longer feeds it once it leaves the map
 			b.srv.noteRecv(ss.s.LastRecv())
 		}
 	})

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -31,6 +32,33 @@ func TestCrossSiteRequest(t *testing.T) {
 			}
 			if got := crossSiteRequest(r); got != c.want {
 				t.Errorf("crossSiteRequest(Sec-Fetch-Site=%q, Origin=%q) = %v, want %v", c.fetchSite, c.origin, got, c.want)
+			}
+		})
+	}
+}
+
+func TestGuard(t *testing.T) {
+	for _, c := range []struct {
+		name, fetchSite, origin string
+		want                    int
+	}{
+		{name: "cross-site page", fetchSite: "cross-site", want: http.StatusForbidden},
+		{name: "foreign origin", origin: "https://evil.example", want: http.StatusForbidden},
+		{name: "no browser headers", want: http.StatusNoContent},
+		{name: "direct navigation", fetchSite: "none", want: http.StatusNoContent},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/stats", nil)
+			if c.fetchSite != "" {
+				r.Header.Set("Sec-Fetch-Site", c.fetchSite)
+			}
+			if c.origin != "" {
+				r.Header.Set("Origin", c.origin)
+			}
+			w := httptest.NewRecorder()
+			guard(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })(w, r)
+			if w.Code != c.want {
+				t.Errorf("guard(Sec-Fetch-Site=%q, Origin=%q) = %d, want %d", c.fetchSite, c.origin, w.Code, c.want)
 			}
 		})
 	}

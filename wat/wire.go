@@ -135,7 +135,9 @@ func parseAckInto(r *reader, buf []rng) (largest uint64, delayUs uint64, rs []rn
 	for i := uint64(1); i < n; i++ {
 		gap := r.uv()
 		ln := r.uv()
-		if r.err != nil || ln == 0 || gap+ln > lo {
+		// Validate without gap+ln: that sum wraps for a hostile range (gap=^uint64(0) passed the old check, then
+		// hi=lo-gap wrapped too and the ACK became overlapping, bogus ranges that amplified onAck's walk). gap < lo.
+		if r.err != nil || ln == 0 || gap >= lo || ln > lo-gap {
 			r.err = errBadFrame
 			return
 		}

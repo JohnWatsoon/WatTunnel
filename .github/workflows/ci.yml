@@ -18,7 +18,7 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l cmd wat)"
       - run: go test -count=1 ./cmd/...
-      - run: go test -count=1 ./wat/
+      - run: go test -count=1 -timeout 15m ./wat/
       - run: bash -n install.sh
       - run: bash -n wattun-manager
       - run: bash -n test-manager.sh
@@ -36,7 +36,7 @@ jobs:
           go-version: '1.26'
       # The ICMP and raw-IP tests skip without root (icmp_linux_test.go, rawip_linux_test.go). They must not
       # skip here: this job runs them under sudo so a real raw-socket regression fails CI.
-      - run: sudo -E env "PATH=$PATH" go test -count=1 -run 'TestICMP|TestRawIP' ./wat/
+      - run: sudo -E env "PATH=$PATH" go test -count=1 -timeout 15m -run 'TestICMP|TestRawIP' ./wat/
   race:
     runs-on: ubuntu-latest
     timeout-minutes: 20

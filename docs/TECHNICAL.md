@@ -379,6 +379,17 @@ flags (or with a first argument that does not start with `-`, such as `wattun au
 `status` or `auto-ip NAME IP`) hands over to `/usr/local/bin/wattun-manager`, which still works by its own name.
 Engine usage (flags starting with `-`) is unchanged.
 
+**Trust model.** `install.sh` checks the release binary, and the `wattun-manager` file when the release ships it,
+against the RSA-signed `SHA256SUMS`; the public key is baked into the script, and a missing or invalid signature
+aborts the install (a local `dist/` build skips the remote check). The installer script itself, fetched with
+`curl | bash` through `WAT_PROXY` (a third-party mirror, untrusted), has no signature to check on that first hop:
+that is trust-on-first-use. `wattun-manager update` now downloads the installer from the release assets and verifies
+it against the same signed `SHA256SUMS` before running it as root. Unsigned installs are explicit opt-ins:
+`WAT_ALLOW_UNSIGNED_MANAGER=1` takes a manager from `raw.githubusercontent.com` when a release does not ship one
+(never through `WAT_PROXY`), and `WAT_ALLOW_UNSIGNED_UPDATE=1` runs an unverified installer from `main`. Until a
+release ships the new `dist/install.sh` asset (the next release built by the updated `build.sh`), the verified update
+path fails closed; the override above is the only escape.
+
 **Windows (2.5.0).** Releases include `wattun-windows-amd64.exe`, the engine alone (no installer, no manager): run it
 with `-config FILE` or flags, as a client or a server. Every carrier but ICMP works; `icmp` needs a Linux raw socket
 and fails at start. `tcp-cc` is ignored (BBR is set only on Linux). Use Windows paths in the config file.
@@ -497,7 +508,7 @@ To judge a link's health, use `last_rx_age_ms` rather than ping. Fields: [Metric
 
 | Your situation | Use | Notes |
 |---|---|---|
-| Only ping passes | `icmp` | Needs root. `icmp-type` can be `echo`, `timestamp`, `info` or `mask`. |
+| Only ping passes | `icmp` | Needs root. `icmp-type` can be `echo` or `timestamp` (Linux does not answer `info`/`mask`). |
 | UDP works | `udp` | Lowest latency and CPU. |
 | Plain TCP works | `tcp` | A pool of connections. |
 | Traffic should look like HTTPS | `tls` | TLS 1.3. Set `tls-pin` to pin the certificate. |
@@ -1269,6 +1280,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `shape` | true | both | Pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval (3.0.0). Compatible with older peers. |
 | `ports` | | both | List of `N`, `N/udp`, `LISTEN:TARGET` and `LISTEN:TARGET/udp`. Client listens on LISTEN, server allows TARGET. Hot-reloaded. |
 | `bind` | `0.0.0.0` | client | Address of the public listeners. |
+| `src-ip` | | client | Outbound source IP address for carriers (per-carrier `src-ip-NAME` in a bond). Pin it when the host has several public addresses and the routing table picks one the customers do not use. See [Traffic shape](#traffic-shape-what-a-dpi-sees-300). |
 | `port-offset` | 0 | client | Added to every listen port. Used by the second slot of a handover. |
 | `lanes` | 4 | client | ICMP identifiers to stripe over. |
 | `conns` | 0 (auto) | client (server with `reverse`) | Connections in a pool carrier. 0 picks 8 on a lean host, 16 on a standard one, 24-32 on a high-performance one (3.1.0, see "3.1.0: host-aware defaults"); older versions used 8. With `reverse`, Kharej dials this many to Iran. |
@@ -1276,10 +1288,11 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `pool-rotate-bytes` | 0 (off) | client, or the dialing server of a `reverse` tunnel since 3.0.2 (pool carriers: tcp, tls, ws, wss, h2, grpc) | With or instead of `pool-rotate`: also recycle each healthy pool connection after this many bytes handed to its socket (`500MB`, `4G`, `300k`; decimal units, 1 MB = 10^6). Jittered +/-25 % like the time axis; whichever limit hits first recycles, so the byte axis does not betray the time axis's jitter. 0 = off. Since 2.8.1. |
 | `mtu` | 0 (carrier default) | both | Datagram size cap, including header and tag. |
 | `win-max` | 0 (auto) | both | Cap of the receive window per stream in MB, 4 to 64 (3.0.3). Windows are receiver-driven, so the value bounds what the peer's sender buffers per stream. 0 uses the host tier (4 MB lean, 16 standard, 32 high-performance); the fixed cap before 3.0.3 was 16 MB. |
+| `mem-budget` | 0 (eighth of RAM) | both | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0). See [3.2.0](#320-fast-by-default-bounded-memory-greipip). |
 | `max-mbps` | 0 (carrier default) | both | Pacing ceiling, MB/s per direction, per session. 0 = 16 when `icmp` is among the carriers, 1250 (10 Gbit, i.e. no practical cap) for udp, tcp, tls, ws, wss, h2, h2c and grpc since 2.4.18 (200 from 2.3.0; before that 16 for every carrier; the server's value caps the download). See "ICMP path limits and pacing". |
 | `tcp-cc` | `bbr` | both | Since 2.4.18, Linux. TCP congestion control set on every pool socket (tcp, tls, ws, wss, h2, h2c, grpc). BBR does not back off on random loss; the kernel default (cubic) halves its window on every lost segment. `system` keeps the kernel default. Each end sets it for what it sends. `tcp_cc` in `/stats` shows what the kernel accepted (falls back to the default if the `tcp_bbr` module is missing). |
 | `sessions` | 0 (auto) | client | Independent sessions to the server, 1 to 16 (2.3.0, client only; the server is unchanged). 0 picks 1 on a lean host and 2-4 on a host with 2+ CPUs and enough RAM (3.1.0), and always 1 for `icmp`, bonds and `reverse`; older versions used 1. See "Several sessions". |
-| `icmp-type` | `echo` | both | ICMP carrier: `echo`, `timestamp`, `info` or `mask`. Both ends must match. |
+| `icmp-type` | `echo` | both | ICMP carrier: `echo` or `timestamp` (Linux does not answer `info`/`mask`). Both ends must match. |
 | `loss-ceiling` | false | both | Opt-in loss-aware ceiling for the pacer (see "ICMP path limits and pacing"). Off = delay only. |
 | `slack-ms` | 8 | both | RTT growth tolerated before slowing down. |
 | `hedge` | false | both | Send small young packets twice. Helps lossy tails, costs packets. |
@@ -1300,9 +1313,9 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `ech` | `off` | client (server with `reverse`) | Encrypted Client Hello, hides the SNI: `off`, `auto`, `ladder` or a base64 ECHConfigList. `auto` fetches the domain's HTTPS DNS record over DoH, by IP (1.1.1.1, 1.0.0.1, 8.8.8.8, 9.9.9.9), and falls back to no ECH. `ladder` (2.9.0) adds the through-the-tunnel DNS relay as the second rung when every direct DoH server fails (both ends 2.9.0). Since 2.2.0. |
 | `ech-cache` | empty (off) | client, with `ech: auto` | File that keeps the last good ECHConfigList (`name base64` per line, written atomically, 0600). On start it is used at once while DoH refreshes in the background; cache errors are logged once and never stop the tunnel. Since 2.2.3. |
 | `tls-frag` | 0 | client (server with `reverse`) | Split the ClientHello into pieces of N bytes. 0 = off. Since 2.2.0. |
-| `tls-small-ch` | false | client | Keep the TLS ClientHello small: drop the post-quantum hybrid key share (Go 1.24+ offers `X25519MLKEM768` by default) and offer `X25519` + `P-256` only, so the hello is ~250 B instead of ~1.5 KB. Some DPIs silently drop large hellos — measured live on an Iranian path 2026-10-22, where 1474 B hellos never left `Send-Q` while 250–512 B hellos passed every time and the tunnel then came up with `srtt` 88 ms. The session's own ChaCha20-Poly1305 layer is unaffected. Since 2.10.4; also applies under `fp: chrome|edge` (the browser presets' post-quantum share is removed too: a Chrome hello goes from ~1.8 KB to ~560 B) since 2.10.8. |
+| `tls-small-ch` | false | client | Keep the TLS ClientHello small: drop the post-quantum hybrid key share (Go 1.24+ offers `X25519MLKEM768` by default) and offer `X25519` + `P-256` only, so the hello is ~250 B instead of ~1.5 KB. Some DPIs silently drop large hellos — measured live on an Iranian path 2026-10-22, where 1474 B hellos never left `Send-Q` while 250–512 B hellos passed every time and the tunnel then came up with `srtt` 88 ms. The session's own ChaCha20-Poly1305 layer is unaffected. Since 2.10.4; also applies under `fp: chrome\|edge` (the browser presets' post-quantum share is removed too: a Chrome hello goes from ~1.8 KB to ~560 B) since 2.10.8. |
 | `fake-sni` | empty (off) | client, or server with `reverse` (2.10.12) | Fake-SNI desync, tcp, tls, wss, h2 and grpc carriers: after each connection's TCP handshake the client injects a raw TLS ClientHello carrying this allowlisted SNI. The DPI classifies the flow as TLS to the allowed site; the server never receives it (wrong sequence number, a TTL that expires at the filtering hop, or a bad checksum), so the session flows on as if it were that TLS connection. Needs Linux + CAP_NET_RAW on the client, like the icmp carrier. Works over IPv4 and IPv6 peers (IPv6 since 2.10.9: the sniffer reads IPv6 frames and the markers go out through a raw `AF_INET6` socket; an IPv6 peer with extension headers before TCP is not tracked). Server unchanged. Since 2.6.0. |
-| `fake-mode` | `seq` | client, with `fake-sni` | `seq`: the marker carries a sequence number below the stream start, the server drops it as an old duplicate. `ttl`: the marker carries a small TTL and expires at the filtering hop (needs `fake-ttl`). `sum` (2.7.1): the marker mirrors the first data segment in-window with a damaged TCP checksum; the server kernel drops it, DPIs that ignore checksums still read it — the mode for filters that check sequence numbers. `seqsum` (2.8.0, experimental): both the seq and the sum marker per connection, ~1 ms apart. `split` (2.10.5): the fake hello cut across `fake-split` TCP segments, so a per-packet SNI parser never sees the whole name. `hlen0` (2.10.5): F&F-style empty TLS record (length 0) that makes a stateful parser latch and stop reading the flow. `paws` (3.0.2): an in-window fake with a valid checksum and a stale TCP timestamp, dropped by the server kernel (PAWS); see [3.0.2](#302-probing-resistance-and-the-paws-marker). `fakeip` (2.10.5): a checksum-valid SYN + hello addressed to `fake-ip` (a CDN edge), for filters that allowlist by destination IP. `synrst` (2.10.5): in-window SYN|RST with a damaged checksum, clears flow tables harder than `rst`. `all` (2.10.5): seq + sum + hlen0 markers ~1 ms apart. `ff` (2.10.6): the Irancell F&F record plan for the fake hello — a zero-length TLS record, then a 104-byte record, then 1-byte records around the SNI, cut across `fake-split` (default 11) below-window segments; the shape the field reports connecting at full speed on Irancell. `rst` (2.9.0): the marker is an in-window RST|ACK with a damaged TCP checksum — a stateful middlebox clears the flow, the server's kernel drops the packet before it reads the flags. Since 2.6.0. |
+| `fake-mode` | `seq` | client, with `fake-sni` | `seq`: the marker carries a sequence number below the stream start, the server drops it as an old duplicate. `ttl`: the marker carries a small TTL and expires at the filtering hop (needs `fake-ttl`). `sum` (2.7.1): the marker mirrors the first data segment in-window with a damaged TCP checksum; the server kernel drops it, DPIs that ignore checksums still read it — the mode for filters that check sequence numbers. `seqsum` (2.8.0, experimental): both the seq and the sum marker per connection, ~1 ms apart. `split` (2.10.5): the fake hello cut across `fake-split` TCP segments, so a per-packet SNI parser never sees the whole name. `hlen0` (2.10.5): F&F-style empty TLS record (length 0) that makes a stateful parser latch and stop reading the flow. `paws` (3.0.2): an in-window fake with a valid checksum and a stale TCP timestamp, dropped by the server kernel (PAWS); see [3.0.2](#302-probing-resistance-and-the-paws-marker). `fakeip` (2.10.5): a checksum-valid SYN + hello addressed to `fake-ip` (a CDN edge), for filters that allowlist by destination IP. `synrst` (2.10.5): in-window SYN\|RST with a damaged checksum, clears flow tables harder than `rst`. `all` (2.10.5): seq + sum + hlen0 markers ~1 ms apart. `ff` (2.10.6): the Irancell F&F record plan for the fake hello — a zero-length TLS record, then a 104-byte record, then 1-byte records around the SNI, cut across `fake-split` (default 11) below-window segments; the shape the field reports connecting at full speed on Irancell. `rst` (2.9.0): the marker is an in-window RST\|ACK with a damaged TCP checksum — a stateful middlebox clears the flow, the server's kernel drops the packet before it reads the flags. Since 2.6.0. |
 | `fake-ip` | `104.16.0.1` (IPv4 peer) / `2606:4700::6810:1` (IPv6 peer) | client, `fake-mode: fakeip` | Destination of the injected fake SYN+hello, IPv4 or IPv6. A destination-IP allowlist then files the flow as CDN traffic. It has to be of the same family as the connection (`peer`); a mismatched one is replaced by that family's default. IPv6 since 2.10.9. Since 2.10.5. |
 | `fake-split` | 0 (3) | client, `fake-mode: split` | How many TCP segments the fake ClientHello is cut into (2..16), so no single packet carries the SNI. Since 2.10.5. |
 | `fake-ttl` | 0 | client, `fake-mode: ttl` | Hop count of the marker packet: one more than the distance to the filtering DPI box, one less than the distance to the server. Read it off a traceroute to the server. 0 also means auto since 2.7.0: the client learns the peer's inbound TTL from its SYN-ACKs, infers the path length from it (initial TTL 32/64/128/255 minus the arrival TTL) and sends the marker one hop short of the server (2.7.0-2.10.7 used the arrival TTL minus one, which still reached the server; fixed in 2.10.8). Unused by `seq` and `sum`. Since 2.6.0. |
@@ -1425,10 +1438,15 @@ Every flag can also be a config key. Flags win over the file.
 | `-udp SPEC` | | Client: UDP forwards. |
 | `-udp-idle D` | `60s` | UDP flow idle timeout. |
 | `-bind ADDR` | `0.0.0.0` | Client listen address. |
+| `-src-ip ADDR` | | Client: outbound source IP address for carriers (per-carrier `-src-ip-NAME` in a bond). |
 | `-port-offset N` | 0 | Added to every client listen port. |
 | `-lanes N` | 4 | ICMP identifiers. |
 | `-conns N` | 0 (auto) | Pool connections. |
+| `-pool-rotate D` | `0` (off) | Client, pool carriers: recycle a healthy connection after this long (`30m`, `4h`, seconds), jittered ±40%; 0 = off (2.8.0; a `reverse` server that dials honours it since 3.0.2). |
+| `-pool-rotate-bytes N` | `0` (off) | With or instead of `-pool-rotate`: also recycle after this many bytes (`500MB`, `4GB`, `300k`), jittered ±25%; 0 = off (2.8.1; `reverse` server since 3.0.2). |
 | `-mtu N` | 0 | Datagram cap. |
+| `-win-max N` | 0 (auto) | Both ends: cap the per-stream receive window in MB, 4-64 (0 = host tier: 4, 16 or 32-64) (3.0.3). |
+| `-mem-budget N` | 0 (eighth of RAM) | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0; see "3.2.0: fast by default, bounded memory, gre/ipip"). |
 | `-max-mbps F` | 0 | Pace ceiling per direction and session; 0 = 16 with icmp, 1250 otherwise (2.4.18; 200 from 2.3.0). |
 | `-tcp-cc NAME` | `bbr` | Pool sockets' TCP congestion control, Linux (2.4.18). `system` keeps the kernel default. |
 | `-batch on\|off` | empty | sendmmsg batching for icmp and udp; empty keeps the default (on for icmp, off for udp). Same switch as `WAT_BATCH`, but kept in the config (3.0.0). |
@@ -1437,10 +1455,11 @@ Every flag can also be a config key. Flags win over the file.
 | `-udp-dns` | false | udp carrier: DNS-shaped datagrams, for port 53 (3.0.0). |
 | `-tcp-mimic` | true | tcp carrier: ClientHello-shaped hello and masked frame lengths (3.0.0). |
 | `-shape` | true | Pad small packets and jitter the keepalive (3.0.0). |
+| `-ping-every N` | 2 | Idle keepalive interval, seconds, 0-60; both ends use their own value, and liveness scales with it. |
 | `-sessions N` | 0 (auto) | Client: N independent sessions, udp and the pool carriers only (2.3.0, server unchanged). |
 | `-dns-listen ADDR` | empty | Client: listen here for DNS queries and forward them through the tunnel's DNS relay, e.g. `127.0.0.1:53` (2.9.0). |
 | `-dns-relay-upstream ADDR` | `8.8.8.8:53` | Kharej: resolver the internal DNS relay queries (port 53, `-ech ladder`); empty = `8.8.8.8:53`. |
-| `-icmp-type T` | `echo` | ICMP carrier: `echo`, `timestamp`, `info`, `mask` (both ends the same). |
+| `-icmp-type T` | `echo` | ICMP carrier: `echo`, `timestamp` (both ends the same; Linux does not answer `info`/`mask`). |
 | `-loss-ceiling` | off | Pacer: also cut the rate when loss jumps far above its learned baseline (opt-in). |
 | `-governor` | off | Pacer, ICMP paths: learn the path's volume ceiling from the reroute signature (a sudden base-RTT jump after sustained bulk) and hold the rate under it (opt-in, 2.9.0; see ICMP path limits). |
 | `-slack-ms N` | 8 | Tolerated RTT growth. |
@@ -1456,6 +1475,12 @@ Every flag can also be a config key. Flags win over the file.
 | `-ech MODE` | `off` | Dialer: `off`, `auto`, `ladder` or a base64 ECHConfigList (2.2.0; `ladder` 2.9.0, see ECH bootstrap ladder). |
 | `-ech-cache FILE` | empty | Dialer, with `-ech auto`/`ladder`: ECH config cache file (2.2.3). |
 | `-tls-frag N` | 0 | Dialer: split the ClientHello into N-byte pieces (2.2.0). |
+| `-tls-small-ch` | false | Client, tls/wss/h2/grpc: keep the ClientHello small by skipping the post-quantum key share (~250 B instead of ~1.5 KB) (2.10.4). |
+| `-fake-sni SNI` | empty (off) | Client (or a `reverse` server): inject a fake TLS ClientHello carrying this allowlisted SNI after each outgoing TCP handshake (Linux raw socket + CAP_NET_RAW). See "Fake-SNI desync". Since 2.6.0. |
+| `-fake-mode MODE` | `seq` | Marker for `-fake-sni`: `seq`, `ttl`, `sum`, `seqsum`, `split`, `hlen0`, `fakeip`, `synrst`, `all`, `ff`, `rst`, `paws` or `auto`. See "Fake-SNI desync". |
+| `-fake-ip ADDR` | empty (family default) | `-fake-mode fakeip`: destination of the fake SYN + hello (empty = `104.16.0.1` for an IPv4 peer, `2606:4700::6810:1` for IPv6). |
+| `-fake-split N` | 0 (3) | `-fake-mode split` (and `ff`): TCP segments the fake ClientHello is cut into, 2-16; 0 = 3 for `split`, `ff` uses 11. |
+| `-fake-ttl N` | 0 (auto) | `-fake-mode ttl`: marker hop count; 0 calibrates from the server's replies. Unused by `seq`, `sum` and `seqsum`. |
 | `-metrics ADDR` | off | Serve `/stats` and pprof. |
 | `-debug` | off | Log every stream. |
 | `-version` | | Print `wattun X.Y.Z` and exit. |
@@ -1562,6 +1587,8 @@ metrics port, even if the port is in the allowlist.
 | `pool_drops` | Since 2.4.18. Packets dropped because a pool connection's queue was full (should stay 0; the session waits instead). |
 | `pool_conn_deaths` | Since 2.4.18. Pool connections that died (both ends count their own). |
 | `pool_conns` | Since 2.4.18. One entry per open pool connection, oldest first: `age_s`, `tx` and `rx` (datagrams), `queue`, `stalled_ms` (how long its current socket write has been blocked). Uneven `tx` deltas show a skewed spread. |
+| `conn_limit_drops` | Client: connections refused by the public TCP listeners' cap (4096 in total, 256 per source IP). |
+| `conns_active` | Client: TCP connections the public listeners currently hold (the cap counts these). Not the per-port `conns_active` in `ports`. |
 | `pool_slow_closed` | Since 2.4.7, pool carriers. Pool connections this process closed for delivering far below their share (see [Stalled pool connections](#stalled-pool-connections-245)). |
 | `cc` | Since 2.4.10. Pacer diagnostics, see below. |
 
@@ -2009,6 +2036,38 @@ No wire-format change: an older peer keeps working, and either order of updating
   remote install whose `SHA256SUMS.sig` is missing or invalid (a local `dist/` build still installs). `build.sh` also
   ships `cmd/wprobe` as `wattun-wprobe-<os>-<arch>`.
 
+**Follow-up audit pass (same day, same unreleased 3.2.1).**
+
+- **A session id cannot be orphaned by an eviction race.** A full server evicts a silent session and closes it in a
+  goroutine while the reconnecting client can be re-admitted under the same id; the old close then deleted the new
+  session entry, leaking it and hanging that client's streams. `subIO.Close` now removes/retires only the entry it
+  still owns (`ss.io == b`).
+- **Hostile ACK ranges cannot wrap.** The range decoder validated `gap+len <= lo` with an addition that overflowed
+  for hostile uvarints; a wrapped ACK decoded into overlapping ranges and multiplied `onAck`'s delivery walk. It now
+  validates by subtraction (`gap >= lo || len > lo-gap`), rejecting the wrapped form.
+- **The memory budget covers buffered data, not just windows.** Received stream bytes (`rxHeld`) and fragment
+  reassembly (`reasmHeld`, 32 MB cap) are now charged to the process budget; when it is full the offending stream is
+  reset (RST) and over-cap fragment pieces are dropped, instead of a key-holding peer pinning gigabytes. The 4 MB
+  base windows are deliberately not charged, so ordinary stream concurrency is unchanged. The received-datagram queue
+  is 64 entries (it can hold reassembled `MaxDatagram` frames).
+- **Public listeners are capped** at 4096 connections in total and 256 per source IP; refused connections are closed
+  and counted in `/stats` as `conn_limit_drops`, with `conns_active` for the live count.
+- **`pprof` and the read metrics endpoints reject cross-site browser requests** like the side-effect routes already
+  did, so a visited page cannot start a CPU profile on the loopback metrics port.
+- **The manager reads the aggregate `/stats` values** (`rtt_ms`/`streams_total`) instead of a nested per-session row,
+  so a `-sessions > 1` tunnel no longer shows the first session's RTT and stream count.
+- **The installer/manager trust chain covers the scripts.** `build.sh` copies `install.sh` into `dist/` and includes it
+  in `SHA256SUMS`; `wattun-manager update` downloads the installer from the release assets, verifies the RSA signature
+  and the installer's hash against the signed list, and only then runs it as root. `install.sh` refuses an unsigned
+  manager for releases that do not ship one. `WAT_ALLOW_UNSIGNED_MANAGER=1`/`WAT_ALLOW_UNSIGNED_UPDATE=1` are explicit
+  opt-ins; a `WAT_PROXY`-fetched installer script itself stays trust-on-first-use.
+- **Tests and CI.** New tests cover the close-identity check, wrapping ACK ranges, the receive budget, the connection
+  limiter, the cross-site guard, the `/stats` aliases and `cmd/wprobe`'s parser/checksum; the hot-reload test can no
+  longer skip its assertion. CI adds `-timeout 15m` to the long suites and the release job asserts that
+  `dist/install.sh` exists in the signed `SHA256SUMS`. The flag table gained the flags it had omitted (fake-SNI family,
+  pool rotation, win-max, mem-budget, ping-every, src-ip, tls-small-ch), the Keys table `mem-budget`/`src-ip`, and
+  `/stats` the two connection counters.
+
 ## 3.2.0: fast by default, bounded memory, gre/ipip
 
 Measured on a 2 vCPU Iran / 2 vCPU Kharej pair, 76-80 ms, raw TCP ~2 Gbit/s sustained on 16 streams (iperf3),
@@ -2311,14 +2370,22 @@ GOOS=linux GOARCH=amd64 go vet ./... && GOOS=linux GOARCH=amd64 go build -o /dev
 sh build.sh                                                     # dist/ binaries
 ```
 
+`-race` needs cgo and does not work on a Windows checkout whose MinGW gcc path contains a space (the linker splits
+the path). On Ubuntu, CI runs `go test -race -count=1 ./cmd/...` plus a selected `./wat/` subset
+(`TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback`).
+
 CI (`.github/workflows/ci.yml`) runs `go build`, `go vet`, the `gofmt` gate, the `cmd` and `wat` suites, the shell
-syntax checks plus `test-manager.sh` and the DPI self-test. A separate job runs the ICMP/raw-IP tests under `sudo`,
-where they do not skip.
+syntax checks plus `test-manager.sh`, the DPI self-test, Windows and linux/arm64 cross builds, and the race subset
+above. A separate job runs the ICMP/raw-IP tests under `sudo`, where they do not skip.
 
 Layout: `wat/` is the library (session, congestion control, streams, carriers), `cmd/wattun` the binary,
 `cmd/wprobe` a path probe (ships in `dist/` as `wattun-wprobe-<os>-<arch>`). Bump `wat/version.go` for every shipped change, and
 rebuild `dist/` (`sh build.sh`). A change that is slower on ICMP is not
 shipped.
+
+`cmd/wprobe` is the standalone ICMP path prober for the Iran ⇄ Kharej route: server mode on Kharej, client on
+Iran; it measures the reply ratio and loss against rate, packet size and ICMP identifier count. It is not part of the
+tunnel, ships in `dist/` as `wattun-wprobe-<os>-<arch>`, and needs Linux + CAP_NET_RAW (root), like the `icmp` carrier.
 
 ## Release history
 

@@ -84,7 +84,7 @@ func main() {
 	shape := flag.Bool("shape", true, "randomize idle traffic: pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval around -ping-every (3.0.0; wire-compatible with older peers)")
 	pingEvery := flag.Int("ping-every", 2, "idle keepalive interval, seconds (raise on paths whose filter rate-limits steady periodic packets into a penalty box: live 2026-10-22 saw 30 echo req/min collapse to 95% loss until a ~5 min cooldown; both ends use their own value)")
 	dnsUpstream := flag.String("dns-relay-upstream", "8.8.8.8:53", "Kharej recursive resolver used by the internal DNS relay (port 53, -ech ladder); empty = 8.8.8.8:53")
-	icmpType := flag.String("icmp-type", "echo", "icmp carrier: echo|timestamp|info|mask - the ICMP request type the client sends (the server answers with the matching reply: 8/0, 13/14, 15/16, 17/18); both ends must use the same")
+	icmpType := flag.String("icmp-type", "echo", "icmp carrier: echo|timestamp - the ICMP request type the client sends (the server answers with the matching reply: 8/0, 13/14); both ends must use the same. info|mask are accepted, but the Linux kernel does not answer them")
 	carrier := flag.String("carrier", "icmp", "icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip (gre/ipip: IP protocol 47/4 on a raw socket, root and Linux, -peer is a bare IP like icmp, 3.2.0 on both ends; all but icmp/gre/ipip: client dials -peer host:port, server listens on -listen; h2 through Cloudflare: not supported, use grpc or wss); join several with '+' (icmp+udp+tcp) to bond them into ONE session that survives any one being blocked; then -peer / -listen are the defaults and -peer-NAME / -listen-NAME (e.g. -peer-udp, -listen-tcp, also keys in the config file) override them per carrier; fortress = alias the manager writes for blackout mode (icmp+tcp+tls+wss+udp on ports 80/443/8443/53)")
 	udpListen := flag.String("listen", ":4443", "server, udp carrier: address to listen on")
 	conns := flag.Int("conns", 0, "client, tcp/tls carrier: connections in the pool (0 = auto-tuned from host hardware: 8 on lean VPS, 16 on 2-CPU/2GB+, 24-32 on 4+ cores)")
@@ -708,11 +708,11 @@ func main() {
 		}
 		go func() {
 			mux := http.NewServeMux()
-			mux.HandleFunc("/debug/pprof/", pprof.Index)
-			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-			mux.HandleFunc("/ports", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("/debug/pprof/", guard(pprof.Index))
+			mux.HandleFunc("/debug/pprof/profile", guard(pprof.Profile))
+			mux.HandleFunc("/ports", guard(func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(portReg.snapshot(side))
-			})
+			}))
 			mux.HandleFunc("/quota/reset", func(w http.ResponseWriter, r *http.Request) {
 				if crossSiteRequest(r) {
 					http.Error(w, "cross-site request refused", http.StatusForbidden)
@@ -766,7 +766,7 @@ func main() {
 					speedH(w, r)
 				})
 			}
-			mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("/stats", guard(func(w http.ResponseWriter, r *http.Request) {
 				st := stats()
 				inTot, outTot := portReg.sessionTotals(st.BytesIn, st.BytesOut)
 				out := map[string]any{
@@ -775,9 +775,6 @@ func main() {
 					"fec_sent": st.FecSent, "fec_recovered": st.FecRecovered, "retrans": st.Retrans, "send_errors": st.Dropped, "ack_late": st.AckLate, "dup_recv": st.RxDup, "rx_too_old": st.RxTooOld, "rate_bps": st.RateBps,
 					"ceiling_bps": st.CeilingBps, "loss_pct": st.LossPct,
 					"srtt_ms": float64(st.SRTT) / 1e6, "min_rtt_ms": float64(st.MinRTT) / 1e6,
-					// Flat aliases for the aggregates: encoding/json sorts the nested carriers/session_list before
-					// these keys, and the manager's grep|head -1 parser would otherwise read a nested value (M6).
-					"rtt_ms": float64(st.SRTT) / 1e6, "streams_total": st.Streams,
 					"streams": st.Streams, "inflight": st.Inflight, "alive": alive(), "last_rx_age_ms": rxAge(), "version": wat.Version, "draining": srv != nil && srv.Draining(),
 					"sessions": func() int {
 						if srv != nil {
@@ -788,8 +785,14 @@ func main() {
 					"dgram_sent": st.DgramSent, "dgram_recv": st.DgramRecv, "dgram_dropped_queue": st.DgramDropQueue,
 					"dgram_dropped_size": st.DgramDropSize, "dgram_dropped_rx": st.DgramDropRx, "dgram_fragmented": st.DgramFragmented, "dgram_reassembled": st.DgramReassembled, "dgram_flows": udpFlowsActive.Load(),
 					"dgram_rejected": udpRejected.Load(), "dgram_flow_cap_drops": udpFlowCapDrop.Load(), "pool_slow_closed": wat.PoolSlowKills(), "pool_conn_deaths": wat.PoolConnDeaths(), "pool_drops": wat.PoolDrops(), "tcp_cc": wat.PoolTCPCCInUse(), "pool_conns": wat.PoolConnStats(),
+					"conn_limit_drops": connLimitDrops.Load(), "conns_active": connLimitActive.Load(),
 					"filter_profile": wat.FilterProfileNow(), // fake-mode auto's startup verdict (2.9.0)
 					"raw_send_fails": wat.RawSendFails(),     // fake-SNI fires that never left the host (2.10.9)
+				}
+				// Flat aliases for the aggregates: encoding/json sorts the nested carriers/session_list before
+				// these keys, and the manager's grep|head -1 parser would otherwise read a nested value (M6).
+				for k, v := range statsAliases(st) {
+					out[k] = v
 				}
 				out["cc"] = map[string]any{ // pacer diagnostics (2.4.10): what held the sender back, and why it slowed
 					"ticks": st.CC.Ticks, "tok_limited": st.CC.TokLimited, "cwnd_limited": st.CC.CwndLimited,
@@ -824,7 +827,7 @@ func main() {
 					}
 				}
 				json.NewEncoder(w).Encode(out)
-			})
+			}))
 			log.Println(http.ListenAndServe(*metrics, mux))
 		}()
 	}
@@ -993,7 +996,8 @@ func main() {
 	}
 }
 
-// acceptLoop runs handle for every connection until the listener is closed.
+// acceptLoop runs handle for every connection until the listener is closed. Public listeners are capped so one
+// source cannot take every stream slot; a refused connection is closed right away.
 func acceptLoop(ln net.Listener, handle func(net.Conn)) {
 	for {
 		c, err := ln.Accept()
@@ -1005,7 +1009,20 @@ func acceptLoop(ln net.Listener, handle func(net.Conn)) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		go handle(c)
+		ip := remoteIP(c.RemoteAddr())
+		if !publicConns.acquire(ip) {
+			connLimitDrops.Add(1)
+			c.Close()
+			continue
+		}
+		connLimitActive.Add(1)
+		go func() {
+			defer func() {
+				publicConns.release(ip)
+				connLimitActive.Add(-1)
+			}()
+			handle(c)
+		}()
 	}
 }
 
@@ -1132,6 +1149,23 @@ func loopbackMetricsAddr(addr string) (string, bool) {
 		return addr, false
 	}
 	return net.JoinHostPort("127.0.0.1", port), true
+}
+
+// guard refuses a cross-site browser request before h runs; the metrics server is loopback-bound, but a page
+// can still issue a plain GET at 127.0.0.1:port with no preflight.
+func guard(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if crossSiteRequest(r) {
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	}
+}
+
+// statsAliases returns the flat aggregate aliases the manager greps out of /stats (see the merge in the handler).
+func statsAliases(st wat.Stats) map[string]any {
+	return map[string]any{"rtt_ms": float64(st.SRTT) / 1e6, "streams_total": st.Streams}
 }
 
 // crossSiteRequest reports whether r was started by a web page on another origin. The metrics server is

@@ -6,8 +6,11 @@
 #   --force            reinstall even when the same version is installed
 #   --uninstall        stop every tunnel and remove WatTun (asks before deleting /etc/wattun)
 # Environment:
-#   WAT_PROXY=https://ghproxy.net/   prefix for every GitHub URL (when github.com is blocked; untrusted: the
-#                                    release signature is always verified, so a mirror cannot swap the binary)
+#   WAT_PROXY=https://ghproxy.net/   prefix for every GitHub URL (when github.com is blocked). Trust-on-first-use:
+#                                    a mirror could change the installer script itself. The release binary and
+#                                    manager are RSA-verified against the signed SHA256SUMS when it ships them.
+#   WAT_ALLOW_UNSIGNED_MANAGER=1     install wattun-manager from raw.githubusercontent for a release that does not
+#                                    ship it (unsigned; only if you trust the source)
 #   WAT_REPO=owner/name              fork to install from
 #   WAT_SIG_PUB=/path/to/pub.pem     another release-signing public key (forks)
 #   WAT_SKIP_CHECKSUM=1              install a local dist/ binary that has no .sha256 file
@@ -184,7 +187,8 @@ Options:
   -h, --help         Show this help screen
 
 Environment:
-  WAT_PROXY=https://ghproxy.net/   Proxy prefix for GitHub downloads (when github.com is filtered)
+  WAT_PROXY=https://ghproxy.net/   Proxy prefix for GitHub downloads (when github.com is filtered; trust-on-first-use)
+  WAT_ALLOW_UNSIGNED_MANAGER=1     Install wattun-manager from raw.githubusercontent when the release does not ship it
   WAT_REPO=owner/name              Fork or repository to install from (default: JohnWatsoon/WatTunnel)
   WAT_SIG_PUB=/path/to/pub.pem     Alternative release-signing public key (for custom forks)
   WAT_SKIP_CHECKSUM=1              Install local dist/ binary without a checksum file
@@ -371,18 +375,22 @@ step_stage2_retrieve_payload() {
   fi
 
   # Retrieve manager payload. From a release it must come from that same release (and is checked against the signed
-  # SHA256SUMS in stage 3); raw.githubusercontent is only a fallback for releases that predate the asset, never
-  # through a proxy.
+  # SHA256SUMS in stage 3). raw.githubusercontent is only an opt-in fallback for releases that predate the asset,
+  # never through a proxy.
   if [ -f "$HERE/wattun-manager" ]; then
     cp "$HERE/wattun-manager" "$TMP/mgr"
   elif [ -n "$DL_BASE" ] && fetch "$DL_BASE/wattun-manager" "$TMP/mgr"; then
     MGR_FROM_REL=1
+  elif [ "${WAT_ALLOW_UNSIGNED_MANAGER:-0}" != 1 ]; then
+    ERRMSG="this release does not ship a signed wattun-manager; refusing to install an unsigned copy (set WAT_ALLOW_UNSIGNED_MANAGER=1 only if you trust the source)"; return 1
   elif fetch "https://raw.githubusercontent.com/$REPO/${WAT_MGR_REF:-main}/wattun-manager" "$TMP/mgr"; then
     [ -n "$PROXY" ] && { ERRMSG="this release does not ship wattun-manager; refusing to fetch it unsigned through WAT_PROXY"; return 1; }
-    DETAIL="$DETAIL, manager from main (not in the signed release)"
+    warn "wattun-manager comes from main, not from the signed release (WAT_ALLOW_UNSIGNED_MANAGER=1)"
+    DETAIL="$DETAIL, manager from main (unsigned)"
   elif [ -n "$TAG" ] && fetch "https://raw.githubusercontent.com/$REPO/$TAG/wattun-manager" "$TMP/mgr"; then
     [ -n "$PROXY" ] && { ERRMSG="this release does not ship wattun-manager; refusing to fetch it unsigned through WAT_PROXY"; return 1; }
-    DETAIL="$DETAIL, manager from $TAG (not in the signed release)"
+    warn "wattun-manager comes from $TAG, not from the signed release (WAT_ALLOW_UNSIGNED_MANAGER=1)"
+    DETAIL="$DETAIL, manager from $TAG (unsigned)"
   else
     ERRMSG="could not download wattun-manager"; return 1
   fi

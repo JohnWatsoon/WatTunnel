@@ -18,10 +18,16 @@ jobs:
           test "v$v" = "$GITHUB_REF_NAME" || { echo "::error::tag $GITHUB_REF_NAME != wat/version.go $v"; exit 1; }
           grep -q "release-v$v" README.md || { echo "::error::README.md badge is not v$v"; exit 1; }
           grep -q "release-v$v" README.fa.md || { echo "::error::README.fa.md badge is not v$v"; exit 1; }
-      - run: go test -count=1 ./...
+      - run: go test -count=1 -timeout 15m ./...
       - run: sh build.sh
         env:
           WAT_SIGN_KEY: ${{ secrets.WAT_SIGN_KEY }}
+      # wattun-manager update() fetches install.sh from the release and runs it against the signed SHA256SUMS, so the
+      # release must ship the installer and list it in that signed file
+      - name: installer is in the signed checksum list
+        run: |
+          test -f dist/install.sh || { echo "::error::dist/install.sh missing — build.sh must copy install.sh into dist/ so the release ships the installer"; exit 1; }
+          grep -q ' install.sh$' dist/SHA256SUMS || { echo "::error::dist/SHA256SUMS does not cover install.sh — the signed list must include the installer"; exit 1; }
       # every release must carry a verifiable signature: the installer (and WAT_PROXY users especially) refuses
       # a download whose SHA256SUMS it cannot check
       - run: 'test -f dist/SHA256SUMS.sig || { echo "::error::dist/SHA256SUMS.sig missing — set the WAT_SIGN_KEY secret (RSA PEM)"; exit 1; }'

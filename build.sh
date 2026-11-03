@@ -2,6 +2,7 @@
 # Reproducible WatTunnel build: static linux/amd64 and linux/arm64 binaries, and windows/amd64 (wattun-windows-amd64.exe,
 # no ICMP), in dist/ with a .sha256 next to each.
 # Also builds the wprobe path prober as wattun-wprobe-linux-{amd64,arm64} and wattun-wprobe-windows-amd64.exe.
+# install.sh and wattun-manager ship in dist/ too, so the signed SHA256SUMS covers the scripts that run as root.
 # Usage: build.sh [amd64|arm64|windows ...]   (default: all three)
 # Go: `go` on PATH (or $GO).
 # Prints one line per binary and "BUILD_OK <version>" at the end, or "BUILD_FAIL <step>".
@@ -39,16 +40,17 @@ for a in amd64 arm64 windows; do
   printf '%s  %s\n' "$sum" "${out##*/}" > "$out.sha256"
   echo "wprobe $VER $os/$arch $sum"
 done
-# The manager is a release asset too: install.sh installs only the copy whose hash is in the signed list, so keep it
-# in dist/ before the checksums are made.
+# The manager and the installer are release assets too: install.sh only installs a manager whose hash is in the signed
+# list, and wattun-manager verifies the installer the same way, so keep both in dist/ before the checksums are made.
 if [ -f wattun-manager ]; then cp wattun-manager dist/wattun-manager; fi
+cp install.sh dist/install.sh
 # The release's signed checksum list: install.sh verifies the RSA signature against the public key baked into it,
 # so a download that went through WAT_PROXY (or any tampered copy) cannot pair a swapped binary with its own
 # checksum. WAT_SIGN_KEY: the private PEM itself (the release workflow passes the secret's contents) or a path to it.
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd dist && sha256sum wattun-* | grep -v '\.sha256$' > SHA256SUMS)
+  (cd dist && sha256sum wattun-* install.sh | grep -v '\.sha256$' > SHA256SUMS)
 elif command -v shasum >/dev/null 2>&1; then
-  (cd dist && shasum -a 256 wattun-* | grep -v '\.sha256$' > SHA256SUMS)
+  (cd dist && shasum -a 256 wattun-* install.sh | grep -v '\.sha256$' > SHA256SUMS)
 fi
 if [ -f dist/SHA256SUMS ] && [ -n "${WAT_SIGN_KEY:-}" ]; then
   key=$WAT_SIGN_KEY

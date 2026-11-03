@@ -427,6 +427,33 @@ func TestAliveScalesWithPingEvery(t *testing.T) {
 	}
 }
 
+// A session id can be re-used while the evicted session's Close goroutine is still queued: evictStaleLocked removes
+// the old entry, admit inserts a new session under the same sid, and the old subIO.Close must then leave the new
+// entry alone (before, it deleted by sid and orphaned the live session). The close must be a no-op here, so nothing
+// ever touches the foreign Session.
+func TestSubIOCloseOnlyOwnSession(t *testing.T) {
+	srv := &Server{sessions: map[uint64]*srvSess{}, retiredPN: map[uint64]uint64{}}
+	foreignIO := &subIO{srv: srv, sid: 7, done: make(chan struct{})}
+	foreign := &srvSess{s: &Session{}, io: foreignIO}
+	srv.sessions[7] = foreign
+	closer := &subIO{srv: srv, sid: 7, done: make(chan struct{})}
+	closer.Close()
+	if got := srv.sessions[7]; got != foreign {
+		t.Fatalf("closing an old session deleted the newer session under the same id: %p", got)
+	}
+	if _, retired := srv.retiredPN[7]; retired {
+		t.Fatal("closing a session that no longer owns its id retired the new session's packet number")
+	}
+
+	// The entry is already gone (eviction retired it): closing must not panic or leave anything behind.
+	delete(srv.sessions, 7)
+	gone := &subIO{srv: srv, sid: 7, done: make(chan struct{})}
+	gone.Close()
+	if n := len(srv.sessions); n != 0 {
+		t.Fatalf("closing with no session in the table left %d entries", n)
+	}
+}
+
 // A full server gives the slot of a silent session to a new client instead of refusing it until the idle timeout.
 func TestServerEvictsStaleWhenFull(t *testing.T) {
 	old := staleAfter

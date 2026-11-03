@@ -231,9 +231,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/i
 WAT_PROXY=https://ghproxy.net/ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/install.sh)
 ```
 
-The proxy is a third-party mirror: it sees and could alter the bytes. `install.sh` therefore requires `openssl` and
-checks every download against an RSA-signed checksum list, with the public key baked into the script; a download
-whose signature is missing or invalid is refused, and so is a checksum mismatch.
+The proxy is a third-party mirror: it sees and could alter the bytes. The release binary and `wattun-manager` are
+checked against an RSA-signed `SHA256SUMS`, with the public key baked into the installer; a download whose signature
+is missing or invalid, or whose hash is not in the signed list, is refused. The `install.sh` script you fetch through
+the mirror is only trust-on-first-use (a mirror could change the script itself), so prefer the release asset or a
+`git clone`. A release that does not ship `wattun-manager` refuses to install an unsigned copy unless you set
+`WAT_ALLOW_UNSIGNED_MANAGER=1`; `wattun-manager update` verifies the installer against the signed release before
+running it (`WAT_ALLOW_UNSIGNED_UPDATE=1` overrides).
 
 Or download `wattun-linux-amd64`, `install.sh` and `wattun-manager` from the
 [releases](https://github.com/JohnWatsoon/WatTunnel/releases) page, put the binary in `dist/` next to `install.sh`,
@@ -298,10 +302,13 @@ server only listens and never starts a flow towards a foreign address. Raw `tcp`
 hello and masked frame lengths instead of a plain pool id (`tcp-mimic`). On a route that cuts every UDP flow after a few
 packets but passes DNS, `udp-dns: true` starts each `udp` datagram like a DNS message on port 53
 ([DNS shape](docs/TECHNICAL.md#dns-shaped-udp-udp-dns-300), [traffic shape](docs/TECHNICAL.md#traffic-shape-what-a-dpi-sees-300)).
-The installer verifies the download's signature against a public key baked into it, so a `WAT_PROXY` mirror (or
-any tampered copy) cannot slip in a changed binary. The connection token contains the key: treat it like a
-password and share it only over a private channel. Keep `metrics` on `127.0.0.1`. What stays visible to the
-network: the server's address, and the volume and timing of packets. Details:
+The installer verifies the release binary, the manager and their `SHA256SUMS` against an RSA public key baked into
+it, so a `WAT_PROXY` mirror (or any tampered copy) cannot slip in a changed binary or manager; `wattun-manager
+update` checks the installer the same way before running it as root. The installer script fetched through a
+third-party mirror is only trust-on-first-use (prefer the release asset or a `git clone`). The overrides
+`WAT_ALLOW_UNSIGNED_MANAGER=1` and `WAT_ALLOW_UNSIGNED_UPDATE=1` are explicit and off by default. The connection
+token contains the key: treat it like a password and share it only over a private channel. Keep `metrics` on
+`127.0.0.1`. What stays visible to the network: the server's address, and the volume and timing of packets. Details:
 [security model](docs/TECHNICAL.md#security-model).
 
 ## More

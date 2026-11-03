@@ -559,5 +559,15 @@ chk "pe_from: moved them off the source" "$(yml_maps t_src | grep -c . || true)"
 chk "pe_from: source keeps its other keys" "$(grep -c '^peer:' "$WAT_CONF/t_src.yml" || true)" "1"
 rm -f "$WAT_CONF/t_src.yml" "$WAT_CONF/t_dst.yml"
 
+# Release checksums: sums_has matches one exact "<sha>  <name>" line (offline; update()'s openssl signature path
+# is exercised by the manual/CI smoke test only)
+SUMS_FILE=$PWD/.smoke/SHA256SUMS
+SUMS_SHA=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+printf '%s  %s\n' "$SUMS_SHA" install.sh >"$SUMS_FILE"
+chk "sums_has match install.sh" "$(sums_has "$SUMS_FILE" install.sh "$SUMS_SHA" && echo y || echo n)" "y"
+chk "sums_has rejects a wrong hash" "$(sums_has "$SUMS_FILE" install.sh 0000000000000000000000000000000000000000000000000000000000000000 && echo y || echo n)" "n"
+chk "sums_has rejects another name" "$(sums_has "$SUMS_FILE" wattun-manager "$SUMS_SHA" && echo y || echo n)" "n"
+rm -f "$SUMS_FILE"
+
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

@@ -49,3 +49,38 @@ func TestParseAckKeepsRangesWithHostileDelay(t *testing.T) {
 		}
 	}
 }
+
+// ackReader builds an ACK body: largest, delay, range count, then the range fields (first len, then gap/len pairs).
+func ackReader(largest, delayUs, ranges uint64, fields ...uint64) *reader {
+	var b []byte
+	b = appendUv(b, largest)
+	b = appendUv(b, delayUs)
+	b = appendUv(b, ranges)
+	for _, f := range fields {
+		b = appendUv(b, f)
+	}
+	return &reader{b: b}
+}
+
+// A second range's gap+len used to wrap uint64, so the wrapped sum passed the old gap+ln > lo check and hi=lo-gap
+// wrapped with it. A hostile ACK then decoded into overlapping, bogus ranges, which onAck walked repeatedly (a
+// CPU amplification on the receive side).
+func TestParseAckRejectsWrappingRange(t *testing.T) {
+	// largest=100 gives hi=101 and, with first len=10, lo=90; then gap=^uint64(0), ln=1.
+	r := ackReader(100, 0, 2, 10, ^uint64(0), 1)
+	_, _, _ = parseAckInto(r, nil)
+	if r.err == nil {
+		t.Fatal("a range whose gap+len wrapped uint64 was accepted")
+	}
+}
+
+// The valid two-range ACK appendAck emits (largest=100, [91,101) and [80,90): first len=10, then gap=1, len=10)
+// must still parse to the same ascending ranges.
+func TestParseAckTwoRangesAscending(t *testing.T) {
+	r := ackReader(100, 0, 2, 10, 1, 10)
+	largest, delayUs, rs := parseAckInto(r, nil)
+	want := []rng{{80, 90}, {91, 101}}
+	if r.err != nil || largest != 100 || delayUs != 0 || len(rs) != 2 || rs[0] != want[0] || rs[1] != want[1] {
+		t.Fatalf("err=%v largest=%d delay=%d ranges=%v, want %v", r.err, largest, delayUs, rs, want)
+	}
+}

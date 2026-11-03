@@ -1,6 +1,9 @@
 package wat
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // Unreliable datagrams (UDP forwarding). A datagram rides in a frDgram frame inside an ordinary encrypted packet, so
 // it is paced and counted in flight like everything else, but it is never retransmitted, never tracked per frame
@@ -21,18 +24,29 @@ import "time"
 const (
 	dgramQueueMax   = 512     // datagrams waiting to be sent
 	dgramQueueBytes = 1 << 20 // and their total size
-	dgramRxCap      = 1024    // received datagrams waiting for the consumer
-	dgramFragMax    = 64      // pieces per datagram
-	fragHdrMax      = 1 + 10 + 3 + 10 + 1 + 1 + 3
-	fragKeep        = 2 * time.Second // an incomplete datagram is dropped after this
-	fragPending     = 256             // datagrams being rebuilt at once
+	// Received datagrams waiting for the consumer. Each can be up to MaxDatagram bytes once reassembled, so a deep
+	// queue of large VPN frames would pin hundreds of MB; this only buffers the burst between the UDP consumer's reads.
+	dgramRxCap   = 64
+	dgramFragMax = 64 // pieces per datagram
+	fragHdrMax   = 1 + 10 + 3 + 10 + 1 + 1 + 3
+	fragKeep     = 2 * time.Second // an incomplete datagram is dropped after this
+	fragPending  = 256             // datagrams being rebuilt at once
 )
+
+// reasmMaxBytes caps the bytes held by datagrams being reassembled across every session: pieces arrive before any
+// stream-level gate sees them. It is a var, not a const, so tests can shrink the cap.
+var reasmMaxBytes int64 = 32 << 20
+
+// reasmHeld is the bytes currently stored in incomplete fragment buffers (every session's s.mu guards its own map,
+// so the process-wide total is atomic).
+var reasmHeld atomic.Int64
 
 type fragKey struct{ flow, id uint64 }
 
 type fragBuf struct {
 	port  int
 	parts [][]byte
+	bytes int // bytes stored in parts, subtracted from reasmHeld when the buffer completes or expires
 	have  int
 	at    time.Time
 }
@@ -153,6 +167,9 @@ func (s *Session) onDgram(flow uint64, port int, data []byte) {
 
 // onDgramFrag runs under s.mu: store one piece and hand the datagram over once every piece is in.
 func (s *Session) onDgramFrag(flow uint64, port int, id uint64, idx, cnt int, data []byte, now time.Time) {
+	if s.closed { // Close returned the buffered fragments; a late piece must not start a new buffer (and leak its cap)
+		return
+	}
 	if s.reasm == nil {
 		s.reasm = make(map[fragKey]*fragBuf)
 	}
@@ -162,6 +179,7 @@ func (s *Session) onDgramFrag(flow uint64, port int, id uint64, idx, cnt int, da
 		if len(s.reasm) >= fragPending {
 			for kk, bb := range s.reasm {
 				if now.Sub(bb.at) > fragKeep {
+					reasmHeld.Add(-int64(bb.bytes))
 					delete(s.reasm, kk)
 				}
 			}
@@ -176,12 +194,21 @@ func (s *Session) onDgramFrag(flow uint64, port int, id uint64, idx, cnt int, da
 	if len(b.parts) != cnt || b.parts[idx] != nil {
 		return
 	}
+	// A key-holding peer can keep fragment sets incomplete, so the bytes they hold are charged to their own cap
+	// instead of growing with the number of peer-chosen ids.
+	if reasmHeld.Load()+int64(len(data)) > reasmMaxBytes {
+		s.stats.DgramDropRx++
+		return
+	}
 	b.parts[idx] = append([]byte(nil), data...)
+	b.bytes += len(data)
+	reasmHeld.Add(int64(len(data)))
 	b.have++
 	if b.have < cnt {
 		return
 	}
 	delete(s.reasm, k)
+	reasmHeld.Add(-int64(b.bytes))
 	var full []byte
 	for _, x := range b.parts {
 		full = append(full, x...)

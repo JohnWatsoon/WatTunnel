@@ -261,6 +261,7 @@ func (st *Stream) Read(b []byte) (int, error) {
 		return 0, io.EOF
 	}
 	n := st.ready.read(b)
+	st.releaseRx(n)
 	st.consumed += uint64(n)
 	now := time.Now()
 	st.tuneWindow(now)
@@ -317,7 +318,7 @@ func (s *Session) killStream(st *Stream, err error) {
 	}
 	delete(s.streams, st.id)
 	s.tomb[st.id] = s.now
-	st.ready.reset()
+	st.dropRxBuffers()
 	st.rc.Broadcast()
 	st.wc.Broadcast()
 }
@@ -335,7 +336,7 @@ func (st *Stream) CloseRead() {
 		return
 	}
 	st.rdClosed = true
-	st.ready.reset()
+	st.dropRxBuffers()
 	if !st.eof { // peer has not closed: we can take no more, so abort both directions
 		var f []byte
 		f = append(f, frRst)
@@ -366,7 +367,7 @@ func (st *Stream) maybeFinish() {
 		winHeld.Add(-int64(extra))
 	}
 	st.snd.reset()
-	st.ready.reset()
+	st.dropRxBuffers()
 	st.rc.Broadcast()
 	st.wc.Broadcast()
 }
@@ -510,6 +511,7 @@ func (st *Stream) insert(off uint64, data []byte) {
 		}
 	}
 	if off == st.rnext && len(st.segs) == 0 && len(data) > 0 { // in order, nothing buffered: no copy into a segment first
+		st.holdRx(len(data))
 		st.appendReady(data)
 		st.rnext += uint64(len(data))
 		data = nil
@@ -537,6 +539,7 @@ func (st *Stream) insert(off uint64, data []byte) {
 			limit = st.segs[i].off - off
 		}
 		cp := append([]byte(nil), data[:limit]...)
+		st.holdRx(len(cp))
 		// Fast append: arrivals behind a hole usually ascend (retransmit stream order), so appending
 		// skips the O(n) shift-insert that dominated the out-of-order path at a 4 MB window (audit
 		// 2026-10-22); the shift stays for a true middle insert.
@@ -576,6 +579,24 @@ func (st *Stream) SetGroup(g uint32) {
 
 // appendReady adds in-order bytes for Read.
 func (st *Stream) appendReady(data []byte) { st.ready.write(data) }
+
+// holdRx charges bytes stored for Read against the process receive budget (session.go rxRoom).
+func (st *Stream) holdRx(n int) { rxHeld.Add(int64(n)) }
+
+// releaseRx returns the bytes Read consumed; by construction it never takes rxHeld below zero.
+func (st *Stream) releaseRx(n int) { rxHeld.Add(-int64(n)) }
+
+// dropRxBuffers frees everything the receive side still holds and returns its bytes to the process budget. It is
+// idempotent: a second call finds the buffers empty and releases nothing.
+func (st *Stream) dropRxBuffers() {
+	n := st.ready.n
+	for _, sg := range st.segs {
+		n += len(sg.data)
+	}
+	rxHeld.Add(-int64(n))
+	st.ready.reset()
+	st.segs = nil
+}
 
 // rdQueue holds received in-order bytes as a queue of pooled 64 KB chunks (2.5.1). It was one contiguous slice that
 // was dropped after each drain and re-grown by doubling, with the unread bytes moved to the front whenever the end
@@ -733,6 +754,11 @@ func (q *sndQueue) release() {
 // Process-wide memory accounting (3.2.0): send bytes held by every stream of every session, and the receive-window
 // growth granted beyond the 4 MB bases. Neither grows past memBudget (SetMemBudget; default an eighth of the RAM).
 var sndHeld, winHeld, memBudget atomic.Int64
+
+// rxHeld is received stream data buffered for Read (ready plus out-of-order segments) across every session. The base
+// windows are deliberately not charged: 4 MB x 8192 streams would exhaust the budget on windows alone, while only the
+// bytes actually stored can grow with a peer that ignores backpressure (session.go rxRoom gates them).
+var rxHeld atomic.Int64
 
 func init() { memBudget.Store(defaultMemBudget(HostProfile().TotalRAMMB)) }
 

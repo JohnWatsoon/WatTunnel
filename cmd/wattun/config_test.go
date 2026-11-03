@@ -228,17 +228,16 @@ func TestHotReloadClientListeners(t *testing.T) {
 	}
 	// the connection opened before the reload still works
 	var srvSide net.Conn
-	for i := 0; i < 8; i++ {
+	timeout := time.After(2 * time.Second)
+	for srvSide == nil {
 		select {
 		case sc := <-held:
 			if sc.RemoteAddr().String() == open.LocalAddr().String() {
 				srvSide = sc
 			}
-		default:
+		case <-timeout:
+			t.Fatal("could not pair the held connection")
 		}
-	}
-	if srvSide == nil {
-		t.Skip("could not pair the held connection")
 	}
 	if _, err := open.Write([]byte("x")); err != nil {
 		t.Fatal(err)

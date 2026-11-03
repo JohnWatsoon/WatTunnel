@@ -558,6 +558,10 @@ func (s *Session) Close() {
 	for _, st := range s.streams {
 		s.killStream(st, ErrSessionDead)
 	}
+	for _, b := range s.reasm { // incomplete fragments die with the session: return their bytes to the process cap
+		reasmHeld.Add(-int64(b.bytes))
+	}
+	s.reasm = nil
 	s.acceptC.Broadcast()
 	s.mu.Unlock()
 	s.io.Close()
@@ -1702,6 +1706,11 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 	return
 }
 
+// rxRoom reports whether n more received stream bytes fit the process memory budget. rxHeld counts only bytes
+// actually buffered for readers, never the 4 MB base windows, so ordinary stream concurrency does not trip it
+// (stream.go holdRx/dropRxBuffers).
+func rxRoom(n int) bool { return rxHeld.Load()+int64(n) <= memBudget.Load() }
+
 func (s *Session) onStream(sid, off uint64, data []byte, fin bool) {
 	st := s.streams[sid]
 	if st == nil {
@@ -1721,6 +1730,18 @@ func (s *Session) onStream(sid, off uint64, data []byte, fin bool) {
 	}
 	if end > max(st.advMax, st.consumed+streamWindow)+s.winSlack { // slack for the largest datagram any peer may send
 		return // beyond the advertised window
+	}
+	if !rxRoom(len(data)) {
+		// The process receive budget is full: a key-holding peer can send window-clipped data that this end buffers
+		// for a reader that is gone or slow. Reset the stream rather than allocate past memBudget; the sender learns
+		// from the RST and its client connection ends, while its other streams keep running.
+		var f []byte
+		f = append(f, frRst)
+		f = appendUv(f, st.id)
+		s.ctrl = append(s.ctrl, f)
+		s.kick()
+		s.killStream(st, ErrReset)
+		return
 	}
 	if fin {
 		st.peerFin, st.peerFinO = true, end
