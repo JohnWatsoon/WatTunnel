@@ -5,6 +5,7 @@ package wat
 import (
 	"bytes"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -79,12 +80,18 @@ func TestICMPLoopbackPerType(t *testing.T) {
 			}
 			sio, err := NewICMPIOReverse(true, reverse, speer, key, kind)
 			if err != nil {
-				t.Skipf("raw socket: %v", err)
+				if os.Geteuid() != 0 {
+					t.Skipf("raw socket (not root): %v", err)
+				}
+				t.Fatalf("raw socket as root: %v", err)
 			}
 			cio, err := NewICMPIOReverse(false, reverse, "127.0.0.1", key, kind)
 			if err != nil {
 				sio.Close()
-				t.Skipf("raw socket: %v", err)
+				if os.Geteuid() != 0 {
+					t.Skipf("raw socket (not root): %v", err)
+				}
+				t.Fatalf("raw socket as root: %v", err)
 			}
 			req, _, _ := ICMPTypes(kind)
 			if cio.sendType() == sio.sendType() || (sio.sendType() == req) != reverse {

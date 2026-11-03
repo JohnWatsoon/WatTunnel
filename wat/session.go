@@ -1569,6 +1569,10 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 			s.rebuildLanes()
 		}
 		s.laneSeen[lane] = now
+	} else if pa, ok := s.io.(interface{ PeerAuthenticated(net.Addr) }); ok {
+		// Reverse pools: tell the carrier which source addresses proved they hold the session key, so a stranger's
+		// connection cannot be chosen to receive the tunnel's packets. No effect on forward carriers.
+		pa.PeerAuthenticated(src)
 	}
 	eliciting := s.parse(plain, now)
 	if eliciting {

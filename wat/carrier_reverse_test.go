@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"io"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -235,4 +236,115 @@ func TestReverseDialHook(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	revBulk(t, ir.cli, 64<<10)
+}
+
+// stubConn lets the pool tests build poolConns without a socket: only Close is ever touched by the code under test.
+type stubConn struct{ closed atomic.Bool }
+
+func (c *stubConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c *stubConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *stubConn) Close() error                     { c.closed.Store(true); return nil }
+func (c *stubConn) LocalAddr() net.Addr              { return nil }
+func (c *stubConn) RemoteAddr() net.Addr             { return nil }
+func (c *stubConn) SetDeadline(time.Time) error      { return nil }
+func (c *stubConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *stubConn) SetWriteDeadline(time.Time) error { return nil }
+
+func newTrustedTestPool() *TCPPoolServer {
+	s := &TCPPoolServer{pools: map[string]map[*poolConn]struct{}{}, ordered: map[string][]*poolConn{},
+		done: make(chan struct{})}
+	s.merge.Store(true)
+	return s
+}
+
+func testPoolConn(t *testing.T, ip string) *poolConn {
+	t.Helper()
+	pc := newPoolConn(&stubConn{})
+	pc.ip = ip
+	t.Cleanup(pc.fail)
+	return pc
+}
+
+// A stranger who merely opened a connection to a reverse listener must never be chosen to receive the tunnel's
+// packets: only a source that delivered an authenticated packet is in the send set (audit 2026-11-03).
+func TestReversePoolSendsOnlyToAuthenticatedSource(t *testing.T) {
+	s := newTrustedTestPool()
+	good := testPoolConn(t, "10.0.0.1")
+	bad := testPoolConn(t, "10.0.0.2")
+	bad.born = time.Now().Add(-time.Minute) // past its trust grace: an old connection that never authenticated
+	s.pools[reverseKey] = map[*poolConn]struct{}{good: {}, bad: {}}
+	s.ordered[reverseKey] = []*poolConn{good, bad}
+
+	// Before any source authenticated there is nothing to protect yet: the pool still starts up.
+	if err := s.SendTo([]byte("hello"), 0, poolAddr{key: reverseKey}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(good.q) + len(bad.q); n != 1 {
+		t.Fatalf("before trust %d datagrams queued, want 1", n)
+	}
+	s.addTrustedIP("10.0.0.1")
+	for range 16 {
+		if err := s.SendTo([]byte("data"), 0, poolAddr{key: reverseKey}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-bad.done:
+	default:
+		t.Fatal("unauthenticated connection was never closed")
+	}
+	if s.ipTrusted("10.0.0.2") {
+		t.Fatal("unauthenticated source reported trusted")
+	}
+	if !s.ipTrusted("10.0.0.1") {
+		t.Fatal("authenticated source reported untrusted")
+	}
+}
+
+// A full merged reverse pool must still admit a new dialer (evicting the oldest conn) instead of letting strangers
+// lock the real side out of its own pool.
+func TestReversePoolEvictsForNewDialer(t *testing.T) {
+	s := newTrustedTestPool()
+	conns := make([]*poolConn, 0, poolMaxConns+1)
+	for i := 0; i < poolMaxConns+1; i++ {
+		pc := testPoolConn(t, "10.0.0.1")
+		conns = append(conns, pc)
+		if !s.add(reverseKey, pc) {
+			t.Fatalf("add %d refused: a full reverse pool must evict instead", i)
+		}
+	}
+	if n := len(s.ordered[reverseKey]); n != poolMaxConns {
+		t.Fatalf("pool holds %d conns, want %d", n, poolMaxConns)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case <-conns[0].done:
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("oldest connection was not evicted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The reverse carrier must turn a session-authenticated source address into a pool trust pin, and ignore anything
+// that is not a pool address.
+func TestReversePeerAuthenticatedPinsSource(t *testing.T) {
+	s := newTrustedTestPool()
+	rio := NewReverseListenIO(s)
+	rio.PeerAuthenticated(poolAddr{key: reverseKey, ip: "192.0.2.7"})
+	rio.PeerAuthenticated(poolAddr{key: reverseKey, ip: "192.0.2.7"}) // duplicate is harmless
+	if !s.ipTrusted("192.0.2.7") {
+		t.Fatal("authenticated source not trusted")
+	}
+	if s.ipTrusted("192.0.2.8") {
+		t.Fatal("a different source was trusted")
+	}
+	rio.PeerAuthenticated(nil) // no address: ignored
+	if got := len(*s.trusted.Load()); got != 1 {
+		t.Fatalf("trusted set has %d addresses, want 1", got)
+	}
 }

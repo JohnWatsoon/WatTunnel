@@ -117,6 +117,8 @@ type poolConn struct {
 
 	rot atomic.Pointer[rotateBudget] // churn budget (client SetRotate); nil on the server side
 
+	ip string // remote IP of the accepted connection (reverse-pool trust)
+
 	txm, rxm *chacha20.Cipher // hello v2 (tcp_mimic.go): length masks of what this end writes and reads; nil = plain lengths
 }
 
@@ -1403,11 +1405,70 @@ type TCPPoolServer struct {
 	merge   atomic.Bool            // reverse mode: every conn joins one pool whatever its hello id says
 	keep    atomic.Bool            // never close a connection for delivering below its share (SetKeepSlow)
 	obfKey  atomic.Pointer[[]byte] // SetObfs: PSK that lets the listener recognise hello v2 (nil: only the plain pool id)
+
+	// Reverse merge mode: source IPs whose connections delivered a packet the session authenticated. SendTo only
+	// writes to those, so an unauthenticated dialer can neither receive the tunnel's packets nor hold it hostage.
+	trustMu sync.Mutex
+	trusted atomic.Pointer[trustedIPs]
 }
+
+type trustedIPs []string
+
+const (
+	maxTrustedIPs  = 8
+	poolTrustGrace = 5 * time.Second // a new conn gets this long to deliver an authenticated packet before it is reaped
+)
 
 // SetObfs lets the listener accept hello v2 (tcp_mimic.go) next to the plain 8-byte pool id, which it tells apart by the
 // first five bytes. A connection that starts like a hello v2 but does not verify is closed without an answer.
 func (s *TCPPoolServer) SetObfs(psk []byte) { s.obfKey.Store(&psk) }
+
+// addTrustedIP pins one source address that delivered an authenticated session packet (reverse merge mode only). The
+// list is small and FIFO-bounded so a peer whose egress address changes keeps working.
+func (s *TCPPoolServer) addTrustedIP(ip string) {
+	if ip == "" {
+		return
+	}
+	if cur := s.trusted.Load(); cur != nil && trustedHas(cur, ip) {
+		return
+	}
+	s.trustMu.Lock()
+	defer s.trustMu.Unlock()
+	cur := s.trusted.Load()
+	if cur != nil && trustedHas(cur, ip) {
+		return
+	}
+	var ips trustedIPs
+	if cur != nil {
+		ips = *cur
+	}
+	if len(ips) >= maxTrustedIPs {
+		ips = ips[1:]
+	}
+	list := make(trustedIPs, 0, len(ips)+1) // a fresh slice: ipTrusted reads the stored one without a lock
+	list = append(list, ips...)
+	list = append(list, ip)
+	s.trusted.Store(&list)
+}
+
+// ipTrusted reports whether ip is allowed to receive tunnel packets on a merged reverse pool. Before any address has
+// authenticated, every connection is allowed (the pool has nothing to protect yet); afterwards only authenticated ones.
+func (s *TCPPoolServer) ipTrusted(ip string) bool {
+	cur := s.trusted.Load()
+	return cur == nil || trustedHas(cur, ip)
+}
+
+func trustedHas(list *trustedIPs, ip string) bool {
+	if list == nil {
+		return false
+	}
+	for _, x := range *list {
+		if x == ip {
+			return true
+		}
+	}
+	return false
+}
 
 // SetKeepSlow turns off the slow-connection check (2.4.7) for a direct path (2.4.18). It exists for a CDN edge whose
 // far leg slows down; on a direct but lossy path every connection's delivery swings with its own TCP retransmits
@@ -1470,6 +1531,17 @@ func (s *TCPPoolServer) healthLoop() {
 					}
 					if last := max(pc.lastRx.Load(), pc.lastTx.Load(), pc.born.UnixNano()); nowNano-last > int64(poolIdleHard) {
 						pc.fail()
+					}
+				}
+			}
+			if s.merge.Load() { // reverse pool: after the first authenticated packet, strangers lose their slots
+				if ts := s.trusted.Load(); ts != nil {
+					for _, cs := range pools {
+						for _, pc := range cs {
+							if !trustedHas(ts, pc.ip) && now.Sub(pc.born) > poolTrustGrace {
+								pc.fail()
+							}
+						}
 					}
 				}
 			}
@@ -1561,6 +1633,7 @@ func (s *TCPPoolServer) handle(c net.Conn) {
 	}
 	c.SetReadDeadline(time.Time{})
 	pc := newPoolConn(c)
+	pc.ip = ip
 	pc.txm, pc.rxm = txm, rxm
 	key := string(id[:])
 	if s.merge.Load() {
@@ -1599,7 +1672,34 @@ func (s *TCPPoolServer) add(key string, pc *poolConn) bool {
 		s.pools[key] = set
 	}
 	if len(set) >= poolMaxConns {
-		return false
+		if !s.merge.Load() {
+			return false
+		}
+		// Reverse mode has ONE pool, so a stranger must never be able to lock the dialing side out of it: evict the
+		// oldest connection (preferring one that never delivered an authenticated packet) and let the new dialer in.
+		// SendTo only writes to trusted source IPs, so an evicted stranger loses nothing it was entitled to.
+		o := s.ordered[key]
+		if len(o) == 0 {
+			return false
+		}
+		victim := o[0]
+		if ts := s.trusted.Load(); ts != nil {
+			for _, c := range o {
+				if !trustedHas(ts, c.ip) {
+					victim = c
+					break
+				}
+			}
+		}
+		delete(set, victim)
+		next := make([]*poolConn, 0, len(o))
+		for _, c := range o {
+			if c != victim {
+				next = append(next, c)
+			}
+		}
+		s.ordered[key] = next
+		go victim.fail()
 	}
 	set[pc] = struct{}{}
 	s.ordered[key] = append(s.ordered[key], pc) // born order kept on change: SendTo must not sort per packet
@@ -1647,6 +1747,15 @@ func (s *TCPPoolServer) SendTo(p []byte, lane int, dst net.Addr) error {
 	s.mu.RUnlock()
 	pc := pickConn(conns, lane, int(s.rr.Add(1)))
 	if pc != nil {
+		if s.merge.Load() && !s.ipTrusted(pc.ip) {
+			// A dialer that never delivered a packet the session could authenticate must not receive the tunnel's
+			// packets. A young connection keeps its grace window to authenticate (a peer may use another egress
+			// address); an older one is closed so the sender can pick a real one.
+			if time.Since(pc.born) > poolTrustGrace {
+				pc.fail()
+			}
+			return nil
+		}
 		pc.enqueue(append(getPkt(len(p))[:0], p...))
 	}
 	return nil // no live conn or full queue: dropped, the session repairs it

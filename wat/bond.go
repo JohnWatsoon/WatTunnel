@@ -71,6 +71,7 @@ func NewBondIO(kids []PacketIO, opt BondOptions) (*BondIO, error) {
 		tm.Mode = opt.Mode
 	}
 	b.ps = newPathSet(names, true, tm)
+	b.ps.setProfiles(b.profs)
 	for i := range kids {
 		go b.recvKid(i)
 	}
@@ -161,6 +162,16 @@ func (b *BondIO) Recv() ([]byte, int, net.Addr, error) {
 
 func (b *BondIO) SetPeer(net.Addr) {}
 
+// PeerAuthenticated forwards a source address that proved it holds the session key to the child pools that can pin
+// their peer (reverse pools). The session calls it for every authenticated packet on the client side.
+func (b *BondIO) PeerAuthenticated(a net.Addr) {
+	for _, k := range b.kids {
+		if pa, ok := k.(interface{ PeerAuthenticated(net.Addr) }); ok {
+			pa.PeerAuthenticated(a)
+		}
+	}
+}
+
 func (b *BondIO) Close() error {
 	b.once.Do(func() {
 		close(b.done)
@@ -184,7 +195,7 @@ func (b *BondIO) Close() error {
 func (b *BondIO) Profile() Profile                         { return b.prof }
 func (b *BondIO) NumPaths() int                            { return len(b.kids) }
 func (b *BondIO) PathProfile(i int) Profile                { return b.profs[i] }
-func (b *BondIO) ChoosePath(_ int, inter bool) int         { return b.ps.choose(inter) }
+func (b *BondIO) ChoosePath(size int, inter bool) int      { return b.ps.choose(size, inter) }
 func (b *BondIO) NextPath(inter bool) int                  { return b.ps.nextPath(inter) }
 func (b *BondIO) ToggleMute(path int) bool                 { return b.ps.ToggleMute(path) }
 func (b *BondIO) OnAck(path int, rtt time.Duration, _ int) { b.ps.onAck(path, rtt) }
@@ -331,6 +342,11 @@ type peerSlot struct {
 func newMultiSubIO(base *subIO, mr *MultiRaw, tm PathTimings, admittingIdx int) *multiSubIO {
 	m := &multiSubIO{subIO: base, mr: mr, slots: make([]peerSlot, len(mr.raws)), admittedCarrier: admittingIdx}
 	m.ps = newPathSet(mr.names, false, tm)
+	profs := make([]Profile, len(mr.raws))
+	for i, r := range mr.raws {
+		profs[i] = profileOf(r)
+	}
+	m.ps.setProfiles(profs)
 	go func() {
 		tk := time.NewTicker(50 * time.Millisecond)
 		defer tk.Stop()
@@ -448,7 +464,7 @@ func (m *multiSubIO) Send(p []byte, path int) error {
 
 func (m *multiSubIO) NumPaths() int                            { return len(m.slots) }
 func (m *multiSubIO) PathProfile(i int) Profile                { return profileOf(m.mr.raws[i]) }
-func (m *multiSubIO) ChoosePath(_ int, inter bool) int         { return m.ps.choose(inter) }
+func (m *multiSubIO) ChoosePath(size int, inter bool) int      { return m.ps.choose(size, inter) }
 func (m *multiSubIO) NextPath(inter bool) int                  { return m.ps.nextPath(inter) }
 func (m *multiSubIO) ToggleMute(path int) bool                 { return m.ps.ToggleMute(path) }
 func (m *multiSubIO) OnAck(path int, rtt time.Duration, _ int) { m.ps.onAck(path, rtt) }

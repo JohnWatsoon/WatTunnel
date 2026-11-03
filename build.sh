@@ -42,7 +42,8 @@ for a in amd64 arm64 windows; do
 done
 # The manager and the installer are release assets too: install.sh only installs a manager whose hash is in the signed
 # list, and wattun-manager verifies the installer the same way, so keep both in dist/ before the checksums are made.
-if [ -f wattun-manager ]; then cp wattun-manager dist/wattun-manager; fi
+# The manager copy is unconditional: a release without it would install an installer that refuses to finish.
+cp wattun-manager dist/wattun-manager
 cp install.sh dist/install.sh
 # The release's signed checksum list: install.sh verifies the RSA signature against the public key baked into it,
 # so a download that went through WAT_PROXY (or any tampered copy) cannot pair a swapped binary with its own

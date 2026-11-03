@@ -58,8 +58,8 @@ instance proves itself, takes new connections, and the old one drains. Nobody is
 
 ### Loopback A/B against GOST (emulated link, 2026-10-09)
 
-Link: 20 ms each way, 0.2 % loss, 100 Mbit. Median of 2 to 3 rounds. Source:
-[`bench/results-2026-10-09-final.md`](bench/results-2026-10-09-final.md).
+Link: 20 ms each way, 0.2 % loss, 100 Mbit. Median of 2 to 3 rounds. Harness:
+[`bench/pair.sh`](bench/pair.sh).
 
 | Contender | 1 flow MB/s | 16 x 2 MB MB/s | p50 ms | p95 ms | CPU-s/MB |
 |---|---|---|---|---|---|
@@ -850,8 +850,10 @@ Works with the pool carriers (`tcp`, `tls`, `ws`, `wss`, `h2`, `h2c`, `grpc`), s
 | Iran (client) | dials `peer` | listens on `listen` | answers with ICMP replies to `peer` (Kharej's IP) |
 | Kharej (server) | listens on `listen` | dials `peer` | sends ICMP requests; `peer` is Iran's IP |
 
-Anyone who connects to the listening side can only occupy one of 64 capped slots. Their packets fail authentication
-and are dropped.
+Anyone who connects to the listening side can only occupy a capped slot. Their packets fail authentication and are
+dropped, and since 3.2.1 the merged reverse pool also sends only to source addresses that delivered a packet the
+session authenticated (up to eight addresses, FIFO, so a peer whose egress address changes keeps working). A stranger
+who never holds the key therefore cannot receive the tunnel's packets or hold its slots.
 
 **With the manager.** For a new tunnel, pick reverse in the Kharej wizard's advanced settings: the token carries it.
 To switch an existing tunnel, update both servers first. On **Kharej** run `wattun`, open the tunnel, press `o`
@@ -1238,7 +1240,8 @@ ports:
 
 - `key: value` per line. The keys are the flag names.
 - `#` starts a comment. Values may be in "double" or 'single' quotes.
-- One list, `ports:`, with `- PORT`, `- PORT/udp`, `- LISTEN:TARGET` or `- LISTEN:TARGET/udp` items.
+- Two lists, `ports:` and `limits:`, both hot-reloaded. `ports:` items are `- PORT`, `- PORT/udp`, `- LISTEN:TARGET`
+  or `- LISTEN:TARGET/udp`; `limits:` items are `- TARGET rate=MBPS quota=SIZE` (see "Per-port traffic and limits").
 - Unknown keys, duplicate keys and bad values stop the start with a line number. Only `header` may repeat.
 - Command-line flags win over the file.
 - The `ports:` list is **hot-reloaded** every 3 seconds. On the client it opens and closes listeners. On the server it
@@ -1319,6 +1322,14 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `fake-ip` | `104.16.0.1` (IPv4 peer) / `2606:4700::6810:1` (IPv6 peer) | client, `fake-mode: fakeip` | Destination of the injected fake SYN+hello, IPv4 or IPv6. A destination-IP allowlist then files the flow as CDN traffic. It has to be of the same family as the connection (`peer`); a mismatched one is replaced by that family's default. IPv6 since 2.10.9. Since 2.10.5. |
 | `fake-split` | 0 (3) | client, `fake-mode: split` | How many TCP segments the fake ClientHello is cut into (2..16), so no single packet carries the SNI. Since 2.10.5. |
 | `fake-ttl` | 0 | client, `fake-mode: ttl` | Hop count of the marker packet: one more than the distance to the filtering DPI box, one less than the distance to the server. Read it off a traceroute to the server. 0 also means auto since 2.7.0: the client learns the peer's inbound TTL from its SYN-ACKs, infers the path length from it (initial TTL 32/64/128/255 minus the arrival TTL) and sends the marker one hop short of the server (2.7.0-2.10.7 used the arrival TTL minus one, which still reached the server; fixed in 2.10.8). Unused by `seq` and `sum`. Since 2.6.0. |
+| `batch` | empty (carrier default) | icmp, udp | recvmmsg/sendmmsg batching (`on`/`off`). Same switch as `WAT_BATCH`, which this overrides. |
+| `bond-mode` | `balanced` | both | Bonded carriers: `balanced`, `active-backup` or `replicate`. |
+| `path-probe-max` | 0 (30s) | client | Bonded carriers: maximum probe backoff for dead paths (blackout mode uses 6s). |
+| `keep-slow` | empty (carrier default) | pool carriers | `on`/`off`: never close a pool connection for delivering below its share (default on for reverse and direct tcp/tls, off for CDN HTTP carriers). |
+| `governor` | false | both | ICMP paths: learn the path's volume ceiling from the reroute signature and hold the rate under it. Opt-in experiment, not field-validated. |
+| `ping-every` | 2 | both | Idle keepalive interval, seconds (0-60). Raise it on paths that rate-limit periodic packets; the liveness and server idle limits scale with it. |
+| `dns-listen` | empty (off) | client | Local address for the DNS relay used by `ech: ladder` (e.g. `127.0.0.1:53`). |
+| `dns-relay-upstream` | `8.8.8.8:53` | server | Resolver used by the built-in DNS relay behind target port 53 (with `ech: ladder`). |
 | `metrics` | off | both | Serve `/stats` and pprof on this address. Always loopback (see Metrics). |
 | `debug` | false | both | Log every stream open and close. |
 
@@ -2067,6 +2078,24 @@ No wire-format change: an older peer keeps working, and either order of updating
   `dist/install.sh` exists in the signed `SHA256SUMS`. The flag table gained the flags it had omitted (fake-SNI family,
   pool rotation, win-max, mem-budget, ping-every, src-ip, tls-small-ch), the Keys table `mem-budget`/`src-ip`, and
   `/stats` the two connection counters.
+
+**Second audit pass (same evening, same unreleased 3.2.1).**
+
+- **A reverse pool now ignores unauthenticated dialers.** The merged listener used to add every TCP connection that
+  wrote eight bytes to its one pool; the send side then preferred the least-queued connection, so a stranger could
+  receive the tunnel's packets and hold every slot. The pool now pins itself to source addresses that delivered a
+  packet the session authenticated (up to eight, FIFO, so a peer whose egress address changes keeps working), never
+  writes to any other connection, reaps an unauthenticated connection after five seconds, and evicts the oldest
+  connection (strangers first) when a full pool must admit a new dialer. No wire change: old peers work.
+- **A bonded packet is only sent on a carrier that can frame it.** `pathSet.choose` now takes the datagram size and
+  skips carriers whose `MaxMTU`/`MTU` is smaller while another path fits, so a 16 KB datagram sized for a direct pool
+  can no longer be handed to the 2 KB-buffered ICMP leg at a burst boundary.
+- **The CI ICMP job fails instead of skipping on a raw-socket error** when running as root, so a primary-carrier
+  regression cannot report green with the only end-to-end ICMP test skipped.
+- **The manager's heal minimum-rate SLA works again** (`rate_bps` is a float in `/stats`; the integer division is now
+  done defensively) and the release/trust paths gained executing tests (a throwaway RSA keypair for `sums_verify`, the
+  embedded release-key parity between `install.sh` and `wattun-manager`), a release self-verification step, shell,
+  vet and gofmt gates in the release workflow, and a `gofmt` gate that includes `testbench`.
 
 ## 3.2.0: fast by default, bounded memory, gre/ipip
 

@@ -47,11 +47,12 @@ func TestPathTimingsNorm(t *testing.T) {
 // In a bond only the icmp path is held to ICMPPathBps; bulk beyond it goes to the other carrier.
 func TestICMPPathCap(t *testing.T) {
 	ps := newPathSet([]string{"icmp", "tcp"}, true, PathTimings{})
+	ps.setProfiles([]Profile{{}, poolProfile})
 	ps.p[1].w = 0.05 // the scheduler would put nearly everything on icmp without the cap
 	var bytes [2]int
 	start := time.Now()
 	for time.Since(start) < 200*time.Millisecond {
-		i := ps.choose(false)
+		i := ps.choose(600, false) // an ICMP-sized datagram: both paths can frame it
 		ps.onSend(i, 1400)
 		bytes[i] += 1400
 	}
@@ -92,13 +93,29 @@ func TestSndQueue(t *testing.T) {
 	}
 }
 
+// A packet sized for a large-MTU path must never be chosen for a small-MTU one while the large one is alive: the
+// bug this pins sent 16 KB datagrams to the 2 KB-buffered ICMP leg at burst boundaries (audit 2026-11-03).
+func TestBondPathFitsPacket(t *testing.T) {
+	ps := newPathSet([]string{"tcp", "icmp"}, true, PathTimings{})
+	ps.setProfiles([]Profile{poolProfile, {}}) // 16 KB pool / 640 B ICMP-safe
+	for range 500 {
+		if got := ps.choose(16000, false); got != 0 {
+			t.Fatalf("a 16000-byte packet went to path %d (limit %d), want the 16 KB path 0", got, ps.pathLimit(got))
+		}
+	}
+	// A full-size direct-pool packet still fits its own path.
+	if lim := ps.pathLimit(0); lim < 16352 {
+		t.Fatalf("path 0 limit %d, expected at least the direct-pool datagram", lim)
+	}
+}
+
 // A lossy bond path loses most of its bulk share, not just the loss fraction.
 func TestBondLossPenalty(t *testing.T) {
 	ps := newPathSet([]string{"a", "b"}, true, PathTimings{})
 	ps.p[1].loss = 0.15
 	var n [2]int
 	for range 24000 {
-		n[ps.choose(false)]++
+		n[ps.choose(0, false)]++
 	}
 	if share := float64(n[1]) / 24000; share > 0.40 {
 		t.Fatalf("15 %%-loss path kept %.2f of the bulk", share)

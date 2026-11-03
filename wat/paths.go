@@ -143,10 +143,11 @@ func (p *pathState) overCap(now time.Time) bool {
 // pathSet is the scoring and health state of the paths of one session end. It is shared by BondIO (client) and
 // the per-session send side of a MultiRaw server.
 type pathSet struct {
-	mu   sync.Mutex
-	cfg  PathTimings
-	mode string
-	p    []pathState
+	mu    sync.Mutex
+	cfg   PathTimings
+	mode  string
+	p     []pathState
+	profs []Profile // per-path profile: a packet is never sent on a carrier that cannot frame it (set before traffic)
 
 	burstPath, burstLeft int
 }
@@ -163,6 +164,33 @@ func newPathSet(names []string, present bool, cfg PathTimings) *pathSet {
 	}
 	return ps
 }
+
+// setProfiles records the profile of every path (BondIO or MultiRaw builds it). Call it before traffic starts.
+func (ps *pathSet) setProfiles(profs []Profile) {
+	ps.mu.Lock()
+	ps.profs = profs
+	ps.mu.Unlock()
+}
+
+// pathLimit is the largest datagram the carrier at path i can frame. A carrier without a Profiled hint (icmp) is
+// bounded by the ICMP-safe default.
+func (ps *pathSet) pathLimit(i int) int {
+	var prof Profile
+	if i >= 0 && i < len(ps.profs) {
+		prof = ps.profs[i]
+	}
+	lim := prof.MaxMTU
+	if lim == 0 {
+		lim = prof.MTU
+	}
+	if lim == 0 {
+		lim = MaxPayload
+	}
+	return lim
+}
+
+// fits reports whether a packet of size bytes (datagram size, header and tag included) may be sent on path i.
+func (ps *pathSet) fits(i, size int) bool { return size <= 0 || ps.pathLimit(i) >= size }
 
 func (ps *pathSet) Mode() string {
 	ps.mu.Lock()
@@ -366,9 +394,11 @@ func (p *pathState) ramped(now time.Time, ramp time.Duration) bool {
 	return p.revived.IsZero() || now.Sub(p.revived) >= ramp
 }
 
-// choose picks the path for one packet. Interactive packets go to the live path with the lowest delay; the rest
-// is split by smooth weighted round robin over every path that is not dead.
-func (ps *pathSet) choose(interactive bool) int {
+// choose picks the path for one packet of size bytes (datagram size incl header and tag; 0 = unknown). Interactive
+// packets go to the live path with the lowest delay; the rest is split by smooth weighted round robin over every
+// path that is not dead. A path whose carrier cannot frame a packet this size is skipped while another one fits, so a
+// packet sized for a 16 KB direct pool is never handed to the 2 KB-buffered ICMP leg.
+func (ps *pathSet) choose(size int, interactive bool) int {
 	now := time.Now()
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -389,7 +419,7 @@ func (ps *pathSet) choose(interactive bool) int {
 		// requests must not all ride one carrier, or its silent death would also starve every other path of acks
 		bs := time.Duration(math.MaxInt64)
 		for i := range ps.p {
-			if p := &ps.p[i]; p.present && p.state == pLive && !p.muted && p.ramped(now, ps.cfg.Ramp) {
+			if p := &ps.p[i]; p.present && p.state == pLive && !p.muted && p.ramped(now, ps.cfg.Ramp) && ps.fits(i, size) {
 				if sc := p.score(); sc < bs {
 					bs = sc
 				}
@@ -398,7 +428,7 @@ func (ps *pathSet) choose(interactive bool) int {
 		best, sum := -1, 0.0
 		for i := range ps.p {
 			p := &ps.p[i]
-			if !p.present || p.state != pLive || p.muted || !p.ramped(now, ps.cfg.Ramp) || p.score() > bs+bs/4+5*time.Millisecond {
+			if !p.present || p.state != pLive || p.muted || !p.ramped(now, ps.cfg.Ramp) || p.score() > bs+bs/4+5*time.Millisecond || !ps.fits(i, size) {
 				continue
 			}
 			p.icredit += p.w
@@ -417,7 +447,7 @@ func (ps *pathSet) choose(interactive bool) int {
 	// the slow path's packets out of the reported ranges (they were then retransmitted although they arrived: 23 %
 	// of all packets on a 40 ms + 150 ms bond, measured).
 	if ps.burstLeft > 0 {
-		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !p.overCap(now) {
+		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !p.overCap(now) && ps.fits(ps.burstPath, size) {
 			ps.burstLeft--
 			return ps.burstPath
 		}
@@ -429,7 +459,7 @@ func (ps *pathSet) choose(interactive bool) int {
 		best, sum := -1, 0.0
 		for i := range ps.p {
 			p := &ps.p[i]
-			if !p.present || p.muted || (p.state == pDead || p.overCap(now)) && pass == 0 {
+			if !p.present || p.muted || (p.state == pDead || p.overCap(now)) && pass == 0 || pass == 0 && !ps.fits(i, size) {
 				continue
 			}
 			w := 1.0

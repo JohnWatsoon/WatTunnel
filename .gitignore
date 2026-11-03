@@ -15,6 +15,7 @@ wattun-release-signing.pub.pem
 REPORT.md
 .goshort/
 .mimocode/
+.smoke/
 *.pcap
 Field Test*.md
 *HANDOFF*.md

@@ -25,6 +25,17 @@ func (r *ReverseListenIO) Send(p []byte, path int) error {
 	return r.ps.SendTo(p, path, poolAddr{key: reverseKey})
 }
 
+// PeerAuthenticated pins the merged reverse pool to a source address that delivered a packet the session could
+// authenticate. Without it, any stranger who opened a TCP connection to the listener joined the one pool, received
+// the tunnel's packets (the send side picks the least-queued connection) and could hold every slot.
+func (r *ReverseListenIO) PeerAuthenticated(a net.Addr) {
+	pa, ok := a.(poolAddr)
+	if !ok || pa.ip == "" {
+		return
+	}
+	r.ps.addTrustedIP(pa.ip)
+}
+
 func (r *ReverseListenIO) Recv() ([]byte, int, net.Addr, error) { return r.ps.Recv() }
 func (r *ReverseListenIO) SetPeer(net.Addr)                     {}
 func (r *ReverseListenIO) Close() error                         { return r.ps.Close() }

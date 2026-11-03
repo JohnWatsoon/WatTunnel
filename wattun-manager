@@ -64,16 +64,16 @@ sig_pub_file() { # write the pinned key to a private temp file and print its pat
   printf '%s\n' "$SIG_PUB" >"$f" || { rm -f "$f"; return 1; }
   printf '%s\n' "$f"
 }
-sums_verify() { # sums sig
+sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-test use a throwaway key
   local pub rc
   command -v openssl >/dev/null 2>&1 || return 1
-  pub=$(sig_pub_file) || return 1
+  if [ -n "${3:-}" ]; then pub=$3; else pub=$(sig_pub_file) || return 1; fi
   openssl dgst -sha256 -verify "$pub" -signature "$2" "$1" >/dev/null 2>&1; rc=$?
-  rm -f "$pub"
+  [ -n "${3:-}" ] || rm -f "$pub"
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110301   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110302   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -6445,13 +6445,15 @@ heal() { # restart Iran tunnels whose link is down or breaches SLA 3 checks in a
       rm -f "$f" "$RUN/$n.cycles"
       sla_f="$CONF/$n.sla"
       if [ -f "$sla_f" ]; then
-        local min_r max_rtt max_loss rtt loss rate_kbps breached=0
+        local min_r max_rtt max_loss rtt loss rate rate_kbps breached=0
         min_r=$(grep '^sla_min_rate_kbps=' "$sla_f" 2>/dev/null | cut -d= -f2)
         max_rtt=$(grep '^sla_max_rtt_ms=' "$sla_f" 2>/dev/null | cut -d= -f2)
         max_loss=$(grep '^sla_max_loss_pct=' "$sla_f" 2>/dev/null | cut -d= -f2)
         rtt=$(jget_flat "$s_raw" rtt_ms srtt_ms)
         loss=$(jget "$s_raw" loss_pct)
-        rate_kbps=$(( $(jget "$s_raw" rate_bps) / 1000 ))
+        rate=$(jget "$s_raw" rate_bps) # float64 in /stats: take the integer part, never do bash arithmetic on "1.2e+07"
+        rate_kbps=$(awk -v r="${rate:-0}" 'BEGIN { printf "%d", r / 1000 }' 2>/dev/null)
+        [ -n "$rate_kbps" ] || rate_kbps=0
         [ -n "$max_rtt" ] && [ "$max_rtt" -gt 0 ] && [ "${rtt%.*}" -gt "$max_rtt" ] 2>/dev/null && breached=1
         [ -n "$max_loss" ] && [ "$max_loss" -gt 0 ] && [ "${loss%.*}" -gt "$max_loss" ] 2>/dev/null && breached=1
         [ -n "$min_r" ] && [ "$min_r" -gt 0 ] && [ "$rate_kbps" -lt "$min_r" ] 2>/dev/null && breached=1

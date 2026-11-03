@@ -12,6 +12,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      - run: go vet ./...
+      - name: gofmt
+        run: test -z "$(gofmt -l cmd wat testbench)"
+      - run: bash -n install.sh
+      - run: bash -n wattun-manager
+      - run: bash -n test-manager.sh
+      - run: bash test-manager.sh
       - name: version matches tag
         run: |
           v=$(sed -n 's/^const Version = "\([^"]*\)".*/\1/p' wat/version.go)
@@ -31,6 +38,11 @@ jobs:
       # every release must carry a verifiable signature: the installer (and WAT_PROXY users especially) refuses
       # a download whose SHA256SUMS it cannot check
       - run: 'test -f dist/SHA256SUMS.sig || { echo "::error::dist/SHA256SUMS.sig missing — set the WAT_SIGN_KEY secret (RSA PEM)"; exit 1; }'
+      - name: the signature verifies against the key shipped in install.sh
+        run: |
+          awk '/^SIG_PUB=/{on=1;next} on&&/^PEM$/{on=0} on' install.sh > /tmp/sigpub.pem
+          grep -q 'BEGIN PUBLIC KEY' /tmp/sigpub.pem || { echo "::error::could not extract SIG_PUB from install.sh"; exit 1; }
+          openssl dgst -sha256 -verify /tmp/sigpub.pem -signature dist/SHA256SUMS.sig dist/SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

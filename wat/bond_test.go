@@ -637,20 +637,20 @@ func TestBondModes(t *testing.T) {
 	if m := ps.Mode(); m != "active-backup" {
 		t.Fatalf("expected mode active-backup, got %s", m)
 	}
-	if p := ps.choose(false); p != 0 {
+	if p := ps.choose(0, false); p != 0 {
 		t.Fatalf("expected primary path 0, got %d", p)
 	}
-	if p := ps.choose(true); p != 0 {
+	if p := ps.choose(0, true); p != 0 {
 		t.Fatalf("expected primary path 0 for interactive, got %d", p)
 	}
 
 	// Mute primary path -> immediate failover to backup
 	ps.ToggleMute(0)
-	if p := ps.choose(false); p != 1 {
+	if p := ps.choose(0, false); p != 1 {
 		t.Fatalf("expected failover to path 1 when path 0 muted, got %d", p)
 	}
 	ps.ToggleMute(0) // unmute
-	if p := ps.choose(false); p != 0 {
+	if p := ps.choose(0, false); p != 0 {
 		t.Fatalf("expected failback to path 0 when unmuted, got %d", p)
 	}
 
@@ -658,13 +658,13 @@ func TestBondModes(t *testing.T) {
 	ps.mu.Lock()
 	ps.p[0].state = pDead
 	ps.mu.Unlock()
-	if p := ps.choose(false); p != 1 {
+	if p := ps.choose(0, false); p != 1 {
 		t.Fatalf("expected failover to path 1 when path 0 dead, got %d", p)
 	}
 
 	// Primary path revives with ack -> failback to path 0
 	ps.onAck(0, 20*time.Millisecond)
-	if p := ps.choose(false); p != 0 {
+	if p := ps.choose(0, false); p != 0 {
 		t.Fatalf("expected failback to path 0 upon ack, got %d", p)
 	}
 
