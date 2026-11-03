@@ -524,6 +524,8 @@ All carriers carry the same encrypted session. Pick one with `carrier:` (or `-ca
 | `h2` | Proxies that prefer HTTP/2. | 4096 | no | One full-duplex POST per pool connection, TLS. |
 | `h2c` | HTTP/2 without TLS, behind a TLS-terminating proxy. | 4096 | no | Same as `h2`, cleartext. |
 | `grpc` | CDNs that allow gRPC. | 4096 | no | Requests go to `<path>/Tun`. `plain: true` for cleartext behind a proxy. |
+| `gre` | UDP is dropped but GRE (IP protocol 47) passes. | 1364 | yes (raw socket) | 3.2.0, both ends. `peer` is a bare IP like icmp. Each packet is GRE (with a key from the PSK) carrying an IPv4/UDP packet; a BPF filter keeps other GRE traffic out. No `-reverse`. |
+| `ipip` | Same, for IP-in-IP (protocol 4). | 1372 | yes (raw socket) | 3.2.0, both ends. Like `gre` without the GRE header. |
 
 Rules for every non-ICMP carrier: the client dials `peer` as `host:port`, and the server listens on `listen`
 (default `:4443`). `mtu` is 256 to 1400 for icmp and udp, and up to 16384 for the pool carriers.
@@ -1962,6 +1964,56 @@ counts these. It works with any peer version, because it only closes connections
 Field result, production CDN, 2026-10-12, measured back to back the same morning: the 30 s download loop averaged
 30.4 MB/s on 2.4.3 and 42.9 / 44.7 MB/s on 2.4.5, at 2 and 21 minutes after the restart. Kharej showed no connection
 in backoff, and the p95 of a small request during the loop fell from 1114 ms to 269-549 ms.
+
+## 3.2.0: fast by default, bounded memory, gre/ipip
+
+Measured on a 2 vCPU Iran / 2 vCPU Kharej pair, 76-80 ms, raw TCP ~2 Gbit/s sustained on 16 streams (iperf3),
+built-in `/speedtest`, 16 streams, default settings, `bench/pair.sh`:
+
+| | 3.1.2 | 3.2.0 |
+|---|---|---|
+| tcp down / up | 193-248 / 112 MB/s | 224-282 / 146 MB/s; **271.7 MB/s (2.17 Gbit/s) sustained over 16 s (4.3 GB)** |
+| tls down / up | 196 / 123 | 187-209 / 140 |
+| one stream down / up (tcp) | 67 / 49 | 147-152 / 36-56 |
+| tcp client to a server with `icmp` among its carriers | 16 MB/s per session (cap) | 206 / 142 |
+| 32 sessions on one server | OOM-killed at 2.7 GB | no kill, peak 1.8 GB on a 3.8 GB box |
+
+- **The ICMP cap only applies to ICMP.** `max-mbps` defaulted to 16 MB/s per session for the whole process whenever
+  `icmp` was among the carriers. Every auto Kharej server (`carrier: icmp+udp+tcp+...`) therefore held tcp, tls and
+  wss clients to 16 MB/s per session. Now the default is 16 only for a lone `icmp` carrier; in a bond the icmp path
+  alone is held to `wat.ICMPPathBps` (16 MB/s) by a token bucket in the path scheduler, and bulk beyond it goes to the
+  other carriers. Updating the Kharej binary is enough; no config change.
+- **Sessions: 2 by default, never forced.** Sessions each run their own pacer and read each other's queue as
+  congestion: 1 session 176, 2 sessions 261, 4 sessions 147, 8 sessions 68-74 MB/s down on the same pair. The engine's
+  auto value is now at most 2 (4-core hosts used to get 4), and `wattun-manager` no longer writes `sessions: 4` for
+  every pool tunnel. An explicit `sessions:` still works.
+- **Memory.** A stream's unacknowledged send data is now a queue of pooled 64 KB chunks (it was one slice doubled up to
+  twice the window, 28 % of the sender's CPU in `memmove` and 7 % zeroing). Send data and grown receive windows are
+  counted for the whole process against `mem-budget` (MB, default an eighth of the RAM); over it every stream holds at
+  most 256 KB of send data and windows stop growing. The Go heap gets a soft limit of a third of the RAM unless
+  `GOMEMLIMIT` is set.
+- **A full server gives up stale slots.** With all 32 session slots taken, a new authenticated client replaces the
+  session that has heard nothing for 10 s or more. A client restarted with many sessions used to be locked out until
+  the idle timeout closed its own dead sessions.
+- **Knock parsing only for strangers.** The revive engine parsed every received data packet as a possible DNS knock
+  (base32, upper-casing): 15 % of a server's CPU at 130 MB/s upload. It now runs only for packets of no live session.
+- **Bond loss penalty.** A carrier's bulk share was `w * (1 - loss)`, so 10 % loss kept 90 % of the share. It is now
+  `w * (1 - loss)^4`: 10 % loss keeps 66 %, 20 % keeps 41 %, 30 % keeps 24 %.
+- **`gre` and `ipip` carriers** (see [Carriers](#carriers)). Both ends need 3.2.0.
+- **Auto test tunes the chosen type.** After the type is chosen (`wattun-manager` Iran wizard with an auto token, and
+  `auto-test NAME`), the manager tries the advanced settings that change its speed, one at a time, each against the
+  best so far, with about 2 s of traffic each way (20-200 MB): pool carriers `sessions` 1/4/8, `conns` 4/8/32/64,
+  `mtu` 16384; udp `sessions` 1/4, `mtu` 1200, `batch` on, `loss-ceiling`; icmp `mtu` 1000/1400, `batch` off,
+  `loss-ceiling`. A value is written to the config only when it beats the best so far by 10 %; otherwise the setting
+  stays at the engine's auto value. Values given with `--sessions`, `--conns`, `--mtu` or a preset are not tested.
+  Bonds and reverse tunnels are not tuned. On the test pair: tcp kept the auto values (sessions 4 +7 %, 8 -50 %), udp
+  kept `sessions: 4` (61 vs 47 MB/s down+up). It takes 30-70 s. Switching an auto tunnel to another type drops the
+  tuned settings, because a value for one type can break another (the engine refuses `sessions` with icmp).
+  The unattended re-test of auto-heal does not tune.
+- Not changed: `loss-ceiling` stays opt-in for udp. On this pair (UDP shaped to ~270 Mbit/s) it cut retransmits from
+  33.5k to 3.8k but halved upload (50 to 23 MB/s).
+- Still open: upload stays below download (the receiving server is CPU-bound at ~1.8 of 2 cores, and direct pools
+  keep about a second of data in flight, which shows as spurious retransmits); sessions do not yet share one pacer.
 
 ## 3.1.1: authenticated session aging, machine-bound totals, matrix for bonds
 

@@ -6,7 +6,7 @@
 
 **Encrypted Iran ↔ Kharej port forwarding that keeps working when the network is filtered, even when only ping gets through.**
 
-[![Release](https://img.shields.io/badge/release-v3.1.2-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
+[![Release](https://img.shields.io/badge/release-v3.2.0-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go)](go.mod)
 ![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20windows-lightgrey?style=flat-square)
@@ -49,6 +49,17 @@ that **plain tools cannot bring up at all** on this route. Old and new releases 
 and the full list of 92 configurations: [docs/TECHNICAL.md](docs/TECHNICAL.md#field-numbers).
 
 ## What changed since 3.0.0
+
+- **Fast by default (3.2.0).** Tunnels made by the manager were held to 16 MB/s per session: every auto Kharej server
+  lists `icmp`, and that capped all its carriers. Now only ICMP traffic is capped, the manager stops forcing 4 sessions,
+  and memory is bounded (one server with 32 clients used to be killed for running out of RAM). On a 2 vCPU pair at
+  80 ms a default `tcp` tunnel now does **271.7 MB/s (2.17 Gbit/s) down sustained** and 146 MB/s up; one download
+  stream went from 67 to ~150 MB/s. Update both ends.
+- **New `gre` and `ipip` carriers (3.2.0)** for routes where UDP is dropped but GRE or IP-in-IP passes. Root and Linux,
+  like icmp; both ends need 3.2.0. Bonds also move traffic off a lossy carrier much faster now.
+- **Auto mode tunes what it picked (3.2.0).** After choosing the fastest connection type, the auto test tries sessions,
+  conns, mtu, batching and loss-ceiling on that type and keeps a value only when it is clearly faster (10 %) on your
+  route. Adds 30-70 s to the test.
 
 - **Counters stay with their server; the matrix handles bonds (3.1.1).** A config copied to a new VPS starts its
   lifetime traffic counters from zero instead of showing the old server's total (`wattun-manager reset-traffic NAME`

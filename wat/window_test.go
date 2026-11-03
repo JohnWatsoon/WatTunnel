@@ -168,7 +168,7 @@ func TestSlowReaderBuffersBounded(t *testing.T) {
 	unread := st.rnext - st.consumed
 	cli.mu.Unlock()
 	srv.mu.Lock()
-	held, capb := len(sst.sbuf), cap(sst.sroot)
+	held, capb := sst.snd.n, len(sst.snd.ch)*rdChunk
 	srv.mu.Unlock()
 	t.Logf("receiver unread %.2f MB, sender buffered %.2f MB (cap %.2f MB)", float64(unread)/1e6, float64(held)/1e6, float64(capb)/1e6)
 	runtime.ReadMemStats(&m1)

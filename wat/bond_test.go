@@ -752,10 +752,9 @@ func TestRetxFrameReslicing(t *testing.T) {
 	st := &Stream{
 		id:      1,
 		sbase:   0,
-		sbuf:    make([]byte, 16384),
 		peerMax: 16384,
 	}
-	copy(st.sbuf, bytes.Repeat([]byte("A"), 16384))
+	st.snd.write(bytes.Repeat([]byte("A"), 16384))
 
 	// Simulate a lost 16KB frame
 	st.retx = []frameRef{

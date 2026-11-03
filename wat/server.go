@@ -135,6 +135,37 @@ func (b *subIO) Close() error {
 	return nil
 }
 
+// staleAfter: a session that heard nothing for this long gives its slot to a new client when the table is full
+// (clients ping every ~2 s). Before 3.2.0 a restarted client with 16 sessions found the server full of its own dead
+// sessions and could not connect until the idle timeout closed them.
+var staleAfter = 10 * time.Second
+
+// evictStaleLocked frees the slot of the longest-silent session if it is stale; the session closes outside the lock.
+func (srv *Server) evictStaleLocked() bool {
+	var victim *srvSess
+	var vlast time.Time
+	for _, ss := range srv.sessions {
+		last := ss.s.LastRecv()
+		if last.IsZero() {
+			last = ss.created
+		}
+		if victim == nil || last.Before(vlast) {
+			victim, vlast = ss, last
+		}
+	}
+	if victim == nil || time.Since(vlast) < staleAfter {
+		return false
+	}
+	sid := victim.io.sid
+	delete(srv.sessions, sid)
+	srv.retireLocked(sid, max(victim.pn, victim.s.LastPN()))
+	if srv.cfg.Logf != nil {
+		srv.cfg.Logf("server full: client session %016x silent for %s, closing it for a new one", sid, time.Since(vlast).Round(time.Second))
+	}
+	go victim.s.Close()
+	return true
+}
+
 // retireLocked records the highest authenticated packet number of a session that left the table; admit refuses a
 // packet at or below it, so the session's own captured packets cannot create a session again.
 func (srv *Server) retireLocked(sid, pn uint64) {
@@ -404,6 +435,19 @@ func (srv *Server) Close() {
 	srv.raw.Close()
 }
 
+// knock reports whether p is a valid revive knock (raw, or inside a DNS query) and hands it to the engine.
+func (srv *Server) knock(p []byte, src net.Addr) bool {
+	if len(p) >= 36 && binary.BigEndian.Uint32(p[:4]) == ReviveMagic {
+		_, err := srv.revive.VerifyKnock(p, src)
+		return err == nil
+	}
+	if k, ok := ParseDNSQueryKnock(p); ok {
+		_, err := srv.revive.VerifyKnock(k, src)
+		return err == nil
+	}
+	return false
+}
+
 func (srv *Server) run() {
 	var bo recvBackoff
 	for {
@@ -418,18 +462,7 @@ func (srv *Server) run() {
 			}
 		}
 		bo.ok()
-		if srv.revive != nil {
-			if len(p) >= 36 && binary.BigEndian.Uint32(p[:4]) == ReviveMagic {
-				if _, err := srv.revive.VerifyKnock(p, src); err == nil {
-					continue
-				}
-			} else if knock, ok := ParseDNSQueryKnock(p); ok {
-				if _, err := srv.revive.VerifyKnock(knock, src); err == nil {
-					continue
-				}
-			}
-		}
-		if len(p) < hdrLen+tagLen+1 {
+		if len(p) < hdrLen+tagLen+1 { // also shorter than any knock (36 bytes and up)
 			continue
 		}
 		// The header is plain (an older peer) or masked (hdrmask.go): a known plain session id decides, else the masked
@@ -450,6 +483,11 @@ func (srv *Server) run() {
 				continue
 			}
 		} else {
+			// knocks only for packets of no live session: parsing every data packet as a DNS knock (base32 and
+			// upper-casing) was 15 % of a server's CPU at 130 MB/s upload (3.2.0)
+			if srv.revive != nil && srv.knock(p, src) {
+				continue
+			}
 			if srv.draining.Load() {
 				continue
 			}
@@ -491,7 +529,7 @@ func (srv *Server) admit(hdr [hdrLen]byte, p []byte, src net.Addr) *srvSess {
 	}
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	if len(srv.sessions) >= srv.MaxSessions || srv.closed {
+	if srv.closed || len(srv.sessions) >= srv.MaxSessions && !srv.evictStaleLocked() {
 		return nil
 	}
 	if ss := srv.sessions[sid]; ss != nil {

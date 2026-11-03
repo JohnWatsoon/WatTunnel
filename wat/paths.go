@@ -89,6 +89,11 @@ func (t PathTimings) norm() PathTimings {
 // bulkBurst: consecutive bulk packets sent on the same path.
 const bulkBurst = 24
 
+// ICMPPathBps caps the bulk bytes/s a bond sends on its icmp path (Iran reroutes ICMP above ~30 MB/s); the other
+// carriers of the bond are not held to it (3.2.0, before: the whole session was capped at 16 MB/s whenever icmp was
+// among the carriers).
+var ICMPPathBps = 16e6
+
 const (
 	pLive = iota
 	pSuspect
@@ -116,6 +121,23 @@ type pathState struct {
 	nextProbe                       time.Time
 
 	sent, acked, lost uint64
+
+	capBps, tokens float64 // >0: byte cap of this path (token bucket, 50 ms burst)
+	tokAt          time.Time
+}
+
+func (p *pathState) refill(now time.Time) {
+	if p.capBps <= 0 {
+		return
+	}
+	p.tokens = min(p.capBps/20, p.tokens+p.capBps*now.Sub(p.tokAt).Seconds())
+	p.tokAt = now
+}
+
+// overCap: the path spent its byte budget; bulk goes elsewhere until it refills.
+func (p *pathState) overCap(now time.Time) bool {
+	p.refill(now)
+	return p.capBps > 0 && p.tokens < 0
 }
 
 // pathSet is the scoring and health state of the paths of one session end. It is shared by BondIO (client) and
@@ -132,8 +154,12 @@ type pathSet struct {
 func newPathSet(names []string, present bool, cfg PathTimings) *pathSet {
 	norm := cfg.norm()
 	ps := &pathSet{cfg: norm, mode: norm.Mode, p: make([]pathState, len(names))}
+	now := time.Now()
 	for i, n := range names {
-		ps.p[i] = pathState{name: n, present: present, w: 1, gap: ps.cfg.ProbeFirst}
+		ps.p[i] = pathState{name: n, present: present, w: 1, gap: ps.cfg.ProbeFirst, tokAt: now}
+		if n == "icmp" && len(names) > 1 {
+			ps.p[i].capBps, ps.p[i].tokens = ICMPPathBps, ICMPPathBps/20
+		}
 	}
 	return ps
 }
@@ -210,11 +236,13 @@ func (ps *pathSet) markPresent(i int) {
 	ps.mu.Unlock()
 }
 
-func (ps *pathSet) onSend(i int) {
+func (ps *pathSet) onSend(i, n int) {
 	now := time.Now()
 	ps.mu.Lock()
 	if i >= 0 && i < len(ps.p) {
 		p := &ps.p[i]
+		p.refill(now)
+		p.tokens -= float64(n)
 		p.sent++
 		p.lastSend = now
 		if p.firstUnacked.IsZero() {
@@ -330,7 +358,9 @@ func maxTime(a, b time.Time) time.Time {
 }
 
 func (p *pathState) weight(now time.Time, ramp time.Duration) float64 {
-	w := p.w * (1 - math.Min(p.loss, 0.9))
+	// (1-loss)^4: a carrier losing 10 % keeps 66 % of its share, 20 % keeps 41 %, 30 % keeps 24 %. With (1-loss) a
+	// 10 %-loss carrier kept 90 % and fed retransmits (3.2.0).
+	w := p.w * math.Pow(1-math.Min(p.loss, 0.9), 4)
 	if !p.revived.IsZero() {
 		w *= math.Min(1, 0.1+0.9*float64(now.Sub(p.revived))/float64(ramp))
 	}
@@ -404,17 +434,19 @@ func (ps *pathSet) choose(interactive bool) int {
 	// the slow path's packets out of the reported ranges (they were then retransmitted although they arrived: 23 %
 	// of all packets on a 40 ms + 150 ms bond, measured).
 	if ps.burstLeft > 0 {
-		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted {
+		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !p.overCap(now) {
 			ps.burstLeft--
 			return ps.burstPath
 		}
 		ps.burstLeft = 0
 	}
+	// shortcut: when only capped paths are left, the second pass sends on them past the cap; the pacer is the only
+	// brake then. Upgrade to holding the packet if a bond whose other carriers all died trips the ICMP reroute.
 	for pass := 0; pass < 2; pass++ { // second pass (nothing healthy): spread over every path so one of them answers
 		best, sum := -1, 0.0
 		for i := range ps.p {
 			p := &ps.p[i]
-			if !p.present || p.muted || (p.state == pDead && pass == 0) {
+			if !p.present || p.muted || (p.state == pDead || p.overCap(now)) && pass == 0 {
 				continue
 			}
 			w := 1.0

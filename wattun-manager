@@ -251,7 +251,11 @@ box_top() { # [title]
   printf '  %s╭─ %s%s%s %s╮%s\n' "$GRY" "$RST" "$1" "$GRY" "$(rep ─ $((BOXW-${#1}-3)))" "$RST"
 }
 box_mid() { printf '  %s├%s┤%s\n' "$GRY" "$(rep ─ "$BOXW")" "$RST"; }
-box_row() { vlen "$1"; local pad=$((BOXW-2-VLEN)); [ "$pad" -lt 0 ] && pad=0; printf '  %s│%s %s%*s %s│%s\n' "$GRY" "$RST" "$1" "$pad" '' "$GRY" "$RST"; }
+box_row() { # a row never pushes the right border out: a longer one is cut to the box (and loses its colors)
+  local t=$1 pad; vlen "$t"
+  if [ "$VLEN" -gt $((BOXW-2)) ]; then t=$(strip_ansi "$t"); t="${t:0:$((BOXW-3))}…"; VLEN=$((BOXW-2)); fi
+  pad=$((BOXW-2-VLEN)); printf '  %s│%s %s%*s %s│%s\n' "$GRY" "$RST" "$t" "$pad" '' "$GRY" "$RST"
+}
 row_2col() {
   local left=$1 right=$2 w_left=36 pad
   vlen "$left"
@@ -423,7 +427,14 @@ public_ip() { # prints a valid IPv4 or nothing. A public address on an interface
 }
 new_key() { head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 40; }
 rand_path() { echo "/api/$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"; } # a fresh URL path per tunnel: every install used /wat, a fixed string a filter can match (3.0.1)
-uptime_of() { local t; t=$(systemctl show "${WAT_PREFIX}@$1" -p ActiveEnterTimestamp --value 2>/dev/null); [ -n "$t" ] && echo "since $t" || echo "-"; }
+uptime_of() { # name -> "3d 4h" / "2h 14m" / "5m", empty when unknown
+  local t s; t=$(systemctl show "${WAT_PREFIX}@$1" -p ActiveEnterTimestamp --value 2>/dev/null)
+  s=$(date -d "$t" +%s 2>/dev/null) || return 0; s=$(( $(date +%s) - s )); [ "$s" -ge 0 ] || return 0
+  if [ "$s" -ge 86400 ]; then echo "$((s/86400))d $((s%86400/3600))h"
+  elif [ "$s" -ge 3600 ]; then echo "$((s/3600))h $((s%3600/60))m"
+  else echo "$((s/60))m"; fi
+}
+has_dgram() { local c; for c in ${1//+/ }; do is_pool "$c" || return 0; done; return 1; } # icmp/udp/gre/ipip in the list: the only carriers whose loss_pct is wire loss
 
 free_metrics_port() { # first free port from WAT_METRICS_BASE (default 19750, sandbox 19850); never 19700-19709 or 18990-18999
   local p=${WAT_METRICS_BASE:-}
@@ -913,17 +924,23 @@ parse_carriers() { # json
 }
 tinfo() { # name -> TI_*  (state: up | degraded | down | stopped)
   TI_STATE=stopped; TI_RTT=0; TI_STREAMS=0; TI_SESS=0; TI_IN=0; TI_OUT=0; TI_RATE=0; TI_RAW=''
-  TI_CAR_COUNT=0; TI_CAR_ALIVE=0; TI_CAR_MUTED=0
+  TI_CAR_COUNT=0; TI_CAR_ALIVE=0; TI_CAR_MUTED=0; TI_LIVE=$(cfg "$1" carrier); TI_AUTO=0
+  is_auto_kharej "$1" || [ -n "$(companion_of "$1")" ] && TI_AUTO=1 # all types open, Iran uses one: the dead rest is normal
   systemctl is-active -q "${WAT_PREFIX}@$1" 2>/dev/null || return 0
   TI_RAW=$(stats "$1")
   if [ "$(jget "$TI_RAW" alive)" = true ]; then TI_STATE=up; else TI_STATE=down; fi
   TI_RTT=$(jget "$TI_RAW" srtt_ms); TI_STREAMS=$(jget "$TI_RAW" streams); TI_SESS=$(jget "$TI_RAW" sessions)
   TI_IN=$(jget "$TI_RAW" bytes_in_total); TI_OUT=$(jget "$TI_RAW" bytes_out_total); TI_RATE=$(jget "$TI_RAW" rate_bps)
   [ -n "$TI_IN" ] || { TI_IN=$(jget "$TI_RAW" bytes_in); TI_OUT=$(jget "$TI_RAW" bytes_out); } # before 2.4.19: since the last restart
+  awk -v r="${TI_RTT:-0}" 'BEGIN{exit !(r < 0.5)}' && TI_RTT=$(jget "$TI_RAW" min_rtt_ms) # a server between samples reports srtt 0
   : "${TI_RTT:=0}" "${TI_STREAMS:=0}" "${TI_SESS:=0}" "${TI_IN:=0}" "${TI_OUT:=0}" "${TI_RATE:=0}"
   parse_carriers "$TI_RAW"
   TI_CAR_COUNT=$CAR_COUNT
-  if [ "$TI_STATE" = up ] && [ "$CAR_COUNT" -gt 0 ]; then
+  if [ "$CAR_COUNT" -gt 0 ]; then
+    local j; TI_LIVE=''
+    for ((j=0; j<CAR_COUNT; j++)); do [ "${CAR_ALIVE[$j]}" = true ] && TI_LIVE+="${TI_LIVE:++}${CAR_NAME[$j]}"; done
+  fi
+  if [ "$TI_STATE" = up ] && [ "$CAR_COUNT" -gt 0 ] && [ "$TI_AUTO" = 0 ]; then
     local i unmuted_live=0 unmuted_total=0
     for ((i=0; i<CAR_COUNT; i++)); do
       if [ "${CAR_MUTED[$i]}" = true ]; then
@@ -938,7 +955,7 @@ tinfo() { # name -> TI_*  (state: up | degraded | down | stopped)
       TI_STATE=degraded
     fi
   fi
-  if [ "$TI_STATE" = up ]; then
+  if [ "$TI_STATE" = up ] && has_dgram "$TI_LIVE"; then
     local loss
     loss=$(jget "$TI_RAW" loss_pct)
     if [ -n "$loss" ] && [ "${loss%.*}" -ge 5 ] 2>/dev/null; then
@@ -1596,7 +1613,7 @@ wizard_kharej() {
     fi
     case "$cr" in ws|wss|grpc|h2|h2c) ask_ok "URL path" "$path" v_path || return 1; path=$REPLY_V ;; esac
     case "$cr" in wss|tls|grpc|h2) ask "Domain / SNI sent by Iran (empty = none)" "$sni"; sni=$REPLY_V ;; esac
-    ask_ok "Speed ceiling in MB/s (empty = default 16)" "$mbps" v_mbps || return 1; mbps=$REPLY_V
+    ask_ok "Speed ceiling in MB/s (empty = no cap; icmp alone: 16)" "$mbps" v_mbps || return 1; mbps=$REPLY_V
     ask_ok "FEC: off or auto (auto needs auto on both ends)" off v_fec || return 1; fec=$REPLY_V
   fi
   valid_name "$name" || { err "The name '$name' is not available."; return 1; }
@@ -2258,7 +2275,7 @@ wizard_iran() {
   if [ "$NONINTERACTIVE" = 1 ] && confirm "Change advanced settings?" "$advdef"; then
     ask_ok "Tunnel name" "$name" v_name && name=$REPLY_V || return 1
     ask_ok "Bind address for the public ports" 0.0.0.0 v_bind || return 1; bind=$REPLY_V
-    ask_ok "Speed ceiling in MB/s (empty = default 16)" "$mbps" v_mbps || return 1; mbps=$REPLY_V
+    ask_ok "Speed ceiling in MB/s (empty = no cap; icmp alone: 16)" "$mbps" v_mbps || return 1; mbps=$REPLY_V
     ask_ok "FEC: off or auto (auto needs auto on both ends)" off v_fec || return 1; fec=$REPLY_V
     if [ "$T_CARRIER" = icmp ]; then ask_ok "ICMP type (must match Kharej)" "${T_ICMP:-echo}" v_icmp || return 1; T_ICMP=$REPLY_V; fi
     case "$T_CARRIER" in wss|tls|grpc|h2) ask "Domain / SNI (empty = none)" "$T_SNI"; T_SNI=$REPLY_V ;; esac
@@ -2509,10 +2526,8 @@ sessions_check() { # --sessions N: only when the installed wattun knows the key 
   return 0
 }
 sessions_line() { # the engine refuses sessions with icmp, bonded carriers, reverse, or more than 16
-  if [ -z "$SESS_USE" ] && [ "$T_REV" != 1 ] && ver_ge "$(bin_ver || true)" 2.3.0 2>/dev/null; then
-    # default for pool carriers: 4 sessions (field, Iran-CF-Kharej wss: 1 = 19, 4 = 52 MB/s down at 91% of 2 cores)
-    case "$T_CARRIER" in tcp|tls|ws|wss|h2|h2c|grpc) SESS_USE=4 ;; esac
-  fi
+  # no default here: the engine's auto value fits the host (2 on 2 CPUs). Forcing 4 or 8 made sessions fight over
+  # the same queue: direct tcp 2026-11-03, 2 sessions 248 MB/s, 8 sessions 68 MB/s.
   [ -n "$SESS_USE" ] || return 0
   case "$T_CARRIER" in icmp|*,*) warn "--sessions ignored: not supported with carrier '$T_CARRIER'" >&2; return 0 ;; esac
   [ "$T_REV" = 1 ] && { warn "--sessions ignored: not supported in reverse mode" >&2; return 0; }
@@ -2881,15 +2896,15 @@ auto_widen() { # name : open every carrier of the token's plan again
 
 # ---- Iran side: test runner ----
 AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=()
-AV_FS=(); AV_FM=() # fake-sni / fake-mode per variant (anti-censor matrix, 2.10.2)
+AV_FS=(); AV_FM=(); AV_X=() # fake-sni / fake-mode per variant (anti-censor matrix, 2.10.2)
 AR_OK=(); AR_DOWN=(); AR_UP=(); AR_RTT=(); AR_WHY=()
 AT_QUIET=0; AT_MB=2; AT_DIR=''; AT_PID=''; AT_FW=''; AT_ADDR=''; AT_SKIP=''; AT_DLINK=0; AT_SECS=0; AT_APPLIED=0
 AT_PRESET=normal; AT_STTY=''; AT_KEYS=0; AT_ACT=''; AT_STOP=0; AT_GSKIP=''
 AT_RANK=(); AT_SEL=(); AT_SEL_LABEL=''; AT_SEL_KEY=''; AT_EXTRA=''; AUTO_TOKEN=''
-av_add() { # label carrier kind(d|c|r) peer port sni [fp ech tls-frag [fake-sni fake-mode]] (the last three: CDN variants, wattun >= 2.2.0; last two: matrix)
+av_add() { # label carrier kind(d|c|r) peer port sni [fp ech tls-frag [fake-sni fake-mode [extra flags]]] (fp..frag: CDN variants, wattun >= 2.2.0; fake-*: matrix; extra: auto tuning)
   AV_LABEL+=("$1"); AV_CAR+=("$2"); AV_KIND+=("$3"); AV_PEER+=("$4"); AV_PORT+=("$5"); AV_SNI+=("$6")
   AV_FP+=("${7:-}"); AV_ECH+=("${8:-}"); AV_FRAG+=("${9:-}")
-  AV_FS+=("${10:-}"); AV_FM+=("${11:-}")
+  AV_FS+=("${10:-}"); AV_FM+=("${11:-}"); AV_X+=("${12:-}")
 }
 av_key() { local k="${AV_CAR[$1]}/${AV_KIND[$1]}"; av_anti "$1" && k+="/${AV_FS[$1]}-${AV_FM[$1]}-${AV_FP[$1]}-${AV_ECH[$1]}-${AV_FRAG[$1]}"; echo "$k"; }
 av_anti() { [ "${AV_KIND[$1]}" = d ] && [ -n "${AV_FS[$1]}${AV_FP[$1]}${AV_ECH[$1]}${AV_FRAG[$1]}" ]; } # a direct variant that carries desync / fingerprint / fragmentation (anti-censor preset)
@@ -2921,7 +2936,7 @@ auto_variants_anti() { # direct plan part
 auto_variants() { # T_* from the auto token -> AV_*
   local d r c p
   AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=()
-  AV_FS=(); AV_FM=()
+  AV_FS=(); AV_FM=(); AV_X=()
   AT_ADDR=$T_PEER; AT_PATH=${T_PATH:-/wat}
   d=$(plan_part "$T_AUTO" d); r=$(plan_part "$T_AUTO" r)
   av_add icmp icmp d "$AT_ADDR" '' ''
@@ -3001,7 +3016,7 @@ at_cleanup() {
   AT_DIR=''; return 0
 }
 at_start() { # i metrics-port : start a throw-away client for variant i (no -map: nothing is published)
-  local i=$1 mp=$2 car=${AV_CAR[$1]} a
+  local i=$1 mp=$2 car=${AV_CAR[$1]} a x
   a=(-mode client -carrier "$car" -key-file "$AT_DIR/key" -peer "${AV_PEER[$i]}" -metrics "127.0.0.1:$mp")
   case "$car" in ws|wss|h2|h2c|grpc) a+=(-path "${T_PATH:-/wat}") ;; esac
   if [ "$car" = icmp ] && [ -n "$T_ICMP" ]; then a+=(-icmp-type "$T_ICMP"); fi
@@ -3013,6 +3028,7 @@ at_start() { # i metrics-port : start a throw-away client for variant i (no -map
     a+=(-fake-sni "${AV_FS[$i]}")
     [ -n "${AV_FM[$i]:-}" ] && a+=(-fake-mode "${AV_FM[$i]}")
   fi
+  if [ -n "${AV_X[$i]:-}" ]; then read -ra x <<<"${AV_X[$i]}"; a+=("${x[@]}"); fi # auto tuning: -key=value words
   # the engine refuses a client without any -map: a loopback-only dummy mapping publishes nothing
   a+=(-map "$(at_free_port $((mp + 1))):1@127.0.0.1")
   if [ "${AV_KIND[$i]}" = r ]; then
@@ -3165,11 +3181,70 @@ auto_refine() { # AT_RANK from the 8 MB screening -> re-measure the top 3 at 20 
   at_rank
   return 0
 }
+# Auto tuning (3.2.0): once the type is chosen, try the advanced settings that change its speed, one setting at a time,
+# each value against the best so far. A value is kept only when it beats that by 10 % (one run is noisy), so a
+# setting stays at the engine's auto value unless another value is clearly faster on this route. Measured on one
+# 2 vCPU pair (2026-11-03): tcp sessions 1/2/4/8 gave 176/261/147/68 MB/s down, so no one value fits every route.
+# Not tuned: max-mbps (icmp keeps its 16 MB/s reroute guard), fec (needs -fec auto on Kharej too), bonds and reverse
+# tunnels (the engine refuses sessions there, and Kharej sets the pool of a reverse tunnel).
+at_tune_knobs() { # carrier -> "key:value,value ..." in test order
+  case "$1" in
+    icmp) echo "mtu:1000,1400 batch:off loss-ceiling:true" ;;
+    udp) echo "sessions:1,4 mtu:1200 batch:on loss-ceiling:true" ;;
+    tcp|tls|ws|wss|h2|h2c|grpc) echo "sessions:1,4,8 conns:4,8,32,64 mtu:16384" ;;
+  esac
+}
+AT_TUNE=''; AT_TUNE_KEYS=''
+at_tune() { # AT_SEL (one direct or CDN variant) -> AT_TUNE (config lines) and AT_TUNE_KEYS (the settings it tested)
+  local b=${AT_SEL[0]} knobs kv k v best bs s i x='' save=$AT_MB
+  AT_TUNE=''; AT_TUNE_KEYS=''
+  [ "${#AT_SEL[@]}" -eq 1 ] && [ "${AV_KIND[$b]}" != r ] || return 0
+  knobs=$(at_tune_knobs "${AV_CAR[$b]}"); [ -n "$knobs" ] || return 0
+  at_prep || return 0
+  # about 2 s each way at the speed the screening saw (20-200 MB): a short run on a fast link measures slow start, not the setting
+  AT_MB=$(awk -v d="${AR_DOWN[$b]:-0}" 'BEGIN{m=int(d*2); print (m<20)?20:(m>200)?200:m}'); AT_STOP=0; AT_ACT=''
+  [ "$AT_QUIET" = 1 ] || { echo; say "  ${BOLD}Tuning ${AV_LABEL[$b]}${RST} (one setting at a time, $AT_MB MB each way)"; }
+  at_tune_try() { # flags label -> i (the new variant) ; prints its row
+    av_add "$2" "${AV_CAR[$b]}" "${AV_KIND[$b]}" "${AV_PEER[$b]}" "${AV_PORT[$b]}" "${AV_SNI[$b]}" \
+      "${AV_FP[$b]}" "${AV_ECH[$b]}" "${AV_FRAG[$b]}" "${AV_FS[$b]}" "${AV_FM[$b]}" "$1"
+    i=$((${#AV_LABEL[@]} - 1))
+    [ "$AT_QUIET" = 1 ] || at_busy "$2"
+    at_probe "$i" 8
+    [ "$AT_QUIET" = 1 ] || { at_idle; at_print "$i"; }
+  }
+  at_tune_try '' 'as chosen (engine auto)'
+  bs=0; [ "${AR_OK[$i]}" = 1 ] && bs=$(at_score "$i")
+  for kv in $knobs; do
+    k=${kv%%:*}
+    case "$k" in # a value given on the command line (--sessions, --conns, --mtu, a preset) wins
+      sessions) [ -n "$NI_SESSIONS" ] && continue ;;
+      conns) [ -n "${NI_CONNS:-}" ] && continue ;;
+      mtu) [ -n "${NI_MTU:-}" ] && continue ;;
+    esac
+    AT_TUNE_KEYS+=" $k"; best=''
+    for v in $(tr ',' ' ' <<<"${kv#*:}"); do
+      at_tune_try "${x:+$x }-$k=$v" "$k $v"
+      [ "${AR_OK[$i]}" = 1 ] || continue
+      s=$(at_score "$i")
+      if awk -v s="$s" -v b="$bs" 'BEGIN{exit !(s > b * 1.1)}'; then bs=$s; best=$v; fi
+    done
+    if [ -n "$best" ]; then x="${x:+$x }-$k=$best"; AT_TUNE+="$k: $best"$'\n'; fi
+  done
+  at_cleanup
+  AT_MB=$save
+  AT_TUNE=${AT_TUNE%$'\n'}
+  if [ "$AT_QUIET" != 1 ]; then
+    if [ -n "$AT_TUNE" ]; then ok "Keeping: $(tr '\n' ',' <<<"$AT_TUNE" | sed 's/,$//; s/,/, /g')"
+    else ok "The engine's auto values were the fastest."; fi
+  fi
+  return 0
+}
+at_tune_extra() { [ -n "$AT_TUNE" ] && AT_EXTRA+="${AT_EXTRA:+$'\n'}$AT_TUNE"; return 0; } # after at_to_t: the tuned lines go into the config with the rest
 auto_test() { # needs read_token of an auto token (T_*), AT_QUIET, AT_MB, AT_SKIP ; fills AR_*, AT_SECS
   local i n t0=$SECONDS kind last='' w pool=() j sc
   at_prep || return 1
   AR_OK=(); AR_DOWN=(); AR_UP=(); AR_RTT=(); AR_WHY=()
-  CS_EDGES=(); CS_TOTAL=0; CS_RAN=0
+  CS_EDGES=(); CS_TOTAL=0; CS_RAN=0; AT_TUNE=''; AT_TUNE_KEYS=''
   if [ -n "$T_SNI" ] && cdn_ok; then # one scan for all CDN carriers; its summary line is printed in the CDN section
     j=''; sc=wss; for i in wss grpc; do j=$(plan_port "$(plan_part "$T_AUTO" d)" "$i"); [ -n "$j" ] && { sc=$i; break; }; done
     if [ -n "$j" ]; then
@@ -3225,7 +3300,7 @@ at_truncate() { # k : keep only the first k variants (the test was stopped befor
   local k=$1
   AV_LABEL=("${AV_LABEL[@]:0:$k}"); AV_CAR=("${AV_CAR[@]:0:$k}"); AV_KIND=("${AV_KIND[@]:0:$k}"); AV_PEER=("${AV_PEER[@]:0:$k}")
   AV_PORT=("${AV_PORT[@]:0:$k}"); AV_SNI=("${AV_SNI[@]:0:$k}"); AV_FP=("${AV_FP[@]:0:$k}"); AV_ECH=("${AV_ECH[@]:0:$k}")
-  AV_FRAG=("${AV_FRAG[@]:0:$k}"); AV_FS=("${AV_FS[@]:0:$k}"); AV_FM=("${AV_FM[@]:0:$k}")
+  AV_FRAG=("${AV_FRAG[@]:0:$k}"); AV_FS=("${AV_FS[@]:0:$k}"); AV_FM=("${AV_FM[@]:0:$k}"); AV_X=("${AV_X[@]:0:$k}")
   AR_OK=("${AR_OK[@]:0:$k}"); AR_DOWN=("${AR_DOWN[@]:0:$k}"); AR_UP=("${AR_UP[@]:0:$k}"); AR_RTT=("${AR_RTT[@]:0:$k}"); AR_WHY=("${AR_WHY[@]:0:$k}")
 }
 at_rank() { # [policy] -> AT_RANK (working variants, best first: policy driven)
@@ -3406,7 +3481,7 @@ at_preset_ask() { # -> AT_PRESET normal|anti (--test in unattended runs), T_SNI 
   [ "$NONINTERACTIVE" = 1 ] && return 0
   local t
   echo
-  say "  Test every connection type from here (2-3 min, up to 400 MB). Nothing is published while it runs."
+  say "  Test every connection type from here, then tune the fastest (3-4 min; on a fast link up to 4 GB). Nothing is published while it runs."
   for t in 1 2 3 4 5 6; do
     printf '  %s test  %s also anti-censor variants %s(30-60 min)%s  %s %s  %s cancel\n' "$(key_label Enter)" "$(key_label a)" "$GRY" "$RST" \
       "$(key_label d)" "${T_SNI:+CDN domain: $T_SNI}${T_SNI:-add a Cloudflare domain}" "$(key_label q)"
@@ -3435,6 +3510,7 @@ auto_iran_front() { # token : test everything, ranked table, choose. Leaves T_* 
   at_table
   at_choose || { warn "Cancelled."; return 1; }
   ok "Using $AT_SEL_LABEL"
+  at_tune; at_tune_extra
   sleep 0.4
   return 0
 }
@@ -3444,13 +3520,18 @@ auto_current_key() { # name -> carrier/kind of the running config (d direct, c C
   if is_reverse "$1"; then echo "$c/r"; elif [ -n "$(cfg "$1" sni)" ]; then echo "$c/c"; else echo "$c/d"; fi
 }
 auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, restart, wait for the link
-  local n=$1 f="$CONF/$1.yml" ol oldrev=0 oldpool=0 l k v rport=''
+  local n=$1 f="$CONF/$1.yml" ol oldrev=0 oldpool=0 l k v rport='' curkey
   AT_APPLIED=1
+  curkey=$(auto_current_key "$n")
   ol=$(cfg "$n" listen); ol=${ol##*:}
   is_reverse "$n" && oldrev=1
   [ "$oldrev" = 1 ] && is_rpool "$(cfg "$n" carrier)" && oldpool=1
   oldproto=$(rproto "$(cfg "$n" carrier)")
   sed -i -E '/^(carrier|peer|path|sni|host|reverse|listen|fp|ech|ech-cache|tls-frag|peer-[a-z0-9]+|listen-[a-z0-9]+):/d' "$f"
+  # settings the tuning tested: its result replaces them. On a switch to another type all of them go: a value tuned for one
+  # type can break another (the engine refuses sessions with icmp, bonds and reverse)
+  [ "$curkey" = "$(cut -d/ -f1,2 <<<"${AT_SEL_KEY:-}")" ] || AT_TUNE_KEYS='sessions conns mtu batch loss-ceiling'
+  for k in $AT_TUNE_KEYS; do sed -i "/^$k:/d" "$f"; done
   set_value "$n" carrier "$T_CARRIER"
   # a working fake-SNI/pool-rotate combination survives a type switch only while the new carrier set has
   # a pool leg and this side is the dialer (the desync layer attaches to every pool leg of a bond, nowhere
@@ -3508,8 +3589,11 @@ auto_test_cmd() { # name : re-run the test for an existing auto Iran tunnel and 
   else
     at_table
     at_choose || { warn "No change."; [ "$NONINTERACTIVE" = 1 ] && return 1; return 0; }
+    at_tune; at_tune_extra
   fi
-  if [ "$AT_SEL_KEY" = "$cur" ]; then ok "'$n' already uses $AT_SEL_LABEL."; return 0; fi
+  local k v curt=''
+  for k in $AT_TUNE_KEYS; do v=$(cfg "$n" "$k"); [ -n "$v" ] && curt+="$k: $v"$'\n'; done
+  if [ "$AT_SEL_KEY" = "$cur" ] && [ "${curt%$'\n'}" = "$AT_TUNE" ]; then ok "'$n' already uses $AT_SEL_LABEL${AT_TUNE:+ with these settings}."; return 0; fi
   confirm "Switch '$n' to $AT_SEL_LABEL? (open connections drop)" y || { warn "No change."; return 0; }
   auto_apply "$n"
 }
@@ -3613,7 +3697,7 @@ ac_matrix() { # name : needs T_* loaded from the tunnel (ac_load); fills AV_*, A
   local n=$1 i fs fm leg peer tag t0=$SECONDS w car=$T_CARRIER bond=0 tlsleg=''
   local -a legs=()
   AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=()
-  AV_FS=(); AV_FM=()
+  AV_FS=(); AV_FM=(); AV_X=()
   AR_OK=(); AR_DOWN=(); AR_UP=(); AR_RTT=(); AR_WHY=()
   at_prep || return 1
   if [[ "$car" == *+* ]]; then # a bond: the desync kit attaches to its pool legs, so each leg is probed as its own client
@@ -4003,7 +4087,7 @@ cdn_tune() { # [full] : needs T_CARRIER T_PEER T_KEY T_PATH T_SNI (the domain), 
   local car=$T_CARRIER port pa pd label a t0=$SECONDS i
   AT_FULL=${1:-0}
   AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=()
-  AV_FS=(); AV_FM=()
+  AV_FS=(); AV_FM=(); AV_X=()
   AR_OK=(); AR_DOWN=(); AR_UP=(); AR_RTT=(); AR_WHY=(); CT_IDX=''
   port=${T_PEER%%,*}; port=${port##*:}
   pd=$T_PEER; case "$pd" in *,*) pd="$T_SNI:$port" ;; esac
@@ -4591,12 +4675,14 @@ tunnel_card() {
   if [ "$r" = Kharej ]; then routing_txt="$(kv allows "$(ports_summary "$n" 26)")"; else routing_txt="$(kv ports "$(ports_summary "$n" 26)")"; fi
   box_top "${par:+reverse side of $par}"
 
-  local boot='no start at boot'; [ "$srv_en" = enabled ] && boot='starts at boot'
-  box_row "${SC_COL}${SC_DOT} ${SC_TXT}${RST} ${GRY}· service ${srv_act}${srv_up:+ $srv_up} · $boot${RST}"
+  local boot='not started at boot'; [ "$srv_en" = enabled ] && boot='starts at boot'
+  if [ "$srv_act" = active ]; then box_row "${SC_COL}${SC_DOT} ${SC_TXT}${RST}${GRY}${srv_up:+ · running $srv_up} · $boot${RST}"
+  else box_row "${SC_COL}${SC_DOT} ${SC_TXT}${RST}${GRY} · service $srv_act · $boot${RST}"; fi
   if is_auto_kharej "$n"; then
     auto_live "$n"; c=$(echo $AN_D ${AN_R:+r:$AN_R}); c=${c// /+}; x=$(cfg "$n" carrier | tr '+' ' ' | wc -w)
     if [ -n "$c" ]; then k="picked by Iran"; else k="$x open"; fi
     row_2col "$(kv carrier "${c:-auto} ${GRY}($k)${RST}")" "$routing_txt"
+  elif [ -n "$par" ]; then row_2col "$(kv carrier "auto ${GRY}($(wc -w <<<"${cr//+/ }") types open)${RST}")" "$routing_txt"
   else row_2col "$(kv carrier "$cr")" "$routing_txt"; fi
 
   # Sub-role details
@@ -4634,7 +4720,7 @@ tunnel_card() {
     if [ -n "$fks" ] || [ "$gov" = true ] || [ -n "$rot" ] || [ -n "$dl" ]; then
       box_row "$(kv anti-censor "${GRN}on${RST} · $(detect_preset "$n")${fks:+ · fake-sni $fks}${dl:+ · dns $dl}")"
     else
-      box_row "$(kv anti-censor "off ${GRY}(plain tunnel, full speed)${RST}")"
+      box_row "$(kv anti-censor off)"
     fi
   elif [ "$(uname -s)" = Linux ] && is_pool_list "$(cfg "$n" carrier)" && is_reverse "$n"; then
     box_row "$(kv anti-censor "${GRY}set on the Kharej side (reverse)${RST}")"
@@ -4651,23 +4737,34 @@ tunnel_card() {
   # Section 2: Real-time telemetry (when not stopped)
   if [ "$TI_STATE" != stopped ]; then
     box_mid
-    row_2col "$(kv rtt "$(ms "$TI_RTT") ms ${GRY}(min $(ms "$(jget "$TI_RAW" min_rtt_ms)"))${RST}")" "$(kv rate "$(human "$TI_RATE")/s")"
-    row_2col "$(kv loss "$(jget "$TI_RAW" loss_pct) %")" "$(kv retrans "$(jget "$TI_RAW" retrans) packets")"
-    row_2col "$(kv streams "$TI_STREAMS")" "$(kv 'udp flows' "$(jget "$TI_RAW" dgram_flows)")"
-    row_2col "$(kv total "↓$(human "$TI_IN")  ↑$(human "$TI_OUT")")" "$(kv sessions "$TI_SESS")"
-    if [ "$TI_CAR_COUNT" -gt 0 ]; then
+    local uf; uf=$(jget "$TI_RAW" dgram_flows)
+    if [ "$TI_STATE" = up ] || [ "$TI_STATE" = degraded ]; then
+      local rt mr; printf -v rt '%.0f' "$TI_RTT"; printf -v mr '%.0f' "$(jget "$TI_RAW" min_rtt_ms)"
+      if [ "$rt" = "$mr" ]; then rt="$rt ms"; else rt="$rt ms ${GRY}min $mr${RST}"; fi
+      row_2col "$(kv rtt "$rt")" "$(kv streams "$TI_STREAMS")"
+      row_2col "$(kv total "↓$(human "$TI_IN")  ↑$(human "$TI_OUT")")" "$(kv sessions "$TI_SESS")"
+      if has_dgram "$TI_LIVE"; then row_2col "$(kv loss "$(printf '%.1f' "$(jget "$TI_RAW" loss_pct)") %")" "$([ "${uf:-0}" -gt 0 ] 2>/dev/null && kv 'udp flows' "$uf")"
+      elif [ "${uf:-0}" -gt 0 ] 2>/dev/null; then box_row "$(kv 'udp flows' "$uf")"; fi
+    else
+      if [ "$r" = Kharej ]; then box_row "${GRY}no link yet, waiting for Iran to connect${RST}"; else box_row "${GRY}no link yet, d runs a diagnosis${RST}"; fi
+      [ "${TI_IN%.*}" -gt 0 ] 2>/dev/null && box_row "$(kv total "↓$(human "$TI_IN")  ↑$(human "$TI_OUT")")"
+    fi
+    # one row per carrier of a bond; an auto side lists only what Iran uses, and nothing when that is one type
+    if [ "$TI_CAR_COUNT" -gt 1 ] && { [ "$TI_AUTO" = 0 ] || [ "$TI_LIVE" != "${TI_LIVE//+/}" ]; }; then
       box_mid
-      local ci ccol cdot ctxt c_pct
+      local ci ccol cdot ctxt det
       for ((ci=0; ci<TI_CAR_COUNT; ci++)); do
-        if [ "${CAR_MUTED[$ci]}" = true ]; then
-          ccol=$GRY; cdot='○'; ctxt="muted"
+        det=''
+        if [ "${CAR_MUTED[$ci]}" = true ]; then ccol=$GRY; cdot='○'; ctxt=muted
         elif [ "${CAR_ALIVE[$ci]}" = true ]; then
-          ccol=$GRN; cdot='●'; ctxt="up"
+          ccol=$GRN; cdot='●'; ctxt=up
+          det="$(printf '%.0f' "${CAR_RTT[$ci]:-0}") ms · $(awk -v sh="${CAR_SHARE[$ci]:-0}" 'BEGIN{printf "%.0f", sh*100}') % of traffic"
+          has_dgram "${CAR_NAME[$ci]}" && det+=" · loss $(awk -v l="${CAR_LOSS[$ci]:-0}" 'BEGIN{printf "%.1f", l*100}') %"
         else
-          ccol=$RED; cdot='○'; ctxt="down"
+          [ "$TI_AUTO" = 1 ] && continue
+          ccol=$RED; cdot='○'; ctxt=down
         fi
-        c_pct=$(awk -v sh="${CAR_SHARE[$ci]:-0}" 'BEGIN{printf "%.0f", sh*100}')
-        box_row "$(printf '%s%s %-5s%s %-8s %s' "$ccol" "$cdot" "$ctxt" "$RST" "${CAR_NAME[$ci]}" "rtt $(ms "${CAR_RTT[$ci]}") ms · loss $(awk -v l="${CAR_LOSS[$ci]:-0}" 'BEGIN{printf "%.1f", l*100}') % · share ${c_pct} %")"
+        box_row "$(printf '%s%s %-5s%s %-6s %s%s%s' "$ccol" "$cdot" "$ctxt" "$RST" "${CAR_NAME[$ci]}" "$GRY" "$det" "$RST")"
       done
     fi
   fi
@@ -4929,9 +5026,9 @@ adv_menu() { # name : max-mbps, fec, bind, icmp-type, direction
   r=$(role "$n"); cr=$(cfg "$n" carrier)
   while :; do
     page "Advanced" "$n"
-    set_row m 'speed limit' "$(cfg "$n" max-mbps)" 'MB/s' '16 MB/s'
-    set_row s sessions "$(cfg "$n" sessions)" '' 1
-    set_row c conns "$(cfg "$n" conns)" '' 8
+    set_row m 'speed limit' "$(cfg "$n" max-mbps)" 'MB/s' 'none'
+    set_row s sessions "$(cfg "$n" sessions)" '' auto
+    set_row c conns "$(cfg "$n" conns)" '' auto
     set_row u mtu "$(cfg "$n" mtu)" '' auto
     set_row f fec "$(cfg "$n" fec)" '' off
     [ "$r" = Iran ] && set_row a bind "$(cfg "$n" bind)" '' 0.0.0.0
@@ -6103,7 +6200,7 @@ limits_menu() { # name
   r=$(role "$n"); cr=$(cfg "$n" carrier)
   while :; do
     page "Limits" "$n"
-    set_row m 'speed limit' "$(cfg "$n" max-mbps)" 'MB/s' '16 MB/s'
+    set_row m 'speed limit' "$(cfg "$n" max-mbps)" 'MB/s' 'none'
     echo
     say "  ${GRY}per port${RST}"
     local -a p_limits=()

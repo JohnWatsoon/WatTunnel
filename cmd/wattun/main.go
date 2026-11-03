@@ -23,6 +23,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	rdebug "runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,10 +34,13 @@ import (
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
 
-var carrierNames = []string{"icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc"}
+var carrierNames = []string{"icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip"}
+
+// rawIPCarrier: the carriers on a raw IP socket, which take a bare IP and run one session.
+var rawIPCarrier = map[string]bool{"icmp": true, "gre": true, "ipip": true}
 
 var validCarrier = map[string]bool{
-	"icmp": true, "udp": true, "tcp": true, "tls": true, "ws": true, "wss": true, "h2": true, "h2c": true, "grpc": true,
+	"icmp": true, "udp": true, "tcp": true, "tls": true, "ws": true, "wss": true, "h2": true, "h2c": true, "grpc": true, "gre": true, "ipip": true,
 	"fortress": true,
 }
 
@@ -59,7 +63,7 @@ func main() {
 	lanes := flag.Int("lanes", 4, "client: ICMP identifiers to stripe over")
 	keepSlow := flag.String("keep-slow", "", "pool carriers: on = never close a pool connection for delivering below its share, off = always run that check, empty = the default (on for reverse and direct tcp|tls, off for ws|wss|h2|h2c|grpc through a CDN); on suits a direct HTTP carrier on a route that cuts flows, where the check can retire the connection that was about to recover (3.0.0)")
 	batch := flag.String("batch", "", "icmp|udp: recvmmsg/sendmmsg batching, on|off (empty = the carrier default: on for icmp, off for udp); the same switch as WAT_BATCH, which this flag overrides (3.0.0)")
-	maxMB := flag.Float64("max-mbps", 0, "pace ceiling, MB/s per direction, per session (0 = the carrier default: 16 when icmp is among the carriers, 1250 (10 Gbit, i.e. no practical cap) for udp|tcp|tls|ws|wss|h2|h2c|grpc; 2.4.18, before: 200; 2.3.0, before: 16 for all)")
+	maxMB := flag.Float64("max-mbps", 0, "pace ceiling, MB/s per direction, per session (0 = the carrier default: 16 for a lone icmp carrier, 1250 (10 Gbit, i.e. no practical cap) otherwise; in a bond only the icmp path is held to 16 (3.2.0, before: the whole bond); 2.4.18, before: 200; 2.3.0, before: 16 for all)")
 	slackMs := flag.Int("slack-ms", 8, "tolerated RTT growth before slowing down, ms")
 	metrics := flag.String("metrics", "", "serve JSON stats on this address (e.g. 127.0.0.1:19700)")
 	allowLo := flag.Int("allow-min", 1, "server: lowest target port a client may ask for")
@@ -80,7 +84,7 @@ func main() {
 	pingEvery := flag.Int("ping-every", 2, "idle keepalive interval, seconds (raise on paths whose filter rate-limits steady periodic packets into a penalty box: live 2026-10-22 saw 30 echo req/min collapse to 95% loss until a ~5 min cooldown; both ends use their own value)")
 	dnsUpstream := flag.String("dns-relay-upstream", "8.8.8.8:53", "Kharej recursive resolver used by the internal DNS relay (port 53, -ech ladder); empty = 8.8.8.8:53")
 	icmpType := flag.String("icmp-type", "echo", "icmp carrier: echo|timestamp|info|mask - the ICMP request type the client sends (the server answers with the matching reply: 8/0, 13/14, 15/16, 17/18); both ends must use the same")
-	carrier := flag.String("carrier", "icmp", "icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc (all but icmp: client dials -peer host:port, server listens on -listen; h2 through Cloudflare: not supported, use grpc or wss); join several with '+' (icmp+udp+tcp) to bond them into ONE session that survives any one being blocked; then -peer / -listen are the defaults and -peer-NAME / -listen-NAME (e.g. -peer-udp, -listen-tcp, also keys in the config file) override them per carrier")
+	carrier := flag.String("carrier", "icmp", "icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip (gre/ipip: IP protocol 47/4 on a raw socket, root and Linux, -peer is a bare IP like icmp, 3.2.0 on both ends; all but icmp/gre/ipip: client dials -peer host:port, server listens on -listen; h2 through Cloudflare: not supported, use grpc or wss); join several with '+' (icmp+udp+tcp) to bond them into ONE session that survives any one being blocked; then -peer / -listen are the defaults and -peer-NAME / -listen-NAME (e.g. -peer-udp, -listen-tcp, also keys in the config file) override them per carrier")
 	udpListen := flag.String("listen", ":4443", "server, udp carrier: address to listen on")
 	conns := flag.Int("conns", 0, "client, tcp/tls carrier: connections in the pool (0 = auto-tuned from host hardware: 8 on lean VPS, 16 on 2-CPU/2GB+, 24-32 on 4+ cores)")
 	poolRotate := flag.String("pool-rotate", "0", "client, pool carriers (tcp|tls|ws|wss|h2|grpc): recycle each healthy pool connection after this long, so no flow shows a months-stable lifetime; accepts 30m, 4h or seconds; jittered +/-40% per connection so the redials never line up; 0 = off (2.8.0; a -reverse server dials too, so it honours it since 3.0.2)")
@@ -92,6 +96,7 @@ func main() {
 	sni := flag.String("sni", "", "client, tls carrier: server name sent in the ClientHello")
 	tlsPin := flag.String("tls-pin", "", "client, tls carrier: hex sha256 of the server certificate to require")
 	mtu := flag.Int("mtu", 0, "datagram size cap incl. header/tag, 256-1400 (tcp|tls|ws|wss|h2|h2c|grpc: up to 16384) (0 = the carrier default: 640 icmp, 1400 udp, 4096 tcp-based)")
+	memBudget := flag.Int("mem-budget", 0, "MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (0 = an eighth of the RAM) (3.2.0: one fast client took a server to 2 GB)")
 	winMax := flag.Int("win-max", 0, "both ends: cap the per-stream receive window in MB, clamped to 4-64 (0 = auto-tuned from host RAM: 4 on lean VPS, 16 on 2-4GB, 32-64 on high-perf VPS) (3.0.3). Windows are receiver-driven, so this bounds what the PEER's sender buffers per stream. Set it explicitly to override auto-tuning")
 	path := flag.String("path", "/wat", "client/server, ws|wss|h2|h2c|grpc carrier: URL path (grpc: service name, requests go to <path>/Tun)")
 	tlsFP := flag.String("fp", "go", "client (also a -reverse server), tls|wss|h2|grpc carriers: TLS ClientHello fingerprint go|chrome|firefox|safari|edge|random; go is the standard library's (client only, 2.2.0; server unchanged)")
@@ -114,7 +119,7 @@ func main() {
 	for _, c := range carrierNames {
 		peerBy[c] = flag.String("peer-"+c, "", "client, bonded carriers: server address of the "+c+" carrier (default: -peer)")
 		srcIPBy[c] = flag.String("src-ip-"+c, "", "client, bonded carriers: source IP address of the "+c+" carrier (default: -src-ip)")
-		if c != "icmp" {
+		if c != "icmp" && c != "gre" && c != "ipip" {
 			listenBy[c] = flag.String("listen-"+c, "", "server (or -reverse client), bonded carriers: listen address of the "+c+" carrier (default: -listen)")
 		}
 	}
@@ -223,7 +228,7 @@ func main() {
 	anyPool := false
 	for _, n := range names {
 		if !validCarrier[n] || seen[n] {
-			fmt.Fprintln(os.Stderr, "unknown -carrier (icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc, joined with + to bond; each at most once)")
+			fmt.Fprintln(os.Stderr, "unknown -carrier (icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip, joined with + to bond; each at most once)")
 			os.Exit(2)
 		}
 		seen[n] = true
@@ -236,11 +241,15 @@ func main() {
 		log.Fatalf("-ping-every must be 0..60 seconds, got %d", *pingEvery)
 	}
 	hp := wat.HostProfile()
+	wat.SetMemBudget(int64(*memBudget) << 20)
+	if os.Getenv("GOMEMLIMIT") == "" && hp.TotalRAMMB > 0 { // the GC works harder near a third of the RAM instead of letting garbage double the heap (1024 streams: 1.8 GB peak at RAM/2)
+		rdebug.SetMemoryLimit(int64(hp.TotalRAMMB) << 20 / 3)
+	}
 	if *conns <= 0 {
 		*conns = hp.DefaultPoolConns
 	}
 	if *nSess <= 0 {
-		if !server && !*reverse && len(names) == 1 && names[0] != "icmp" {
+		if !server && !*reverse && len(names) == 1 && !rawIPCarrier[names[0]] {
 			*nSess = hp.DefaultSessions
 		} else {
 			*nSess = 1
@@ -255,7 +264,7 @@ func main() {
 		case *nSess < 1 || *nSess > maxSessions:
 			fmt.Fprintf(os.Stderr, "-sessions must be 1..%d, got %d\n", maxSessions, *nSess)
 			os.Exit(2)
-		case len(names) > 1 || names[0] == "icmp":
+		case len(names) > 1 || rawIPCarrier[names[0]]:
 			fmt.Fprintf(os.Stderr, "-sessions > 1 works with one udp|tcp|tls|ws|wss|h2|h2c|grpc carrier, not %q\n", *carrier)
 			os.Exit(2)
 		case *reverse:
@@ -274,8 +283,8 @@ func main() {
 	smallCH := *tlsSmallCH || *fakeSNI != "" && !smallCHSet
 	if *maxMB <= 0 { // carrier default: the ICMP path keeps its measured 16 MB/s, the others are not capped by it
 		*maxMB = 1250 // 10 Gbit: no practical cap (2.4.18, before: 200)
-		if seen["icmp"] {
-			*maxMB = 16
+		if len(names) == 1 && seen["icmp"] {
+			*maxMB = 16 // in a bond only the icmp path is capped (wat.ICMPPathBps), not the session (3.2.0)
 		}
 	}
 	// -ech ladder (2.9.0): the DoH-through-the-tunnel hook needs the sessions, which are built after the
@@ -347,7 +356,7 @@ func main() {
 				log.Fatalf("%s carrier: invalid -src-ip %q", carrier, src)
 			}
 		}
-		if (carrier == "icmp" || carrier == "udp") && strings.Contains(peer, ",") {
+		if (rawIPCarrier[carrier] || carrier == "udp") && strings.Contains(peer, ",") {
 			log.Fatalf("%s carrier: -peer takes exactly one address, got %q (several comma separated addresses work with tcp|tls|ws|wss|h2|h2c|grpc)", carrier, peer)
 		}
 		lis := server != (*reverse && poolCarriers[carrier]) // which side listens: the server, or the client when -reverse
@@ -371,6 +380,15 @@ func main() {
 				log.Fatalf("icmp socket: %v", err)
 			}
 			pio, raw = ic, ic
+		case "gre", "ipip":
+			if *reverse {
+				log.Fatalf("%s carrier: -reverse is not supported (use icmp, udp or a pool carrier)", carrier)
+			}
+			r, err := wat.NewRawIPIO(carrier == "gre", server, peer, src, k)
+			if err != nil {
+				log.Fatalf("%s socket: %v", carrier, err)
+			}
+			pio, raw = r, r
 		case "udp":
 			if *reverse && server { // 3.0.0: the server punches towards the client, which never sends first
 				raw, err = wat.NewUDPReverseServer(listen, peer, k)

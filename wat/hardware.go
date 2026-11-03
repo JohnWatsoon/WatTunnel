@@ -73,10 +73,8 @@ func profileForResources(cpus, ram int) HardwareProfile {
 		conns = 24
 		if cpus >= 4 {
 			conns = 32
-			sessions = 4
-		} else {
-			sessions = 2
 		}
+		sessions = 2 // 4 sessions on one pair: 147 MB/s, 2 sessions: 261 (their pacers read each other's queue, 3.2.0)
 		winCap = 32 << 20
 		maxSessWin = 128 << 20
 		lowat = 256 << 10

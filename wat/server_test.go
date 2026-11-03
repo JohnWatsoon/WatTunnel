@@ -420,3 +420,23 @@ func TestAliveScalesWithPingEvery(t *testing.T) {
 		t.Fatalf("IdleTimeout %v with a 40 s ping interval, want >= 120 s", srv.IdleTimeout)
 	}
 }
+
+// A full server gives the slot of a silent session to a new client instead of refusing it until the idle timeout.
+func TestServerEvictsStaleWhenFull(t *testing.T) {
+	old := staleAfter
+	staleAfter = 300 * time.Millisecond
+	defer func() { staleAfter = old }()
+	h, srv := newHub(t)
+	srv.MaxSessions = 1
+	srv.IdleTimeout = time.Hour
+	a, _ := NewSession(Config{Key: []byte("hub-key"), Paths: 4}, h.client("e1", 0, 5*time.Millisecond, 10e6, 50))
+	echoOnce(t, a, 20000, 1)
+	a.Close() // gone without the server noticing
+	time.Sleep(500 * time.Millisecond)
+	b, _ := NewSession(Config{Key: []byte("hub-key"), Paths: 4}, h.client("e2", 0, 5*time.Millisecond, 10e6, 50))
+	defer b.Close()
+	echoOnce(t, b, 20000, 2)
+	if n := srv.Sessions(); n != 1 {
+		t.Fatalf("%d sessions, want 1", n)
+	}
+}

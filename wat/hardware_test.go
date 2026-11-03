@@ -46,7 +46,7 @@ func TestProfileForResources(t *testing.T) {
 		WinCap: 32 << 20, MaxSessionWin: 128 << 20, PoolLowat: 256 << 10,
 	}
 	high4 := high
-	high4.DefaultPoolConns, high4.DefaultSessions = 32, 4
+	high4.DefaultPoolConns, high4.DefaultSessions = 32, 2
 
 	for _, tc := range []struct {
 		name               string

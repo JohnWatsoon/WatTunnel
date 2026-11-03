@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,7 +36,7 @@ type Stream struct {
 	rc, wc *sync.Cond // readers / writers wait on these (both guarded by s.mu)
 
 	// send side
-	sbuf      []byte // unacknowledged data; sbuf[0] is stream offset sbase
+	snd       sndQueue // unacknowledged data; its first byte is stream offset sbase
 	sbase     uint64
 	snext     uint64 // next never-sent offset
 	retx      []frameRef
@@ -51,14 +52,12 @@ type Stream struct {
 	inActive  bool
 	group     uint32 // fair-queue group (SetGroup): the public port the stream belongs to
 	fg        *fairGroup
-	sroot     []byte // backing array of sbuf (sbuf is a window into it, so acked bytes at the front can be reclaimed)
 
 	// receive side
 	rnext    uint64
 	segs     []seg
-	ready    rdQueue   // in-order bytes Read has not taken yet
-	slowWin  uint64    // >0: the smaller window advertised while the local reader lags (tuneSlow)
-	shrunkAt time.Time // last time onAcked gave back an oversized send buffer
+	ready    rdQueue // in-order bytes Read has not taken yet
+	slowWin  uint64  // >0: the smaller window advertised while the local reader lags (tuneSlow)
 	slowAt   time.Time
 	slowC    uint64
 	consumed uint64
@@ -91,7 +90,7 @@ func (st *Stream) sendable() bool {
 	if len(st.retx) > 0 {
 		return true
 	}
-	if st.snext < st.sbase+uint64(len(st.sbuf)) && st.snext < st.peerMax {
+	if st.snext < st.sbase+uint64(st.snd.n) && st.snext < st.peerMax {
 		return true
 	}
 	return st.finQueued && !st.finSent && st.snext == st.finOff
@@ -104,7 +103,11 @@ func (st *Stream) Write(b []byte) (int, error) {
 	defer s.mu.Unlock()
 	total := 0
 	for len(b) > 0 {
-		for st.err == nil && !st.finQueued && len(st.sbuf) >= st.writeCap() {
+		n := 0 // writeCap read once: the process budget it checks moves with every other session
+		for st.err == nil && !st.finQueued {
+			if n = st.writeCap() - st.snd.n; n > 0 {
+				break
+			}
 			st.wc.Wait()
 		}
 		if st.err != nil {
@@ -113,12 +116,10 @@ func (st *Stream) Write(b []byte) (int, error) {
 		if st.finQueued {
 			return total, ErrClosed
 		}
-		n := st.writeCap() - len(st.sbuf)
 		if n > len(b) {
 			n = len(b)
 		}
-		st.makeRoom(n)
-		st.sbuf = append(st.sbuf, b[:n]...)
+		st.snd.write(b[:n])
 		b = b[n:]
 		total += n
 		s.activate(st)
@@ -137,7 +138,12 @@ func (st *Stream) sendCap() int {
 
 // writeCap is sendCap, but at most sendStage beyond what the peer's window lets us send: while a slow reader keeps
 // the peer's window shut, there is no point holding another 4 MB here (2.4.3; the local source refills fast).
+// Over the process memory budget every stream holds at most sendStage (3.2.0: a server with 32 clients was OOM-killed
+// at 2.7 GB of send buffers).
 func (st *Stream) writeCap() int {
+	if sndHeld.Load() > memBudget.Load() {
+		return sendStage
+	}
 	room := 0
 	if st.peerMax > st.sbase {
 		room = int(min(st.peerMax-st.sbase, st.s.winCap))
@@ -215,10 +221,11 @@ func (st *Stream) tuneWindow(now time.Time) {
 	if edge {
 		nw = min(2*st.win, s.winCap)
 	}
-	if nw <= st.win || s.winExtra+(nw-st.win) > s.maxSessionWin {
+	if nw <= st.win || s.winExtra+(nw-st.win) > s.maxSessionWin || winHeld.Load()+int64(nw-st.win) > memBudget.Load() {
 		return
 	}
 	s.winExtra += nw - st.win
+	winHeld.Add(int64(nw - st.win))
 	st.win = nw
 }
 
@@ -232,7 +239,7 @@ func (st *Stream) CloseWrite() error {
 	}
 	if !st.finQueued {
 		st.finQueued = true
-		st.finOff = st.sbase + uint64(len(st.sbuf))
+		st.finOff = st.sbase + uint64(st.snd.n)
 		s.activate(st)
 	}
 	return nil
@@ -302,7 +309,9 @@ func (s *Session) killStream(st *Stream, err error) {
 		} else {
 			s.winExtra = 0
 		}
+		winHeld.Add(-int64(extra))
 	}
+	st.snd.reset()
 	if st.err == nil {
 		st.err = err
 	}
@@ -354,7 +363,9 @@ func (st *Stream) maybeFinish() {
 		} else {
 			s.winExtra = 0
 		}
+		winHeld.Add(-int64(extra))
 	}
+	st.snd.reset()
 	st.ready.reset()
 	st.rc.Broadcast()
 	st.wc.Broadcast()
@@ -365,26 +376,10 @@ func (st *Stream) onAcked(f frameRef) {
 		st.acked.add(f.off, f.off+uint64(f.n))
 		if len(st.acked) > 0 && st.acked[0].lo <= st.sbase && st.acked[0].hi > st.sbase {
 			drop := st.acked[0].hi - st.sbase
-			if drop > uint64(len(st.sbuf)) {
-				drop = uint64(len(st.sbuf))
+			if drop > uint64(st.snd.n) {
+				drop = uint64(st.snd.n)
 			}
-			st.sbuf = st.sbuf[drop:]
-			if len(st.sbuf) == 0 {
-				if cap(st.sroot) > keepBuf && (st.finQueued || st.dead) {
-					st.sroot, st.sbuf = nil, nil // do not pin a big buffer on a finished or dead stream
-				} else {
-					st.sbuf = st.sroot[:0]
-				}
-			} else if c := st.writeCap(); cap(st.sroot) > 1<<20 && cap(st.sroot) > 4*c && len(st.sbuf) <= c &&
-				st.s.now.Sub(st.shrunkAt) > time.Second {
-				// the peer's window shut (slow reader): give back the big buffer, at most once a second. The cap moves
-				// with every ack and window update, so shrinking on each of them re-copied the buffer per ack: 2.4.3
-				// allocated 100x the data in onAcked and tripled the sender's CPU (field 2026-10-12).
-				st.shrunkAt = st.s.now
-				nb := make([]byte, len(st.sbuf), 2*c)
-				copy(nb, st.sbuf)
-				st.sroot, st.sbuf = nb, nb
-			}
+			st.snd.drop(int(drop)) // acked chunks go back to the pool at once: nothing to shrink or re-copy
 			st.sbase += drop
 			if st.acked[0].hi <= st.sbase {
 				st.acked = append(st.acked[:0], st.acked[1:]...)
@@ -453,7 +448,7 @@ func (st *Stream) emit(p []byte, sp *sentPkt, room int) (np []byte, sent, fit bo
 		sp.rtx = true
 		return p, true, true
 	}
-	end := st.sbase + uint64(len(st.sbuf))
+	end := st.sbase + uint64(st.snd.n)
 	limit := end
 	if st.peerMax < limit {
 		limit = st.peerMax
@@ -501,7 +496,7 @@ func (st *Stream) appendFrame(p []byte, off uint64, n int, fin bool) []byte {
 	p = appendUv(p, off)
 	p = appendUv(p, uint64(n))
 	if n > 0 {
-		p = append(p, st.sbuf[off-st.sbase:off-st.sbase+uint64(n)]...)
+		p = st.snd.appendRange(p, int(off-st.sbase), n)
 	}
 	return p
 }
@@ -577,29 +572,6 @@ func (st *Stream) SetGroup(g uint32) {
 	s.mu.Lock()
 	st.group = g
 	s.mu.Unlock()
-}
-
-// makeRoom guarantees room for n more bytes at the end of sbuf without allocating when the acked front of the
-// buffer can be reclaimed. (append on a resliced `sbuf[drop:]` loses that front for good and re-allocates the whole
-// unacked window every time the capacity runs out: measured 5x the bytes written, BenchmarkSessionBulk.)
-func (st *Stream) makeRoom(n int) {
-	live := len(st.sbuf)
-	if cap(st.sbuf)-live >= n {
-		return
-	}
-	// Move the live bytes to the front only when the acked front is at least half their size, so each byte is moved
-	// about twice at most. A buffer kept just at the cap moved all its live bytes for every write when the front had
-	// freed a little: 56 % of the sending end's copying on a download (field profile 2026-10-16). It grows instead,
-	// up to twice the cap, which leaves room for the front to free up.
-	gap := cap(st.sroot) - cap(st.sbuf)
-	if cap(st.sroot) >= live+n && (gap >= live/2 || cap(st.sroot) >= 2*st.sendCap()) {
-		copy(st.sroot[:live], st.sbuf)
-		st.sbuf = st.sroot[:live]
-		return
-	}
-	nb := make([]byte, live, max(min(2*(live+n), 2*st.sendCap()), live+n, 4096)) // doubling, but not past twice the cap
-	copy(nb, st.sbuf)
-	st.sroot, st.sbuf = nb, nb
 }
 
 // appendReady adds in-order bytes for Read.
@@ -688,3 +660,93 @@ func (st *Stream) cool(now time.Time) float64 {
 
 // bulky: the stream sent prioBytes or more recently (it goes to the fair-queued bulk class, not the interactive one).
 func (st *Stream) bulky(now time.Time) bool { return st.cool(now) >= prioBytes }
+
+// sndQueue holds a stream's unacknowledged bytes as pooled 64 KB chunks (3.2.0), like rdQueue on the receive side.
+// It was one contiguous slice grown by doubling to twice the send cap and moved to the front as acks freed it: 28 %
+// of the sending end's CPU in memmove and 7 % zeroing new arrays (2 Gbit/s field profile 2026-11-03), and 2x the
+// window per stream held in memory plus the garbage of every array it outgrew.
+type sndQueue struct {
+	ch []*[rdChunk]byte
+	r  int // offset of the first held byte in ch[0]
+	n  int // bytes held
+}
+
+func (q *sndQueue) write(p []byte) {
+	sndHeld.Add(int64(len(p)))
+	for len(p) > 0 {
+		e := q.r + q.n
+		i, o := e/rdChunk, e%rdChunk
+		if i == len(q.ch) {
+			q.ch = append(q.ch, rdPool.Get().(*[rdChunk]byte))
+		}
+		c := copy(q.ch[i][o:], p)
+		q.n += c
+		p = p[c:]
+	}
+}
+
+func (q *sndQueue) drop(k int) {
+	k = min(k, q.n)
+	sndHeld.Add(-int64(k))
+	q.r += k
+	q.n -= k
+	if q.n == 0 {
+		q.release()
+		return
+	}
+	for q.r >= rdChunk {
+		rdPool.Put(q.ch[0])
+		q.ch[0] = nil
+		q.ch = q.ch[1:]
+		q.r -= rdChunk
+	}
+}
+
+// appendRange appends k held bytes starting off bytes after the first one.
+func (q *sndQueue) appendRange(p []byte, off, k int) []byte {
+	pos := q.r + off
+	for k > 0 {
+		i, o := pos/rdChunk, pos%rdChunk
+		c := min(k, rdChunk-o)
+		p = append(p, q.ch[i][o:o+c]...)
+		pos += c
+		k -= c
+	}
+	return p
+}
+
+func (q *sndQueue) reset() {
+	sndHeld.Add(-int64(q.n))
+	q.release()
+}
+
+func (q *sndQueue) release() {
+	for _, c := range q.ch {
+		if c != nil {
+			rdPool.Put(c)
+		}
+	}
+	clear(q.ch)
+	*q = sndQueue{ch: q.ch[:0]}
+}
+
+// Process-wide memory accounting (3.2.0): send bytes held by every stream of every session, and the receive-window
+// growth granted beyond the 4 MB bases. Neither grows past memBudget (SetMemBudget; default an eighth of the RAM).
+var sndHeld, winHeld, memBudget atomic.Int64
+
+func init() { memBudget.Store(defaultMemBudget(HostProfile().TotalRAMMB)) }
+
+func defaultMemBudget(ramMB int) int64 {
+	if ramMB <= 0 {
+		return 256 << 20
+	}
+	return max(int64(ramMB)<<20/8, 64<<20)
+}
+
+// SetMemBudget sets the process budget for stream buffers in bytes (0 = default: an eighth of the RAM).
+func SetMemBudget(b int64) {
+	if b <= 0 {
+		b = defaultMemBudget(HostProfile().TotalRAMMB)
+	}
+	memBudget.Store(b)
+}

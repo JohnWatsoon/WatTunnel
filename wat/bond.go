@@ -124,7 +124,7 @@ func (b *BondIO) Send(p []byte, path int) error {
 	if path < 0 || path >= len(b.kids) {
 		path = 0
 	}
-	b.ps.onSend(path)
+	b.ps.onSend(path, len(p))
 	lane := 0
 	if n := b.lanes[path]; n > 1 {
 		lane = int(b.laneRR[path].Add(1) % uint32(n))
@@ -133,7 +133,7 @@ func (b *BondIO) Send(p []byte, path int) error {
 	if b.ps.Mode() == "replicate" {
 		for i, kid := range b.kids {
 			if i != path && b.ps.isLiveOrSuspect(i) {
-				b.ps.onSend(i)
+				b.ps.onSend(i, len(p))
 				l := 0
 				if n := b.lanes[i]; n > 1 {
 					l = int(b.laneRR[i].Add(1) % uint32(n))
@@ -416,10 +416,10 @@ func (m *multiSubIO) Send(p []byte, path int) error {
 		}
 	}
 	m.mu.Unlock()
-	m.ps.onSend(path)
+	m.ps.onSend(path, len(p))
 	err := m.mr.raws[path].SendTo(p, lane, dst.Addr)
 	for _, d := range dups {
-		m.ps.onSend(d.idx)
+		m.ps.onSend(d.idx, len(p))
 		_ = d.raw.SendTo(p, d.lane, d.addr)
 	}
 	return err

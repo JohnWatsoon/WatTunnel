@@ -33,12 +33,9 @@ const (
 	sendStage     = 256 << 10 // Write may buffer this much beyond the peer's window (stream.go writeCap)
 	slowWinMin    = 256 << 10 // a lagging reader's window floor (stream.go tuneSlow)
 	slowWinRTTs   = 2
-	// keepBuf is the largest drained send buffer a stream keeps for reuse (the receive side uses pooled chunks). Field 2026-10-12: at 1 MB, 220
-	// mostly idle streams pinned ~190 MB on the receiving end.
-	keepBuf      = 256 << 10
-	prioBytes    = 64 << 10 // streams that sent less than this recently go first (interactive traffic; Stream.bulky)
-	dirServerBit = uint64(1) << 63
-	replayWin    = 1024
+	prioBytes     = 64 << 10 // streams that sent less than this recently go first (interactive traffic; Stream.bulky)
+	dirServerBit  = uint64(1) << 63
+	replayWin     = 1024
 	// A pool of TCP connections reorders by a whole head-of-line stall (60-100 ms of packets, ~1900 at 640 B and
 	// 12 MB/s); a window of 1024 turned every late packet after a stall into a "replay" and dropped it (measured).
 	// 16384 was ~0.3-0.7 s at 30-70 MB/s: a connection in a few rounds of TCP loss recovery outlasted it, and the data
@@ -349,7 +346,7 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 	}
 	s.cc.reliable = prof.Reliable
 	s.cc.direct = prof.Reliable && cfg.Direct && !noDirect
-	s.pin = s.cc.direct && !noPin && !isChooser(pio) // a chooser routes by its own lanes; PinLaneBase means another path there
+	s.pin = s.cc.direct && !noPin && !isChooser(pio)                      // a chooser routes by its own lanes; PinLaneBase means another path there
 	if prof.Reliable && cfg.MinBps == 2e5 && cfg.InitBps > s.cc.minRate { // default floor: never pace a TCP pool below its start rate
 		s.cc.minRate = min(cfg.InitBps, cfg.MaxBps)
 	}
@@ -576,7 +573,7 @@ func (s *Session) Stats() Stats {
 	st.CC, st.FloorBps, st.Cwnd = s.cc.diag, s.cc.floor(), s.cc.cwnd()
 	st.LossTime, st.PTO, st.RelLossMul = s.cc.lossTime(), s.cc.pto(), s.cc.relLossMul
 	for _, x := range s.streams {
-		if len(x.retx) == 0 && x.snext < x.sbase+uint64(len(x.sbuf)) && x.snext >= x.peerMax {
+		if len(x.retx) == 0 && x.snext < x.sbase+uint64(x.snd.n) && x.snext >= x.peerMax {
 			st.WinBlocked++
 		}
 	}
