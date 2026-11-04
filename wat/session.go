@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"sync"
@@ -67,8 +68,29 @@ type Config struct {
 	MaxPayload int           // datagram size cap incl. header and tag; 0 = MaxPayload (640), bounded to [256, 1400]
 	Hedge      bool          // send young packets twice on different lanes (costs ~8% extra packets)
 	FEC        bool          // adaptive XOR parity after bursts of small packets (both ends must enable it; see fec.go)
-	NoKex      bool          // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
-	Bond       PathTimings   // multipath health/probe timings (server side; zero = production values)
+	// FECOnLoss/FECOffLoss (3.3.0, F11) are the sender-side loss gate in fraction form: parity is sent while the
+	// measured loss is above FECOnLoss and stops once it falls below FECOffLoss (fecGate in fec.go), with a minimum
+	// dwell between flips. The zero value keeps the 1.7.0-3.2.x behavior (no gate, parity for every burst);
+	// cmd/wattun passes -fec-on-loss/-fec-off-loss (2 % / 0.5 %).
+	FECOnLoss, FECOffLoss float64
+	NoKex                 bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
+	Bond                  PathTimings // multipath health/probe timings (server side; zero = production values)
+	// AllowClients (W10, 3.3.0) is the server-side client allowlist: a new session is admitted only from a source IP
+	// inside one of these prefixes. The check runs before admit on the unauthenticated packet, so even a valid packet
+	// from a non-allowed source is dropped. Empty = every source (the pre-3.3.0 behavior). Only a carrier that reports
+	// the peer's own IP can be filtered: the direct icmp/udp/tcp/tls/gre/ipip carriers and a bond of them. Behind a
+	// CDN (ws/wss/h2/h2c/grpc) the source is the CDN edge, not the client, and a reverse pool's dialed connections
+	// report no client IP at all, so those sources are rejected while the list is set (cmd/wattun warns for a CDN
+	// carrier or -sni and does not apply the list with -reverse).
+	AllowClients []netip.Prefix
+	// ShapeData (W7, 3.3.0): pad packets that carry stream data to randomized realistic sizes, spending at most this
+	// fraction (0..0.25) of the stream bytes actually sent. 0 = off: no per-packet work at all. See shape.go.
+	ShapeData float64
+	// NoiseBps (F13, 3.3.0): while the session has no user data in either direction, send non-ack-eliciting filler
+	// packets at this many bytes/s; 0 = off. NoiseFrom/NoiseTo are a local-clock minute-of-day window [from, to)
+	// (both 0 = all day; may wrap past midnight). See shape.go.
+	NoiseBps           float64
+	NoiseFrom, NoiseTo int
 	// Direct: the reliable carrier runs straight between the two servers (reverse mode, or tcp/tls), with no CDN that
 	// could buffer in between. The only queues are our pool's and the sockets', which push back (Backlogger), so the
 	// session lets TCP set the pace: a window of about a second of delivery and a long loss timer (2.4.18, see cc.go).
@@ -107,6 +129,9 @@ type Stats struct {
 	DgramDropQueue, DgramDropSize, DgramDropRx uint64
 	DgramFragmented, DgramReassembled          uint64 // datagrams sent in pieces / rebuilt from pieces (2.5.0)
 	FecSent, FecRecovered                      uint64
+	FecState                                   string  // F11 loss gate: "on" while this end sends parity, else "off"
+	PadBytes                                   uint64  // W7 data-shaping padding added (frame + filler), 3.3.0
+	NoiseSent, NoiseBytes                      uint64  // F13 idle-noise packets sent and their wire bytes, 3.3.0
 	CeilingBps, LossPct                        float64 // loss-aware soft ceiling (0 = none); last judged interval loss in percent
 
 	// pacer diagnostics (2.4.10)
@@ -236,8 +261,12 @@ type Session struct {
 	spFree        []*sentPkt
 	ackRs         []rng // parsed ACK ranges, valid for one parse
 
-	fec      *fecState // nil unless Config.FEC
-	hedgeTok float64   // bytes of hedging allowed: ~8% of what was sent
+	fec      *fecState   // nil unless Config.FEC
+	padAllow float64     // W7: banked padding budget (bytes), refilled by stream bytes sent
+	noise    *noiseState // F13: idle-noise budget, nil unless Config.NoiseBps > 0
+	noiseBuf []byte      // F13: packet assembly scratch for a noise packet
+	lastUser time.Time   // last packet carrying user data (stream/datagram), either direction: the idle clock
+	hedgeTok float64     // bytes of hedging allowed: ~8% of what was sent
 	bootAt   time.Time
 	peerBoot uint64
 	wake     chan struct{}
@@ -310,6 +339,17 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 		}
 	}
 	cfg.MaxPayload = min(max(cfg.MaxPayload, MinPayload), hi)
+	// M1/M15 (3.3.0): an explicit -mtu may not exceed what the carrier itself can frame. A carrier with a MaxMTU
+	// advertises its hard ceiling (a direct pool: 16 KB); otherwise its MTU is the ceiling (shaped carriers, gre/ipip:
+	// the header they add comes out of the 1400 B datagram, so mtu 1400 used to overflow the wire by up to 72 bytes).
+	// The clamp lives here as well as in cmd/wattun so the server's admitted sessions obey the same ceiling.
+	ceiling := prof.MaxMTU
+	if ceiling <= 0 {
+		ceiling = prof.MTU
+	}
+	if ceiling > 0 && cfg.MaxPayload > ceiling {
+		cfg.MaxPayload = ceiling
+	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
@@ -389,6 +429,12 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 	s.cc.maxPlain = s.maxPlain
 	if cfg.FEC {
 		s.fec = newFec()
+		s.fec.gate.onLoss, s.fec.gate.offLoss = cfg.FECOnLoss, cfg.FECOffLoss // F11: zero = no gate (3.3.0)
+	}
+	if cfg.NoiseBps > 0 {
+		// L2: the idle clock exists only for -noise; with noise off the session does no lastUser bookkeeping at all.
+		s.lastUser = s.now // noise measures idleness from the session's creation
+		s.noise = &noiseState{bps: cfg.NoiseBps}
 	}
 	// A client run has its own random session id and with it its own key, so its packet numbers can start at 0 and two
 	// clients on one key (two slots) are independent sessions. A restarted SERVER meets the same session id again, so
@@ -574,6 +620,10 @@ func (s *Session) Stats() Stats {
 	st.RateBps, st.SRTT, st.MinRTT = s.cc.rate, s.cc.srtt, s.cc.minRTT
 	st.CeilingBps, st.LossPct = s.cc.ceiling, s.cc.lossPct*100
 	st.Streams, st.Inflight = len(s.streams), s.inflight
+	st.FecState = "off"
+	if s.fec != nil && s.fec.gate.on {
+		st.FecState = "on"
+	}
 	st.CC, st.FloorBps, st.Cwnd = s.cc.diag, s.cc.floor(), s.cc.cwnd()
 	st.LossTime, st.PTO, st.RelLossMul = s.cc.lossTime(), s.cc.pto(), s.cc.relLossMul
 	for _, x := range s.streams {
@@ -735,9 +785,19 @@ func (s *Session) pump() {
 				batch = append(batch, o)
 			}
 		}
+		if s.noise != nil {
+			if o, ok := s.noiseDue(now); ok {
+				batch = append(batch, o)
+			}
+		}
 		next := 100 * time.Millisecond
 		if s.busy() || len(batch) > 0 {
 			next = time.Millisecond
+		}
+		if s.noise != nil { // M14: follow the filler deadline, not the fixed 100 ms idle tick (which capped the rate)
+			if d := s.noiseWake(now); d > 0 && d < next {
+				next = d
+			}
 		}
 		s.mu.Unlock()
 		if s.masked.Load() {
@@ -1011,6 +1071,9 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		s.freeSent(sp)
 		return outPkt{}, false
 	}
+	if s.noise != nil && (len(sp.frames) > 0 || sp.dgram) { // L2: user data restarts the idle-noise clock (F13)
+		s.lastUser = now
+	}
 	if s.chooser != nil { // bond: packets that carry young streams, datagrams, acks or are small want the fastest path
 		lane = s.chooser.ChoosePath(len(p)+overhead, prioSeen || !bulkSeen || len(p)+overhead <= 330)
 		// An ack-only packet is never acked, so a path used only for acks (a download's return path) would give no
@@ -1033,7 +1096,14 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		return outPkt{}, false
 	}
 	if (!s.cfg.NoShape || s.hk != nil) && len(sp.frames) == 0 && !sp.dgram {
-		p = s.pad(p)
+		p = s.pad(p) // control-only packets (3.0.0); data packets are shaped by shapeData below, never both
+	}
+	if s.cfg.ShapeData > 0 && len(sp.frames) > 0 && !sp.dgram { // W7: pad stream-data packets to a realistic size
+		n := 0
+		for _, f := range sp.frames {
+			n += f.n
+		}
+		p = s.shapeData(n, p)
 	}
 	out, pn := s.seal(p)
 	size := len(out) + ipIcmpHdr
@@ -1557,7 +1627,7 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 		s.rxSince = append(s.rxSince, pn)
 	}
 	if s.fec != nil {
-		s.fecKeep(pn, plain)
+		s.fecKeep(pn, plain, now)
 	}
 	s.lastRecv, s.lastAuth = now, now
 	s.stats.PktsIn++
@@ -1618,6 +1688,9 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 			if r.err != nil {
 				return
 			}
+			if s.noise != nil { // L2: only the noise feature reads the idle clock
+				s.lastUser = now
+			}
 			eliciting = true
 			s.onStream(sid, off, data, t == frStreamFin)
 		case frAck:
@@ -1677,6 +1750,9 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 			if r.err != nil || port > 65535 {
 				return
 			}
+			if s.noise != nil {
+				s.lastUser = now // F13: datagram traffic is user data too
+			}
 			eliciting = true // acked, so the sender's pacing/inflight accounting releases the packet
 			s.onDgram(flow, int(port), data)
 		case frDgramFrag:
@@ -1684,6 +1760,9 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 			data := r.take(n)
 			if r.err != nil || port > 65535 || cnt < 2 || cnt > dgramFragMax || idx >= cnt {
 				return
+			}
+			if s.noise != nil {
+				s.lastUser = now
 			}
 			eliciting = true
 			s.onDgramFrag(flow, int(port), id, int(idx), int(cnt), data, now)
@@ -1703,6 +1782,9 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 				s.peerMaskOK.Store(true)
 				s.masked.Store(true) // the first exchange may have settled on plain only because the server was not up yet
 			}
+		case frPad2: // 3.3.0: data-shaping padding or idle noise, always the LAST frame of its packet
+			r.take(r.uv())
+			return // an older peer stops at the type byte; a 3.3.0 peer reads the filler and stops here too
 		default:
 			return
 		}

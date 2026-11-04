@@ -6,7 +6,7 @@
 
 **Encrypted Iran ↔ Kharej port forwarding that keeps working when the network is filtered, even when only ping gets through.**
 
-[![Release](https://img.shields.io/badge/release-v3.2.1-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
+[![Release](https://img.shields.io/badge/release-v3.3.0-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go)](go.mod)
 ![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20windows-lightgrey?style=flat-square)
@@ -50,6 +50,34 @@ and the full list of 92 configurations: [docs/TECHNICAL.md](docs/TECHNICAL.md#fi
 
 ## What changed since 3.0.0
 
+- **Auto mode at full speed (3.3.0).** Measurement is duration-based now: screening probes 8-16 MB each way and the
+  finalists are re-measured with 16 streams and a sustained 20-40 MB run, so a fast link is not judged on slow start.
+  The tuning is down to the settings that moved speed (sessions and conns, one fixed 20 MB probe each) and its traffic
+  is part of the printed budget: up to 1184 MB worst case for a normal plan, shown before the test starts (544 MB
+  screening + 240 MB finalists + 400 MB tuning; far less on a filtered route). The manager's limits finally match the
+  engine (sessions 1-16 on one udp/pool carrier, conns 1-64, mtu 256-1400 or 16384 with pool legs, a bond uses its
+  smallest leg).
+- **Cleaner, quieter, safer (3.3.0).** `fec: auto` sends parity only while the link is really losing packets (above
+  2 %, stops below 0.5 %), so a healthy tunnel pays nothing — `fec_state` in `/stats` shows it. An auto Kharej tunnel
+  closes only the unused reverse side (its old reverse companion and stale watchers) about 12 minutes after your
+  choice; direct-carrier narrowing is opt-in (`autoprune-direct=1`) because a bonded Iran client looks like one leg.
+  If the open carriers all fail it reopens everything (10 minute cooldown). Bonded tunnels can retest their legs on a
+  schedule (off by default). A server-side `-allow-clients` list restricts the holder of the key/token to the client
+  IPs you name. Counters can live on tmpfs with `-state-dir`/`-state-save` (the shipped unit supports `/run/wattun`
+  and keeps it across a restart; a reboot loses them), and the opt-in `shape-data`/`noise` knobs shape packet sizes or
+  idle traffic when a filter needs it (they cost bandwidth and count on the bill; the noise budget is per session).
+- **13 shaped carriers (3.3.0).** Raw `sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3` (Linux, root) and UDP
+  `fou-gre`, `gue-ipip`, `vxlan`, `geneve`, `dnscrypt-udp`, `ntp-direct`, `openvpn-dco`, `srtp-direct`: every packet
+  carries a known protocol's header so the flow reads as that protocol. Both ends need 3.3.0 and the same carrier name;
+  these are WatTunnel-internal shapes, not real IPsec/VXLAN/... interop, and they work as a single carrier only (a
+  bond with a shaped leg is refused). Repeated loopback bench runs put them 0.3-4.5 % below plain udp; one short run
+  scatters more.
+- **More transports in Auto and the manager (3.3.0).** Auto now tests `gre`/`ipip` too (raw IP, no listen port). An
+  opt-in **extended** mode on the Kharej side (`--extended`, both ends 3.3.0) also tests the 13 shaped carriers through
+  one hidden single-carrier listener per shape — raw tier needs Linux + root and the cloud firewall to pass protocols
+  41/50/97/115. The manager's connection-type picker can create one shaped carrier directly (More transports), the
+  Advanced page is grouped into Performance / Shaping & DPI / Safety / State & data, FEC keeps its one-key off/auto
+  toggle with `a` for the loss band, and `win-max`/`loss-ceiling` are editable there.
 - **Fast by default (3.2.0).** Tunnels made by the manager were held to 16 MB/s per session: every auto Kharej server
   lists `icmp`, and that capped all its carriers. Now only ICMP traffic is capped, the manager stops forcing 4 sessions,
   and memory is bounded (one server with 32 clients used to be killed for running out of RAM). On a 2 vCPU pair at
@@ -84,7 +112,8 @@ and the full list of 92 configurations: [docs/TECHNICAL.md](docs/TECHNICAL.md#fi
   so Kharej recycles its connections (the manager sets `30m` on new reverse tunnels). A 20 s rotation kept every
   connection under 20 s old at 80 MB/s down and 68 MB/s up; the run without it lost all traffic on its 150 s old
   connections. Add `pool-rotate: 30m` to existing reverse tunnels by hand.
-- **Auto test with two presets (3.0.2).** The manager asks first: *normal* (2-3 minutes) or *anti-censor* (every desync
+- **Auto test with two presets (3.0.2).** The manager asks first: *normal* (the manager prints its worst-case traffic
+  and a rough time before it starts) or *anti-censor* (every desync
   mode, SNI, TLS fragment, fingerprint and ECH variant on every carrier, about 195 variants). `s` skips a variant, `g` a
   carrier, `q` stops and lets you choose from what was measured.
 - **Looks more like a web server (3.0.2).** HTTP carriers answer with the stock nginx pages, a random throwaway
@@ -252,7 +281,8 @@ wat1:aWNtcHwyMDMuMC4xMTMuMTB8a1E3...
 ```
 
 **3. Iran.** Run `wattun`, press `n`, choose **Iran**, and paste the token. The menu tests every connection type
-(about 2-3 minutes) and offers the fastest that works: press **Enter** to take it. Then enter your ports, for example
+(it prints its worst-case traffic and a rough time before it starts) and offers the fastest that works: press
+**Enter** to take it. Then enter your ports, for example
 `443, 8443:443, 53/udp` (`8443:443` means users connect to Iran port 8443 and reach Kharej port 443).
 
 ```
@@ -265,8 +295,9 @@ wat1:aWNtcHwyMDMuMC4xMTMuMTB8a1E3...
 
 Done. Users connect to the Iran server's IP, and Kharej forwards only to its own `127.0.0.1`.
 
-**Day to day.** `wattun` opens the dashboard: press a tunnel's number for its page (speed test, diagnose, logs,
-ports, change connection type with **m**), `u` updates, `s` holds rollback and auto-heal. Auto-heal is on for Iran
+**Day to day.** `wattun` opens the dashboard: press a tunnel's number for its page (logs, diagnose, speed test,
+ports, change connection type with **c**; arrow keys move, Enter opens), `u` updates, `s` holds rollback and
+auto-heal. Auto-heal is on for Iran
 tunnels and restarts one whose link has been down for 3 minutes.
 
 ```bash
@@ -276,7 +307,9 @@ wattun ports NAME      # edit port mappings (applied live)
 wattun update          # update the binary and the menu
 ```
 
-**Auto uses data.** The test on Iran moves up to about 400 MB in total (about 50-150 MB on a filtered route where few types connect). On a traffic-billed server, pick a type yourself. After Iran has picked, run `wattun-manager auto-narrow NAME` on Kharej (or `u` on the tunnel page) to close the carrier ports it does not use.
+**Auto uses data.** The test on Iran screens every type with an 8-16 MB probe each way (sized so it runs at least 1.5 s each way at the measured rate), re-measures the best three with 16 streams and a sustained 20-40 MB run, then tunes the chosen type's sessions/conns with 20 MB probes. The manager prints the worst-case budget before an interactive run: up to **1184 MB** for a normal plan (544 screening + 240 finalists + 400 tuning); on a filtered route where few types connect it moves far less. If the Kharej token was created with `--extended`, the test also screens up to 13 shaped carriers (both ends 3.3.0) and the printed budget grows by up to about 416 MB. On a traffic-billed server, pick a type yourself. After Iran has picked, the Kharej auto tunnel closes only the unused **reverse** side (its old companion and stale watchers) once the choice has been stable for 12 minutes (`autoprune` in `.manager.conf`, 0 = off); the direct carrier list is not rewritten by default because a bonded Iran client looks like one leg, and full direct narrowing is opt-in (`autoprune-direct=1` or `auto-prune NAME --direct`). The auto Kharej wizard installs the timer that runs this pass, so a Kharej-only server needs no extra step, and if the tunnel later loses every open carrier for 3 checks the manager reopens the whole plan automatically (at most once per `autowiden` minutes, default 10). Force a close with `wattun-manager auto-narrow NAME`, keep every carrier open with `auto-prune NAME --keep-open`, or reopen them with `auto-widen NAME`.
+
+**Under the hood.** `fec: auto` is nearly free now (parity only while the link is actually losing packets), `/speedtest` defaults to 16 streams, and `state-dir`/`state-save` can move the quota and lifetime counters to tmpfs so a busy tunnel stops writing the disk (the manager follows them; the shipped unit supports `/run/wattun` and keeps it across a service restart, but a reboot loses the counters). Two opt-in knobs trade bandwidth for harder-to-classify traffic: `shape-data PCT` pads stream packets, and `noise` sends idle filler inside an optional `noise-window` (about 11 MB/day on `low` and 88 MB/day on `med`, **per session** — two sessions double it, and each Kharej client has its own). Thirteen new carriers dress each datagram as a common tunnelling or voice protocol (`sit`, `vxlan`, `dnscrypt-udp`, `ntp-direct`, ...): they are wattun-internal shapes between two 3.3.0 peers, not real-protocol interoperability, the raw tier needs Linux + root, and they run one at a time (the engine and the manager refuse a shaped leg inside a `+` bond). The manager can set them from the command line (`wattun kharej --carrier vxlan ...`) or from its connection-type picker (More transports); opt-in extended Auto tests all of them, one hidden listener per shape. Its interactive Kharej wizard can create one shaped carrier directly. The Advanced page (grouped Performance / Shaping & DPI / Safety / State & data) edits the tuning and shaping keys; FEC keeps a one-key off/auto with `a` for the band; change the connection type with **c** on the tunnel page.
 
 If you already know what your route allows, you can pick a type yourself in step 2:
 
@@ -295,7 +328,8 @@ id; from 2.10.0 the two ends also run an ephemeral X25519 exchange on every sess
 later key-file leak stays unreadable. That protects the **Iran ↔ Kharej leg only**: between your users and the Iran
 server the traffic is whatever the forwarded service itself provides, so run an end-to-end encrypted protocol
 (VLESS+Reality, TLS, WireGuard) inside the tunnel. Kharej dials only its own `127.0.0.1`, and only ports on the
-allowlist.
+allowlist; on a direct carrier `allow-clients` can also pin the holder of the key/token to the client source IPs you
+name (its list file must live under `/etc/wattun`; a CDN carrier refuses the combination at startup).
 From 3.0.0 no byte of a packet header is constant (the session id and packet number are masked), idle packets are
 padded to random sizes with a jittered keepalive, and `udp` has a [reverse mode](docs/TECHNICAL.md#reverse-udp-300): the Iran
 server only listens and never starts a flow towards a foreign address. Raw `tcp` opens with a TLS ClientHello-shaped
@@ -308,7 +342,9 @@ update` checks the installer the same way before running it as root. The install
 third-party mirror is only trust-on-first-use (prefer the release asset or a `git clone`). The overrides
 `WAT_ALLOW_UNSIGNED_MANAGER=1` and `WAT_ALLOW_UNSIGNED_UPDATE=1` are explicit and off by default. The connection
 token contains the key: treat it like a password and share it only over a private channel. Keep `metrics` on
-`127.0.0.1`. What stays visible to the network: the server's address, and the volume and timing of packets. Details:
+`127.0.0.1`. What stays visible to the network: the server's address, and the volume and timing of packets. What each
+anti-censor option actually hides — and what none of them hides — is in
+[spoofing and shaping](docs/TECHNICAL.md#spoofing-and-shaping-explained). Details:
 [security model](docs/TECHNICAL.md#security-model).
 
 ## More

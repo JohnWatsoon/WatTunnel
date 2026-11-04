@@ -1,0 +1,15 @@
+# Data-path benchmark baseline for bench/gate.sh (audit M6).
+# Measured 2026-11-04 on the Windows amd64 dev checkout (Git Bash, Go 1.26, -benchtime 1s, -count=1).
+# CI runners differ; the gate fails only above 4x and warns above 1.6x, so it catches catastrophic regressions
+# (an accidental copy/allocation on the data path), not small drift. Update only with a real 1s run, dated.
+# Names are normalized by stripping the -<GOMAXPROCS> suffix.
+BenchmarkSessionBulk 164712
+BenchmarkShapedUDP/udp 577786
+BenchmarkShapedUDP/fou-gre 567203
+BenchmarkShapedUDP/gue-ipip 567604
+BenchmarkShapedUDP/vxlan 569271
+BenchmarkShapedUDP/geneve 562129
+BenchmarkShapedUDP/dnscrypt-udp 594180
+BenchmarkShapedUDP/ntp-direct 598184
+BenchmarkShapedUDP/openvpn-dco 563574
+BenchmarkShapedUDP/srtp-direct 570686

@@ -3,9 +3,9 @@ package main
 // Per-port traffic counters, rate limits and quotas.
 //
 // Every public port (client: the port users connect to; server: the target port) has a portStat of atomics that the
-// copy loops update; one 1 s ticker derives rates and peaks, enforces quotas and (every 30 s) persists quota usage.
-// Limits come from the config's `limits:` list and are hot-reloaded. With no limit set the only per-chunk cost is a
-// few atomic adds and two atomic loads.
+// copy loops update; one 1 s ticker derives rates and peaks, enforces quotas and (every -state-save seconds, default
+// 30) persists quota usage and the lifetime totals. Limits come from the config's `limits:` list and are hot-reloaded.
+// With no limit set the only per-chunk cost is a few atomic adds and two atomic loads.
 
 import (
 	"encoding/json"
@@ -444,7 +444,7 @@ func (r *registry) saveTotals() {
 }
 
 // save writes quota usage and the lifetime totals atomically (tmp file + rename). One writer at a time:
-// the 30 s ticker, the shutdown save and /quota/reset can overlap, and two writers on the same .tmp
+// the periodic ticker, the shutdown save and /quota/reset can overlap, and two writers on the same .tmp
 // file interleave and publish a corrupt state (audit 2026-10-21).
 func (r *registry) save() {
 	r.saveMu.Lock()
@@ -489,12 +489,14 @@ func (r *registry) resetQuota(port int) bool {
 	return found
 }
 
-// run is the 1 s ticker: rates, peaks, quota enforcement, periodic persistence.
-func (r *registry) run() {
+// run is the 1 s ticker: rates, peaks, quota enforcement, and a state save every saveEvery (0 = only on shutdown,
+// from -state-save / F8).
+func (r *registry) run(saveEvery time.Duration) {
 	n := 0
 	for range time.Tick(time.Second) {
 		r.tick()
-		if n++; n%30 == 0 {
+		n++
+		if saveEvery > 0 && time.Duration(n)*time.Second%saveEvery == 0 {
 			r.save()
 		}
 	}

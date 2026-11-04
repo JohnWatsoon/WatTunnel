@@ -18,8 +18,9 @@ const (
 	frDgram     = 0x08 // flow, port, len, data: an unreliable datagram (UDP forwarding); always the LAST frame of a packet
 	frFec       = 0x09 // XOR parity over the last few small data packets (fec.go); alone in its packet
 	frDgramFrag = 0x0a // flow, port, id, index, count, len, data: one piece of a datagram too big for one packet (2.5.0)
-	frKex       = 0x0b // 32-byte ephemeral X25519 public key: the forward-secrecy key exchange (2.10.0, both ends; see session.go onKex); always the LAST frame of a packet
+	frKex       = 0x0b // 32-byte ephemeral X25519 public key: the forward-secrecy key exchange (2.10.0, both ends; see session.go onKex). Older peers stop parsing at it, so it is the effective end of the frame stream; 3.0 padding and 3.3.0 shape-data/noise may append frPad/frPad2 after it, which those peers ignore.
 	frPad       = 0x0c // len (one byte, < 128), then len zero bytes: random padding (3.0.0, hdrmask.go); always the LAST frame of a packet, so an older peer stops at it
+	frPad2      = 0x0d // len (uvarint), then len bytes of filler: data-shaping padding and idle noise (3.3.0, shape.go); always the LAST frame of a packet, so an older peer stops at the type byte. The long form exists because frPad's one-byte length cannot fill a 640/1400 B packet in one frame.
 )
 
 var errBadFrame = errors.New("wat: malformed frame")

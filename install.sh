@@ -508,7 +508,13 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_PACKET AF_NETLINK AF_UNIX
 RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-ReadWritePaths=/etc/wattun
+# -state-dir may point at tmpfs (/run/wattun, the documented value). RuntimeDirectory creates it writable
+# inside the ProtectSystem=strict sandbox; Preserve keeps it across a unit restart (the multi-instance template
+# shares the path) and ReadWritePaths is kept for the legacy /etc/wattun state next to configs.
+RuntimeDirectory=wattun
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=/etc/wattun /run/wattun
 
 [Install]
 WantedBy=multi-user.target

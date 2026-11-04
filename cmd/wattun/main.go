@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -35,17 +36,36 @@ import (
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
 
-var carrierNames = []string{"icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip"}
+var carrierNames = []string{"icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip",
+	"sit", "6to4", "xfrm-ipsec", "etherip", "l2tpv3",
+	"fou-gre", "gue-ipip", "vxlan", "geneve", "dnscrypt-udp", "ntp-direct", "openvpn-dco", "srtp-direct"}
 
 // rawIPCarrier: the carriers on a raw IP socket, which take a bare IP and run one session.
-var rawIPCarrier = map[string]bool{"icmp": true, "gre": true, "ipip": true}
+var rawIPCarrier = map[string]bool{"icmp": true, "gre": true, "ipip": true,
+	"sit": true, "6to4": true, "xfrm-ipsec": true, "etherip": true, "l2tpv3": true}
+
+// shapedUDPCarrier: F19 phase-2 (3.3.0) wattun-internal UDP shapes: the udp carrier with a fixed per-protocol header
+// and conventional port. Both ends must run 3.3.0 and pick the same name; they do not talk to the real protocol.
+var shapedUDPCarrier = map[string]bool{"fou-gre": true, "gue-ipip": true, "vxlan": true, "geneve": true,
+	"dnscrypt-udp": true, "ntp-direct": true, "openvpn-dco": true, "srtp-direct": true}
+
+// shapedRawCarrier: F19 phase-1 raw-tier shaped carriers (Linux + CAP_NET_RAW). D7: shaped carriers, raw or UDP tier,
+// are single-carrier in 3.3.0 and are rejected inside a '+' bond.
+var shapedRawCarrier = map[string]bool{"sit": true, "6to4": true, "xfrm-ipsec": true, "etherip": true, "l2tpv3": true}
 
 var validCarrier = map[string]bool{
 	"icmp": true, "udp": true, "tcp": true, "tls": true, "ws": true, "wss": true, "h2": true, "h2c": true, "grpc": true, "gre": true, "ipip": true,
+	"sit": true, "6to4": true, "xfrm-ipsec": true, "etherip": true, "l2tpv3": true,
+	"fou-gre": true, "gue-ipip": true, "vxlan": true, "geneve": true, "dnscrypt-udp": true, "ntp-direct": true, "openvpn-dco": true, "srtp-direct": true,
 	"fortress": true,
 }
 
 var poolCarriers = map[string]bool{"tcp": true, "tls": true, "ws": true, "wss": true, "h2": true, "h2c": true, "grpc": true}
+
+// carrierNoListen: carriers with no -listen / -listen-NAME (raw sockets bind the whole protocol; icmp is a raw socket
+// that only answers).
+var carrierNoListen = map[string]bool{"icmp": true, "gre": true, "ipip": true,
+	"sit": true, "6to4": true, "xfrm-ipsec": true, "etherip": true, "l2tpv3": true}
 
 func main() {
 	runManager()
@@ -55,7 +75,7 @@ func main() {
 	mode := flag.String("mode", "", "client|server")
 	key := flag.String("key", "", "pre-shared key")
 	keyFile := flag.String("key-file", "", "read the key from a file")
-	peer := flag.String("peer", "", "client: server IP; the pool carriers (tcp|tls|ws|wss|h2|h2c|grpc) take host:port and may list several, comma separated, which the pool connections spread over (client only, 2.2.0)")
+	peer := flag.String("peer", "", "client: server IP; the pool carriers (tcp|tls|ws|wss|h2|h2c|grpc) take host:port and may list several, comma separated, which the pool connections spread over (client only, 2.2.0); the F19 shaped carriers take the same host:port form, with a bare host using the carrier's conventional port")
 	maps := flag.String("map", "", "client: listenPort:serverPort[,...]")
 	udpMaps := flag.String("udp", "", "client: UDP forwarding, PORT or listenPort:serverPort[@bind][,...] (both ends need wattun >= 1.2.0)")
 	udpIdle := flag.Duration("udp-idle", 60*time.Second, "UDP flows with no traffic for this long are closed")
@@ -71,9 +91,17 @@ func main() {
 	allowHi := flag.Int("allow-max", 65535, "server: highest target port")
 	allowList := flag.String("allow-ports", "", "server: comma list of target ports clients may reach (overrides allow-min/max)")
 	allowFile := flag.String("allow-file", "", "server: file with the allowed target ports (comma/space/newline separated), re-read when it changes; overrides -allow-ports")
+	allowClients := flag.String("allow-clients", "", "server: comma/space separated IPv4/IPv6 addresses or CIDR prefixes that may open a session; every other source is dropped before admission (empty = every source). Direct carriers only: behind a CDN the source is the proxy, and -reverse is not filtered (3.3.0)")
+	allowClientsFile := flag.String("allow-clients-file", "", "server: file with the -allow-clients list (comma/space/newline separated), read at startup; replaces -allow-clients (3.3.0)")
 	debug := flag.Bool("debug", false, "log every stream open/close")
 	version := flag.Bool("version", false, "print the version and exit")
-	fecMode := flag.String("fec", "off", "off|auto: adaptive XOR parity after bursts of small packets (cuts tail latency on lossy links; both ends need 1.7.0 and -fec auto)")
+	fecMode := flag.String("fec", "off", "off|auto: adaptive XOR parity after bursts of small packets, sent only while the measured loss is above -fec-on-loss (cuts tail latency on lossy links; both ends need 1.7.0 and -fec auto; loss gate since 3.3.0)")
+	fecOnLoss := flag.Float64("fec-on-loss", 2, "fec auto: start sending parity once the sender's measured loss is above this percent (0.01 = 1 %, at most 50; must be above -fec-off-loss; 3.3.0)")
+	fecOffLoss := flag.Float64("fec-off-loss", 0.5, "fec auto: stop sending parity once the measured loss falls below this percent (0 = once open it never closes; below -fec-on-loss; 3.3.0)")
+	shapeData := flag.Float64("shape-data", 0, "pad packets that carry stream data to randomized realistic sizes, spending at most this percent of the stream bytes sent (0 = off, at most 25; 3.3.0)")
+	noiseMode := flag.String("noise", "off", "idle traffic, off|low|med|custom: while the session has no user data for ~2 keepalives, send non-ack-eliciting filler packets at the matching byte budget (low 128 B/s, med 1024 B/s; custom uses -noise-bps; 3.3.0)")
+	noiseBps := flag.Int("noise-bps", 0, "noise, with -noise custom: filler byte budget in bytes/second (64..1000000; 3.3.0)")
+	noiseWindow := flag.String("noise-window", "", `noise: local-clock window "HH:MM-HH:MM" (e.g. 02:00-06:00) during which filler may be sent; empty = all day (3.3.0)`)
 	hedge := flag.Bool("hedge", false, "send small young packets twice (extra packets, helps lossy tails)")
 	lossCeil := flag.Bool("loss-ceiling", false, "pacer: also cut the rate when loss jumps far above its learned baseline (opt-in; default: delay only)")
 	governor := flag.Bool("governor", false, "pacer, ICMP paths: learn the path's volume ceiling from the reroute signature (a sudden base-RTT jump after sustained bulk) and hold the rate under it (opt-in; replaces hand-tuned max-mbps on routes where ICMP above ~30 MB/s total triggers a reroute inside Iran; 2.9.0)")
@@ -85,8 +113,8 @@ func main() {
 	pingEvery := flag.Int("ping-every", 2, "idle keepalive interval, seconds (raise on paths whose filter rate-limits steady periodic packets into a penalty box: live 2026-10-22 saw 30 echo req/min collapse to 95% loss until a ~5 min cooldown; both ends use their own value)")
 	dnsUpstream := flag.String("dns-relay-upstream", "8.8.8.8:53", "Kharej recursive resolver used by the internal DNS relay (port 53, -ech ladder); empty = 8.8.8.8:53")
 	icmpType := flag.String("icmp-type", "echo", "icmp carrier: echo|timestamp - the ICMP request type the client sends (the server answers with the matching reply: 8/0, 13/14); both ends must use the same. info|mask are accepted, but the Linux kernel does not answer them")
-	carrier := flag.String("carrier", "icmp", "icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip (gre/ipip: IP protocol 47/4 on a raw socket, root and Linux, -peer is a bare IP like icmp, 3.2.0 on both ends; all but icmp/gre/ipip: client dials -peer host:port, server listens on -listen; h2 through Cloudflare: not supported, use grpc or wss); join several with '+' (icmp+udp+tcp) to bond them into ONE session that survives any one being blocked; then -peer / -listen are the defaults and -peer-NAME / -listen-NAME (e.g. -peer-udp, -listen-tcp, also keys in the config file) override them per carrier; fortress = alias the manager writes for blackout mode (icmp+tcp+tls+wss+udp on ports 80/443/8443/53)")
-	udpListen := flag.String("listen", ":4443", "server, udp carrier: address to listen on")
+	carrier := flag.String("carrier", "icmp", "icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip|sit|6to4|xfrm-ipsec|etherip|l2tpv3|fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct (gre/ipip: IP protocol 47/4 on a raw socket, root and Linux, -peer is a bare IP like icmp, 3.2.0 on both ends; sit/6to4/xfrm-ipsec/etherip/l2tpv3: F19 raw-tier shaped carriers, IP protocol 41/41/50/97/115 on a raw socket, root and Linux, bare-IP -peer, 3.3.0 on both ends; fou-gre/gue-ipip/vxlan/geneve/dnscrypt-udp/ntp-direct/openvpn-dco/srtp-direct: F19 UDP-shaped carriers, the udp carrier with a fixed per-protocol header and conventional port (5555/6080/4789/6081/443/123/1194/5004, an explicit port wins), client dials -peer host:port, server listens on -listen, 3.3.0 on both ends; F19 shapes are wattun-internal: both ends must use the same name, they do not talk to the real protocol; all but icmp/gre/ipip and the F19 raw shapes: client dials -peer host:port, server listens on -listen; h2 through Cloudflare: not supported, use grpc or wss); join several with '+' (icmp+udp+tcp) to bond them into ONE session that survives any one being blocked; then -peer / -listen are the defaults and -peer-NAME / -listen-NAME (e.g. -peer-udp, -listen-tcp, also keys in the config file) override them per carrier; fortress = alias the manager writes for blackout mode (icmp+tcp+tls+wss+udp on ports 80/443/8443/53)")
+	udpListen := flag.String("listen", ":4443", "server, udp carrier: address to listen on (the F19 UDP-shaped carriers listen on their conventional port when this is not set)")
 	conns := flag.Int("conns", 0, "client, tcp/tls carrier: connections in the pool (0 = auto-tuned from host hardware: 8 on lean VPS, 16 on 2-CPU/2GB+, 24-32 on 4+ cores)")
 	poolRotate := flag.String("pool-rotate", "0", "client, pool carriers (tcp|tls|ws|wss|h2|grpc): recycle each healthy pool connection after this long, so no flow shows a months-stable lifetime; accepts 30m, 4h or seconds; jittered +/-40% per connection so the redials never line up; 0 = off (2.8.0; a -reverse server dials too, so it honours it since 3.0.2)")
 	poolRotateBytes := flag.String("pool-rotate-bytes", "0", "client, pool carriers, with -pool-rotate or alone: also recycle each healthy pool connection after this many bytes handed to its socket (500MB, 4GB, 300k; 1MB = 1e6); jittered +/-25% like the time axis; whichever limit hits first recycles (2.8.1; a -reverse server honours it since 3.0.2)")
@@ -120,10 +148,12 @@ func main() {
 	for _, c := range carrierNames {
 		peerBy[c] = flag.String("peer-"+c, "", "client, bonded carriers: server address of the "+c+" carrier (default: -peer)")
 		srcIPBy[c] = flag.String("src-ip-"+c, "", "client, bonded carriers: source IP address of the "+c+" carrier (default: -src-ip)")
-		if c != "icmp" && c != "gre" && c != "ipip" {
+		if !carrierNoListen[c] {
 			listenBy[c] = flag.String("listen-"+c, "", "server (or -reverse client), bonded carriers: listen address of the "+c+" carrier (default: -listen)")
 		}
 	}
+	stateDir := flag.String("state-dir", "", "directory for the quota-usage and lifetime-totals state files (<config>.quota.json, <config>.totals.json); created 0700 when missing; needs -config. Empty = next to the config, the 2.5.0-3.2.x location (3.3.0). Point it at tmpfs (e.g. /run/wattun) to spare the disk: tmpfs loses the counters on reboot")
+	stateSave := flag.Int("state-save", 30, "seconds between state-file saves (quota usage and lifetime totals); 0 = only on shutdown (3.3.0)")
 	cfgPath := flag.String("config", "", "YAML-subset config file: keys are flag names, plus a ports: list (hot-reloaded); command-line flags win")
 	var hdrs []string
 	flag.Func("header", "client, ws|wss|h2|h2c|grpc carrier: extra request header 'Name: value' (repeatable)", func(v string) error {
@@ -160,6 +190,14 @@ func main() {
 		}
 	}
 	debugOn = *debug
+	// F19 (3.3.0): which keys the config file set, so a shaped carrier can tell its -listen default (:4443, the udp
+	// carrier's) from an operator's explicit choice.
+	cfgKeys := map[string]bool{}
+	if fileCfg != nil {
+		for _, e := range fileCfg.KVs {
+			cfgKeys[e.Key] = true
+		}
+	}
 	switch *keepSlow {
 	case "", "on", "true", "off", "false":
 	default:
@@ -195,6 +233,26 @@ func main() {
 	if *udpIdle < time.Second { // a shorter idle makes the janitor reap flows mid-burst and UDP silently dies (audit 2026-10-22)
 		log.Fatalf("-udp-idle must be at least 1s, got %v", *udpIdle)
 	}
+	// F8 (3.3.0): the state files stay named after the config; -state-dir only moves them, -state-save sets the
+	// periodic write interval (0 = shutdown only).
+	stateEvery, err := stateSaveInterval(*stateSave)
+	if err != nil {
+		log.Fatal(err)
+	}
+	quotaPath, totalsPath := statePaths(*cfgPath, *stateDir)
+	if *stateDir != "" {
+		if *cfgPath == "" {
+			log.Fatal("-state-dir needs -config: the state files are named after the config file")
+		}
+		if err := prepareStateDir(*stateDir); err != nil {
+			log.Fatalf("-state-dir: %v", err)
+		}
+		log.Printf("state files in %s", *stateDir)
+	}
+	fecOn, fecOff, err := fecGatePct(*fecOnLoss, *fecOffLoss)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	k := []byte(*key)
 	if *keyFile != "" {
@@ -229,11 +287,18 @@ func main() {
 	anyPool := false
 	for _, n := range names {
 		if !validCarrier[n] || seen[n] {
-			fmt.Fprintln(os.Stderr, "unknown -carrier (icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip, joined with + to bond; each at most once)")
+			fmt.Fprintln(os.Stderr, "unknown -carrier (icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip|sit|6to4|xfrm-ipsec|etherip|l2tpv3|fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct, joined with + to bond; each at most once)")
 			os.Exit(2)
 		}
 		seen[n] = true
 		anyPool = anyPool || poolCarriers[n]
+	}
+	// D7 (3.3.0): shaped carriers are single-carrier. A bond sizes each packet for the path it takes, and each shaped
+	// carrier derives its own header (the UDP tier also its own conventional port), so a shaped leg in a bond was
+	// untested and could silently use mismatched ports; refuse it here (the manager refuses it too).
+	if bad := shapedBondCarrier(names); bad != "" {
+		fmt.Fprintf(os.Stderr, "-carrier %q: %s is a shaped carrier and works as a single carrier only in 3.3.0; bond udp|tcp|tls|ws|wss|h2|h2c|grpc or use it alone\n", *carrier, bad)
+		os.Exit(2)
 	}
 	if *winMax < 0 || *winMax > 64 {
 		log.Fatalf("-win-max must be 0 (auto) or 4..64 MB, got %d", *winMax)
@@ -250,7 +315,7 @@ func main() {
 		*conns = hp.DefaultPoolConns
 	}
 	if *nSess <= 0 {
-		if !server && !*reverse && len(names) == 1 && !rawIPCarrier[names[0]] {
+		if !server && !*reverse && len(names) == 1 && !rawIPCarrier[names[0]] && !shapedUDPCarrier[names[0]] {
 			*nSess = hp.DefaultSessions
 		} else {
 			*nSess = 1
@@ -265,7 +330,7 @@ func main() {
 		case *nSess < 1 || *nSess > maxSessions:
 			fmt.Fprintf(os.Stderr, "-sessions must be 1..%d, got %d\n", maxSessions, *nSess)
 			os.Exit(2)
-		case len(names) > 1 || rawIPCarrier[names[0]]:
+		case len(names) > 1 || rawIPCarrier[names[0]] || shapedUDPCarrier[names[0]]:
 			fmt.Fprintf(os.Stderr, "-sessions > 1 works with one udp|tcp|tls|ws|wss|h2|h2c|grpc carrier, not %q\n", *carrier)
 			os.Exit(2)
 		case *reverse:
@@ -276,6 +341,67 @@ func main() {
 	if *reverse && *fakeSNI != "" && (*fakeMode == "sum" || *fakeMode == "seqsum") { // 3.0.0
 		fmt.Fprintf(os.Stderr, "-fake-mode %s does not work with -reverse: checksum markers need a middlebox that drops the damaged segment; on an open reverse path the peer can take it and the tunnel dies. Use rst or synrst.\n", *fakeMode)
 		os.Exit(2)
+	}
+	// W10 (3.3.0): server-side client allowlist. The check runs before a session is admitted, on the source address the
+	// carrier reports, so it only makes sense where that is the client's own IP. M4: it restricts holders of the
+	// PSK/token to these source IPs (AEAD-before-admission already keeps every other source out); the file variant must
+	// live under /etc/wattun because the unit runs with ProtectHome=yes. M11: with a CDN/proxy carrier or -sni the
+	// server sees the edge's address, so the list would reject every real client: that combination is a startup error.
+	// -reverse has no client source to compare, so it is ignored with a warning (the server dials the client).
+	var allowClientPrefixes []netip.Prefix
+	if *allowClients != "" || *allowClientsFile != "" {
+		if !server {
+			log.Fatal("-allow-clients is a server option: it filters which clients may open a session")
+		}
+		// M4 (3.3.0): the unit runs with ProtectHome=yes, so a list under /root or /home would pass manager validation
+		// and then fail at startup; require the file under /etc/wattun (the unit's readable tree).
+		if *allowClientsFile != "" && !allowClientsFileUnderEtc(*allowClientsFile) {
+			log.Fatalf("-allow-clients-file must be under /etc/wattun (the service unit runs with ProtectHome=yes, so a list under /root or /home is not readable); got %q", *allowClientsFile)
+		}
+		ps, err := clientAllowList(*allowClients, *allowClientsFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if *reverse {
+			log.Printf("warning: -allow-clients is ignored with -reverse: the server dials the client, so a session's source address is not the client's")
+		} else if cdn := allowClientsCDN(names, *sni); cdn != "" {
+			// M11 (3.3.0): with a CDN/proxy carrier the source the server sees is the edge's address, so a list would
+			// reject every real client. That is a guaranteed lock-out, not a warning: refuse it at startup.
+			log.Fatalf("-allow-clients cannot be used with %s: the server sees the CDN/proxy address, not the client's, so every real client would be rejected; filter at the proxy or use a direct carrier", cdn)
+		} else {
+			allowClientPrefixes = ps
+			log.Printf("clients allowed from %d prefix(es) (-allow-clients restricts holders of the PSK/token to these source IPs)", len(ps))
+		}
+	}
+	// W7/F13 (3.3.0): opt-in traffic shaping. Both are off by default and validate their own bounds here; nothing is
+	// added to the packet path unless the parsed value is non-zero.
+	shapeFrac, err := shapeDataPct(*shapeData)
+	if err != nil {
+		log.Fatal(err)
+	}
+	noiseBpsVal, err := noiseBudget(*noiseMode, *noiseBps)
+	if err != nil {
+		log.Fatal(err)
+	}
+	noiseFrom, noiseTo, err := parseNoiseWindow(*noiseWindow)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if noiseBpsVal == 0 && *noiseWindow != "" {
+		log.Printf("warning: -noise-window is ignored without -noise")
+	}
+	if shapeFrac > 0 && len(names) > 1 {
+		log.Printf("warning: -shape-data is ignored on bonded carriers: a bond sizes each packet for the path it takes")
+	}
+	if shapeFrac > 0 {
+		log.Printf("shape-data: padding stream-data packets with up to %.0f%% extra bytes", shapeFrac*100)
+	}
+	if noiseBpsVal > 0 {
+		if noiseFrom == 0 && noiseTo == 0 {
+			log.Printf("noise: up to %.0f B/s of filler while idle (all day)", noiseBpsVal)
+		} else {
+			log.Printf("noise: up to %.0f B/s of filler while idle (window %02d:%02d-%02d:%02d)", noiseBpsVal, noiseFrom/60, noiseFrom%60, noiseTo/60, noiseTo%60)
+		}
 	}
 	// -fake-sni implies -tls-small-ch (2.10.11: large post-quantum hellos were dropped on a live path), unless the
 	// operator set -tls-small-ch explicitly, so -tls-small-ch=false now turns the full hello back on (3.0.0).
@@ -357,7 +483,7 @@ func main() {
 				log.Fatalf("%s carrier: invalid -src-ip %q", carrier, src)
 			}
 		}
-		if (rawIPCarrier[carrier] || carrier == "udp") && strings.Contains(peer, ",") {
+		if (rawIPCarrier[carrier] || carrier == "udp" || shapedUDPCarrier[carrier]) && strings.Contains(peer, ",") {
 			log.Fatalf("%s carrier: -peer takes exactly one address, got %q (several comma separated addresses work with tcp|tls|ws|wss|h2|h2c|grpc)", carrier, peer)
 		}
 		lis := server != (*reverse && poolCarriers[carrier]) // which side listens: the server, or the client when -reverse
@@ -390,6 +516,21 @@ func main() {
 				log.Fatalf("%s socket: %v", carrier, err)
 			}
 			pio, raw = r, r
+		case "sit", "6to4", "xfrm-ipsec", "etherip", "l2tpv3":
+			// F19 phase 1 (3.3.0): raw-tier shaped carriers. wattun-internal wire shapes between two 3.3.0 peers
+			// (both ends need the same carrier name), not real 6in4/IPsec/EtherIP/L2TPv3; raw sockets are Linux+root.
+			if *reverse {
+				log.Fatalf("%s carrier: -reverse is not supported (use icmp, udp or a pool carrier)", carrier)
+			}
+			if !server && peer == "" {
+				log.Fatalf("%s carrier: -peer is empty (want the server's bare IP)", carrier)
+			}
+			r, err := wat.NewShapedRaw(carrier, server, peer, src, k)
+			if err != nil {
+				log.Fatalf("%s socket: %v", carrier, err)
+			}
+			pio, raw = r, r
+			log.Printf("%s carrier: wattun-internal F19 shape between two 3.3.0 wattun peers, not real %s", carrier, carrierRealName[carrier])
 		case "udp":
 			if *reverse && server { // 3.0.0: the server punches towards the client, which never sends first
 				raw, err = wat.NewUDPReverseServer(listen, peer, k)
@@ -412,6 +553,38 @@ func main() {
 					}
 				}
 			}
+		case "fou-gre", "gue-ipip", "vxlan", "geneve", "dnscrypt-udp", "ntp-direct", "openvpn-dco", "srtp-direct":
+			// F19 phase 2 (3.3.0): the udp carrier with a fixed per-protocol header in front of every datagram and the
+			// protocol's conventional port by default. wattun-internal shapes between two 3.3.0 peers (same name), not
+			// real VXLAN/Geneve/GUE/FOu/DNSCrypt/NTP/OpenVPN/SRTP.
+			if *reverse {
+				log.Fatalf("%s carrier: -reverse is not supported (use udp or icmp for reverse)", carrier)
+			}
+			shapePort := wat.UDPShapePort(carrier)
+			if !server && peer == "" {
+				log.Fatalf("%s carrier: -peer is empty (want host[:port])", carrier)
+			}
+			if peer != "" {
+				peer = withDefaultPort(peer, shapePort)
+			}
+			// -listen defaults to the udp carrier's :4443; a shaped carrier that was not given an explicit address
+			// uses its protocol's conventional port instead.
+			if !explicit["listen"] && !explicit["listen-"+carrier] && !cfgKeys["listen"] && !cfgKeys["listen-"+carrier] {
+				listen = withDefaultPort("", shapePort)
+			} else {
+				listen = withDefaultPort(listen, shapePort)
+			}
+			if server {
+				raw, err = wat.NewShapedUDPServer(carrier, listen, k)
+			} else if srcNetIP != nil {
+				pio, err = wat.NewShapedUDPClientAddr(carrier, peer, &net.UDPAddr{IP: srcNetIP}, k)
+			} else {
+				pio, err = wat.NewShapedUDPClient(carrier, peer, k)
+			}
+			if err != nil {
+				log.Fatalf("%s socket: %v", carrier, err)
+			}
+			log.Printf("%s carrier: wattun-internal F19 shape between two 3.3.0 wattun peers, not real %s", carrier, carrierRealName[carrier])
 		case "tcp":
 			if lis {
 				ps, err = wat.NewTCPPoolServer(listen)
@@ -589,10 +762,28 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	// M1/M15 (3.3.0): an explicit -mtu may not exceed the carrier's own payload ceiling (a shaped carrier adds its header
+	// inside the 1400 B datagram; NewSession clamps too, for the server's admitted sessions). A profile without a ceiling
+	// (icmp) keeps the operator's value.
+	maxPayload := *mtu
+	if maxPayload > 0 {
+		var prof wat.Profile
+		if pr, ok := pio.(wat.Profiled); ok {
+			prof = pr.Profile()
+		} else if pr, ok := raw.(wat.Profiled); ok {
+			prof = pr.Profile()
+		}
+		if v, clamped := clampMaxPayload(maxPayload, prof); clamped {
+			log.Printf("-mtu %d is above the payload ceiling of carrier %q (%d B); using %d B", maxPayload, *carrier, v, v)
+			maxPayload = v
+		}
+	}
 	cfg := wat.Config{
 		Server: server, Key: k, Paths: *lanes, MaxBps: *maxMB * 1e6, Slack: time.Duration(*slackMs) * time.Millisecond,
 		PingEvery: time.Duration(*pingEvery) * time.Second, NoMask: !*hdrMask, NoShape: !*shape,
-		Logf: log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", MaxPayload: *mtu, Bond: tm,
+		Logf: log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", FECOnLoss: fecOn, FECOffLoss: fecOff,
+		MaxPayload: maxPayload, Bond: tm, AllowClients: allowClientPrefixes,
+		ShapeData: shapeFrac, NoiseBps: noiseBpsVal, NoiseFrom: noiseFrom, NoiseTo: noiseTo,
 		WinMax: uint64(*winMax) << 20,
 		// no CDN can sit in a reverse pool (Kharej dials Iran's IP) or in front of raw tcp/tls: TCP paces (2.4.18)
 		Direct: allReliableDirect(names, *reverse),
@@ -678,14 +869,14 @@ func main() {
 	if server {
 		side = "s"
 	}
-	if *cfgPath != "" {
-		portReg.loadQuota(*cfgPath + ".quota.json")
-		portReg.loadTotals(*cfgPath+".totals.json", func() (uint64, uint64) { st := stats(); return st.BytesIn, st.BytesOut })
+	if quotaPath != "" { // F8: -state-dir/-state-save only move and time these files; their names stay <config>.*
+		portReg.loadQuota(quotaPath)
+		portReg.loadTotals(totalsPath, func() (uint64, uint64) { st := stats(); return st.BytesIn, st.BytesOut })
 	}
 	if fileCfg != nil {
 		portReg.applyLimits(fileCfg.Limits)
 	}
-	go portReg.run()
+	go portReg.run(stateEvery)
 	log.Printf("wattun %s up (ident base %d, lanes %d, max %.0f MB/s; host: %d CPU, %d MB RAM, %s tier, conns %d, sessions %d)",
 		*mode, wat.IdentBase(k), *lanes, *maxMB, hp.NumCPU, hp.TotalRAMMB, hp.Tier, *conns, *nSess)
 	if tun != nil && len(tun.list) > 1 {
@@ -772,7 +963,7 @@ func main() {
 				out := map[string]any{
 					"bytes_in_total": inTot, "bytes_out_total": outTot,
 					"pkts_out": st.PktsOut, "pkts_in": st.PktsIn, "bytes_out": st.BytesOut, "bytes_in": st.BytesIn,
-					"fec_sent": st.FecSent, "fec_recovered": st.FecRecovered, "retrans": st.Retrans, "send_errors": st.Dropped, "ack_late": st.AckLate, "dup_recv": st.RxDup, "rx_too_old": st.RxTooOld, "rate_bps": st.RateBps,
+					"fec_sent": st.FecSent, "fec_recovered": st.FecRecovered, "fec_state": st.FecState, "shape_data_bytes": st.PadBytes, "noise_sent": st.NoiseSent, "noise_bytes": st.NoiseBytes, "retrans": st.Retrans, "send_errors": st.Dropped, "ack_late": st.AckLate, "dup_recv": st.RxDup, "rx_too_old": st.RxTooOld, "rate_bps": st.RateBps,
 					"ceiling_bps": st.CeilingBps, "loss_pct": st.LossPct,
 					"srtt_ms": float64(st.SRTT) / 1e6, "min_rtt_ms": float64(st.MinRTT) / 1e6,
 					"streams": st.Streams, "inflight": st.Inflight, "alive": alive(), "last_rx_age_ms": rxAge(), "version": wat.Version, "draining": srv != nil && srv.Draining(),
@@ -841,7 +1032,8 @@ func main() {
 					log.Print(note)
 				}
 			}
-			if st.PktsIn == last.PktsIn && st.PktsOut == last.PktsOut && st.Streams == 0 {
+			// M7 (3.3.0): noise filler is never acked and must not keep the quiet-idle stats line alive forever.
+			if quietStats(st, last) {
 				continue
 			}
 			log.Printf("stats: streams=%d rate=%.1fMB/s srtt=%v min=%v out=%d in=%d retrans=%d errs=%d ceiling=%.1fMB/s loss=%.1f%%", st.Streams, st.RateBps/1e6,
@@ -1459,4 +1651,76 @@ func allReliableDirect(names []string, reverse bool) bool {
 		}
 	}
 	return true
+}
+
+// clampMaxPayload (M1/M15) applies a carrier's payload ceiling to an explicit -mtu. MaxMTU is the hard frame ceiling
+// when the carrier sets one (a direct pool allows bigger than its default MTU); otherwise MTU is the ceiling (shaped
+// carriers, gre/ipip: their own header comes out of the 1400 B datagram, so an explicit 1400 overflowed the wire). A
+// profile with neither (icmp) does not constrain -mtu.
+func clampMaxPayload(explicit int, prof wat.Profile) (int, bool) {
+	if explicit <= 0 {
+		return explicit, false
+	}
+	ceiling := prof.MaxMTU
+	if ceiling <= 0 {
+		ceiling = prof.MTU
+	}
+	if ceiling > 0 && explicit > ceiling {
+		return ceiling, true
+	}
+	return explicit, false
+}
+
+// quietStats reports whether the 10 s stats line has nothing to say: no non-noise packet moved in either direction and
+// no stream is live. Noise alone is deliberately quiet (M7: with -noise an otherwise idle tunnel otherwise logged a
+// "stats:" line every 10 s, ~8.6k lines/day, for traffic that is never acked).
+func quietStats(st, last wat.Stats) bool {
+	return st.PktsIn == last.PktsIn && st.PktsOut-st.NoiseSent == last.PktsOut-last.NoiseSent && st.Streams == 0
+}
+
+// shapedBondCarrier returns the first shaped carrier in a bonded '+' list ("" when none). D7 (3.3.0): the F19 raw-tier
+// and UDP-tier shapes are wattun-internal per-carrier shapes whose headers/ports are sized for one carrier, so they are
+// single-carrier in this release.
+func shapedBondCarrier(names []string) string {
+	if len(names) < 2 { // a single carrier is not a bond (and is exactly how a shaped carrier is meant to be used)
+		return ""
+	}
+	for _, n := range names {
+		if shapedRawCarrier[n] || shapedUDPCarrier[n] {
+			return n
+		}
+	}
+	return ""
+}
+
+// carrierRealName names the protocol each F19 shaped carrier imitates, for the startup "not real ..." line.
+var carrierRealName = map[string]string{
+	"sit": "6in4", "6to4": "6to4", "xfrm-ipsec": "IPsec/ESP", "etherip": "EtherIP", "l2tpv3": "L2TPv3",
+	"fou-gre": "FOu/GRE-in-UDP", "gue-ipip": "GUE", "vxlan": "VXLAN", "geneve": "Geneve",
+	"dnscrypt-udp": "DNSCrypt", "ntp-direct": "NTP", "openvpn-dco": "OpenVPN DCO", "srtp-direct": "SRTP",
+}
+
+// withDefaultPort fills port into an address that has no explicit one ("" becomes ":port"); an address that already
+// carries a port, including a bracketed IPv6 literal, is returned unchanged. F19 UDP-shaped carriers use it so a bare
+// host or -listen gets the protocol's conventional port unless the operator chose one.
+func withDefaultPort(addr string, port int) string {
+	if port <= 0 {
+		return addr
+	}
+	if addr == "" {
+		return ":" + strconv.Itoa(port)
+	}
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr
+	}
+	if len(addr) > 2 && addr[0] == '[' && addr[len(addr)-1] == ']' { // a bracketed IPv6 literal without a port
+		return net.JoinHostPort(addr[1:len(addr)-1], strconv.Itoa(port))
+	}
+	if ip := net.ParseIP(addr); ip != nil {
+		return net.JoinHostPort(addr, strconv.Itoa(port))
+	}
+	if strings.Contains(addr, ":") { // an unbracketed IPv6 literal
+		return "[" + addr + "]:" + strconv.Itoa(port)
+	}
+	return net.JoinHostPort(addr, strconv.Itoa(port))
 }

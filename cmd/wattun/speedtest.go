@@ -17,9 +17,11 @@ package main
 // size, and reports the total over the wall time ("sessions" says how many took part). The server side is unchanged:
 // it only ever sees ordinary speed-test streams.
 //
-// streams=N (2.4.18, 1-32, default 8) runs N streams on every session, the way real users load a tunnel with many
-// connections. On a direct pool each stream rides one TCP connection (stream pinning), so a single stream shows what
-// one connection does and N streams what the tunnel does. streams=1 is the pre-2.4.18 single-stream test.
+// streams=N (2.4.18, 1-32, default 16 since 3.3.0; was 8) runs N streams on every session, the way real users load a
+// tunnel with many connections. On a direct pool each stream rides one TCP connection (stream pinning), so a single
+// stream shows what one connection does and N streams what the tunnel does. streams=1 is the pre-2.4.18 single-stream
+// test. 16 is the auto-mode/`wattun speedtest` default so the figure reflects multi-connection capacity rather than
+// one connection's share.
 
 import (
 	"encoding/binary"
@@ -39,6 +41,10 @@ const (
 	speedTestPort  = 0
 	speedTestMaxMB = 256
 	speedTestLimit = 3 * time.Minute
+	// speedTestStreamsMax is the accepted streams= range (1..32); speedTestStreamsDefault is used when it is absent
+	// or out of range (3.3.0: 16, was 8).
+	speedTestStreamsMax     = 32
+	speedTestStreamsDefault = 16
 )
 
 var speedChunk = make([]byte, 32<<10)
@@ -219,6 +225,16 @@ func speedOne(sess *wat.Session, dir string, size uint64, done <-chan struct{}) 
 	return res
 }
 
+// speedTestStreams parses /speedtest's streams= parameter: 1..speedTestStreamsMax, else the default (3.3.0: 16, so
+// auto mode and `wattun speedtest` measure multi-stream capacity; before: 8).
+func speedTestStreams(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > speedTestStreamsMax {
+		return speedTestStreamsDefault
+	}
+	return n
+}
+
 // speedTestHandler serves /speedtest?dir=down|up&mb=N on the client's metrics address.
 func speedTestHandler(tun *tunnel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -230,10 +246,7 @@ func speedTestHandler(tun *tunnel) http.HandlerFunc {
 		if err != nil || mb < 1 {
 			mb = 10
 		}
-		streams, err := strconv.Atoi(r.URL.Query().Get("streams"))
-		if err != nil || streams < 1 || streams > 32 {
-			streams = 8
-		}
+		streams := speedTestStreams(r.URL.Query().Get("streams"))
 		mb = min(mb, speedTestMaxMB*streams) // the server's cap is per stream, and mb is split between the streams
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(runSpeedTest(tun, dir, uint64(mb)<<20, streams, r.Context().Done()))

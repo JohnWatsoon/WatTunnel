@@ -22,10 +22,33 @@ jobs:
       - run: bash -n install.sh
       - run: bash -n wattun-manager
       - run: bash -n test-manager.sh
+      - run: bash -n bench/gate.sh
       - run: bash test-manager.sh
       - run: python3 testbench/emulate_dpi.py --self-test
       - run: GOOS=windows GOARCH=amd64 go build ./...
       - run: GOOS=linux GOARCH=arm64 go build ./...
+  arm64:
+    # The arm64 binary ships, so run tests on real arm64 hardware, not only a cross-build (audit M5).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: go build ./...
+      - run: go test -count=1 ./cmd/...
+      - run: go test -count=1 -run 'TestShape|TestNoise|TestFecGate|TestFecRx|TestShapedUDP|TestSourceAllowed|TestServerClientAllowlist' ./wat/
+  bench:
+    # Data-path regression floor (audit M6): 4x fail / 1.6x warn against bench/baseline.txt (runner-tolerant).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: bash bench/gate.sh
   icmp:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -35,8 +58,9 @@ jobs:
         with:
           go-version: '1.26'
       # The ICMP and raw-IP tests skip without root (icmp_linux_test.go, rawip_linux_test.go). They must not
-      # skip here: this job runs them under sudo so a real raw-socket regression fails CI.
-      - run: sudo -E env "PATH=$PATH" go test -count=1 -timeout 15m -run 'TestICMP|TestRawIP' ./wat/
+      # skip here: this job runs them under sudo so a real raw-socket regression fails CI. TestRawIPShapedLoopback
+      # is the only end-to-end test of the raw shaped carriers (H9 in the 2026-11-04 audit).
+      - run: sudo -E env "PATH=$PATH" go test -count=1 -timeout 15m -run 'TestICMP|TestRawIP|TestRawIPShapedLoopback' ./wat/
   race:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -46,4 +70,6 @@ jobs:
         with:
           go-version: '1.26'
       - run: go test -race -count=1 ./cmd/...
-      - run: go test -race -count=1 -run 'TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback' ./wat/
+      # The 3.3.0 send-path state (noise/shapeData under s.mu, udpShaper.seq, shapedUDPBufs pool, deny map,
+      # FEC gate/ring) must be race-checked too (audit M5).
+      - run: go test -race -count=1 -run 'TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback|TestShape|TestNoise|TestFecGate|TestFecRx|TestShapedUDP|TestSourceAllowed|TestServerClientAllowlist|TestPad2' ./wat/

@@ -122,6 +122,7 @@ func (t *tunnel) stats() wat.Stats {
 		return t.list[0].Stats()
 	}
 	var tot wat.Stats
+	tot.FecState = "off" // F11: "on" while any session's loss gate is open
 	var srtts, all []time.Duration
 	for _, s := range t.list {
 		st := s.Stats()
@@ -141,6 +142,12 @@ func (t *tunnel) stats() wat.Stats {
 		tot.DgramDropRx += st.DgramDropRx
 		tot.FecSent += st.FecSent
 		tot.FecRecovered += st.FecRecovered
+		if st.FecState == "on" {
+			tot.FecState = "on"
+		}
+		tot.PadBytes += st.PadBytes
+		tot.NoiseSent += st.NoiseSent
+		tot.NoiseBytes += st.NoiseBytes
 		tot.CeilingBps += st.CeilingBps
 		wat.AddPacer(&tot, st)
 		tot.LossPct = max(tot.LossPct, st.LossPct)

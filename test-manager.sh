@@ -331,6 +331,7 @@ ech: ladder
 ports:
   - 8443:443/tcp
 EOF
+_pb_def=$(declare -f port_busy) # restored below: later wizard tests need the real check
 port_busy() { return 0; }
 stats() {
   echo '{"alive": true, "srtt_ms": 22.4, "pkts_in": 120, "pkts_out": 135, "filter_profile": "desync-seqsum", "ech": "ladder"}'
@@ -343,6 +344,7 @@ stats() {
 expect_fail env ANTICENSOR_TEST_WAIT=1 anticensor_test t_probe
 expect_fail anticensor_test non_existent_tunnel
 rm -f "$WAT_CONF/t_probe.yml"
+eval "$_pb_def" # the port-busy stub was only for this tunnel probe
 
 # Regression test for F9: AT_EXTRA deduplication with T_ECH
 t_extra=$(printf "fp: chrome\nech: auto\ntls-frag: 100")
@@ -416,18 +418,171 @@ chk "arm-blackout iran governor" "$(grep '^governor:' "$WAT_CONF/t1.yml")" "gove
 # Phase 1-4: Engine & Transport Suites, Bonding, SLA Healing, Policies & UX Tooling
 # ======================================================================================
 
-# 1. Validators: v_sessions, v_conns, v_mtu
-for s in 1 16 64 - 0 default; do v_sessions "$s" && echo "ok   v_sessions $s" || { echo "FAIL v_sessions $s"; fail=1; }; done
-for s in 65 -1 00 abc; do expect_fail v_sessions "$s"; done
+# 1. Validators: v_sessions, v_conns, v_mtu (engine limits: maxSessions=16, poolMaxConns=64, MaxPayload 256..16384)
+for s in 1 16 - 0 default; do v_sessions "$s" && echo "ok   v_sessions $s" || { echo "FAIL v_sessions $s"; fail=1; }; done
+for s in 17 64 65 -1 00 abc; do expect_fail v_sessions "$s"; done
 
-for c in 1 8 128 - 0 default; do v_conns "$c" && echo "ok   v_conns $c" || { echo "FAIL v_conns $c"; fail=1; }; done
-for c in 129 -1 00 abc; do expect_fail v_conns "$c"; done
+for c in 1 8 64 - 0 default; do v_conns "$c" && echo "ok   v_conns $c" || { echo "FAIL v_conns $c"; fail=1; }; done
+for c in 65 128 129 -1 00 abc; do expect_fail v_conns "$c"; done
 
-for m in 576 1400 1500 65535 - 0 default; do v_mtu "$m" && echo "ok   v_mtu $m" || { echo "FAIL v_mtu $m"; fail=1; }; done
-for m in 575 70000 -1 abc; do expect_fail v_mtu "$m"; done
+for m in 256 576 1400 1500 16384 - 0 default; do v_mtu "$m" && echo "ok   v_mtu $m" || { echo "FAIL v_mtu $m"; fail=1; }; done
+for m in 255 16385 65535 70000 -1 abc; do expect_fail v_mtu "$m"; done
 
-# 2. Unattended flags: --conns, --mtu, --policy
-ni_parse --conns 16 --mtu 1400 --policy latency
+# carrier-aware: a bond is one session and merges to its smallest leg's mtu
+v_sessions 4 tcp && echo "ok   v_sessions 4 tcp" || { echo "FAIL v_sessions 4 tcp"; fail=1; }
+v_sessions 4 udp && echo "ok   v_sessions 4 udp" || { echo "FAIL v_sessions 4 udp"; fail=1; }
+expect_fail v_sessions 4 icmp
+expect_fail v_sessions 4 gre
+expect_fail v_sessions 4 'tcp+tls'
+expect_fail v_sessions 4 tcp 1
+chk "mtu_max_for a pool carrier" "$(mtu_max_for tcp)" "16384"
+chk "mtu_max_for a pool bond" "$(mtu_max_for 'tcp+tls')" "16384"
+chk "mtu_max_for icmp" "$(mtu_max_for icmp)" "1400"
+chk "mtu_max_for udp" "$(mtu_max_for udp)" "1400"
+chk "mtu_max_for a bond uses its smallest leg" "$(mtu_max_for 'icmp+tcp')" "1400"
+v_mtu 16384 tcp && echo "ok   v_mtu 16384 tcp" || { echo "FAIL v_mtu 16384 tcp"; fail=1; }
+v_mtu 1400 icmp && echo "ok   v_mtu 1400 icmp" || { echo "FAIL v_mtu 1400 icmp"; fail=1; }
+expect_fail v_mtu 1401 icmp
+expect_fail v_mtu 16385 tcp
+# a config written from the unattended flags: carrier known only at write time
+_TC=$T_CARRIER; _TR=$T_REV; _SS=$SESS_USE; _NM=${NI_MTU:-}
+T_CARRIER=tcp; T_REV=''; SESS_USE=4; NI_MTU=16384
+chk "sessions_line writes one pool carrier" "$(sessions_line 2>/dev/null)" "sessions: 4"
+chk "mtu_line writes a pool mtu" "$(mtu_line 2>/dev/null)" "mtu: 16384"
+T_CARRIER=icmp
+chk "sessions_line ignores icmp" "$(sessions_line 2>/dev/null)" ""
+chk "mtu_line ignores an mtu icmp would clamp" "$(mtu_line 2>/dev/null)" ""
+T_CARRIER=tcp+tls
+chk "sessions_line ignores a bond" "$(sessions_line 2>/dev/null)" ""
+T_CARRIER=tcp; T_REV=1
+chk "sessions_line ignores reverse" "$(sessions_line 2>/dev/null)" ""
+T_CARRIER=$_TC; T_REV=$_TR; SESS_USE=$_SS; NI_MTU=$_NM
+
+# 1b. F19 shaped carriers (3.3.0): raw tier sit/6to4/xfrm-ipsec/etherip/l2tpv3 (bare-IP peer like icmp, no listen, no
+# reverse, one session, Linux+CAP_NET_RAW) and the UDP tier fou-gre/gue-ipip/vxlan/geneve/dnscrypt-udp/ntp-direct/
+# openvpn-dco/srtp-direct (peer/listen with the protocol's conventional port by default). These are wattun-internal
+# shapes, not the real protocols: everything here mirrors cmd/wattun/main.go and wat/udpshape.go.
+for c in sit 6to4 xfrm-ipsec etherip l2tpv3 fou-gre gue-ipip vxlan geneve dnscrypt-udp ntp-direct openvpn-dco srtp-direct; do
+  carrier_ok "$c" && echo "ok   carrier_ok $c" || { echo "FAIL carrier_ok $c"; fail=1; }
+done
+expect_fail carrier_ok auto
+expect_fail carrier_ok vlxan
+chk "shaped: five raw-tier names" "$(for c in $SHAPED_RAW; do echo x; done | wc -l | tr -d ' ')" "5"
+chk "shaped: eight UDP-tier names" "$(for c in $SHAPED_UDP; do echo x; done | wc -l | tr -d ' ')" "8"
+chk "shaped: raw tier detected" "$(is_shaped_raw etherip && echo y)" "y"
+chk "shaped: UDP tier detected" "$(is_shaped_udp srtp-direct && echo y)" "y"
+chk "shaped: vxlan is not the raw tier" "$(is_shaped_raw vxlan && echo y)" ""
+chk "shaped: icmp is not shaped" "$(is_shaped_carrier icmp && echo y)" ""
+chk "shaped: a raw shape takes no listen" "$(carrier_has_listen l2tpv3 && echo y)" ""
+chk "shaped: a UDP shape takes a listen" "$(carrier_has_listen fou-gre && echo y)" "y"
+chk "shaped: no global listen for a raw shape" "$(carrier_write_listen sit && echo y)" ""
+chk "shaped: a global listen for a UDP shape" "$(carrier_write_listen ntp-direct && echo y)" "y"
+chk "shaped: no global listen for a raw-only bond" "$(carrier_write_listen 'sit+etherip' && echo y)" ""
+chk "shaped: a bond with a pool leg needs a global listen" "$(carrier_write_listen 'sit+tcp' && echo y)" "y"
+# conventional port table, kept in sync with wat/udpshape.go (an explicit port in the address wins)
+for p in 'fou-gre 5555' 'gue-ipip 6080' 'vxlan 4789' 'geneve 6081' 'dnscrypt-udp 443' 'ntp-direct 123' 'openvpn-dco 1194' 'srtp-direct 5004'; do
+  set -- $p
+  chk "shaped port $1" "$(shaped_udp_port "$1")" "$2"
+done
+chk "shaped: raw-tier protocol numbers" "$(shaped_raw_proto sit)/$(shaped_raw_proto xfrm-ipsec)/$(shaped_raw_proto l2tpv3)" "41/50/115"
+chk "shaped: the fixed header comes out of the datagram ceiling" "$(mtu_max_for dnscrypt-udp)" "1326"
+chk "shaped: a shaped bond merges to the smallest leg" "$(mtu_max_for 'tcp+dnscrypt-udp')" "1326"
+# M1/M15: raw-tier ceilings are 1400 minus the IP-protocol header (not the generic 1400)
+chk "shaped: sit ceiling" "$(mtu_max_for sit)" "1360"
+chk "shaped: 6to4 ceiling" "$(mtu_max_for 6to4)" "1360"
+chk "shaped: xfrm-ipsec ceiling" "$(mtu_max_for xfrm-ipsec)" "1392"
+chk "shaped: etherip ceiling" "$(mtu_max_for etherip)" "1384"
+chk "shaped: l2tpv3 ceiling" "$(mtu_max_for l2tpv3)" "1396"
+chk "shaped: raw ceiling in a mixed list" "$(mtu_max_for sit)" "1360"
+chk "shaped: a UDP shape's carrier port is udp" "$(rproto vxlan)" "udp"
+chk "shaped: peer gets the conventional UDP port" "$(shaped_peer_for_client fou-gre kharej.example)" "kharej.example:5555"
+chk "shaped: an explicit UDP port wins" "$(shaped_peer_for_client fou-gre kharej.example:6000)" "kharej.example:6000"
+chk "shaped: raw tier keeps a bare peer" "$(shaped_peer_for_client sit kharej.example)" "kharej.example"
+chk "shaped: a hand-made raw token loses its port" "$(shaped_peer_for_client 6to4 kharej.example:41)" "kharej.example"
+# D7: 3.3.0 refuses shaped carriers in a '+'-bond; only single shaped carriers are accepted
+for c in sit fou-gre 6to4 srtp-direct; do
+  v_carrier_list "$c" && echo "ok   v_carrier_list $c" || { echo "FAIL v_carrier_list $c"; fail=1; }
+done
+v_carrier_list auto && echo "ok   v_carrier_list auto" || { echo "FAIL v_carrier_list auto"; fail=1; }
+v_carrier_list 'icmp+tcp' && echo "ok   v_carrier_list a normal bond" || { echo "FAIL v_carrier_list a normal bond"; fail=1; }
+for c in 'icmp+sit' 'tcp+fou-gre' 'sit+6to4' 'icmp++sit' 'icmp+icmp' bogus 'auto+icmp' '+sit'; do expect_fail v_carrier_list "$c"; done
+chk "shaped bond: the per-leg YAML writer is gone" "$(grep -c '^shaped_bond_yaml()' wattun-manager)" "0"
+NI_CARRIER=sit; CARRIER=''
+pick_carrier auto >/dev/null 2>&1
+chk "shaped: the picker accepts a raw shape" "$CARRIER" "sit"
+NI_CARRIER='tcp+sit'; CARRIER=''
+expect_fail pick_carrier auto
+NI_CARRIER=auto; CARRIER=''
+pick_carrier auto >/dev/null 2>&1
+chk "shaped: the picker still accepts auto" "$CARRIER" "auto"
+NI_CARRIER=bogus; expect_fail pick_carrier auto
+ni_parse --carrier fou-gre
+chk "unattended --carrier a UDP shape" "$NI_CARRIER" "fou-gre"
+expect_fail ni_parse --carrier 'icmp+gue-ipip'
+expect_fail ni_parse --carrier bogus
+expect_fail ni_parse --carrier 'icmp++sit'
+expect_fail v_sessions 2 fou-gre # the F19 shapes run one session
+expect_fail v_sessions 2 sit
+# this host gate: 3.3.0 on both ends, and Linux for the raw tier (uname/bin_ver_ok are stubbed in this harness)
+shaped_supported_here fou-gre && echo "ok   shaped_supported_here a UDP shape" || { echo "FAIL shaped_supported_here a UDP shape"; fail=1; }
+_bb=$(declare -f bin_ver_ok); _un=$(declare -f uname)
+bin_ver_ok() { echo ''; }
+expect_fail shaped_supported_here fou-gre
+eval "$_bb"
+uname() { echo Windows; }
+expect_fail shaped_supported_here sit
+eval "$_un"
+shaped_supported_here sit && echo "ok   shaped_supported_here a raw shape on Linux" || { echo "FAIL shaped_supported_here a raw shape on Linux"; fail=1; }
+# Kharej wizard offline: the UDP tier writes the conventional listen port and a peer that carries it; the raw tier
+# writes no listen key and a bare-IP peer. Then the Iran wizard reads that token and writes the client side.
+( free_metrics_port() { echo 19999; }
+  NONINTERACTIVE=1 NI_CARRIER=fou-gre NI_NAME=t_f19u NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
+chk "F19 UDP wizard: Kharej listens on the conventional port" "$(grep -c '^listen: ":5555"$' "$WAT_CONF/t_f19u.yml")" "1"
+chk "F19 UDP wizard: the token peer carries the port" "$(read_token "$(cat "$WAT_CONF/t_f19u.token")"; printf '%s' "$T_PEER")" "203.0.113.5:5555"
+( free_metrics_port() { echo 19999; }
+  NONINTERACTIVE=1 NI_CARRIER=sit NI_NAME=t_f19r NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
+chk "F19 raw wizard: no listen key at all" "$(grep -c '^listen:' "$WAT_CONF/t_f19r.yml")" "0"
+chk "F19 raw wizard: the token peer is a bare address" "$(read_token "$(cat "$WAT_CONF/t_f19r.token")"; printf '%s' "$T_PEER")" "203.0.113.5"
+( free_metrics_port() { echo 19999; }; wait_link() { return 1; }; test_tunnel() { :; }
+  NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
+  NONINTERACTIVE=1 NI_TOKEN=$(cat "$WAT_CONF/t_f19u.token") NI_MAP='47811:18899' NI_NAME=t_f19i wizard_iran ) >/dev/null 2>&1
+chk "F19 Iran wizard: carrier and peer from the token" "$(grep -c '^carrier: fou-gre$' "$WAT_CONF/t_f19i.yml")/$(grep -c '^peer: 203.0.113.5:5555$' "$WAT_CONF/t_f19i.yml")" "1/1"
+chk "F19 Iran wizard: no listen/reverse for a UDP shape" "$(grep -cE '^(listen|reverse):' "$WAT_CONF/t_f19i.yml")" "0"
+( free_metrics_port() { echo 19999; }; wait_link() { return 1; }; test_tunnel() { :; }
+  NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
+  NONINTERACTIVE=1 NI_TOKEN=$(cat "$WAT_CONF/t_f19r.token") NI_MAP='47812:18899' NI_NAME=t_f19j wizard_iran ) >/dev/null 2>&1
+chk "F19 Iran wizard: a raw shape writes the bare peer" "$(grep -c '^peer: 203.0.113.5$' "$WAT_CONF/t_f19j.yml")" "1"
+rm -f "$WAT_CONF"/t_f19*.yml "$WAT_CONF"/t_f19*.key "$WAT_CONF"/t_f19*.token "$WAT_CONF"/t_f19*.ech
+# A4: the interactive Kharej picker gets a "More transports (advanced)" branch for the 13 shaped carriers; a shaped
+# selection must pass the same validators and produce the same config/token as the unattended --carrier path.
+shaped_pick_list
+chk "shaped picker: 13 choices (A4)" "${#SHAPED_OPTS[@]}" "13"
+chk "shaped picker: raw tier first (A4)" "${SHAPED_OPTS[0]}/${SHAPED_OPTS[5]}/${SHAPED_OPTS[12]}" "sit/fou-gre/srtp-direct"
+chk "shaped picker: index maps to a carrier (A4)" "$(shaped_pick_index 8 2>/dev/null || true)" "vxlan"
+for i in 0 14 abc ''; do expect_fail shaped_pick_index "$i"; done
+_ni=$NONINTERACTIVE; NONINTERACTIVE=0
+printf 'q' | pick_carrier auto >"$PWD/.smoke/pick.out" 2>&1
+chk "shaped picker: the branch is offered in the picker (A4)" "$(grep -c 'More transports' "$PWD/.smoke/pick.out")" "1"
+printf 'm8\n' >"$PWD/.smoke/pick.in"
+CARRIER=''; pick_carrier auto <"$PWD/.smoke/pick.in" >/dev/null 2>&1
+chk "shaped picker: choosing vxlan returns it (A4)" "$CARRIER" "vxlan"
+rm -f "$PWD/.smoke/pick.in"
+NONINTERACTIVE=$_ni
+rm -f "$PWD/.smoke/pick.out"
+( free_metrics_port() { echo 19998; }
+  NONINTERACTIVE=1 NI_CARRIER=vxlan NI_NAME=t_a4u NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
+chk "shaped picker: the chosen UDP shape is written (A4)" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_a4u.yml")" "1"
+chk "shaped picker: the UDP shape listens on 4789 (A4)" "$(grep -c '^listen: ":4789"$' "$WAT_CONF/t_a4u.yml")" "1"
+chk "shaped picker: its token carries the shape (A4)" "$(read_token "$(cat "$WAT_CONF/t_a4u.token")"; printf '%s %s' "$T_CARRIER" "$T_PEER")" "vxlan 203.0.113.5:4789"
+( free_metrics_port() { echo 19997; }
+  NONINTERACTIVE=1 NI_CARRIER=sit NI_NAME=t_a4r NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
+chk "shaped picker: the chosen raw shape writes no listen (A4)" "$(grep -c '^listen:' "$WAT_CONF/t_a4r.yml")" "0"
+rm -f "$WAT_CONF"/t_a4*.yml "$WAT_CONF"/t_a4*.key "$WAT_CONF"/t_a4*.token
+NI_CARRIER=''; NI_NAME=''; CARRIER=''
+
+# 2. Unattended flags: --sessions, --conns, --mtu, --policy
+ni_parse --sessions 16 --conns 16 --mtu 1400 --policy latency
+chk "unattended --sessions" "$NI_SESSIONS" "16"
 chk "unattended --conns" "$NI_CONNS" "16"
 chk "unattended --mtu" "$NI_MTU" "1400"
 chk "unattended --policy latency" "$NI_POLICY" "latency"
@@ -435,6 +590,7 @@ chk "unattended --policy latency" "$NI_POLICY" "latency"
 ni_parse --policy direct
 chk "unattended --policy direct" "$NI_POLICY" "direct"
 
+expect_fail ni_parse --sessions 17
 expect_fail ni_parse --conns 200
 expect_fail ni_parse --mtu 100
 expect_fail ni_parse --policy bogus
@@ -559,6 +715,642 @@ chk "pe_from: moved them off the source" "$(yml_maps t_src | grep -c . || true)"
 chk "pe_from: source keeps its other keys" "$(grep -c '^peer:' "$WAT_CONF/t_src.yml" || true)" "1"
 rm -f "$WAT_CONF/t_src.yml" "$WAT_CONF/t_dst.yml"
 
+# Tunnel page: the two-column command deck. Pure functions (no systemd, root or binary), so every action the flat
+# menu used to expose must stay reachable, the cursor must follow arrows and typed hotkeys, and the descriptions the
+# page shows must exist for every action.
+deck_keys() { printf ' %s ' "${TL_KEY[@]}" "${TR_KEY[@]}"; }
+missing=''
+TM_SELKEY=''
+tunnel_menu_build t_deck Iran active enabled icmp 1 0 0 0
+for k in l d v m p c q b z t h a r s e o; do case "$(deck_keys)" in *" $k "*) ;; *) missing+="$k " ;; esac; done
+chk "deck: Iran has every action" "$missing" ""
+chk "deck: Iran has no Kharej-only key" "$(case "$(deck_keys)" in *' k '*) echo has;; *) echo no;; esac)" "no"
+chk "deck: Iran auto mode present" "$(case "$(deck_keys)" in *' a '*) echo has;; *) echo no;; esac)" "has"
+TM_SELKEY=''
+tunnel_menu_build t_deck Kharej active enabled tcp 1 1 0 0
+missing=''
+for k in l d v m p c q b z r s e o t k h; do case "$(deck_keys)" in *" $k "*) ;; *) missing+="$k " ;; esac; done
+chk "deck: Kharej has every action" "$missing" ""
+chk "deck: Kharej has no auto mode" "$(case "$(deck_keys)" in *' a '*) echo has;; *) echo no;; esac)" "no"
+chk "deck: reverse Kharej can change the Iran address" "$(case "$(deck_keys)" in *' h '*) echo has;; *) echo no;; esac)" "has"
+TM_SELKEY=''
+tunnel_menu_build t_deck Kharej active enabled icmp 1 0 1 0
+chk "deck: auto Kharej can close unused carriers" "$(case "$(deck_keys)" in *' u '*) echo has;; *) echo no;; esac)" "has"
+TM_SELKEY=''
+tunnel_menu_build t_deck Iran inactive disabled icmp 1 0 0 0
+chk "deck: stopped tunnel offers Start" "$(printf '%s\n' "${TR_LAB[@]}" | grep -c '^Start$')" "1"
+chk "deck: boot off says so" "$(printf '%s\n' "${TR_DESC[@]}" | grep -c 'off · toggle')" "1"
+# navigation: arrows walk the actions, headers are skipped, left/right switch columns
+TM_SELKEY=l; tunnel_menu_move down; chk "deck: down l->d" "$TM_SELKEY" "d"
+tunnel_menu_move down; chk "deck: down d->v" "$TM_SELKEY" "v"
+tunnel_menu_move right; chk "deck: right v->e" "$TM_SELKEY" "e"
+tunnel_menu_move up; chk "deck: up e->s" "$TM_SELKEY" "s"
+tunnel_menu_move left; chk "deck: left s->d" "$TM_SELKEY" "d"
+TM_SELKEY=d; tunnel_menu_move up; tunnel_menu_move up; chk "deck: up stops at the first action" "$TM_SELKEY" "l"
+# rendering: the cursor, the selected action and its explanation are on screen
+tunnel_menu_build t_deck Iran active enabled icmp 1 0 0 0
+deck=$(tunnel_menu_render; tunnel_menu_help_line)
+case "$deck" in *'▸ [l] Logs'*) got=yes;; *) got=no;; esac
+chk "deck: draws the cursor on the selected action" "$got" "yes"
+case "$deck" in *'follow the log'*) got=yes;; *) got=no;; esac
+chk "deck: draws the explanation line" "$got" "yes"
+# key_read: arrows become key names only on a page that navigates; everywhere else they are still swallowed
+# (NONINTERACTIVE stays 1 for the rest of this suite, so an interactive-key test has to clear it locally)
+chk "deck: arrow decoded on the page" "$( NONINTERACTIVE=0; KEY_NAV=1; { key_read; echo "$KEY"; } <<< $'\033[A')" "up"
+chk "deck: arrow swallowed elsewhere" "$( NONINTERACTIVE=0; KEY_NAV=0; { key_read; echo "$KEY"; } <<< $'\033[Ax')" "x"
+
+# F8 state-dir (3.3.0): the engine's statePaths mirror. A tunnel with `state-dir:` keeps its quota/totals pair in that
+# directory under the config basename (`<dir>/NAME.yml.*`); without the key the files stay next to the config, so the
+# cleanup paths do not change for existing tunnels. reset-traffic must delete the lifetime totals where the engine
+# actually keeps them, and must not touch a stale file at the old location.
+chk "state base: next to the config by default" "$(state_base_path kb '')" "$WAT_CONF/kb.yml"
+chk "state base: state-dir honoured" "$(state_base_path kb /run/wattun)" "/run/wattun/kb.yml"
+chk "state base: trailing slash normalised" "$(state_base_path kb /run/wattun/)" "/run/wattun/kb.yml"
+chk "state base: a hand-edited relative value resolves from /" "$(state_base_path kb run/wattun)" "/run/wattun/kb.yml"
+chk "state base: a root state-dir keeps its slash" "$(state_base_path kb /)" "/kb.yml"
+cat >"$WAT_CONF/t_state.yml" <<EOF
+mode: client
+carrier: tcp
+state-dir: $PWD/.smoke/state
+EOF
+mkdir -p "$PWD/.smoke/state"
+chk "state dir read from the config" "$(state_dir_of t_state)" "$PWD/.smoke/state"
+chk "state file: totals in the state-dir" "$(state_file t_state totals)" "$PWD/.smoke/state/t_state.yml.totals.json"
+chk "state file: quota in the state-dir" "$(state_file t_state quota)" "$PWD/.smoke/state/t_state.yml.quota.json"
+chk "state files: every file the engine can leave" "$(state_files t_state | tr '\n' ' ')" "$PWD/.smoke/state/t_state.yml.totals.json $PWD/.smoke/state/t_state.yml.totals.json.host $PWD/.smoke/state/t_state.yml.totals.json.tmp $PWD/.smoke/state/t_state.yml.quota.json $PWD/.smoke/state/t_state.yml.quota.json.tmp "
+printf 'totals\n' >"$PWD/.smoke/state/t_state.yml.totals.json"
+printf 'quota\n' >"$PWD/.smoke/state/t_state.yml.quota.json"
+printf 'stale\n' >"$WAT_CONF/t_state.yml.totals.json" # a stale file at the old location
+reset_traffic t_state >/dev/null 2>&1
+chk "reset_traffic deletes the totals where the engine keeps them" "$([ -f "$PWD/.smoke/state/t_state.yml.totals.json" ] && echo y || echo n)" "n"
+chk "reset_traffic keeps the quota usage" "$([ -f "$PWD/.smoke/state/t_state.yml.quota.json" ] && echo y || echo n)" "y"
+chk "reset_traffic does not touch the old location" "$([ -f "$WAT_CONF/t_state.yml.totals.json" ] && echo y || echo n)" "y"
+rm -rf "$PWD/.smoke/state" "$WAT_CONF/t_state.yml" "$WAT_CONF/t_state.yml.totals.json"
+
+# F11/F8 advanced settings: the validators mirror the engine, because an out-of-range value is a startup failure
+# (cmd/wattun/fecgate.go: 0 < on <= 50 and 0 <= off < on; stateSaveInterval: >= 0 seconds; state-dir must be an
+# absolute usable directory). Defaults are unchanged: empty/-/default means "unset, engine default".
+v_fec_on 2 && echo "ok   v_fec_on 2" || { echo "FAIL v_fec_on 2"; fail=1; }
+v_fec_on 50 && echo "ok   v_fec_on 50" || { echo "FAIL v_fec_on 50"; fail=1; }
+v_fec_on 0.5 0 && echo "ok   v_fec_on 0.5 above 0" || { echo "FAIL v_fec_on 0.5 above 0"; fail=1; }
+expect_fail v_fec_on 0
+expect_fail v_fec_on 51
+expect_fail v_fec_on 2 2
+expect_fail v_fec_on abc
+v_fec_off 0 && echo "ok   v_fec_off 0" || { echo "FAIL v_fec_off 0"; fail=1; }
+v_fec_off 0.5 && echo "ok   v_fec_off 0.5" || { echo "FAIL v_fec_off 0.5"; fail=1; }
+v_fec_off 1.9 2 && echo "ok   v_fec_off 1.9 below 2" || { echo "FAIL v_fec_off 1.9 below 2"; fail=1; }
+expect_fail v_fec_off 2 2
+expect_fail v_fec_off 2.5 2
+expect_fail v_fec_off -1
+# A3: stable knob validators — the engine clamps -win-max to 4..64 and takes -loss-ceiling as a bool
+for v in 4 64 0 - default; do v_win_max "$v" && echo "ok   v_win_max $v" || { echo "FAIL v_win_max $v"; fail=1; }; done
+for v in 3 65 abc 1.5; do expect_fail v_win_max "$v"; done
+for v in on off true false 1 0; do v_loss_ceiling "$v" && echo "ok   v_loss_ceiling $v" || { echo "FAIL v_loss_ceiling $v"; fail=1; }; done
+expect_fail v_loss_ceiling maybe
+# A2: the wizard FEC shortcut — `a` means auto + open the loss-band rows, but only when the engine has the band keys
+fec_choice off
+chk "wizard FEC: off keeps off (A2)" "$REPLY_V:$REPLY_FEC_BAND" "off:0"
+fec_choice auto
+chk "wizard FEC: auto keeps auto (A2)" "$REPLY_V:$REPLY_FEC_BAND" "auto:0"
+fec_choice a
+chk "wizard FEC: a opens the band rows on 3.3.0 (A2)" "$REPLY_V:$REPLY_FEC_BAND" "auto:1"
+_bbf=$(declare -f bin_ver_ok)
+bin_ver_ok() { return 0; }
+fec_choice a
+chk "wizard FEC: a falls back to plain auto on an older engine (A2)" "$REPLY_V:$REPLY_FEC_BAND:$REPLY_FEC_OLD" "auto:0:1"
+expect_fail fec_choice gq
+eval "$_bbf"
+ask_fec auto
+chk "wizard FEC: the non-interactive prompt takes the default (A2)" "$REPLY_V:$REPLY_FEC_BAND" "auto:0"
+chk "wizard FEC: both wizards use ask_fec (A2)" "$(grep -c 'ask_fec off' wattun-manager)" "2"
+v_state_save 0 && echo "ok   v_state_save 0" || { echo "FAIL v_state_save 0"; fail=1; }
+v_state_save 30 && echo "ok   v_state_save 30" || { echo "FAIL v_state_save 30"; fail=1; }
+v_state_save 2147483647 && echo "ok   v_state_save 2147483647" || { echo "FAIL v_state_save 2147483647"; fail=1; }
+expect_fail v_state_save -1
+expect_fail v_state_save 3x
+expect_fail v_state_save 2147483648
+v_state_dir /run/wattun && echo "ok   v_state_dir /run/wattun" || { echo "FAIL v_state_dir /run/wattun"; fail=1; }
+_vsd=$(v_state_dir /var/lib/wattun-test-audit 2>&1)
+chk "state-dir: a custom path warns about the unit sandbox (H1)" "$(grep -c 'ReadWritePaths' <<<"$_vsd")" "1"
+v_state_dir - && echo "ok   v_state_dir - (default)" || { echo "FAIL v_state_dir - (default)"; fail=1; }
+expect_fail v_state_dir relative/path
+expect_fail v_state_dir /run/../etc
+expect_fail v_state_dir '/run/x y'
+: >"$PWD/.smoke/not-a-dir"
+expect_fail v_state_dir "$PWD/.smoke/not-a-dir"
+rm -f "$PWD/.smoke/not-a-dir"
+
+# F13/W10 settings: shape-data, noise/noise-bps/noise-window and the server-side admission allowlist. Every validator
+# mirrors the engine's own startup check (cmd/wattun/noise.go, cmd/wattun/clientallow.go), because a value the engine
+# refuses stops the tunnel at the next restart.
+v_shape_data 0 && echo "ok   v_shape_data 0" || { echo "FAIL v_shape_data 0"; fail=1; }
+v_shape_data 25 && echo "ok   v_shape_data 25" || { echo "FAIL v_shape_data 25"; fail=1; }
+v_shape_data 12.5 && echo "ok   v_shape_data 12.5" || { echo "FAIL v_shape_data 12.5"; fail=1; }
+expect_fail v_shape_data 25.1
+expect_fail v_shape_data 26
+expect_fail v_shape_data -1
+expect_fail v_shape_data abc
+for m in off low med custom; do v_noise_mode "$m" && echo "ok   v_noise_mode $m" || { echo "FAIL v_noise_mode $m"; fail=1; }; done
+expect_fail v_noise_mode loud
+for b in 64 1024 1000000; do v_noise_bps "$b" && echo "ok   v_noise_bps $b" || { echo "FAIL v_noise_bps $b"; fail=1; }; done
+for b in 63 1000001 0 abc; do expect_fail v_noise_bps "$b"; done
+for w in 02:00-06:00 2:00-06:00 22:00-06:00 00:00-23:59 23:59-00:00; do
+  v_noise_window "$w" && echo "ok   v_noise_window $w" || { echo "FAIL v_noise_window $w"; fail=1; }
+done
+for w in 02:00-02:00 24:00-01:00 02:60-03:00 2-3 all 02:00-06:00-07:00; do expect_fail v_noise_window "$w"; done
+# admission allowlist: bare IPv4/IPv6 addresses and CIDR prefixes (netip.ParsePrefix/ParseAddr in the engine)
+for a in ::1 2a06:98c1:3121::7 fe80::1%eth0 1:2:3:4:5:6:7:8 ::ffff:1.2.3.4 ::; do
+  ipv6_ok "$a" && echo "ok   ipv6_ok $a" || { echo "FAIL ipv6_ok $a"; fail=1; }
+done
+for a in 1::2::3 :1:2:3:4:5:6:7 1:2:3:4:5:6:7 12345::1 gg::1 1.2.3.4 1:2:3:4:5:6:7:8:9; do expect_fail ipv6_ok "$a"; done
+for a in 203.0.113.5 10.0.0.0/8 2a06:98c1::/32 2001:db8::1/128 ::1/128; do
+  ip_or_cidr_ok "$a" && echo "ok   ip_or_cidr_ok $a" || { echo "FAIL ip_or_cidr_ok $a"; fail=1; }
+done
+for a in 10.0.0.0/33 2001:db8::/129 example.com /8 ''; do expect_fail ip_or_cidr_ok "$a"; done
+v_allow_clients "203.0.113.5, 10.0.0.0/8" && echo "ok   v_allow_clients list" || { echo "FAIL v_allow_clients list"; fail=1; }
+v_allow_clients "2001:db8::1" && echo "ok   v_allow_clients ipv6" || { echo "FAIL v_allow_clients ipv6"; fail=1; }
+v_allow_clients "" && echo "ok   v_allow_clients empty = any source" || { echo "FAIL v_allow_clients empty = any source"; fail=1; }
+expect_fail v_allow_clients "example.com"
+expect_fail v_allow_clients "10.0.0.0/33"
+# M4: the shipped unit can only read /etc/wattun; in the sandbox the allowed dir is $CONF. The file must be there.
+ALLOWF=$WAT_CONF/allowlist.txt
+printf '203.0.113.5\n10.0.0.0/8\n' >"$ALLOWF"
+v_allow_clients_file "$ALLOWF" && echo "ok   v_allow_clients_file entries" || { echo "FAIL v_allow_clients_file entries"; fail=1; }
+printf '203.0.113.5, bogus\n' >"$ALLOWF"
+expect_fail v_allow_clients_file "$ALLOWF"
+: >"$ALLOWF"
+expect_fail v_allow_clients_file "$ALLOWF" # the engine refuses an empty file, so a typo cannot allow every source
+rm -f "$ALLOWF"
+expect_fail v_allow_clients_file "$PWD/.smoke/outside-allowlist.txt" # outside the unit's readable dir
+expect_fail v_allow_clients_file /tmp/allowlist.txt
+expect_fail v_allow_clients_file relative.txt
+expect_fail v_allow_clients_file /nonexistent-wattun-allowlist.txt
+v_allow_clients_file - && echo "ok   v_allow_clients_file - = none" || { echo "FAIL v_allow_clients_file - = none"; fail=1; }
+# M4: the engine refuses the allowlist on a CDN carrier (source would be the CDN edge); the manager must refuse it too
+allow_clients_cdn_risk tcp '' && echo "FAIL direct carrier flagged as CDN" || { echo "ok   allowlist allowed on a direct carrier"; }
+allow_clients_cdn_risk wss '' && echo "ok   allowlist refused on wss" || { echo "FAIL wss not flagged"; fail=1; }
+allow_clients_cdn_risk 'tcp+wss' '' && echo "ok   allowlist refused on a bond with a CDN leg" || { echo "FAIL CDN bond not flagged"; fail=1; }
+allow_clients_cdn_risk tcp 'cdn.example.com' && echo "ok   allowlist refused when sni is set" || { echo "FAIL sni not flagged"; fail=1; }
+
+# F20 discovery: the "Spoofing & shaping" page has to render the docs' classification and be reachable from the
+# anti-censor menu and from the tunnel deck's "?" key map. Plain functions, no network, no engine.
+help_out=$(spoofhelp_page t1)
+chk "spoof help: fake-sni is the only spoof" "$(grep -c 'Only fake-sni does this' <<<"$help_out")" "1"
+chk "spoof help: names the shape options" "$(grep -c 'tcp-mimic, hdr-mask, shape, tls-frag, ech, udp-dns, pool-rotate' <<<"$help_out")" "1"
+chk "spoof help: lists shape-data and noise" "$(grep -c 'shape-data (pad stream packets to random sizes) and noise (idle filler packets)' <<<"$help_out")" "1"
+chk "spoof help: says both spend bandwidth" "$(grep -c 'Both are opt-in and spend bandwidth' <<<"$help_out")" "1"
+chk "spoof help: tunnel-level spoofing is not shipped" "$(grep -c 'Tunnel-level spoofing is NOT shipped' <<<"$help_out")" "1"
+chk "spoof help: points at the docs section" "$(grep -c 'Spoofing and shaping, explained' <<<"$help_out")" "1"
+chk "spoof help: extended auto opt-in is explained (B5)" "$(grep -c 'Auto mode can also test the 13 F19 shaped carriers' <<<"$help_out")" "1"
+_usage=$(usage 2>&1)
+chk "usage: documents --extended (B5)" "$([ "$(grep -c -- '--extended' <<<"$_usage")" -ge 1 ] && echo y)" "y"
+chk "usage: says normal Auto includes gre/ipip (B5)" "$(grep -c 'gre/ipip, which need 3.2.0 on both ends' <<<"$_usage")" "1"
+chk "usage: says old Iran leaves extended ports open (B5)" "$(grep -c 'stay open until auto-prune NAME --direct' <<<"$_usage")" "1"
+ni_parse --extended; chk "unattended --extended sets NI_EXTENDED (B5)" "$NI_EXTENDED" "1"; NI_EXTENDED=0
+ac_help=$( NONINTERACTIVE=0; printf 'hb' | anticensor_menu t1 ) # h opens the page, b leaves it
+chk "spoof help: opens from the anti-censor menu" "$(grep -c 'Tunnel-level spoofing is NOT shipped' <<<"$ac_help")" "1"
+TM_SELKEY=''
+tunnel_menu_build t1 Iran active enabled wss 1 0 0 0
+keys_out=$(tunnel_menu_keys t1)
+chk "spoof help: listed in the deck key map" "$(grep -c 'Spoofing & shaping' <<<"$keys_out")" "1"
+
+# Advanced page wiring: the new rows exist where the engine accepts them (FEC band only with fec: auto; admission
+# allowlist only on the server), and the page still renders with the engine defaults when no keys are set.
+cat >"$WAT_CONF/t_adv.yml" <<'EOF'
+mode: server
+carrier: tcp
+EOF
+role() { echo Kharej; }
+adv_out=$( NONINTERACTIVE=1; adv_menu t_adv )
+# A1: the page is grouped, in a fixed order, and every grouped row is still on its original key
+chk "advanced groups: four headings in order (A1)" "$(grep -oE 'Performance|Shaping & DPI|Safety|State & data' <<<"$adv_out" | paste -sd'|' -)" "Performance|Shaping & DPI|Safety|State & data"
+chk "advanced groups: Performance rows keep their keys (A1)" "$(grep -c '\[m\].*speed limit\|\[c\].*conns\|\[u\].*mtu' <<<"$adv_out")" "3"
+chk "advanced groups: Shaping rows keep their keys (A1)" "$(grep -c '\[f\].*fec\|\[p\].*shape data\|\[n\].*noise' <<<"$adv_out")" "3"
+chk "advanced groups: Safety rows keep their keys (A1)" "$(grep -c '\[j\].*allow clients\|\[l\].*allow clients file' <<<"$adv_out")" "2"
+chk "advanced help: file-only expert keys are named (A5)" "$(grep -ci 'file-only expert keys' <<<"$adv_out")" "1"
+chk "advanced rows: shape-data" "$(grep -c 'shape data' <<<"$adv_out")" "1"
+chk "advanced rows: win-max row (A3)" "$(grep -c '\[e\].*win max' <<<"$adv_out")" "1"
+chk "advanced rows: loss-ceiling row (A3)" "$(grep -c '\[r\].*loss ceiling' <<<"$adv_out")" "1"
+_adv_v2=$( NONINTERACTIVE=1; bin_ver_ok() { return 0; }; adv_menu t_adv ) # a 2.x engine: neither knob exists
+chk "advanced rows: win-max hidden on an old engine (A3)" "$(grep -c 'win max' <<<"$_adv_v2")" "0"
+chk "advanced rows: loss-ceiling hidden on an old engine (A3)" "$(grep -c 'loss ceiling' <<<"$_adv_v2")" "0"
+_adv_v303=$( NONINTERACTIVE=1; bin_ver_ok() { [ "$1" = 3.0.3 ] && return 0; echo 1; }; adv_menu t_adv ) # 3.0.2: loss-ceiling yes, win-max no
+chk "advanced rows: loss-ceiling exists before win-max (A3)" "$(grep -c 'loss ceiling' <<<"$_adv_v303")" "1"
+chk "advanced rows: win-max hidden before 3.0.3 (A3)" "$(grep -c 'win max' <<<"$_adv_v303")" "0"
+chk "advanced rows: noise" "$(grep -c 'noise' <<<"$adv_out")" "1"
+chk "advanced rows: allow clients (list + file)" "$(grep -c 'allow clients' <<<"$adv_out")" "2"
+chk "advanced rows: FEC band hidden while fec off" "$(grep -c 'fec on loss' <<<"$adv_out")" "0"
+printf 'fec: auto\n' >>"$WAT_CONF/t_adv.yml"
+adv_out=$( NONINTERACTIVE=1; adv_menu t_adv )
+chk "advanced rows: FEC on-loss with fec auto" "$(grep -c 'fec on loss' <<<"$adv_out")" "1"
+chk "advanced rows: FEC off-loss with fec auto" "$(grep -c 'fec off loss' <<<"$adv_out")" "1"
+role() { echo Iran; }
+adv_out=$( NONINTERACTIVE=1; adv_menu t_adv )
+chk "advanced rows: admission allowlist hidden on Iran" "$(grep -c 'allow clients' <<<"$adv_out")" "0"
+rm -f "$WAT_CONF/t_adv.yml"
+# A5: coverage test — every engine flag (cmd/wattun/main.go) must have a manager path: a cfg read/literal/set_row/
+# wizard prompt (or an explicit file-only/ports-UI exclusion). Synthetic per-carrier flags are excluded by prefix.
+# A fake name passed as an argument must be reported, proving the test can fail.
+cfg_flag_names() { grep -oE 'flag\.(String|Int|Bool|Float64|Duration)\("[^"]+"' cmd/wattun/main.go | sed -E 's/.*\("//; s/"$//'; }
+cfg_coverage_missing() { # [extra names...] -> missing engine flags, space separated (empty = complete)
+  local f miss=''
+  for f in $(cfg_flag_names) "$@"; do
+    case "$f" in
+      config|mode|key|key-file|map|udp|ports|listen|peer|host|path|sni|metrics|version) continue ;;
+      listen-*|peer-*|src-ip-*) continue ;;
+    esac
+    case " $CFG_FILE_ONLY $CFG_PORTS_UI " in *" $f "*) continue ;; esac
+    grep -q -- "$f" wattun-manager || miss+="$f "
+  done
+  printf '%s' "${miss% }"
+}
+chk "config coverage: the parser sees the engine flags (A5)" "$(cfg_flag_names | grep -c '^shape-data$')" "1"
+chk "config coverage: every engine flag has a manager path (A5)" "$(cfg_coverage_missing)" ""
+chk "config coverage: a fake flag is caught (A5)" "$(cfg_coverage_missing made-up-flag)" "made-up-flag"
+chk "config coverage: file-only expert keys are declared (A5)" "$(grep -c '^CFG_FILE_ONLY=' wattun-manager)" "1"
+chk "config coverage: the file-only list names the documented keys (A5)" "$(grep -o 'debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key' <<<"$CFG_FILE_ONLY" | wc -l | tr -d ' ')" "1"
+chk "config coverage: the ports UI covers the allowlist flags (A5)" "$(grep -c 'allow-min allow-max allow-ports allow-file' <<<"$CFG_PORTS_UI")" "1"
+
+
+# Bond auto-retest (F10): the setting is visible only on a bonded Iran client, defaults to off (a sidecar value, never
+# a YAML key: the engine rejects unknown keys), and every value maps to a real systemd schedule. The decision helpers
+# are pure; the timer itself needs root/systemd, so only the schedule text and the safety rules are pinned here.
+chk "bond: a '+' carrier list is a bond" "$(bond_is_bond 'tcp+tls' && echo y || echo n)" "y"
+chk "bond: one carrier is not a bond" "$(bond_is_bond tcp && echo y || echo n)" "n"
+chk "bond-retest: shown on a bonded Iran tunnel" "$(bond_retest_visible Iran 'tcp+tls' && echo y || echo n)" "y"
+chk "bond-retest: hidden on Kharej" "$(bond_retest_visible Kharej 'tcp+tls' && echo y || echo n)" "n"
+chk "bond-retest: hidden on a single carrier" "$(bond_retest_visible Iran tcp && echo y || echo n)" "n"
+chk "bond-retest: default is off" "$(bondretest_get t_absent)" "off"
+for v in off 30m 1h 6h daily-offpeak; do
+  bondretest_ok "$v" >/dev/null && echo "ok   bondretest_ok $v" || { echo "FAIL bondretest_ok $v"; fail=1; }
+done
+chk "bond-retest: normalizes Daily-Offpeak" "$(bondretest_ok 'Daily-Offpeak')" "daily-offpeak"
+expect_fail bondretest_ok 15m
+printf 'daily-offpeak\n' >"$WAT_CONF/t_br.bondretest"
+chk "bond-retest: reads the sidecar" "$(bondretest_get t_br)" "daily-offpeak"
+printf 'junk\n' >"$WAT_CONF/t_br.bondretest"
+chk "bond-retest: a bad sidecar falls back to off" "$(bondretest_get t_br)" "off"
+rm -f "$WAT_CONF/t_br.bondretest"
+chk "bond-retest timer: 30m" "$(bondretest_timer_lines 30m)" $'OnBootSec=5min\nOnUnitActiveSec=30min\nRandomizedDelaySec=60\nPersistent=true'
+chk "bond-retest timer: 1h" "$(bondretest_timer_lines 1h)" $'OnBootSec=5min\nOnUnitActiveSec=1h\nRandomizedDelaySec=60\nPersistent=true'
+chk "bond-retest timer: 6h" "$(bondretest_timer_lines 6h)" $'OnBootSec=5min\nOnUnitActiveSec=6h\nRandomizedDelaySec=60\nPersistent=true'
+chk "bond-retest timer: daily off-peak" "$(bondretest_timer_lines daily-offpeak)" $'OnCalendar=*-*-* 04:15:00\nRandomizedDelaySec=300\nPersistent=true'
+chk "bond-retest unit name" "$(bondretest_unit kb)" "${WAT_PREFIX}-bondretest-kb"
+chk "bond candidates: a plan carrier the bond lacks gets its plan port" \
+  "$(bond_candidates_plan 'tcp+udp' 'udp:4443,tcp:4443,tls:8443' '203.0.113.10')" \
+  $'icmp 203.0.113.10\ntls 203.0.113.10:8443'
+chk "bond candidates: a carrier already in the bond is skipped" \
+  "$(bond_candidates_plan 'icmp+udp+tcp' 'udp:4443,tcp:4443' '203.0.113.10')" ""
+chk "bondfail_next: keeps an old failure the budget did not reach" "$(bondfail_next 'tls,wss' 'tcp+udp' 'tcp udp tls' 'tls')" "tls,wss"
+chk "bondfail_next: drops a recovered one" "$(bondfail_next 'tls,wss' 'tcp+udp' 'tcp udp tls wss' '')" ""
+chk "bondfail_next: records a new failure" "$(bondfail_next '' 'tcp+udp' 'tcp udp ws' 'ws')" "ws"
+chk "bondfail_next: never lists a leg the bond already has" "$(bondfail_next 'tls' 'tcp+tls' 'tcp tls' 'tls')" ""
+chk "bond_worth: no working leg, any working carrier counts" "$(bond_worth 3 0 && echo y || echo n)" "y"
+chk "bond_worth: 10% of the best leg is enough" "$(bond_worth 10 100 && echo y || echo n)" "y"
+chk "bond_worth: slower than 10% is not added" "$(bond_worth 9 100 && echo y || echo n)" "n"
+chk "bond_worth: a dead candidate is never added" "$(bond_worth 0 0 && echo y || echo n)" "n"
+chk "bond_budget_fit: 20 MB fits ten 2 MB probes" "$(bond_budget_fit 12 20)" "10"
+chk "bond_budget_fit: a 1 MB budget still probes one" "$(bond_budget_fit 5 1)" "1"
+
+# Auto mode (R1): the variant lists and the tuning table are data (AUTO_VAR_*, AUTO_TUNE_*), so this suite can prove a
+# carrier is picked up from the list instead of a hard-coded loop, and that the tuning knobs respect the engine limits
+# (sessions ≤ 16 and never on a bond/reverse, conns ≤ 64, mtu per carrier, win-max 16/32/64) and the installed version.
+FULL_PLAN='d=udp:4443,tcp:4443,tls:8443,ws:2052,wss:2053,h2:2087,h2c:2082,grpc:2083;r=tcp:24431,tls:24432,ws:24433,wss:24434,h2:24435,h2c:24436,grpc:24437'
+_T_AUTO=$T_AUTO; _T_PEER=$T_PEER; _T_PATH=$T_PATH; _T_SNI=$T_SNI; _AT_PRESET=$AT_PRESET
+T_AUTO=$FULL_PLAN; T_PEER='203.0.113.10'; T_PATH='/wat'; T_SNI=''; AT_PRESET=normal
+auto_variants
+chk "auto variants: the full plan has 17 rows" "${#AV_LABEL[@]}" "17"
+chk "auto variants: icmp is the first row" "${AV_CAR[0]}" "icmp"
+# B1: the token plan, not AUTO_VAR_DIRECT, is the source of the direct variant order (a carrier the plan omits is not
+# tested, and a bare entry is a port-less raw carrier)
+missing=''
+for c in ${FULL_PLAN#*d=}; do
+  c=${c%%;*}; [ "$c" = icmp ] && continue
+  n=0; for ((i=0; i<${#AV_LABEL[@]}; i++)); do [ "${AV_KIND[$i]}" = d ] && [ "${AV_CAR[$i]}" = "${c%%:*}" ] && n=$((n+1)); done
+  [ "$n" = 1 ] || missing+="${c%%:*} "
+done
+chk "auto variants: every planned direct carrier is tested once (B1)" "$missing" ""
+chk "auto variants: a carrier absent from the plan is not tested (B1)" "$(AUTO_VAR_DIRECT='icmp gre'; auto_variants >/dev/null; echo "${#AV_LABEL[@]}")" "17"
+GRE_PLAN='d=udp:4443,gre,ipip;r=icmp'
+T_AUTO=$GRE_PLAN; auto_variants
+chk "auto variants: bare plan entries become variants (B1)" "${#AV_LABEL[@]}" "5"
+chk "auto variants: bare raw entry uses the bare peer (B1)" "${AV_PEER[2]}/${AV_PEER[3]}" "203.0.113.10/203.0.113.10"
+chk "auto variants: the labeled carriers are gre and ipip (B1)" "${AV_CAR[2]}+${AV_CAR[3]}" "gre+ipip"
+chk "plan: a bare entry has no port (B1)" "$(plan_port 'udp:4443,gre' gre)" ""
+chk "plan: a surrounding port entry still resolves (B1)" "$(plan_port 'udp:4443,gre' udp)" "4443"
+chk "plan: plan_has sees a bare entry (B1)" "$(plan_has 'udp:4443,gre' gre && echo y)" "y"
+chk "plan: plan_has misses an absent carrier (B1)" "$(plan_has 'udp:4443,gre' ipip && echo y)" ""
+T_AUTO=$FULL_PLAN; auto_variants
+chk "auto variants: restored after the bare-entry test (B1)" "${#AV_LABEL[@]}" "17"
+# B1: the token plan is the source, so changing the old data list must NOT change the test any more
+AUTO_VAR_DIRECT='icmp tcp'
+auto_variants
+chk "auto variants: the old data list no longer prunes the plan (B1)" "${#AV_LABEL[@]}" "17"
+AUTO_VAR_DIRECT='icmp udp tcp tls wss h2 grpc ws h2c gre ipip'
+T_AUTO='d=tcp:4443;r=icmp'; auto_variants
+chk "auto variants: a shortened direct plan is honoured (B1)" "${#AV_LABEL[@]}" "3"
+T_AUTO='d=udp:4443,tcp:4443;r=tcp:24431'; auto_variants
+chk "auto variants: a shortened reverse plan is honoured (B1)" "${#AV_LABEL[@]}" "5"
+T_AUTO=$FULL_PLAN; auto_variants
+chk "auto variants: restored with the full plan (B1)" "${#AV_LABEL[@]}" "17"
+T_AUTO=$_T_AUTO; T_PEER=$_T_PEER; T_PATH=$_T_PATH; T_SNI=$_T_SNI; AT_PRESET=$_AT_PRESET
+chk "auto reverse plan: one port per AUTO_VAR_REVERSE carrier" "$AUTO_RPLAN" "tcp:24431,tls:24432,ws:24433,wss:24434,h2:24435,h2c:24436,grpc:24437"
+_AVR=$AUTO_VAR_REVERSE; AUTO_VAR_REVERSE='icmp tcp udp'
+chk "auto reverse plan: follows the data list" "$(auto_rplan_build)" "tcp:24431,udp:24432"
+AUTO_VAR_REVERSE=$_AVR
+chk "auto reverse plan: restored with the data list" "$(auto_rplan_build)" "$AUTO_RPLAN"
+_lb_def=$(declare -f listen_blocked) # the Kharej listen set is built from the same AUTO_VAR_DIRECT data
+listen_blocked() { return 1; }
+auto_pick_ports
+eval "$_lb_def"
+missing=''
+for c in $AUTO_VAR_DIRECT; do
+  [ "$c" = icmp ] && continue
+  carrier_has_listen "$c" || continue # B1: raw carriers have no listen port by design
+  [ -n "$(plan_port "$AUTO_D" "$c")" ] || missing+="$c "
+done
+chk "auto Kharej: listens on every portable AUTO_VAR_DIRECT carrier" "$missing" ""
+chk "auto Kharej: icmp has no listen port" "$(plan_port "$AUTO_D" icmp)" ""
+chk "auto Kharej: gre/ipip are bare plan entries (B1)" "$(plan_has "$AUTO_D" gre && plan_has "$AUTO_D" ipip && [ -z "$(plan_port "$AUTO_D" gre)$(plan_port "$AUTO_D" ipip)" ] && echo y)" "y"
+chk "auto Kharej: the plan ends with the raw entries (B1)" "${AUTO_D##*,}" "ipip"
+# B2: carrier version gates on both ends (gre/ipip 3.2.0, the 13 shapes 3.3.0, everything else the Auto minimum)
+chk "carrier version: icmp needs the Auto minimum (B2)" "$(carrier_min_ver icmp)" "2.1.0"
+chk "carrier version: gre needs 3.2.0 (B2)" "$(carrier_min_ver gre)/$(carrier_min_ver ipip)" "3.2.0/3.2.0"
+chk "carrier version: a shaped carrier needs 3.3.0 (B2)" "$(carrier_min_ver vxlan)/$(carrier_min_ver sit)" "3.3.0/3.3.0"
+_bvd=$(declare -f bin_ver); _bvokd=$(declare -f bin_ver_ok); _verd=$VER; VER=3.1.0
+bin_ver() { echo "$VER"; }
+bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; } # the real gate, not this harness's always-yes stub
+chk "carrier gate: gre is unsupported on 3.1 (B2)" "$(carrier_ok_here gre && echo y || echo n)" "n"
+chk "carrier gate: icmp is always supported (B2)" "$(carrier_ok_here icmp && echo y || echo n)" "y"
+T_AUTO='d=udp:4443,gre;r=icmp'; T_PEER='203.0.113.10'; auto_variants
+chk "Iran gate: a gre variant is skipped on 3.1 (B2)" "${AT_SKIPPED}/${#AV_LABEL[@]}" "gre/3"
+chk "Iran gate: the skip hint is one clear sentence (B2)" "$(at_skipped_hint)" "Token includes gre; this server runs 3.1.0 and cannot test them (both ends need newer wattun for these transports)."
+VER=3.2.0; T_AUTO='d=gre;r=icmp'; auto_variants
+chk "Iran gate: gre works on 3.2 (B2)" "${AT_SKIPPED}/${#AV_LABEL[@]}" "/3"
+T_AUTO='d=vxlan:4789;r=icmp'; auto_variants
+chk "Iran gate: a shaped variant is skipped on 3.2 (B2)" "${AT_SKIPPED}/${#AV_LABEL[@]}" "vxlan/2"
+VER=3.3.0; T_AUTO='d=vxlan:4789,sit;r=icmp'; auto_variants
+chk "Iran gate: shaped variants work on 3.3 (B2)" "${AT_SKIPPED}/${#AV_LABEL[@]}" "/4"
+VER=3.1.0; listen_blocked() { return 1; }; auto_pick_ports
+chk "Kharej gate: gre/ipip are left out of the plan on 3.1 (B2)" "$(plan_has "$AUTO_D" gre && echo y || echo n)/$AUTO_SKIP" "n/gre, ipip"
+VER=3.2.0; auto_pick_ports
+chk "Kharej gate: gre/ipip enter the plan on 3.2 (B2)" "$(plan_has "$AUTO_D" gre && plan_has "$AUTO_D" ipip && echo y)" "y"
+VER=3.2.1; T_CARRIER=vxlan; printf 'mode: client\ncarrier: tcp\npeer: 203.0.113.10:4443\n' >"$WAT_CONF/t_v2.yml"
+expect_fail auto_apply t_v2
+chk "apply gate: an unsupported carrier is never written (B2)" "$(cfg t_v2 carrier)" "tcp"
+rm -f "$WAT_CONF/t_v2.yml"; T_CARRIER=''
+eval "$_bvokd"; eval "$_bvd"; VER=$_verd
+T_AUTO=''; AT_SKIPPED=''
+# B4: shaped variants — peer forms, no anti/CDN extras, bond exclusion, auto_apply config+token
+VER=3.3.0
+bin_ver() { echo "$VER"; }
+bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
+T_AUTO='d=vxlan:4789,sit,gre;r=icmp'; T_PEER='203.0.113.10'; AT_PRESET=normal; auto_variants
+chk "shaped variants: UDP shape peer carries the plan port (B4)" "${AV_PEER[1]}" "203.0.113.10:4789"
+chk "shaped variants: raw shape peer is bare (B4)" "${AV_PEER[2]}" "203.0.113.10"
+chk "shaped variants: gre peer is bare (B4)" "${AV_PEER[3]}" "203.0.113.10"
+chk "shaped variants: labels warn they are shapes (B4)" "$(grep -o 'shape only' <<<"${AV_LABEL[1]} ${AV_LABEL[2]}" | wc -l | tr -d ' ')" "2"
+chk "shaped variants: no anti/CDN variants are generated (B4)" "${#AV_LABEL[@]}" "5"
+# bond picker: a shaped row must never be joined (the engine refuses shaped-in-bond)
+AV_LABEL=(vxlan tcp sit); AV_CAR=(vxlan tcp sit); AV_KIND=(d d d); AV_PEER=('203.0.113.10:4789' '203.0.113.10:4443' '203.0.113.10')
+AT_RANK=(1 0 2); AR_DOWN=(10 20 30); AR_UP=(1 2 3); NI_PICK=bond
+at_choose >/dev/null 2>&1
+chk "bond picker: excludes shaped rows (B4)" "$(IFS=,; echo "${AV_CAR[${AT_SEL[0]}]}")/$((${#AT_SEL[@]}))" "tcp/1"
+AT_RANK=(0 1); AV_LABEL=(vxlan tcp); AV_CAR=(vxlan tcp); AV_KIND=(d d); AV_PEER=('203.0.113.10:4789' '203.0.113.10:4443')
+expect_fail at_rows '1 2'
+NI_PICK=best; AT_RANK=()
+# auto_apply: a chosen UDP shape writes a valid single-carrier client config and a token naming the shape
+cat >"$WAT_CONF/t_b4.yml" <<'EOF'
+mode: client
+carrier: tcp
+peer: 203.0.113.10:4443
+key-file: /etc/wattun/t_b4.key
+EOF
+_T_CARRIER=$T_CARRIER; _T_PEER=$T_PEER; _T_KEY=${T_KEY:-}; _T_PATH=$T_PATH; _T_SNI=$T_SNI; _T_ICMP=$T_ICMP; _T_PORTS=$T_PORTS; _T_REV=$T_REV; _AT_EXTRA=$AT_EXTRA; _AT_TUNE_KEYS=$AT_TUNE_KEYS; _AT_QUIET=$AT_QUIET; _AT_SEL_KEY=$AT_SEL_KEY
+T_CARRIER=vxlan; T_PEER='203.0.113.10:4789'; T_KEY='testkey'; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; AT_EXTRA=''; AT_TUNE_KEYS=''; AT_QUIET=1; AT_SEL_KEY='vxlan/d'
+auto_apply t_b4 >/dev/null 2>&1
+chk "auto_apply: UDP shape carrier (B4)" "$(cfg t_b4 carrier)" "vxlan"
+chk "auto_apply: UDP shape peer keeps the port (B4)" "$(cfg t_b4 peer)" "203.0.113.10:4789"
+chk "auto_apply: no listen on the client (B4)" "$(cfg t_b4 listen)" ""
+chk "auto_apply: token names the chosen shape (B4)" "$(sed 's/^wat1://' "$WAT_CONF/t_b4.token" | base64 -d | cut -d'|' -f1,2)" "vxlan|203.0.113.10:4789"
+chk "auto_apply: no sessions/reverse keys written (B4)" "$(grep -cE '^(sessions|reverse):' "$WAT_CONF/t_b4.yml")" "0"
+T_CARRIER=sit; T_PEER='203.0.113.10'; AT_SEL_KEY='sit/d'; AT_TUNE_KEYS=''
+printf 'mode: client\ncarrier: tcp\npeer: 203.0.113.10:4443\nkey-file: /etc/wattun/t_b4.key\n' >"$WAT_CONF/t_b4.yml"
+auto_apply t_b4 >/dev/null 2>&1
+chk "auto_apply: raw shape peer stays bare (B4)" "$(cfg t_b4 peer)" "203.0.113.10"
+chk "auto_apply: raw shape writes no listen (B4)" "$(cfg t_b4 listen)" ""
+chk "auto_apply: raw shape token names it (B4)" "$(sed 's/^wat1://' "$WAT_CONF/t_b4.token" | base64 -d | cut -d'|' -f1)" "sit"
+T_CARRIER=$_T_CARRIER; T_PEER=$_T_PEER; T_KEY=$_T_KEY; T_PATH=$_T_PATH; T_SNI=$_T_SNI; T_ICMP=$_T_ICMP; T_PORTS=$_T_PORTS; T_REV=$_T_REV
+AT_EXTRA=$_AT_EXTRA; AT_TUNE_KEYS=$_AT_TUNE_KEYS; AT_QUIET=$_AT_QUIET; AT_SEL_KEY=$_AT_SEL_KEY
+rm -f "$WAT_CONF/t_b4.yml" "$WAT_CONF/t_b4.token" "$WAT_CONF/t_b4.key"
+eval "$_bvokd"; eval "$_bvd"; VER=$_verd
+AV_LABEL=(); AV_CAR=(); AV_KIND=()
+# A6: the Iran auto screen splits the token plan standard/extended and never counts skipped carriers in the budget
+chk "auto plan display: standard carriers keep plan order (A6)" "$(auto_plan_standard 'udp:4443,vxlan:4789,sit,gre')" "udp gre"
+chk "auto plan display: extended carriers are listed (A6)" "$(auto_plan_extnames 'udp:4443,vxlan:4789,sit,gre')" "vxlan sit"
+chk "auto plan display: a normal plan has no extended line (A6)" "$(auto_plan_intro 'udp:4443,tcp:4443')" $'standard carriers: udp tcp'
+chk "auto plan display: an extended plan is labelled (A6)" "$(auto_plan_intro 'udp:4443,vxlan:4789,sit')" $'standard carriers: udp\nextended carriers: vxlan sit (both ends must run 3.3.0; shaped transports, not the real protocols)'
+_bvd6=$(declare -f bin_ver); _bvokd6=$(declare -f bin_ver_ok); _verd6=$VER
+bin_ver() { echo "$VER"; }; bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
+VER=3.2.1; T_AUTO='d=udp:4443,vxlan:4789;r=icmp'; T_PEER='203.0.113.10'; AT_PRESET=normal; auto_variants
+_n32=${#AV_LABEL[@]}; _p32=$(at_budget "$_n32" "$AT_SCREEN_CAP_MB" "$AT_FINAL_MB_MAX" "$AT_TUNE_PROBES_MAX" "$AT_TUNE_PROBE_MB")
+VER=3.3.0; auto_variants
+_n33=${#AV_LABEL[@]}; _p33=$(at_budget "$_n33" "$AT_SCREEN_CAP_MB" "$AT_FINAL_MB_MAX" "$AT_TUNE_PROBES_MAX" "$AT_TUNE_PROBE_MB")
+chk "auto budget: a skipped carrier is not counted (A6)" "$([ "$_n32" -lt "$_n33" ] && echo y)/$([ "$_p32" != "$_p33" ] && echo y)" "y/y"
+chk "auto screen: the skip hint names the carrier (A6)" "$(AT_SKIPPED=vxlan at_skipped_hint | grep -c vxlan)" "1"
+chk "auto screen: the test screen prints the plan split (A6)" "$(grep -c 'auto_plan_intro "$(plan_part "$T_AUTO" d)"' wattun-manager)" "1"
+eval "$_bvokd6"; eval "$_bvd6"; VER=$_verd6
+T_AUTO=''; AT_SKIPPED=''; AV_LABEL=(); AV_CAR=(); AV_KIND=()
+# B3: extended Auto = one hidden single-carrier server unit per shaped carrier (the engine refuses shaped-in-bond)
+_bt_sctl=$(declare -f systemctl); _bt_fmp=$(declare -f free_metrics_port); _bt_lb=$(declare -f listen_blocked)
+_bt_bv=$(declare -f bin_ver); _bt_bvok=$(declare -f bin_ver_ok); _bt_ver=$VER; _bt_autolive=$(declare -f auto_live); _bt_su=$(declare -f start_unit)
+systemctl() { printf '%s\n' "$*" >>"$PWD/.smoke/sys.log"; return 0; }
+systemd-run() { :; }
+start_unit() { :; } # the wizard's unit start needs /etc/systemd; the config/token/unit files are what this checks
+listen_blocked() { return 1; }
+free_metrics_port() { echo $(( 26000 + $(ls "$WAT_CONF"/*.yml 2>/dev/null | wc -l) )) ; }
+VER=3.3.0; bin_ver() { echo "$VER"; }; bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
+: >"$PWD/.smoke/sys.log"
+( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_ext NI_ADDR=203.0.113.5 NI_EXTENDED=1 wizard_kharej ) >"$PWD/.smoke/ext.out" 2>&1
+chk "extended auto: parent config created (B3)" "$([ -f "$WAT_CONF/t_ext.yml" ] && echo y)" "y"
+chk "extended auto: parent keeps standard carriers + gre/ipip (B3)" "$(grep -c '^carrier: icmp+udp+tcp+tls+wss+h2+grpc+ws+h2c+gre+ipip$' "$WAT_CONF/t_ext.yml")" "1"
+chk "extended auto: parent has no shaped carrier (B3)" "$(grep -cE '^carrier:.*(vxlan|sit)' "$WAT_CONF/t_ext.yml")" "0"
+chk "extended auto: 13 hidden configs (B3)" "$(ls "$WAT_CONF"/t_ext-e-*.yml 2>/dev/null | wc -l | tr -d ' ')" "13"
+chk "extended auto: hidden config carries the shape (B3)" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_ext-e-vxlan.yml")" "1"
+chk "extended auto: UDP shape listens on its port (B3)" "$(grep -c '^listen: ":4789"$' "$WAT_CONF/t_ext-e-vxlan.yml")" "1"
+chk "extended auto: raw shape writes no listen (B3)" "$(grep -c '^listen:' "$WAT_CONF/t_ext-e-sit.yml")" "0"
+chk "extended auto: hidden configs share the parent key (B3)" "$(grep -c "^key-file: $WAT_CONF/t_ext.key$" "$WAT_CONF/t_ext-e-sit.yml")" "1"
+chk "extended auto: hidden configs get unique metrics ports (B3)" "$(for f in "$WAT_CONF"/t_ext-e-*.yml; do sed -n 's/^metrics: 127.0.0.1://p' "$f"; done | sort -u | wc -l | tr -d ' ')" "13"
+chk "extended auto: sidecar names the parent (B3)" "$(cat "$WAT_CONF/t_ext-e-vxlan.autoext")" "t_ext"
+chk "extended auto: listeners were enabled and started (B3)" "$(grep -cE '(enable|restart) wattest@t_ext-e-vxlan' "$PWD/.smoke/sys.log")" "2"
+chk "extended auto: plan carries all 13 shapes + marker (B3)" "$(read_token "$(cat "$WAT_CONF/t_ext.token")"; printf '%s/%s' "$(printf '%s' "$T_AUTO" | grep -oE '(fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct|sit|6to4|xfrm-ipsec|etherip|l2tpv3)' | sort -u | wc -l | tr -d ' ')" "$(case "$T_AUTO" in *';e=1'*) echo y ;; *) echo n ;; esac)")" "13/y"
+chk "extended auto: plan keeps the standard direct part (B3)" "$(read_token "$(cat "$WAT_CONF/t_ext.token")"; plan_part "$T_AUTO" d | grep -c '^udp:4443,tcp:4443')" "1"
+chk "extended auto: hidden from the tunnel list (B3)" "$(tunnels | grep -c '^t_ext-e-')" "0"
+chk "extended auto: tunnels_all sees the listeners (B3)" "$(tunnels_all | grep -c '^t_ext-e-')" "13"
+chk "extended auto: the hint warns old Iran leaves the ports open (B3)" "$(grep -c 'auto-prune t_ext --direct' "$PWD/.smoke/ext.out")" "2"
+# lifecycle: a down enabled listener is restarted by heal's helper
+systemctl() { case "$*" in
+  "is-enabled -q wattest@t_ext-e-sit") return 0 ;;
+  "is-active -q wattest@t_ext-e-sit") return 1 ;;
+  *"restart wattest@t_ext-e-sit"*) printf '%s\n' "$*" >>"$PWD/.smoke/sys.log"; return 0 ;; esac; return 1; }
+: >"$PWD/.smoke/sys.log"
+heal_ext_listeners >/dev/null 2>&1
+chk "extended heal: restarts a down listener (B3)" "$(grep -c 'restart wattest@t_ext-e-sit' "$PWD/.smoke/sys.log")" "1"
+# prune keeps the shape Iran picked and stops the rest
+systemctl() { printf '%s\n' "$*" >>"$PWD/.smoke/sys.log"; return 0; }
+: >"$PWD/.smoke/sys.log"
+auto_live() { AN_D='vxlan'; AN_R=''; }
+auto_ext_prune t_ext >/dev/null 2>&1
+chk "extended prune: keeps the shape Iran uses (B3)" "$(grep -c 'stop wattest@t_ext-e-vxlan' "$PWD/.smoke/sys.log")" "0"
+chk "extended prune: stops an unused shape (B3)" "$(grep -c 'stop wattest@t_ext-e-sit' "$PWD/.smoke/sys.log")" "1"
+: >"$PWD/.smoke/sys.log"
+auto_ext_start t_ext >/dev/null 2>&1
+chk "extended widen: reopens the listeners for a retest (B3)" "$(grep -c 'restart wattest@t_ext-e-vxlan' "$PWD/.smoke/sys.log")" "1"
+chk "extended wiring: both prune paths run the ext pruner (B3)" "$(grep -c 'auto_ext_prune "\$n"' wattun-manager)" "2"
+chk "extended wiring: widen and prune --direct reopen listeners (B3)" "$(grep -c 'auto_ext_start "\$n"' wattun-manager)" "2"
+chk "extended wiring: heal calls the listener helper (B3)" "$(grep -c '^  heal_ext_listeners$' wattun-manager)" "1"
+# delete removes the hidden listeners with their parent
+: >"$PWD/.smoke/sys.log"
+NONINTERACTIVE=1 delete_tunnel t_ext >/dev/null 2>&1
+chk "extended delete: configs removed with the parent (B3)" "$(ls "$WAT_CONF"/t_ext*.yml 2>/dev/null | wc -l | tr -d ' ')" "0"
+chk "extended delete: the hidden units are stopped (B3)" "$(grep -c 'disable --now wattest@t_ext-e-vxlan' "$PWD/.smoke/sys.log")" "1"
+# default stays unchanged: no --extended, no hidden configs and no plan marker
+( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_extn NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
+chk "extended off by default: no hidden configs (B3)" "$(ls "$WAT_CONF"/t_extn-e-*.yml 2>/dev/null | wc -l | tr -d ' ')" "0"
+chk "extended off by default: the plan has no marker (B3)" "$(read_token "$(cat "$WAT_CONF/t_extn.token")"; case "$T_AUTO" in *';e=1'*) echo y ;; *) echo n ;; esac)" "n"
+rm -f "$WAT_CONF"/t_extn*
+# an old Kharej refuses --extended with one clear message and writes nothing
+VER=3.2.1; : >"$PWD/.smoke/ext.out"
+( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_ext2 NI_ADDR=203.0.113.5 NI_EXTENDED=1 wizard_kharej ) >"$PWD/.smoke/ext.out" 2>&1
+_ext_rc=$?
+chk "extended: an old Kharej refuses --extended (B3)" "$_ext_rc/$(grep -c 'needs wattun 3.3.0' "$PWD/.smoke/ext.out")" "1/1"
+chk "extended: the refusal creates nothing (B3)" "$(ls "$WAT_CONF"/t_ext2* 2>/dev/null | wc -l | tr -d ' ')" "0"
+eval "$_bt_autolive"; eval "$_bt_fmp"; eval "$_bt_lb"; eval "$_bt_sctl"; eval "$_bt_su"
+eval "$_bt_bv"; eval "$_bt_bvok"; VER=$_bt_ver
+unset -f systemd-run
+NI_EXTENDED=0; AUTO_EXT=0; AUTO_EXT_D=''
+rm -f "$PWD/.smoke/sys.log" "$PWD/.smoke/ext.out"
+
+chk "tune knobs: pool lanes test sessions up to the engine max 16" "$(at_tune_knobs tcp | grep -c 'sessions:1,2,4,8,16')" "1"
+chk "tune knobs: pool lanes test conns up to 64" "$(at_tune_knobs tcp | grep -c 'conns:4,8,32,64')" "1"
+chk "tune knobs: the reduced D8 grid has no mtu/batch/loss-ceiling/win-max" "$(at_tune_knobs tcp | grep -cE 'mtu:|batch:|loss-ceiling:|win-max:')" "0"
+chk "tune knobs: reverse never tests sessions" "$(at_tune_knobs reverse | grep -c 'sessions')" "0"
+chk "tune knobs: reverse tests conns only" "$(at_tune_knobs reverse)" "conns:4,8,32"
+T_CARRIER='icmp+tcp'
+chk "tune knobs: a bond never tests sessions" "$(at_tune_knobs bond | grep -c 'sessions')" "0"
+chk "tune knobs: a bond tests conns" "$(at_tune_knobs bond)" "conns:4,8,32,64"
+T_CARRIER=''
+chk "tune knobs: an icmp carrier has no tunable sessions/conns" "$(at_tune_knobs icmp)" ""
+chk "tune knobs: the reduced grid is the budget's probe count" "$(at_tune_probe_count "$AUTO_TUNE_POOL")" "10"
+chk "tune knobs: every remaining knob exists on every supported engine" "$(at_tune_knobs_avail tcp)" "$AUTO_TUNE_POOL"
+AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=(); AV_FS=(); AV_FM=(); AV_X=()
+av_add tcp tcp d '203.0.113.10:4443' '' ''; av_add tls tls d '203.0.113.10:8443' '' ''
+T_CARRIER='tcp+tls'; AT_SEL=(0 1); AT_X=() # at_tune_bond_variant appends to the AV arrays from a clean state
+at_tune_bond_variant
+chk "bond tune variant: one extra row probes the whole bond" "${#AV_LABEL[@]}" "3"
+chk "bond tune variant: its label names the carrier list" "${AV_LABEL[2]}" "bond tcp+tls"
+chk "bond tune variant: every leg's peer goes in as a flag" "${AV_X[2]}" "-peer-tcp 203.0.113.10:4443 -peer-tls 203.0.113.10:8443"
+chk "bond tune variant: base index" "$AT_TUNE_BASE" "2"
+# H2/H3: the budget now counts all three phases, and the probe size is duration-based
+chk "at_budget: screening+finalists+tuning worst case" "$(at_budget 17 16 40 10 20)" "up to 1184 MB, about 3 min"
+chk "at_budget: an empty plan stays at the minimum" "$(at_budget 0 0 0 0 0)" "up to 0 MB, about 1 min"
+chk "at_probe_mb: unknown rate starts at 8 MB" "$(at_probe_mb 0)" "8"
+chk "at_probe_mb: a slow link keeps 8 MB" "$(at_probe_mb 0.5)" "8"
+chk "at_probe_mb: a fast link escalates to the cap" "$(at_probe_mb 100 1.5 200)" "200"
+chk "at_probe_mb: the screening cap bounds it" "$(at_probe_mb 100 1.5 16)" "16"
+chk "at_probe_mb: the finalist cap bounds it" "$(at_probe_mb 100 1.5 40)" "40"
+chk "at_probe_mb: 1.5 s floor reached below the cap" "$(at_probe_mb 4 1.5 200)" "8"
+chk "at_probe_mb: a broken rate falls back to 8" "$(at_probe_mb abc)" "8"
+
+# R3 auto lifecycle prune: the decision is pure (no systemd, no /stats). A selection that changes restarts the window,
+# an empty tunnel is never touched, and the grace setting only lives in .manager.conf (default 12 min, 0 = off).
+chk "prune: nothing connected -> idle" "$(prune_decision '' '' '' 1000 600)" "idle - -"
+chk "prune: first sighting starts the window" "$(prune_decision 'tcp+wss' '' '' 1000 600)" "reset tcp+wss 1000"
+chk "prune: a changed selection restarts the window" "$(prune_decision tcp 'tcp+wss' 100 1000 600)" "reset tcp 1000"
+chk "prune: inside the grace window -> wait" "$(prune_decision tcp tcp 500 1000 600)" "wait tcp 500"
+chk "prune: grace elapsed -> prune" "$(prune_decision tcp tcp 300 1000 600)" "prune tcp 300"
+chk "prune: a 12 minute window" "$(prune_decision 'r:icmp' 'r:icmp' 0 720 720)" "prune r:icmp 0"
+chk "prune: grace 0 waits (off is decided by the caller)" "$(prune_decision tcp tcp 0 100000 0)" "wait tcp 0"
+( umask 077; printf 'autoprune=0\n' >"$WAT_CONF/.manager.conf" )
+chk "autoprune: 0 disables the automatic pass" "$(autoprune_grace)" "0"
+printf 'autoprune=7\n' >"$WAT_CONF/.manager.conf"
+chk "autoprune: a custom window" "$(autoprune_grace)" "7"
+printf 'autoprune=soon\n' >"$WAT_CONF/.manager.conf"
+chk "autoprune: junk falls back to the default" "$(autoprune_grace)" "$AUTOPRUNE_DEFAULT_MIN"
+rm -f "$WAT_CONF/.manager.conf"
+chk "autoprune: default is 12 minutes" "$(autoprune_grace)" "12"
+
+# R3 scheduling + widen safety net: the automatic prune pass runs from heal(), so a Kharej-only server must get that
+# timer installed; and a narrowed tunnel that loses every open carrier reopens the plan, bounded by autowiden minutes.
+chk "widen decision: a working open carrier resets the counter" "$(autowiden_decision 1 5 9999 3 30)" "reset"
+chk "widen decision: one failed check only waits" "$(autowiden_decision 0 0 9999 3 30)" "wait 1"
+chk "widen decision: the third failed check widens" "$(autowiden_decision 0 2 9999 3 30)" "widen"
+chk "widen decision: a just-widened tunnel is not widened again" "$(autowiden_decision 0 5 60 3 30)" "wait 6"
+chk "widen decision: after the cooldown it may widen again" "$(autowiden_decision 0 5 1800 3 30)" "widen"
+chk "widen decision: broken counters do not widen" "$(autowiden_decision 0 junk junk 3 30)" "wait 1"
+chk "prune timer: a Kharej auto tunnel needs the heal timer" "$(prune_timer_needed Kharej 1 && echo y)" "y"
+chk "prune timer: an Iran tunnel does not" "$(prune_timer_needed Iran 1 && echo y)" ""
+chk "prune timer: a fixed Kharej tunnel does not" "$(prune_timer_needed Kharej 0 && echo y)" ""
+( umask 077; printf 'autowiden=0\n' >"$WAT_CONF/.manager.conf" )
+chk "autowiden: 0 turns the automatic widen off" "$(autowiden_grace)" "0"
+rm -f "$WAT_CONF/.manager.conf"
+chk "autowiden: default cooldown is 10 minutes (D1)" "$(autowiden_grace)" "10"
+# the timer unit itself: install writes a oneshot that runs heal every minute, remove deletes both files
+UNITS=$PWD/.smoke/units; rm -rf "$UNITS"
+WAT_UNIT_DIR=$UNITS heal_enable >/dev/null 2>&1
+chk "heal timer: service installed" "$([ -f "$UNITS/$HEAL_UNIT.service" ] && echo y || echo n)" "y"
+chk "heal timer: timer installed" "$([ -f "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "y"
+chk "heal timer: runs the heal pass" "$(grep -c '^ExecStart=.* heal$' "$UNITS/$HEAL_UNIT.service")" "1"
+chk "heal timer: fires every minute" "$(grep -c '^OnUnitActiveSec=1min$' "$UNITS/$HEAL_UNIT.timer")" "1"
+WAT_UNIT_DIR=$UNITS heal_disable >/dev/null 2>&1
+chk "heal timer: remove drops the service" "$([ -e "$UNITS/$HEAL_UNIT.service" ] && echo y || echo n)" "n"
+chk "heal timer: remove drops the timer" "$([ -e "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "n"
+# a Kharej-only auto setup installs it with no operator action (and does nothing when it is already enabled)
+cat >"$WAT_CONF/t_auto.yml" <<'EOF'
+mode: server
+carrier: icmp+tcp
+listen-tcp: ":4443"
+EOF
+make_token auto '203.0.113.10' 'testkey123' '/wat' '' '' '' '' 'd=udp:4443,tcp:4443;r=tcp:24431' >"$WAT_CONF/t_auto.token"
+chmod 600 "$WAT_CONF/t_auto.token"
+role() { echo Kharej; }
+tunnels() { echo t_auto; } # the SLA test above leaves a tunnels() stub; point it at the auto tunnel for this check
+systemctl() { case "${1:-}" in is-enabled) return 1 ;; *) return 0 ;; esac; }
+WAT_UNIT_DIR=$UNITS ensure_prune_timer
+chk "prune scheduling: an auto Kharej setup installs the heal timer" "$([ -f "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "y"
+systemctl() { case "${1:-}" in is-enabled) return 0 ;; *) return 0 ;; esac; }
+WAT_UNIT_DIR=$UNITS ensure_prune_timer >/dev/null 2>&1
+chk "prune scheduling: an enabled timer is left alone" "$([ -f "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "y"
+# the widen pass itself: three failed checks reopen the token plan and start the cooldown, without operator action
+: >"$WAT_RUN/t_auto.autoprune.done"
+auto_widen_tick t_auto >/dev/null 2>&1
+chk "widen pass: the first failed check is counted" "$(cat "$WAT_RUN/t_auto.autowiden.down" 2>/dev/null || echo 0)" "1"
+auto_widen_tick t_auto >/dev/null 2>&1
+auto_widen_tick t_auto >/dev/null 2>&1
+chk "widen pass: the third check reopens every planned carrier" "$(grep -c '^carrier: icmp+udp+tcp$' "$WAT_CONF/t_auto.yml")" "1"
+chk "widen pass: widening clears the pruned marker" "$([ -e "$WAT_RUN/t_auto.autoprune.done" ] && echo y || echo n)" "n"
+chk "widen pass: widening starts the cooldown stamp" "$([ -f "$WAT_RUN/t_auto.autowiden" ] && echo y || echo n)" "y"
+chk "widen pass: widening resets the failed-check counter" "$([ -e "$WAT_RUN/t_auto.autowiden.down" ] && echo y || echo n)" "n"
+# heal() on a Kharej-only host must never restart a client tunnel: only the prune/widen pass may run
+SYSCALLS=$PWD/.smoke/syscalls
+cat >"$WAT_CONF/t_kh.yml" <<'EOF'
+mode: server
+carrier: icmp+tcp
+listen-tcp: ":4443"
+EOF
+: >"$SYSCALLS"
+tunnels() { echo t_kh; } # a Kharej-only host: heal() must not restart it (it is not an Iran client)
+systemctl() { case "${1:-}" in restart) echo restart >>"$SYSCALLS" ;; esac; return 0; }
+heal >/dev/null 2>&1 || true
+chk "heal on a Kharej host: no client restarts" "$(grep -c '^restart$' "$SYSCALLS" || true)" "0"
+role() { echo Iran; }
+tunnels() { echo t_sla; } # restore the stub the SLA test left behind
+systemctl() { return 0; }
+WAT_UNIT_DIR=$UNITS heal_disable >/dev/null 2>&1
+rm -rf "$UNITS" "$SYSCALLS" "$WAT_CONF/t_kh.yml" "$WAT_CONF/t_auto.yml" "$WAT_CONF/t_auto.token" \
+       "$WAT_RUN/t_auto.autowiden" "$WAT_RUN/t_auto.autowiden.down" "$WAT_RUN/t_auto.autoprune.done"
+
 # Release checksums: sums_has matches one exact "<sha>  <name>" line; sums_verify is the RSA check update() runs
 # before it executes the installer as root, so it is exercised here with a throwaway key. The release key embedded
 # in install.sh and in the manager must stay byte-identical (the manager's own comment requires it).
@@ -586,6 +1378,118 @@ else
   echo "skip sums_verify: openssl not available"
 fi
 rm -f "$SUMS_FILE"
+
+# ---- task-14: manager Wave 0+1 of the 2026-11-04 audit fix plan (H8/H4/H6/H10/M1/D7/M4/M17/M8/H2/H3/D8) ----
+# H8: delete_tunnel must stop the unit BEFORE removing its state files; the engine's SIGTERM save would otherwise
+# re-create quota/totals after the rm (the 3.2.1 regression). Assert by position inside the function body.
+_dt=$(sed -n '/^delete_tunnel() {/,/^}/p' wattun-manager)
+_stop=$(grep -n 'disable --now "${WAT_PREFIX}@\$n"' <<<"$_dt" | head -1 | cut -d: -f1)
+_rm=$(grep -n 'state_files "\$n"' <<<"$_dt" | head -1 | cut -d: -f1)
+chk "delete: stops the unit before removing its state files (H8)" "$([ -n "$_stop" ] && [ -n "$_rm" ] && [ "$_stop" -lt "$_rm" ] && echo y)" "y"
+# H6: one mode list; the old second list in --fake-mode missed 5 documented modes
+chk "fake-mode: one shared list of 13 modes (H6)" "$(for m in $AC_ALLMODES; do echo x; done | wc -l | tr -d ' ')" "13"
+_h6=0; for m in $AC_ALLMODES; do v_fake_mode "$m" || _h6=1; done
+chk "fake-mode: every listed mode validates" "$_h6" "0"
+expect_fail v_fake_mode bogus
+NI_FAKEMODE=ff; REPLY_V=''
+pick_fake_mode rst >/dev/null 2>&1
+chk "fake-mode: the picker accepts a listed mode (ff)" "$REPLY_V" "ff"
+NI_FAKEMODE=nope; expect_fail pick_fake_mode rst
+NI_FAKEMODE=''
+ni_parse --fake-sni example.com --fake-mode ff
+chk "fake-mode: --fake-mode parses a listed mode (ff)" "$NI_FAKEMODE" "ff"
+expect_fail ni_parse --fake-sni example.com --fake-mode nope
+chk "fake-mode: the matrix uses the shared list" "$(grep -c 'for fm in \$AC_ALLMODES' wattun-manager)" "1"
+NI_FAKEMODE=''
+# H4: every 3.3.0-only Advanced row and write is refused on an older engine (the manager ships from main, the engine
+# from releases/latest, so an unknown key would crash the tunnel)
+cat >"$WAT_CONF/t_h4.yml" <<'EOF'
+mode: client
+carrier: tcp
+fec: auto
+EOF
+_h4_old=$( NONINTERACTIVE=1; bin_ver_ok() { return 1; }; adv_menu t_h4 ) 2>/dev/null
+chk "H4: 3.3.0-only Advanced rows hidden on an older engine" "$(grep -cE 'state dir|state save|shape data|allow clients|fec on loss|fec off loss|noise' <<<"$_h4_old")" "0"
+_h4_gate=$( bin_ver_ok() { return 1; }; adv_33 >/dev/null 2>&1 && echo ok || echo refused )
+chk "H4: the 3.3.0 write gate refuses an older engine" "$_h4_gate" "refused"
+chk "H4: the write gate allows a 3.3.0 engine" "$(adv_33 >/dev/null 2>&1 && echo ok)" "ok"
+rm -f "$WAT_CONF/t_h4.yml"
+# H10/D1: default automatic cleanup is reverse-side only; direct narrowing is opt-in (a bonded Iran client looks like
+# one direct carrier, so narrowing it by default could break failover)
+chk "prune scope: default closes the reverse side only" "$(prune_targets 0 'tcp' 'icmp' 1)" "reverse"
+chk "prune scope: no companion -> nothing to clean" "$(prune_targets 0 'tcp' '' 0)" "none"
+chk "prune scope: a live direct set never narrows by default (bond safety)" "$(prune_targets 0 'tcp' 'icmp' 1)" "reverse"
+chk "prune scope: autoprune-direct=1 narrows both sides" "$(prune_targets 1 'tcp' 'icmp' 1)" "both"
+chk "prune scope: direct opt-in with nothing live -> none" "$(prune_targets 1 '' '' 0)" "none"
+chk "prune signature: reverse-only ignores the direct set" "$(prune_signature 0 'tcp' 'icmp' 1)" "r:icmp"
+chk "prune signature: an unused companion is still watched" "$(prune_signature 0 'tcp' '' 1)" "r:-"
+chk "prune signature: the opt-in covers both sides" "$(prune_signature 1 'tcp' 'icmp' 1)" "tcp+r:icmp"
+chk "prune scope: autoprune-direct defaults to off" "$(autoprune_direct_setting)" "0"
+( umask 077; printf 'autoprune-direct=1\n' >"$WAT_CONF/.manager.conf" )
+chk "prune scope: autoprune-direct=1 is read from .manager.conf" "$(autoprune_direct_setting)" "1"
+rm -f "$WAT_CONF/.manager.conf"
+chk "prune: the reverse-only pass is a separate function" "$(grep -c '^auto_prune_reverse_only()' wattun-manager)" "1"
+chk "prune: the default pass cannot call auto_narrow directly" "$(awk '/^auto_prune_tick\(\)/,/^}/' wattun-manager | grep -c 'targets.*= both')" "1"
+# end-to-end offline pass: with the default scope a companion that Iran does not use is closed by the pass, and the
+# direct carrier list is left exactly as it was (systemd is stubbed by this harness); grace 0 would disable it, so the
+# stamp is pre-seeded as the stable signature and the window is 1 minute.
+cat >"$WAT_CONF/t_pr.yml" <<'EOF'
+mode: server
+carrier: tcp+icmp
+EOF
+cat >"$WAT_CONF/t_pr-r.yml" <<'EOF'
+mode: client
+carrier: icmp
+peer: 203.0.113.5
+EOF
+printf 'wat1:%s\n' "$(printf 'auto|203.0.113.5|k||||||d:icmp,tcp;r:icmp' | base64 | tr -d '\n')" >"$WAT_CONF/t_pr.token"
+( umask 077; printf 'autoprune=1\n' >"$WAT_CONF/.manager.conf" )
+mkdir -p "$WAT_RUN"; printf 'r:- 0\n' >"$WAT_RUN/t_pr.autoprune"
+_pr_sys="$WAT_RUN/.prune-sys"; rm -f "$_pr_sys"
+_pr_out=$( NONINTERACTIVE=1; systemctl() { echo "$*" >>"$_pr_sys"; return 0; }; auto_prune_tick t_pr ) 2>/dev/null
+chk "prune pass: the default scope closes the unused reverse side" "$(grep -c 'stop wattest@t_pr-r' "$_pr_sys" 2>/dev/null)" "1"
+chk "prune pass: it never touches the direct unit" "$(grep -cE '(stop|restart|disable).*@t_pr($|[^-])' "$_pr_sys")" "0"
+chk "prune pass: it never rewrites the direct carrier list" "$(cfg t_pr carrier)" "tcp+icmp"
+chk "prune pass: it records the done marker" "$([ -f "$WAT_RUN/t_pr.autoprune.done" ] && echo y)" "y"
+# a reverse side that is fully in use must stay open and keep being watched (no done marker)
+rm -f "$WAT_RUN/t_pr.autoprune.done"; printf 'r:icmp 0\n' >"$WAT_RUN/t_pr.autoprune"
+_pr_out2=$( NONINTERACTIVE=1; auto_live() { AN_D=''; AN_R='icmp'; }; auto_prune_tick t_pr ) 2>/dev/null
+chk "prune pass: a fully used reverse side is left open" "$([ -f "$WAT_RUN/t_pr.autoprune.done" ] && echo y || echo n)" "n"
+chk "prune pass: the window restarts instead of marking done" "$(cut -d' ' -f1 "$WAT_RUN/t_pr.autoprune")" "r:icmp"
+rm -f "$WAT_CONF/t_pr.yml" "$WAT_CONF/t_pr-r.yml" "$WAT_CONF/t_pr.token" "$WAT_CONF/.manager.conf" \
+      "$WAT_RUN/t_pr.autoprune" "$WAT_RUN/t_pr.autoprune.done" "$WAT_RUN/.prune-sys"
+# M8: a hand-edited relative state-dir resolves from / in the manager (the unit's CWD), and says so out loud
+cat >"$WAT_CONF/t_m8.yml" <<'EOF'
+mode: client
+carrier: tcp
+state-dir: relstate
+EOF
+chk "state-dir: a relative value is detected (M8)" "$(state_dir_is_relative t_m8 && echo y)" "y"
+_m8w=$(state_dir_relative_warn t_m8 2>&1)
+chk "state-dir: a relative value warns instead of resolving silently (M8)" "$(grep -c 'resolves it from /' <<<"$_m8w")" "1"
+chk "state-dir: a relative value resolves from / (M8)" "$(state_base_path t_m8 relstate)" "/relstate/t_m8.yml"
+printf 'mode: client\ncarrier: tcp\nstate-dir: /var/lib/wattun\n' >"$WAT_CONF/t_m8.yml"
+chk "state-dir: an absolute value is not flagged" "$(state_dir_is_relative t_m8 && echo y || echo n)" "n"
+rm -f "$WAT_CONF/t_m8.yml"
+# M1: raw-tier shaped MTU ceilings come from the engine profile (1400 minus the IP-protocol header)
+for p in 'sit 1360' '6to4 1360' 'xfrm-ipsec 1392' 'etherip 1384' 'l2tpv3 1396' 'dnscrypt-udp 1326' 'ntp-direct 1352' 'srtp-direct 1388' 'fou-gre 1392' 'gue-ipip 1392' 'vxlan 1392' 'geneve 1392' 'openvpn-dco 1396'; do
+  set -- $p
+  chk "mtu ceiling: shaped $1" "$(mtu_max_for "$1")" "$2"
+done
+v_mtu 1360 sit && echo "ok   v_mtu accepts the sit ceiling" || { echo "FAIL v_mtu sit ceiling"; fail=1; }
+expect_fail v_mtu 1361 sit
+v_mtu 1392 xfrm-ipsec && echo "ok   v_mtu accepts the xfrm-ipsec ceiling" || { echo "FAIL v_mtu xfrm ceiling"; fail=1; }
+expect_fail v_mtu 1393 xfrm-ipsec
+ADV_CR=sit; v_mtu_adv 1360 && echo "ok   v_mtu_adv uses the shaped ceiling" || { echo "FAIL v_mtu_adv shaped"; fail=1; }
+expect_fail v_mtu_adv 1400
+ADV_CR=''
+# H2/H3/D8: at_best_rate sizes the next screening probe from the fastest measured direction
+AR_OK=(1 1 0); AR_DOWN=(10 5 999); AR_UP=(3 20 999)
+chk "at_best_rate: fastest measured direction" "$(at_best_rate 0 0 1 2)" "20"
+chk "at_best_rate: a failed variant is ignored" "$(at_best_rate 0 2)" "0"
+AR_OK=(); AR_DOWN=(); AR_UP=()
+# H1: the documented tmpfs path is the one the unit makes writable
+chk "state-dir: hints/validator point at /run/wattun (H1)" "$([ "$(grep -c '/run/wattun' wattun-manager)" -ge 3 ] && echo y)" "y"
 
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

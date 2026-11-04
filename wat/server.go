@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +42,21 @@ type Server struct {
 	MaxSessions int
 	IdleTimeout time.Duration
 
+	// Client allowlist (W10, Config.AllowClients): a new session is admitted only from a source inside allow.
+	// deny is owned by run() (the single receive goroutine): one log line per rejected source per denyEvery, so a
+	// source-address spray can neither grow the table without bound nor log per packet.
+	allow     []netip.Prefix
+	deny      map[netip.Addr]denyEntry
+	denyEvery time.Duration
+	// L8: a global token bucket on the deny log (lines/s, burst). A spoofed-source spray reaches the reject path
+	// without a valid AEAD, so per-source throttling alone still allowed ~25 lines/s with 256 sources; this caps the
+	// journald cost and counts what it suppressed. Owned by run(), like deny.
+	denyLogRate    float64
+	denyLogBurst   float64
+	denyTokens     float64
+	denyTokAt      time.Time
+	denySuppressed int
+
 	// retiredPN: highest packet number the session of a sid that left the table accepted, so a replay of one of its
 	// packets cannot open a new session. retiredQ keeps insertion order for the bound.
 	retiredPN map[uint64]uint64
@@ -62,6 +78,20 @@ type srvSess struct {
 
 // maxRetiredSIDs bounds the replay watermark map. An evicted id may be replayed once.
 const maxRetiredSIDs = 4096
+
+// Client allowlist deny log: one line per source per clientDenyEvery (never per packet), and a bounded source table.
+const (
+	clientDenyEvery = 10 * time.Second
+	clientDenyMax   = 256
+	// clientDenyLogPerSec/clientDenyLogBurst bound the deny log over the whole server (L8), not per source.
+	clientDenyLogPerSec = 3.0
+	clientDenyLogBurst  = 3.0
+)
+
+type denyEntry struct {
+	at time.Time
+	n  int // packets dropped since the last line
+}
 
 type subIO struct {
 	srv   *Server
@@ -200,6 +230,10 @@ func NewServer(cfg Config, raw RawIO) *Server {
 		stop: make(chan struct{}), free: make(chan []byte, 1024), MaxSessions: 32, retiredPN: map[uint64]uint64{},
 		// a raised -ping-every means longer silences between authenticated packets (see Alive)
 		IdleTimeout: max(45*time.Second, 3*cfg.PingEvery)}
+	if len(cfg.AllowClients) > 0 {
+		srv.allow, srv.deny, srv.denyEvery = cfg.AllowClients, map[netip.Addr]denyEntry{}, clientDenyEvery
+		srv.denyLogRate, srv.denyLogBurst = clientDenyLogPerSec, clientDenyLogBurst
+	}
 	if !cfg.NoMask {
 		srv.hk = hdrMaskKey(cfg.Key)
 	}
@@ -230,6 +264,7 @@ func (srv *Server) Stats() Stats {
 	defer srv.statMu.Unlock()
 	now := make(map[*Session]Stats, len(list))
 	var t Stats
+	t.FecState = "off" // no session, no parity: the aggregate is "on" while any client session sends it (F11)
 	for _, s := range list {
 		st := s.Stats()
 		t.PktsOut += st.PktsOut
@@ -243,6 +278,12 @@ func (srv *Server) Stats() Stats {
 		t.Inflight += st.Inflight
 		t.FecSent += st.FecSent
 		t.FecRecovered += st.FecRecovered
+		if st.FecState == "on" {
+			t.FecState = "on"
+		}
+		t.PadBytes += st.PadBytes
+		t.NoiseSent += st.NoiseSent
+		t.NoiseBytes += st.NoiseBytes
 		t.CeilingBps += st.CeilingBps
 		if st.LossPct > t.LossPct {
 			t.LossPct = st.LossPct
@@ -374,6 +415,9 @@ func addCounters(a *Stats, b Stats) {
 	a.Dropped += b.Dropped
 	a.FecSent += b.FecSent
 	a.FecRecovered += b.FecRecovered
+	a.PadBytes += b.PadBytes
+	a.NoiseSent += b.NoiseSent
+	a.NoiseBytes += b.NoiseBytes
 	a.CC.add(b.CC)
 }
 
@@ -473,6 +517,13 @@ func (srv *Server) run() {
 			if srv.draining.Load() {
 				continue
 			}
+			// W10: the client allowlist is checked before admit, on the unauthenticated packet: a valid packet from a
+			// source that is not allowed must not create a session either. Existing sessions are not re-checked
+			// (a NAT/roaming client keeps working; only admission is gated).
+			if !srv.sourceAllowed(src) {
+				srv.noteDenied(src)
+				continue
+			}
 			if ss = srv.admit(hdr, p, src); ss == nil && srv.hk != nil {
 				ss = srv.admit(unmaskedHdr(srv.hk, p), p, src)
 			}
@@ -552,6 +603,128 @@ func (srv *Server) admit(hdr [hdrLen]byte, p []byte, src net.Addr) *srvSess {
 		srv.cfg.Logf("new client session %016x (%d active)", sid, len(srv.sessions))
 	}
 	return ss
+}
+
+// sourceIP resolves a RawIO source address to the client's IP. ok=false when the address carries no IP (a reverse
+// pool's merged dialed connections, or a custom/test RawIO).
+func sourceIP(a net.Addr) (netip.Addr, bool) {
+	for {
+		switch v := a.(type) {
+		case nil:
+			return netip.Addr{}, false
+		case *TaggedAddr: // bonded server: the child raw's own source address
+			a = v.Addr
+			continue
+		case poolAddr: // direct tcp/tls/ws pool: the accepted connection's remote IP
+			ip, err := netip.ParseAddr(v.ip)
+			if err != nil {
+				return netip.Addr{}, false
+			}
+			return ip.Unmap(), true
+		case *net.UDPAddr:
+			return ipNetip(v.IP)
+		case *net.TCPAddr:
+			return ipNetip(v.IP)
+		case *net.IPAddr:
+			return ipNetip(v.IP)
+		}
+		if h, _, err := net.SplitHostPort(a.String()); err == nil {
+			if ip, err := netip.ParseAddr(h); err == nil {
+				return ip.Unmap(), true
+			}
+		}
+		if ip, err := netip.ParseAddr(a.String()); err == nil {
+			return ip.Unmap(), true
+		}
+		return netip.Addr{}, false
+	}
+}
+
+// ipNetip converts a net.IP to a netip.Addr, unmapping a 4-in-6 address so IPv4 prefixes match it.
+func ipNetip(ip net.IP) (netip.Addr, bool) {
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	return a.Unmap(), true
+}
+
+// sourceAllowed reports whether a new session may be admitted from src (run goroutine). With no allowlist every
+// source is allowed; with one, a source that carries no IP fails closed: a source that cannot be checked must not
+// create a session.
+func (srv *Server) sourceAllowed(src net.Addr) bool {
+	if len(srv.allow) == 0 {
+		return true
+	}
+	ip, ok := sourceIP(src)
+	if !ok {
+		return false
+	}
+	for _, p := range srv.allow {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// noteDenied logs a rejected source at most once per denyEvery (run goroutine). Drops between two lines are counted
+// and reported with the next one; the source table is bounded, so an address spray is dropped silently once it is
+// full. L8: a global token bucket caps the log over the whole server, and the suppressed count is reported with the
+// next line that gets through.
+func (srv *Server) noteDenied(src net.Addr) {
+	ip, ok := sourceIP(src)
+	if !ok || srv.cfg.Logf == nil {
+		return
+	}
+	now := time.Now()
+	e, seen := srv.deny[ip]
+	if !seen && len(srv.deny) >= clientDenyMax {
+		for k, v := range srv.deny {
+			if now.Sub(v.at) >= srv.denyEvery {
+				delete(srv.deny, k)
+			}
+		}
+		if len(srv.deny) >= clientDenyMax {
+			return
+		}
+	}
+	if seen && now.Sub(e.at) < srv.denyEvery {
+		e.n++
+		srv.deny[ip] = e
+		return
+	}
+	if !srv.denyAllow(now) {
+		srv.denySuppressed++
+		e.n++
+		srv.deny[ip] = e
+		return
+	}
+	if srv.denySuppressed > 0 {
+		srv.cfg.Logf("client %s is not in -allow-clients: %d packet(s) dropped (%d more drops suppressed by the log throttle)", ip, e.n+1, srv.denySuppressed)
+		srv.denySuppressed = 0
+	} else {
+		srv.cfg.Logf("client %s is not in -allow-clients: %d packet(s) dropped", ip, e.n+1)
+	}
+	srv.deny[ip] = denyEntry{at: now}
+}
+
+// denyAllow takes one token from the server-wide deny-log bucket (L8); false means this line is suppressed. A Server
+// built directly rather than by NewServer has rate 0, which means unlimited (the pre-L8 behaviour).
+func (srv *Server) denyAllow(now time.Time) bool {
+	if srv.denyLogRate <= 0 {
+		return true
+	}
+	if srv.denyTokAt.IsZero() {
+		srv.denyTokAt, srv.denyTokens = now, srv.denyLogBurst
+	}
+	srv.denyTokens = min(srv.denyTokens+now.Sub(srv.denyTokAt).Seconds()*srv.denyLogRate, srv.denyLogBurst)
+	srv.denyTokAt = now
+	if srv.denyTokens < 1 {
+		return false
+	}
+	srv.denyTokens--
+	return true
 }
 
 func (srv *Server) janitor() {

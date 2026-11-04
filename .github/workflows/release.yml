@@ -25,6 +25,7 @@ jobs:
           test "v$v" = "$GITHUB_REF_NAME" || { echo "::error::tag $GITHUB_REF_NAME != wat/version.go $v"; exit 1; }
           grep -q "release-v$v" README.md || { echo "::error::README.md badge is not v$v"; exit 1; }
           grep -q "release-v$v" README.fa.md || { echo "::error::README.fa.md badge is not v$v"; exit 1; }
+          test -f "docs/release-notes/$GITHUB_REF_NAME.md" || { echo "::error::missing docs/release-notes/$GITHUB_REF_NAME.md (publishable release notes must be tracked, not in git-ignored .dsh/)"; exit 1; }
       - run: go test -count=1 -timeout 15m ./...
       - run: sh build.sh
         env:
@@ -43,6 +44,8 @@ jobs:
           awk '/^SIG_PUB=/{on=1;next} on&&/^PEM$/{on=0} on' install.sh > /tmp/sigpub.pem
           grep -q 'BEGIN PUBLIC KEY' /tmp/sigpub.pem || { echo "::error::could not extract SIG_PUB from install.sh"; exit 1; }
           openssl dgst -sha256 -verify /tmp/sigpub.pem -signature dist/SHA256SUMS.sig dist/SHA256SUMS
-      - uses: softprops/action-gh-release@v2
+      # Pinned to a full commit SHA (the mutable v2 tag was 3bb12739 at pin time): this job holds
+      # contents:write and WAT_SIGN_KEY, so a retagged/hijacked action must not be able to swap the signed dist/.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           files: dist/*

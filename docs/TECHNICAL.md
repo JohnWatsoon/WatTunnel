@@ -17,21 +17,24 @@ Version: see `wat/version.go` (`wattun -version`).
 3. [Quick start](#quick-start)
    - [Managing tunnels](#managing-tunnels)
 4. [Carriers](#carriers)
+   - [Shaped carriers (3.3.0)](#shaped-carriers-330)
 5. [Bonding](#bonding)
 6. [Traffic shape](#traffic-shape-what-a-dpi-sees-300)
-7. [Reverse mode](#reverse-mode)
+   - [Stream padding and idle noise](#stream-padding-and-idle-noise-330)
+7. [Spoofing and shaping, explained](#spoofing-and-shaping-explained)
+8. [Reverse mode](#reverse-mode)
    - [Auto mode](#auto-mode)
    - [CDN tuning](#cdn-tuning)
-8. [UDP forwarding](#udp-forwarding)
-9. [Config file](#config-file)
-10. [Command-line flags](#command-line-flags)
-11. [Metrics](#metrics)
-12. [Handover, drain and rollback](#handover-drain-and-rollback)
-13. [Troubleshooting](#troubleshooting)
-14. [Security model](#security-model)
-15. [Build and test](#build-and-test)
-16. [Release history](#release-history)
-17. [License and attribution](#license-and-attribution)
+9. [UDP forwarding](#udp-forwarding)
+10. [Config file](#config-file)
+11. [Command-line flags](#command-line-flags)
+12. [Metrics](#metrics)
+13. [Handover, drain and rollback](#handover-drain-and-rollback)
+14. [Troubleshooting](#troubleshooting)
+15. [Security model](#security-model)
+16. [Build and test](#build-and-test)
+17. [Release history](#release-history)
+18. [License and attribution](#license-and-attribution)
 
 ## Why it exists
 
@@ -443,9 +446,30 @@ A tunnel's page has:
 - logs
 - the port-mapping editor
 - the token
-- advanced settings (speed ceiling, FEC, bind, ICMP type, direction, resilience)
-- change connection type (**m**)
+- advanced settings, grouped as Performance / Shaping & DPI / Safety / State & data (speed ceiling,
+  sessions/conns/mtu, FEC and its loss band, win-max, loss-ceiling, bind, ICMP type, direction, resilience, state
+  files, shaping, admission allowlist)
+- change connection type (**c**)
 - restart and delete
+
+The tunnel page is a two-column action deck with a status header and the live route above it: **↑/↓** move,
+**Tab** or **←/→** switch column, **Enter** opens the highlighted action, and every action keeps its hotkey.
+The page explains the highlighted action in one line, so nothing has to be memorized. Its **Spoofing & shaping** page
+(the same taxonomy as this document, `shape-data` and `noise` included) is also reachable as `h` in the Anti-censor
+page. A fixed connection type — the 3.3.0 shaped carriers included — is set at creation through the unattended
+`wattun kharej --carrier ...` path or a token; the interactive Kharej wizard makes Auto tunnels only, and **c** shows
+the type in use (Iran changes it by pasting a new token).
+
+Advanced settings validate their values against the engine before writing them and restart the tunnel when you leave
+the page: `sessions` 1-16 (and above 1 only for a single udp/pool carrier, not a bond or a reverse tunnel), `conns`
+1-64 per pool, `mtu` 256-1400 (up to 16384 when every leg is a pool carrier; a bond keeps the bound of its smallest
+leg), `state-dir`/`state-save`, the FEC loss band (`fec-on-loss`/`fec-off-loss`, shown only with `fec: auto`),
+`shape-data`, `noise`/`noise-bps`/`noise-window`, and on a Kharej tunnel `allow-clients`/`allow-clients-file`. The page
+is grouped into Performance / Shaping & DPI / Safety / State & data; `win-max` (4-64) and `loss-ceiling` are in
+Performance. The FEC choice itself stays a one-key `off`/`auto`; answering `a` at that prompt opens the loss-band rows
+(3.3.0+). Keys with no UI path (`debug`, `ping-every`, `udp-idle`, `tcp-cc`, `slack-ms`, `hedge`, `lanes`,
+`mem-budget`, `plain`, plus `port-offset` and the TLS cert/key paths) are documented as file-only expert keys in
+`/etc/wattun/NAME.yml`.
 
 When a link is down, the doctor names the likely cause — and when a direct pool carrier's TCP port is
 still reachable but the tunnel cannot connect (the SNI-allowlist tell), it points at `wattun blackout`.
@@ -467,6 +491,10 @@ wattun blackout NAME [SNI]         # one command to turn the resilience kit on w
 wattun auto-test NAME  # re-run the Auto mode test
 wattun cdn-tune NAME   # re-tune a Cloudflare tunnel
 wattun auto-ip NAME IP # tell an auto tunnel Iran's IP (on Kharej)
+wattun auto-narrow NAME        # close the carrier ports an auto Kharej tunnel no longer needs
+wattun auto-widen NAME         # open every carrier of an auto Kharej tunnel again
+wattun auto-prune NAME [--keep-open|--auto|--direct|--reverse-only]  # automatic cleanup state of an auto Kharej tunnel
+wattun bond-retest NAME        # bonded Iran tunnel: re-test its legs and add one that works again
 wattun update | rollback | help
 ```
 
@@ -517,12 +545,15 @@ To judge a link's health, use `last_rx_age_ms` rather than ping. Fields: [Metric
 | Iran can't reach Kharej's TCP port, but Kharej can reach Iran | TCP-type carrier + reverse | Iran listens, Kharej dials. |
 | Don't know | `auto` | See [Auto mode](#auto-mode). |
 | Must survive any one carrier being blocked | Bonding, e.g. `carrier: icmp+udp+tcp` | See [Bonding](#bonding). |
+| The filter classifies by outer IP protocol number, UDP port or first header | A shaped carrier, e.g. `carrier: vxlan` | Both ends 3.3.0 and the same name; raw tier needs Linux + root. Wattun-internal shape, not the real protocol. See [Shaped carriers](#shaped-carriers-330). |
 
 If the route cuts TCP in both directions, only ICMP (and reverse ICMP) will work.
 
 ## Carriers
 
-All carriers carry the same encrypted session. Pick one with `carrier:` (or `-carrier`). Only ICMP needs root.
+All carriers carry the same encrypted session. Pick one with `carrier:` (or `-carrier`). Only the raw-socket carriers
+need root: `icmp`, `gre`, `ipip` and the shaped raw tier (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`); the
+other carriers, including the shaped UDP tier, run as an ordinary user. The shaped carriers are described below.
 
 | Carrier | Use it when | Default datagram size | Needs root | Notes |
 |---|---|---|---|---|
@@ -540,7 +571,71 @@ All carriers carry the same encrypted session. Pick one with `carrier:` (or `-ca
 | `fortress` | Blackout mode: `wattun-manager arm-blackout NAME` writes it. | — | yes (includes icmp) | Not a wire protocol: a manager-written alias expanded to `icmp+tcp+tls+wss+udp` with default listeners 80/tcp, 443/tcp, 8443/tcp and 53/udp. |
 
 Rules for every non-ICMP carrier: the client dials `peer` as `host:port`, and the server listens on `listen`
-(default `:4443`). `mtu` is 256 to 1400 for icmp and udp, and up to 16384 for the pool carriers.
+(default `:4443`). `mtu` is 256 to 1400 for icmp, udp, gre and ipip, and up to 16384 for the pool carriers (a bond
+uses its smallest leg's bound). The 3.3.0 shaped carriers have their own, lower ceilings: see "Shaped carriers".
+
+### Shaped carriers (3.3.0)
+
+Thirteen carrier names put a fixed, key-derived header in front of every datagram so a classifier sees the
+datagram of a protocol it knows. They are wattun-internal wire shapes between **two 3.3.0 wattun peers**, not
+implementations of those protocols: no inner packet is produced or parsed and a real peer of that protocol will not
+talk to them. Both ends must run 3.3.0, select the same carrier name and share the key; a datagram whose key-derived
+fields do not match is dropped, so a third party speaking the same protocol number cannot inject into the session.
+
+**Raw tier** (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`) — one raw-IP socket per IP protocol, a bare-IP
+`peer` like `icmp`/`gre`, no `listen` and no `-listen-NAME`, no `-reverse`, one session (`-sessions` > 1 is
+rejected), Linux + CAP_NET_RAW on both ends. The MTU is 1400 minus the shape's header.
+
+| Carrier | Outer IP protocol | Header on the wire |
+|---|---|---|
+| `sit` | 41 | 40-byte inner IPv6 header (6in4-like) with ULA `fc00::/7` addresses |
+| `6to4` | 41 | 40-byte inner IPv6 header with the `2002:V4ADDR::/48` prefix |
+| `xfrm-ipsec` | 50 (ESP) | 8-byte ESP header: key-derived SPI + sequence counter |
+| `etherip` | 97 | 2-byte EtherIP header + 14-byte Ethernet header |
+| `l2tpv3` | 115 | 4-byte L2TPv3-style session header with a key-derived session id |
+
+**UDP tier** — the ordinary `udp` carrier with one fixed header per datagram. The client dials `peer` as
+`host[:port]`, the server listens on `listen` (`host[:port]`); a bare host uses the protocol's conventional port
+below, and an explicit port in the address wins. `-reverse` and `-sessions` > 1 are rejected.
+
+| Carrier | UDP port | Header on the wire |
+|---|---|---|
+| `fou-gre` | 5555 | 8-byte GRE header with a key + protocol `0x0800` |
+| `gue-ipip` | 6080 | 8-byte GUE-like header (v1, proto `0x0800`, includes a 4-byte key) |
+| `vxlan` | 4789 | 8-byte VXLAN header with the I flag + 24-bit VNI |
+| `geneve` | 6081 | 8-byte Geneve base header (proto `0x6558`) + 24-bit VNI |
+| `dnscrypt-udp` | 443 | 11-byte key magic + version + length, then zero padding to a multiple of 64 (256 B minimum) |
+| `ntp-direct` | 123 | 48-byte NTPv4 header (mode 3 from the client, 4 from the server) + key reference id |
+| `openvpn-dco` | 1194 | 4-byte OpenVPN P_DATA_V2-like opcode/key id + key-derived 3-byte peer id |
+| `srtp-direct` | 5004 | 12-byte RTP header (V2, payload type 96, sequence + timestamp, key-derived SSRC) |
+
+These names are not real protocols and do not add secrecy: they only change the outer bytes a middlebox inspects,
+for filters that classify by protocol number, port or first header. In particular they are **not** IPsec, 6in4,
+EtherIP, L2TPv3, VXLAN, Geneve, FOu, GUE, DNSCrypt, NTP, OpenVPN DCO or SRTP interoperable. `udp-dns` is ignored on a
+shaped carrier (the shape owns the datagram prefix). A shaped carrier is **single-carrier only in 3.3.0**: the engine
+refuses a `+` bond that contains one (exit code 2), and the manager refuses the same list, because each shape derives
+its own header and the UDP tier its own conventional port. `shape-data` is ignored on bonded tunnels.
+
+**Cost (loopback bench).** Repeated `go test -run xxx -bench 'ShapedUDP' -benchtime 2s ./wat/` runs put the shaped
+versions 0.3-4.5 % below plain `udp`; one short run scatters much more (about -13 % to +9 % between runs), so read a
+single-row number as noise, not a per-shape ranking. There is no live filtered-pair bench for these carriers yet.
+
+**Manager support (3.3.0).** The manager can create and run these carriers from its unattended Kharej path
+(`wattun kharej --carrier NAME ...`, one shaped carrier at a time), from the interactive Kharej picker's **More
+transports (advanced)…** branch, and from a shaped token pasted on Iran (the Iran wizard, or **t** New token). Before
+writing a config it checks that the local binary is 3.3.0+, refuses the raw tier on a non-Linux host, warns about
+root/CAP_NET_RAW and about allowing the raw tier's IP protocols in the cloud firewalls (41 for `sit` and `6to4`, 50
+for `xfrm-ipsec`, 97 for `etherip`, 115 for `l2tpv3`), and for the UDP tier writes and opens the conventional port
+unless `--listen` gives another. It refuses a `+` bond that contains a shaped carrier, matching the engine. Change
+peer takes a bare host for the raw tier and `host:port` for the UDP tier.
+
+**Manager limits.** Where the type is shown (change connection type) the manager repeats the not-real warning but
+offers no picker: Kharej fixed the type, and Iran changes it by pasting a new token, which may be shaped. `sessions`
+above 1 is refused, the connection test skips the TCP probe for a shaped leg, and Auto mode reaches the shapes only
+through the opt-in extended mode (each one gets its own hidden single-carrier Kharej unit; see "Auto mode"). The MTU
+ceiling is per shape (1400 minus the header), and an explicit `-mtu` above it is clamped with a log line: raw tier
+`sit`/`6to4` 1360, `xfrm-ipsec` 1392, `etherip` 1384, `l2tpv3` 1396; UDP tier `dnscrypt-udp` 1326, `ntp-direct` 1352,
+`srtp-direct` 1388, `fou-gre`/`gue-ipip`/`vxlan`/`geneve` 1392, `openvpn-dco` 1396.
 
 ### Fake-SNI desync (`fake-sni`, 2.6.0)
 
@@ -725,6 +820,37 @@ ports:
   - 443
 ```
 
+### Bond auto-retest (3.3.0)
+
+A censor can block one leg of a bond for hours and clear it later; the bond keeps working on its remaining legs, so
+the blocked leg is only re-dialed forever unless something tries it again. On Iran, a bonded tunnel (`carrier` with
+`+`) can re-test its legs on a schedule and add one back when it works again. This is a manager feature, no engine
+flag: the tunnel page's **auto-retest** row (bonded Iran tunnels only) writes `/etc/wattun/NAME.bondretest`, never
+the YAML (the engine rejects unknown keys).
+
+| Value | Runs |
+|---|---|
+| `off` (default) | no timer |
+| `30m`, `1h`, `6h` | every 30 minutes, 1 hour or 6 hours (systemd timer; first run 5 minutes after boot, ±60 s jitter) |
+| `daily-offpeak` | once a day at 04:15, ±5 minutes |
+
+`wattun-manager bond-retest NAME` runs it now. What a run does:
+
+- Probes every leg currently in the bond, every carrier the auto plan left out (an auto token names them), and the
+  carriers that failed last time (kept in `/etc/wattun/NAME.bondfail`), with throw-away clients carrying the
+  tunnel's key and settings; the live tunnel is untouched until something is added.
+- **Never removes a leg.** A leg that fails is reported and stays in the bond. A carrier that works again is added
+  only when no leg of the bond works at all, or when it reaches 10 % of the best working leg's throughput, so a
+  barely-alive path does not enlarge the bond. Adding one rewrites `carrier:` and restarts the tunnel, so open
+  connections drop for a few seconds.
+- Moves test traffic: 1 MB each way per probed carrier, budgeted by `bondretest-budget` (`.manager.conf`, MB per
+  run, default 20). When more carriers are queued than the budget fits, the rest wait for the next run.
+- Writes its decisions to the journal (`logger -t wattun-bondretest`): which leg failed, which works now, what was
+  added, and the total traffic spent.
+
+Limits: Iran side only (the side that dials the bond), and not a reverse bond (Kharej is the dialing side there).
+Setting the value to `off`, or deleting the tunnel, removes the timer.
+
 ### Fake-SNI field test (2.10.12)
 
 Measured on 2026-10-25 between the owner's Iran server (185.84.158.216) and Kharej (185.71.219.227), binary 2.10.12,
@@ -835,6 +961,112 @@ offers probe resistance and obfuscation layers. obfs4 pads its handshake to a ra
 Iran's national filter is a protocol whitelist (DNS, HTTP/80, HTTPS/443 pass; the rest is dropped) and resets TLS to
 blocked SNIs after the ClientHello (FOCI 2020, arXiv 2507.14183). That is why `tcp-mimic` copies the ClientHello shape
 and the header mask removes the constant bytes. None of this is proven to be what restricted a given VPS.
+
+### Stream padding and idle noise (3.3.0)
+
+Two opt-in knobs change WatTunnel's own traffic beyond the 3.0.0 defaults. Both are off by default and spend real
+bandwidth: they count against the host's traffic bill and the session's `max-mbps` ceiling, and they appear in the
+session totals (`bytes_out`, `bytes_out_total`). The per-port counters, rate limits and per-port quotas keep counting
+forwarded payload only.
+
+- `shape-data PCT` (0-25, default 0): pads packets that carry stream data to a randomized realistic total size (small
+  100-300 B, medium 500-900 B, or near the path MTU), so a size classifier sees a spread instead of the
+  request/response pattern. The padding is budgeted as a percent of the stream bytes actually sent, plus a 4 KB bank
+  so a small interactive packet can spend the allowance earlier bulk traffic earned; the budget is never exceeded
+  (total padding <= the configured percent plus the bank). Bulk traffic is already full and pays almost nothing
+  (in-process benchmark: under 0.004 % padded bytes); a small request/response flow pays up to the configured percent.
+  The padding is an `frPad2` frame, always the last frame of a packet, so an older peer stops at the unknown type
+  byte and loses nothing. Ignored on bonded carriers (a bond sizes every packet for the path it takes).
+- `noise MODE` (`off` default; `low` 128 B/s, `med` 1024 B/s, `custom` with `noise-bps` 64-1,000,000 B/s): while the
+  session has had no user data in either direction for about two keepalives, sends filler packets of random size
+  (64 B up to about the per-second budget) at jittered intervals. `noise-window HH:MM-HH:MM` (local clock, may cross
+  midnight; empty = all day) limits it to an off-peak window; `noise-window` without `noise` is ignored with a
+  warning. Noise spends pacer tokens, so it cannot burst past the session ceiling, and it is never acked,
+  retransmitted or in flight; the keepalive cadence is unchanged. Budget: `low` is about 128 B/s (~11 MB/day),
+  `med` about 1 KB/s (~88 MB/day) of real traffic, **per session** (see below).
+
+The noise budget is **per session**, not per tunnel: every session sends its own configured rate, so `-sessions 2`
+doubles the daily bytes and a Kharej serving N clients carries N times that rate. A normal 2-vCPU client defaults to
+two sessions, i.e. about 22 MB/day on `low` and 176 MB/day on `med` in total. The delivered rate tracks the configured
+budget (the pump now wakes at the filler deadline instead of the 100 ms idle tick), and noise alone does not keep the
+10-second stats line printing.
+
+Both count in `/stats` as `shape_data_bytes`, `noise_sent` and `noise_bytes` (see Metrics). Older peers ignore both:
+`frPad2` is the last frame, an unknown frame type ends their parse, and nothing else in the packet changes.
+
+## Spoofing and shaping, explained
+
+The anti-censor options are often lumped together as "obfuscation". They do different jobs, and none of them hides
+everything. Two words separate them here:
+
+- **Spoof** means the censor is shown a second, fake artifact next to the real flow and the peer ignores it
+  (`fake-sni`). The fake carries no session data.
+- **Shape** means WatTunnel's own packets change their bytes, sizes or timing (everything else in the table below,
+  plus the carriers that wrap the session in a real protocol or in a shaped outer header: TLS, WebSocket, HTTP/2,
+  gRPC, DNS, ICMP echo, and the 3.3.0 [shaped carriers](#shaped-carriers-330)).
+- Neither is encryption: the session is already encrypted, and none of this adds secrecy.
+
+`hdr-mask`, `shape` and `tcp-mimic` are on by default; every other line in the table is opt-in. Per-feature detail
+and field caveats stay in the sections each row links to.
+
+| Option (default) | What it actually changes | What it does not hide |
+|---|---|---|
+| `fake-sni` (off; Linux + CAP_NET_RAW, dialing side) | **Spoof.** Injects one raw TLS ClientHello carrying an allowlisted SNI next to each outgoing pool connection. A DPI that reassembles flows without checking the TCP window reads it and marks the flow "TLS to an allowed site"; the server's tunnel never processes it (`seq`: the kernel drops it as an old duplicate; `sum`/`rst`: a bad TCP checksum; `ttl`: it dies before the server; the other modes pick one of these mechanisms or a variant). No server change or update. | That a connection exists, where it goes, and how much it carries — the flow is still the tunnel once classified. It also fails behind a NAT that normalizes sequence numbers or validates checksums before the DPI, and against an allowlist enforced by destination IP. Modes and caveats: [Fake-SNI desync](#fake-sni-desync-whitelisting-survival). |
+| `tcp-mimic` (on; raw `tcp` pool) | **Shape.** Each connection opens with a 517-byte Chrome-shaped TLS 1.3 ClientHello that carries the authentication in its random and session-id fields; the 2-byte frame lengths are XORed with a per-direction ChaCha20 stream. | It is not a TLS session (there is no ServerHello): it defeats "first bytes are not TLS" and fixed-structure checks, not a classifier that waits for a real handshake. The `tls`, `wss`, `h2` and `grpc` carriers already carry everything inside real TLS/HTTP and do not use it. |
+| `hdr-mask` (on) | **Shape.** XORs the 16 header bytes (session id and packet number) with a ChaCha20 keystream keyed from the PSK and seeded by the first 12 bytes of the ciphertext, so no header byte is constant and no counter is in clear. | The payload is already ciphertext; the destination address, the volume and the timing are unchanged. A peer older than 3.0.0 is detected and answered in the plain form. |
+| `shape` (on) | **Shape.** Packets that carry no stream data (acks, keepalives, key exchange) and are shorter than 192 bytes get a random-size `frPad` padding frame (up to 100 bytes); the idle keepalive interval is re-rolled to 60-140 % of `ping-every`. | Packets that carry stream data are not padded, so sizes and timing under load are unchanged. It reshapes idle and tail traffic only. |
+| `shape-data` (0 = off) | **Shape.** Pads packets that carry stream data to randomized realistic total sizes, bounded by a budget of the configured percent of stream bytes (plus a 4 KB bank); 3.3.0, see [Stream padding and idle noise](#stream-padding-and-idle-noise-330). | Packets already near the MTU are not padded, so bulk traffic is essentially unchanged (under 0.004 % padded bytes in the in-process benchmark). It spends bandwidth: up to the configured percent of stream bytes (0-25 %), counted in the session totals but not in the per-port counters or quotas. |
+| `noise` (off) | **Shape.** While the session is idle (about two keepalives with no user data), sends random-size filler packets at 128 B/s (`low`), 1024 B/s (`med`) or a custom byte rate, optionally only inside a local-clock window; never acked, retransmitted or in flight. | Nothing beyond idle traffic: it spends real bandwidth (~11 MB/day on `low`, ~88 MB/day on `med`, per session), counts against the session `max-mbps` ceiling and the session totals, and stops while the tunnel is busy. Per-port counters and quotas stay payload-only. |
+| `tls-frag` (0 = off; `tls`, `wss`, `h2`, `grpc`) | **Shape.** Writes the TLS ClientHello as N-byte TCP segments with a short gap between them; `-1` cuts directly inside the SNI extension, so no segment carries the complete `server_name`. | A DPI that reassembles the TCP stream before it classifies still reads the whole hello; it defeats per-segment parsing only, and changes nothing else about the flow. |
+| `ech` (off; TLS carriers) | **Shape.** Real Encrypted Client Hello (standard TLS): the SNI is hidden under the destination's ECHConfig, fetched over DoH by IP (or through the tunnel's own DNS relay with `ladder`), so an on-path observer sees only the public outer name. | The destination IP, that a TLS/ECH handshake happened, and volume/timing. It needs a destination that publishes ECH (a Cloudflare-proxied domain) and does nothing on carriers that are not TLS (`ws`, `h2c`, `udp`, `icmp`). |
+| `udp-dns` (off; `udp` carrier) | **Shape.** Every datagram is prefixed with a DNS header and one fresh random question (the client looks like a recursive query, the server like an empty NOERROR answer), costing 26-37 bytes. | That this is a sustained UDP conversation to one server: a 1400-byte DNS exchange at tens of MB/s is not ordinary DNS. Both ends must enable it, and it helps only where the filter passes DNS-shaped UDP, normally on port 53. See [DNS-shaped udp](#dns-shaped-udp-udp-dns-300). |
+| `pool-rotate` (0 = off; dialing side) | **Shape.** Recycles each healthy pool connection on a jittered budget (±40 % in time, ±25 % in bytes, re-rolled on every recycle), so no single flow shows a stable lifetime; the session resends anything in flight, so the cost is one redial at a time. | Aggregate volume and timing, the destination, and how many connections exist over time. It hides only the lifetime of one connection. |
+| `fec` (off) | **Robustness, not camouflage.** Adaptive XOR parity over small packets, so one lost packet in a group is rebuilt instead of waiting for a PTO; k adapts from 4 to 16 with the measured loss, and full-size packets are never covered. | Nothing about identity, size or timing: it is for a lossy path, not for a classifier, and it adds packets (under 5 % in bulk) instead of removing a signal. Both ends must set `fec: auto`. |
+| `governor` (off; ICMP) | **Pacing, not camouflage.** Learns the highest rate that did not trigger the path's reroute signature (a base-RTT jump) and holds the delay pacer under it. | Nothing: it hides nothing, it keeps the ICMP volume below a limit that would reroute the path. It is an opt-in experiment, not field-validated. See [ICMP path limits](#icmp-path-limits-and-pacing). |
+
+**How to choose.** Match the option to the check that is killing the flows, not to a general idea of "harder":
+
+| What the censor does | What to try |
+|---|---|
+| Cuts every flow unless the TLS ClientHello carries an allowlisted SNI | `fake-sni` (default `seq` mode; `rst` where a stateful filter clears the flow — the field result), with the carrier's real `sni` set to the same allowed name and `fp: chrome`. |
+| Lets the handshake through, then resets or black-holes by SNI | `ech` (`auto`, or `ladder` when DoH is blocked) on `wss`/`grpc` through a Cloudflare-proxied domain. |
+| Drops large ClientHellos (the hello stalls in `Send-Q`) | `tls-small-ch: true` (~250 B instead of ~1.5 KB). |
+| Flags "first bytes are not TLS" or a fixed header structure | `tcp-mimic` and `hdr-mask` (both on by default), or move to a real-TLS carrier (`tls`/`wss`). |
+| Cuts every UDP flow after a few datagrams, but passes DNS on 53 | `udp-dns: true` on both ends, carrier `udp`, server on port 53. |
+| Keeps per-flow state and reclassifies or clears it on RST | `fake-mode: rst` or `synrst`; `pool-rotate` for long-lived flows. |
+| Watches connection lifetime or bytes per flow | `pool-rotate` and/or `pool-rotate-bytes`. |
+| Reroutes or rate-limits sustained ICMP volume | `governor` plus a total `max-mbps` of about 30 or less per ICMP path; raise `mtu` only after proving the path passes it. |
+| Loss (not filtering) hurts small request/response traffic | `fec: auto` on both ends. |
+| Allowlists by destination IP only | The real destination must still pass the filter: `fake-mode: fakeip` only names a whitelisted CDN IP in the injected marker, and no shipped option changes where the real flow goes. |
+| Classifies by outer IP protocol number, UDP port or first header | One of the 3.3.0 [shaped carriers](#shaped-carriers-330) (both ends 3.3.0, same name; the raw tier needs Linux + CAP_NET_RAW). The shape is a wattun-internal envelope, not interoperability with the real protocol. |
+
+If you do not know which check is killing the tunnel, measure instead of guessing: `wattun matrix NAME` tries the
+combinations from the Iran server and applies the best one, and `wattun blackout NAME [SNI]` writes the desync preset
+(see [Fake-SNI desync](#fake-sni-desync-whitelisting-survival)).
+
+**What none of them hide.** Whatever combination runs, these stay visible; plan for them instead of around them:
+
+- **The destination and the flow's existence.** The server's address, which side started the connection, and the fact
+  that a long-lived, high-volume flow to one foreign address exists (`reverse` only changes which side starts it).
+- **Volume and timing under load.** Padding reshapes idle packets (and, since 3.3.0, `shape-data` spreads data-packet
+  sizes), but masked headers and fragmented hellos do not change how many bytes move or when. A CDN carrier (Cloudflare)
+  changes the visibly contacted peer; the options above do not.
+- **The `icmp` carrier's echo structure.** No shipped option changes it: on a route where only ping passes, the tunnel
+  looks like ping traffic by construction.
+- **The forwarded content between your users and the Iran server.** WatTunnel encrypts the Iran ↔ Kharej leg only.
+- **That the payload is not what the envelope implies.** Behind the DNS prefix or the TLS-shaped hello the bytes are
+  a WatTunnel session, not a DNS message or a real application's traffic; a classifier that can see past the envelope,
+  or blacklists traffic by end-to-end behaviour, still sees a tunnel.
+
+**What is not shipped: tunnel-level spoofing.** There is no option that makes WatTunnel look like another tunnel or
+tool end to end. There is no VLESS, Shadowsocks, Trojan, Hysteria or WireGuard mimicry, no faked application session,
+and no forged handshake that is completed on purpose: the `fake-sni` ClientHello is designed to be dropped by the peer,
+and `tcp-mimic` never completes a TLS handshake. The shipped envelopes (ICMP echo, UDP, TCP, real TLS, WebSocket,
+HTTP/2, gRPC, DNS-prefixed UDP, and the 3.3.0 shaped raw/UDP tiers) are shapes around WatTunnel's own encrypted
+packets, and the HTTP listeners answer a probe with the stock nginx page rather than a tunnel banner. If a filter's
+rule is "only a flow that completes a real session to an allowed site passes", or it blacklists by end-to-end
+behaviour, no option here satisfies it: use a CDN path with a real protocol inside, or a tool designed for that
+requirement.
 
 ## Reverse mode
 
@@ -1031,9 +1263,13 @@ what a DNS-only whitelist lets through; it does not hide that a very busy UDP 53
 | `icmp` | yes | yes | direct: any; reverse: 2.0.0 |
 | `udp` | yes | yes | direct: any; reverse: 3.0.0 |
 | `tcp`, `tls`, `ws`, `wss`, `h2`, `h2c`, `grpc` | yes | yes | direct: 1.3.0; reverse: 1.8.0 |
+| `gre`, `ipip` | yes | no | 3.2.0 (Linux + root) |
+| shaped raw tier (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`) | yes | no | 3.3.0 (Linux + root) |
+| shaped UDP tier (`fou-gre`, `gue-ipip`, `vxlan`, `geneve`, `dnscrypt-udp`, `ntp-direct`, `openvpn-dco`, `srtp-direct`) | yes | no | 3.3.0 |
 
 The reverse pool carriers are in the first release of this repository's history (1.8.0). An earlier release may
-have had them too; this table says 1.8.0 because that is the oldest one that can be checked.
+have had them too; this table says 1.8.0 because that is the oldest one that can be checked. The `gre`/`ipip` and
+shaped carriers are direct only: the server answers the source address a session authenticated from.
 
 ## Auto mode
 
@@ -1053,14 +1289,17 @@ on every carrier, and prints one token.
 | `h2` | 2087 |
 | `h2c` | 2082 |
 | `grpc` | 2083 |
-| `icmp` | none |
+| `icmp`, `gre`, `ipip` | none |
 
-A port that is already taken moves to a free fallback; the real ports are in the token.
+A port that is already taken moves to a free fallback; the real ports are in the token. `gre`/`ipip` arrived in
+3.2.0 and are raw-IP carriers with no listen port; the plan carries them as bare names.
 
 **Token.** `wat1:` + base64 of `carrier|peer|key|path|sni|icmp-type|allowed-ports|reverse|plan`. Field 9 (`plan`) looks
-like `d=udp:4443,tcp:4443,...;r=tcp:24431,tls:24432,ws:24433,wss:24434,h2:24435,h2c:24436,grpc:24437`. `d` is the
-Kharej listen port per carrier. `r` is the port Iran listens on for each reverse test. Tokens with 7 or 8 fields (older
-managers, non-auto tunnels) still work.
+like `d=udp:4443,tcp:4443,...,gre,ipip;r=tcp:24431,tls:24432,ws:24433,wss:24434,h2:24435,h2c:24436,grpc:24437`.
+`d` is the Kharej listen port per carrier; a raw-IP carrier with no listen port (`icmp`, `gre`, `ipip`, and the raw
+shaped carriers) is a bare name in the list. `r` is the port Iran listens on for each reverse test. Tokens with 7 or 8
+fields (older managers, non-auto tunnels) still work. An extended token appends `;e=1`, which older managers and
+`plan_part` ignore.
 
 **Reverse side.** A transient unit `wattun-autowatch-NAME` (`systemd-run`, 1 hour at most) polls the Kharej tunnel's
 `/stats` `clients` list. When Iran's first test client connects, it learns Iran's IP and writes and starts a companion
@@ -1070,16 +1309,18 @@ Kharej: `wattun auto-ip NAME IRAN_IP`. `NAME-r` appears on the dashboard as the 
 its ports and key, and is deleted with it.
 
 **Iran test.** Pasting an auto token runs the test (re-run later with `wattun auto-test NAME`). Phases: direct,
-then CDN (if a domain was given), then reverse. Each variant is a throw-away client with its own `/speedtest`
-(2 MB down + up). Since 2.1.1 the reverse variants are started all at once and get up to 45 s to connect (Kharej's
-reverse dialer backoff made most of them fail with "no link in 8 s" before). Nothing is published; temp files are in `/run/wattun-auto`. Reverse test ports are opened in the
+then CDN (if a domain was given), then reverse. Each variant is a throw-away client that runs its own `/speedtest`
+(screening: an 8 MB probe each way with 8 streams, grown to 16 MB when the measured rate would move it in under
+1.5 s). Since 2.1.1 the reverse variants are started all at once and get up to 45 s to
+connect (Kharej's reverse dialer backoff made most of them fail with "no link in 8 s" before). Nothing is published;
+temp files are in `/run/wattun-auto`. Reverse test ports are opened in the
 firewall only during their probe. Since 2.1.1 the manager opens ufw/firewalld ports without a confirm, Kharej does not
 ask which ports Iran may reach (all are allowed; restrict later in the port editor), and Iran enables auto-heal by
 itself (off: `wattun` → `s` → `h`). The table is ranked by download plus upload (ties: lower RTT) and accepts Enter (best), `b` (bond the working carriers), `1`-`N`
 (one variant) and `q`. The normal wizard continues at port mapping. The token is saved in `/etc/wattun/NAME.auto`.
 
 **Test presets (3.0.2).** Before the test starts the manager asks what to test. *Normal* (Enter) is the test above, without anti-censor
-variants, about 2-3 minutes. *Anti-censor* (`a`) adds, for every direct pool carrier of the plan (tcp, tls, wss, h2, grpc, ws, h2c): all fake-SNI
+variants; its worst-case traffic and a rough time are printed before it starts (see "Bandwidth of the test"). *Anti-censor* (`a`) adds, for every direct pool carrier of the plan (tcp, tls, wss, h2, grpc, ws, h2c): all fake-SNI
 modes (`rst synrst paws seq seqsum sum ttl split hlen0 fakeip ff all auto`) with the first curated SNI, `rst`/`synrst`/`paws` against the other
 curated SNIs and `www.cloudflare.com`, and on the TLS carriers `tls-frag` -1 and 40, the chrome/firefox/safari fingerprints and chrome+ECH when a CDN
 domain is set (about 195 variants for a full plan, 30-60 minutes). Reverse tunnels have no anti-censor variants here: the desync runs on the dialing
@@ -1089,27 +1330,96 @@ An anti-censor variant has to beat the plain type by 8 % to rank above it, canno
 `fake-mode`, `fp`, `ech` and `tls-frag` lines. Unattended runs (`wattun iran --token ... --yes`, `auto-test NAME --yes`) use `--test normal|anti`
 (default normal); `auto-retest` and auto-heal always run normal.
 
-**Auto-heal.** After two failed restart cycles on an auto tunnel, `wattun-manager heal` starts a re-test (1 MB, at most
-once per 30 minutes). It switches to another working variant only when the current one fails, and logs
-`wattun-heal: switched NAME from X to Y`.
+**Auto-heal.** After two failed restart cycles on an auto tunnel, `wattun-manager heal` starts a re-test (a normal
+screening run, at most once per 30 minutes). It switches to another working variant only when the current one fails,
+and logs `wattun-heal: switched NAME from X to Y`.
 
-**Bandwidth of the test.** The Iran test moves real data. Each working variant is screened with 8 MB down and 8 MB up
-(16 MB), then the top 3 are measured again with 20 MB each way (120 MB in all). There are at most 17 variants (19 with a
-CDN domain): icmp, udp, tcp, tls, wss, h2, grpc, ws, h2c, icmp reverse and 7 reverse pool carriers. A variant that does
-not connect sends almost nothing. Worst case, when everything works, is about 400 MB in total (about 200 MB each way, on
-both servers); on a filtered route where few carriers connect, expect 50 to 150 MB. Re-tests by auto-heal or the off-peak
-optimizer use 1 MB each way per variant (about 35 MB when all variants work), and auto-heal runs one at most every 30
-minutes, only after the tunnel failed. If your server is billed by traffic, pick a fixed carrier instead of Auto.
+**Test methodology (3.3.0).** Measurement is duration-based, not a fixed size, so slow start cannot decide the winner.
+Screening runs a throw-away client per variant with 8 streams: the probe starts at 8 MB each way and moves to 16 MB
+(the cap) when the measured rate would finish it in under 1.5 s. The top 3 are then measured again with 16 streams
+and a sustained run sized to at least 1.5 s each way at their screening rate, clamped to 20-40 MB each way. A
+finalist that fails the longer run keeps its screening numbers. The table is ranked by download plus upload.
 
-**After Iran has picked.** The Kharej auto tunnel is the real server for the carrier Iran chose, so it is not deleted. It
-keeps every carrier port open so that Iran's test and auto-heal can reach any of them. Once Iran runs on its pick, close
-the rest: tunnel page, `u`, or `wattun-manager auto-narrow NAME [--yes]`. It reads which carriers have a live Iran
-session (`/stats` `clients` on `NAME`, alive `carriers` on `NAME-r`), rewrites the carrier list, restarts the tunnel for a
-moment, closes the firewall ports no longer needed, and stops `NAME` or `NAME-r` when nothing of it is in use (the token
-and config stay). Auto-heal on Iran can then only switch between carriers that stay open. `wattun-manager auto-widen NAME`
-opens all of them again. The tunnel card shows "Iran uses ..." and how many carriers are still open.
+**Extended transports (3.3.0, opt-in).** The Kharej wizard asks once whether to also test the 13 shaped carriers
+(unattended `--extended`); the question and the flag are offered only when the local engine is 3.3.0. Because the
+engine refuses a shaped leg inside the auto bond, extended creates one hidden single-carrier server unit per shape
+(`NAME-e-<shape>`, shared `NAME.key`, own metrics port; `listen` only for the eight UDP shapes, conventional port or a
+free fallback recorded in the plan; the five raw shapes have no listen/peer) and appends the shapes to the plan. Iran
+tests them like any other direct variant (a bare peer for the raw tier, `addr:port` for the UDP tier) and can pick one;
+an extended plan needs 3.3.0 on **both** ends, and the raw tier needs Linux + root/CAP_NET_RAW plus the cloud firewall
+allowing protocols 41/50/97/115. Anti-censor still adds variants only for the direct pool carriers (the shapes have no
+desync layer); there are no reverse or count-based tuning variants for them. The extended listeners are hidden from the
+tunnel list but follow the parent's life: heal restarts a down one, delete/uninstall remove them, the default
+reverse-side prune keeps the shape Iran picked and stops the rest, and `auto-widen` / `auto-prune NAME --direct`
+re-enable them for a retest (a normal Auto test can also re-test them). An older Iran ignores their plan entries; their
+Kharej ports then stay open until that prune/manual close — that trade is why extended is opt-in.
 
-**Costs and limits.** Several ports are open on Kharej at once. The test takes about 2 to 3 minutes. Kharej must be
+**Auto tuning (3.3.0).** After the type (or the bond) is chosen, the manager tries the settings that change its speed,
+one setting at a time, starting from the engine auto values and keeping a value only when it beats the best so far by
+more than 10 % (one run is noisy). Probes are fixed at 20 MB each way, and the grid is reduced to the two knobs with
+field evidence:
+
+| What is tuned | Values tried |
+|---|---|
+| `icmp` | nothing (a raw-IP carrier has no `sessions`/`conns` to tune) |
+| `udp` | `sessions` 1/2/4 |
+| `tcp`, `tls`, `ws`, `wss`, `h2`, `h2c`, `grpc` | `sessions` 1/2/4/8/16, `conns` 4/8/32/64 |
+| reverse | `conns` 4/8/32 |
+| bond (datagram or pool legs) | `conns` 4/8/32/64 |
+
+`sessions` is never tuned on a bond or a reverse tunnel (the engine refuses it there), and `max-mbps`/`fec` are not
+tuned (`icmp` keeps its 16 MB/s reroute guard, and `fec: auto` must match on Kharej). `mtu`, `win-max`, `batch` and
+`loss-ceiling` are no longer probed: their effect on the test pair sat inside the run-to-run noise. A value given on
+the command line (`--sessions`, `--conns`, `--mtu`) or in a preset wins over the tuner. The manager reports the
+traffic the tuning moved afterwards: 20 MB each way per probe, so up to about 400 MB for the widest (pool) grid,
+160 MB for `udp` or a reverse tunnel and 200 MB for a bond. The unattended re-test by auto-heal does not tune.
+
+**Bandwidth of the test.** The Iran test moves real data, and the printed budget now counts all three phases. Screening
+starts at 8 MB each way per variant and grows to 16 MB when the rate calls for it, so a normal plan (17 variants: 9
+direct + 8 reverse; 19 with a CDN domain) has a worst case of 544 MB (17 × 2 × 16). The 3 finalists add up to 240 MB
+(3 × 2 × 40), and tuning adds up to 400 MB (10 probes, baseline included, × 2 × 20 MB). The manager prints that total
+before an interactive test: `Budget: up to 1184 MB, about 3 min` for a normal plan (1248 MB with a CDN domain); the
+minutes assume a conservative 8 MB/s aggregate, so a fast link finishes sooner and a slow route later, while the MB
+figure is the exact cap. A variant that does not connect sends almost nothing, so on a filtered route where few
+carriers connect expect far less. The anti-censor preset moves more because it tries about 195 variants. An extended
+token adds up to 13 shaped-carrier variants to the screening phase (about 416 MB extra worst case at 16 MB each way);
+the printed variant count and budget include them, and an Iran that cannot run them skips them before counting. Re-tests by
+auto-heal or the off-peak optimizer run the screening phase (8-16 MB each way per connecting variant; up to 544 MB for
+a normal plan if every variant connects); auto-heal runs one at most every 30 minutes and only after the tunnel
+failed. If your server is billed by traffic, pick a fixed carrier instead of Auto.
+
+**After Iran has picked.** The Kharej auto tunnel is the real server for the carrier Iran chose, so it is never
+deleted. It keeps every carrier port open so that Iran's test and auto-heal can reach any of them — which is attack
+surface once Iran has picked. Since 3.3.0 the heal pass closes what is provably unused by itself, and the default
+scope is deliberately the **reverse side only**: it stops the stale `wattun-autowatch` helper and, once Iran's pick
+has been stable for `autoprune` minutes (`.manager.conf`, default 12, `0` = off), stops `NAME-r` when no reverse
+carrier is alive or narrows `NAME-r` to the reverse carriers that are. The direct `carrier:` list is **not** rewritten
+by default, because the engine reports one carrier per session and cannot tell a bonded Iran client from a single
+leg. Full direct-side narrowing stays available but is opt-in: `.manager.conf autoprune-direct=1`, or
+`wattun-manager auto-prune NAME --direct` (the old `auto-narrow`, both sides). A changed pick restarts the window, so
+a flapping selection is never pruned. Configs and tokens always stay, and `auto-widen` brings everything back. Hidden
+extended listeners follow the same rule: the default pass keeps the shape Iran picked and stops the unused ones;
+`auto-widen` / `auto-prune --direct` re-enable them.
+
+The pass runs inside `heal`. The manager installs the heal timer where it is needed: the auto Kharej wizard and
+`auto-ip` install it, and any later manager run does the same for an existing auto Kharej tunnel, so a Kharej-only
+server is cleaned up without operator action. `wattun-manager heal` triggers one pass by hand.
+
+**Widen safety net (3.3.0).** A pruned tunnel keeps only the carriers Iran used, so if that carrier is blocked there
+is nothing left to fail over to. When the heal pass sees a pruned auto tunnel with no working open carrier for 3
+consecutive checks, it reopens the full token plan (`auto-widen`) and logs
+`wattun-auto: ... reopening the whole plan`. It does so at most once per `autowiden` minutes (`.manager.conf`, default
+10; `0` disables the automatic widen), and a reopen starts a fresh stable-selection window, so the tunnel narrows again
+after a new stable pick. Manual control is always available: `wattun-manager auto-narrow NAME` closes every unused
+carrier now (both sides); `wattun-manager auto-prune NAME --keep-open` opts one tunnel out of both automatic passes (every carrier stays
+open), `--auto` turns them back on, `--direct` opts into direct-side narrowing and `--reverse-only` returns to the
+default; `wattun-manager auto-widen NAME` opens every carrier of the token's plan again.
+`auto-narrow` reads which carriers have a live Iran session (`/stats` `clients` on `NAME`, alive `carriers` on
+`NAME-r`). The tunnel card shows "Iran uses ..." and how many carriers are still open.
+
+**Costs and limits.** Several ports are open on Kharej at once until the default reverse-side cleanup (or a manual
+`auto-narrow`) closes them. An interactive test prints its worst-case traffic and a rough time before it starts.
+Kharej must be
 2.1.0 or newer (the `clients` field and the reverse dial backoff). The wire format did not change, so 2.1.0 peers work
 with 2.0.x ones for normal tunnels.
 
@@ -1272,24 +1582,28 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `mode` | (required) | both | `client` or `server`. |
 | `key` | | both | Pre-shared key. Prefer `key-file`. |
 | `key-file` | | both | File with the key (whitespace trimmed). Same on both ends. |
-| `carrier` | `icmp` | both | One of the carriers above, or several joined with `+` (see Bonding). |
-| `peer-NAME`, `listen-NAME` | = `peer`, `listen` | client / server | Bonded carriers only: per-carrier address (`peer-udp`, `listen-tcp`, ...). |
-| `peer` | | client (server with `reverse`) | icmp, udp: server IP. Others: `host:port`. Reverse pool carriers: Kharej sets Iran's `IP:port`. Reverse icmp: Kharej sets Iran's IP, Iran keeps Kharej's. |
-| `listen` | `:4443` | server (client with `reverse`) | Address for non-ICMP carriers. With `reverse` Iran listens here and Kharej's `peer` must point to it. |
-| `reverse` | false | both | Swap who listens and who dials. With `icmp` (2.0.0): Kharej sends the requests, Iran replies. With `udp` (3.0.0): Iran binds `listen` and only answers, Kharej punches to `peer`. |
+| `carrier` | `icmp` | both | One of the carriers above (including the 3.3.0 [shaped carriers](#shaped-carriers-330)), or several joined with `+` (see Bonding). A shaped carrier must be alone: a `+` list that contains one stops startup. |
+| `peer-NAME`, `listen-NAME` | = `peer`, `listen` | client / server | Bonded carriers only: per-carrier address (`peer-udp`, `listen-tcp`, ...). A shaped raw-tier carrier has no `listen-NAME`. |
+| `peer` | | client (server with `reverse`) | icmp, udp: server IP. Pool carriers: `host:port`. Shaped raw tier: the server's bare IP (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`). Shaped UDP tier: `host[:port]`, a bare host using the protocol's conventional port. Reverse pool carriers: Kharej sets Iran's `IP:port`. Reverse icmp: Kharej sets Iran's IP, Iran keeps Kharej's. |
+| `listen` | `:4443` | server (client with `reverse`) | Address for non-ICMP carriers. With `reverse` Iran listens here and Kharej's `peer` must point to it. A shaped UDP-tier carrier defaults to the protocol's conventional port instead of `:4443`; the shaped raw tier has no `listen`. |
+| `reverse` | false | both | Swap who listens and who dials. With `icmp` (2.0.0): Kharej sends the requests, Iran replies. With `udp` (3.0.0): Iran binds `listen` and only answers, Kharej punches to `peer`. Not supported on the 3.3.0 shaped carriers (or `gre`/`ipip`). |
 | `hdr-mask` | true | both | Mask the session id and packet number at the start of every packet (3.0.0). An older peer is detected and answered plain; `false` sends the plain header. |
 | `tcp-mimic` | true | both | tcp carrier: open each connection with a TLS ClientHello-shaped hello (SNI `fake-sni`) that carries the auth, and mask the 2-byte lengths (3.0.0). An older peer is detected after 6 s and answered with the plain pool id; `false` sends the plain id. |
-| `udp-dns` | false | both | udp carrier: start every datagram with a DNS header and question (3.0.0), for routes that pass only DNS-looking UDP on port 53. Both ends must set it. See "DNS-shaped udp". |
+| `udp-dns` | false | both | udp carrier: start every datagram with a DNS header and question (3.0.0), for routes that pass only DNS-looking UDP on port 53. Both ends must set it. Ignored on a shaped carrier (the shape owns the datagram prefix). See "DNS-shaped udp". |
 | `shape` | true | both | Pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval (3.0.0). Compatible with older peers. |
+| `shape-data` | 0 (off) | both (3.3.0) | Pad packets that carry stream data to randomized realistic sizes, spending at most this percent (0-25) of the stream bytes sent (plus a 4 KB bank). Spends real bandwidth; ignored on bonded carriers. See "Stream padding and idle noise". |
+| `noise` | off | both (3.3.0) | Idle filler traffic, **per session**: `off`, `low` (128 B/s, ~11 MB/day), `med` (1024 B/s, ~88 MB/day) or `custom` with `noise-bps`. Sent only while the session has no user data for about two keepalives, jittered, never acked. `-sessions 2` doubles it; each Kharej client's session sends its own. See "Stream padding and idle noise". |
+| `noise-bps` | 0 | both (3.3.0) | Byte budget in bytes/second for `noise: custom`, 64-1,000,000; an error with any other `noise` mode. |
+| `noise-window` | empty (all day) | both (3.3.0) | `HH:MM-HH:MM` local clock, may cross midnight (for example `02:00-06:00`); noise is sent only inside it. Ignored (with a warning) when `noise` is off. |
 | `ports` | | both | List of `N`, `N/udp`, `LISTEN:TARGET` and `LISTEN:TARGET/udp`. Client listens on LISTEN, server allows TARGET. Hot-reloaded. |
 | `bind` | `0.0.0.0` | client | Address of the public listeners. |
 | `src-ip` | | client | Outbound source IP address for carriers (per-carrier `src-ip-NAME` in a bond). Pin it when the host has several public addresses and the routing table picks one the customers do not use. See [Traffic shape](#traffic-shape-what-a-dpi-sees-300). |
 | `port-offset` | 0 | client | Added to every listen port. Used by the second slot of a handover. |
 | `lanes` | 4 | client | ICMP identifiers to stripe over. |
-| `conns` | 0 (auto) | client (server with `reverse`) | Connections in a pool carrier. 0 picks 8 on a lean host, 16 on a standard one, 24-32 on a high-performance one (3.1.0, see "3.1.0: host-aware defaults"); older versions used 8. With `reverse`, Kharej dials this many to Iran. |
+| `conns` | 0 (auto) | client (server with `reverse`) | Connections in a pool carrier. 0 picks 8 on a lean host, 16 on a standard one, 24-32 on a high-performance one (3.1.0, see "3.1.0: host-aware defaults"); older versions used 8. The engine caps a pool at 64 connections (the manager refuses larger values); with `reverse`, Kharej dials this many to Iran. |
 | `pool-rotate` | 0 (off) | client, or the dialing server of a `reverse` tunnel since 3.0.2 (pool carriers: tcp, tls, ws, wss, h2, grpc) | Recycle each healthy pool connection after this long (`30m`, `4h`), so no single flow shows a months-stable lifetime; each connection's actual budget is jittered ±40 % and re-rolled on every recycle, so redials never line up into a detectable period. The session resends anything in flight, so the cost is one redial on one connection at a time. 0 = off. Since 2.8.0. |
 | `pool-rotate-bytes` | 0 (off) | client, or the dialing server of a `reverse` tunnel since 3.0.2 (pool carriers: tcp, tls, ws, wss, h2, grpc) | With or instead of `pool-rotate`: also recycle each healthy pool connection after this many bytes handed to its socket (`500MB`, `4G`, `300k`; decimal units, 1 MB = 10^6). Jittered +/-25 % like the time axis; whichever limit hits first recycles, so the byte axis does not betray the time axis's jitter. 0 = off. Since 2.8.1. |
-| `mtu` | 0 (carrier default) | both | Datagram size cap, including header and tag. |
+| `mtu` | 0 (carrier default) | both | Datagram size cap, including header and tag. 256-1400 for icmp, udp, gre and ipip; up to 16384 for the pool carriers; a bond uses the smallest bound of its legs. |
 | `win-max` | 0 (auto) | both | Cap of the receive window per stream in MB, 4 to 64 (3.0.3). Windows are receiver-driven, so the value bounds what the peer's sender buffers per stream. 0 uses the host tier (4 MB lean, 16 standard, 32 high-performance); the fixed cap before 3.0.3 was 16 MB. |
 | `mem-budget` | 0 (eighth of RAM) | both | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0). See [3.2.0](#320-fast-by-default-bounded-memory-greipip). |
 | `max-mbps` | 0 (carrier default) | both | Pacing ceiling, MB/s per direction, per session. 0 = 16 when `icmp` is among the carriers, 1250 (10 Gbit, i.e. no practical cap) for udp, tcp, tls, ws, wss, h2, h2c and grpc since 2.4.18 (200 from 2.3.0; before that 16 for every carrier; the server's value caps the download). See "ICMP path limits and pacing". |
@@ -1299,10 +1613,14 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `loss-ceiling` | false | both | Opt-in loss-aware ceiling for the pacer (see "ICMP path limits and pacing"). Off = delay only. |
 | `slack-ms` | 8 | both | RTT growth tolerated before slowing down. |
 | `hedge` | false | both | Send small young packets twice. Helps lossy tails, costs packets. |
-| `fec` | off | both | `off` or `auto`: adaptive XOR parity for small transfers (see FEC). Needs 1.7.0 and `auto` on both ends. |
+| `fec` | off | both | `off` or `auto`: adaptive XOR parity for small transfers (see FEC). Needs 1.7.0 and `auto` on both ends. Since 3.3.0 parity is also loss-gated: it is sent only while the sender's measured loss is above `fec-on-loss`. |
+| `fec-on-loss` | 2 (percent) | both (3.3.0) | `fec: auto` only: start sending parity once the sender's measured loss is above this percent (0.01 = 1 %, at most 50; must be above `fec-off-loss`). Local policy, no wire change. |
+| `fec-off-loss` | 0.5 (percent) | both (3.3.0) | `fec: auto` only: stop sending parity once the measured loss falls below this percent (0 = once open it never closes; must be below `fec-on-loss`). See "FEC". |
 | `allow-min`, `allow-max` | 1, 65535 | server | Range of target ports clients may ask for. |
 | `allow-ports` | | server | Comma list of allowed target ports. |
 | `allow-file` | | server | File with allowed ports, re-read when it changes. Overrides `allow-ports`. |
+| `allow-clients` | empty (every source) | server (3.3.0) | Restricts holders of the PSK/token to these source addresses: comma/space separated IPv4/IPv6 addresses or CIDR prefixes that may open a session; any other source is dropped before admission (an unauthenticated source could not admit anyway). Admission only — an established session is never re-checked, so a NAT/roaming client keeps working. Only a carrier that reports the client's own IP can be filtered (direct icmp/udp/tcp/tls/gre/ipip and a bond of them): a CDN carrier (`ws`, `wss`, `h2`, `h2c`, `grpc`) or `sni` makes the combination a startup error, and with `reverse` the list is ignored with a warning. A source the carrier cannot attribute to an IP fails closed. The deny log is rate-limited over the whole server (3 lines/s, burst 3) with the suppressed count reported. See "Client allowlist". |
+| `allow-clients-file` | | server (3.3.0) | File with the `allow-clients` list (comma/space/newline separated), read once at startup; replaces `-allow-clients`. Must be under `/etc/wattun` (the unit runs with `ProtectHome=yes`, so a list under `/root` or `/home` would not be readable): any other path is a startup error. An empty file is a startup error, never "allow every source". |
 | `udp` | | client | UDP forwards, `PORT` or `listenPort:serverPort[@bind]`. |
 | `udp-idle` | 60s | both | Close UDP flows idle this long. |
 | `tls-cert`, `tls-key` | in-memory self-signed | server (client with `reverse`) | Certificate files for tls, wss, h2 and grpc, on whichever side listens. |
@@ -1331,6 +1649,8 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `dns-listen` | empty (off) | client | Local address for the DNS relay used by `ech: ladder` (e.g. `127.0.0.1:53`). |
 | `dns-relay-upstream` | `8.8.8.8:53` | server | Resolver used by the built-in DNS relay behind target port 53 (with `ech: ladder`). |
 | `metrics` | off | both | Serve `/stats` and pprof on this address. Always loopback (see Metrics). |
+| `state-dir` | empty (next to the config) | both, needs `-config` (3.3.0) | Directory that holds the quota-usage and lifetime-totals files (`<config>.quota.json`, `<config>.totals.json`). Created 0700 when missing; the file names keep the config's base name, so one directory can hold several tunnels. Point it at tmpfs (`/run/wattun`) to spare the disk: the shipped unit creates that directory and keeps it across a service restart, but the counters are still lost on reboot. See "State files". |
+| `state-save` | 30 | both (3.3.0) | Seconds between state-file saves (quota usage and lifetime totals); `0` = only on shutdown. The save itself is atomic (tmp + rename), as before. |
 | `debug` | false | both | Log every stream open and close. |
 
 ### Example: ICMP (the production setup)
@@ -1438,11 +1758,11 @@ Every flag can also be a config key. Flags win over the file.
 | `-mode client\|server` | | Role. |
 | `-key SECRET`, `-key-file FILE` | | Pre-shared key. |
 | `-config FILE` | | Config file (above). |
-| `-carrier NAME` | `icmp` | Transport, or `a+b+c` to bond several; `fortress` is the manager alias `icmp+tcp+tls+wss+udp` (80/443/8443/53). |
-| `-peer-NAME ADDR`, `-listen-NAME ADDR` | | Bonded carriers: per-carrier peer / listen address. |
-| `-peer ADDR` | | Server IP (icmp, udp) or `host:port`. |
-| `-listen ADDR` | `:4443` | Listen address of non-ICMP carriers. |
-| `-reverse` | off | Swap dial and listen (pool carriers), or which side sends the ICMP requests (`icmp`, 2.0.0). |
+| `-carrier NAME` | `icmp` | Transport, or `a+b+c` to bond several. Also the 3.3.0 [shaped carriers](#shaped-carriers-330) (Linux + root for the raw tier; both ends 3.3.0 and the same name; single carrier only, a `+` list that contains one stops startup); `fortress` is the manager alias `icmp+tcp+tls+wss+udp` (80/443/8443/53). |
+| `-peer-NAME ADDR`, `-listen-NAME ADDR` | | Bonded carriers: per-carrier peer / listen address (no `-listen-NAME` for the shaped raw tier). |
+| `-peer ADDR` | | Server IP (icmp, udp, shaped raw tier) or `host:port` (pool and shaped UDP tier; a shaped UDP-tier bare host uses the protocol's conventional port). |
+| `-listen ADDR` | `:4443` | Listen address of non-ICMP carriers; a shaped UDP-tier carrier defaults to its protocol's conventional port instead. |
+| `-reverse` | off | Swap dial and listen (pool carriers), or which side sends the ICMP requests (`icmp`, 2.0.0). Rejected for `gre`, `ipip` and the shaped carriers. |
 | `-bond-mode MODE` | `balanced` | Bonded carriers: `balanced`, `active-backup` or `replicate`. |
 | `-path-probe-max D` | 0 (30s) | Client, bonded carriers: maximum probe backoff for dead paths (default 30s; blackout mode 6s). |
 | `-map l:s[,...]` | | Client: listen port to server port. `l:s@127.0.0.1` keeps a port private. |
@@ -1463,11 +1783,15 @@ Every flag can also be a config key. Flags win over the file.
 | `-batch on\|off` | empty | sendmmsg batching for icmp and udp; empty keeps the default (on for icmp, off for udp). Same switch as `WAT_BATCH`, but kept in the config (3.0.0). |
 | `-keep-slow on\|off` | empty | Pool carriers: `on` never retires a connection for delivering below its share, `off` always checks; empty = on for reverse and direct tcp/tls, off for the HTTP carriers (3.0.0). |
 | `-hdr-mask` | true | Mask the packet header (3.0.0). |
-| `-udp-dns` | false | udp carrier: DNS-shaped datagrams, for port 53 (3.0.0). |
+| `-udp-dns` | false | udp carrier: DNS-shaped datagrams, for port 53 (3.0.0). Ignored on a shaped carrier. |
 | `-tcp-mimic` | true | tcp carrier: ClientHello-shaped hello and masked frame lengths (3.0.0). |
 | `-shape` | true | Pad small packets and jitter the keepalive (3.0.0). |
+| `-shape-data PCT` | 0 (off) | Both ends (3.3.0): pad data-carrying packets to randomized realistic sizes, spending at most PCT (0-25) percent of the stream bytes sent; ignored on bonded carriers. See "Stream padding and idle noise". |
+| `-noise MODE` | `off` | Both ends (3.3.0): idle filler traffic, per session: `off`, `low` (128 B/s, ~11 MB/day), `med` (1024 B/s, ~88 MB/day) or `custom` with `-noise-bps`. `-sessions` and Kharej's client count multiply it. |
+| `-noise-bps N` | 0 | Both ends (3.3.0): filler budget in bytes/second for `-noise custom`, 64-1,000,000. |
+| `-noise-window HH:MM-HH:MM` | empty (all day) | Both ends (3.3.0): local-clock window for noise, may cross midnight; requires `-noise` (ignored with a warning otherwise). |
 | `-ping-every N` | 2 | Idle keepalive interval, seconds, 0-60; both ends use their own value, and liveness scales with it. |
-| `-sessions N` | 0 (auto) | Client: N independent sessions, udp and the pool carriers only (2.3.0, server unchanged). |
+| `-sessions N` | 0 (auto) | Client: N independent sessions, udp and the pool carriers only (2.3.0, server unchanged). Rejected for the raw and shaped carriers. |
 | `-dns-listen ADDR` | empty | Client: listen here for DNS queries and forward them through the tunnel's DNS relay, e.g. `127.0.0.1:53` (2.9.0). |
 | `-dns-relay-upstream ADDR` | `8.8.8.8:53` | Kharej: resolver the internal DNS relay queries (port 53, `-ech ladder`); empty = `8.8.8.8:53`. |
 | `-icmp-type T` | `echo` | ICMP carrier: `echo`, `timestamp` (both ends the same; Linux does not answer `info`/`mask`). |
@@ -1475,10 +1799,14 @@ Every flag can also be a config key. Flags win over the file.
 | `-governor` | off | Pacer, ICMP paths: learn the path's volume ceiling from the reroute signature (a sudden base-RTT jump after sustained bulk) and hold the rate under it (opt-in, 2.9.0; see ICMP path limits). |
 | `-slack-ms N` | 8 | Tolerated RTT growth. |
 | `-hedge` | off | Duplicate small young packets. |
-| `-fec auto` | off | Adaptive FEC, both ends (see FEC). |
+| `-fec auto` | off | Adaptive FEC, both ends; since 3.3.0 parity is sent only while the measured loss is above `-fec-on-loss` (see FEC). |
+| `-fec-on-loss P` | 2 | `fec: auto`: start parity above this loss percentage (0.01 = 1 %, at most 50, above `-fec-off-loss`) (3.3.0). |
+| `-fec-off-loss P` | 0.5 | `fec: auto`: stop parity below this loss percentage (0 = never close the gate, below `-fec-on-loss`) (3.3.0). |
 | `-allow-min`, `-allow-max` | 1, 65535 | Server: target port range. |
 | `-allow-ports LIST` | | Server: allowed target ports. |
 | `-allow-file FILE` | | Server: allowed ports file, hot-reloaded. |
+| `-allow-clients LIST` | empty (every source) | Server (3.3.0): restricts holders of the PSK/token to these IPv4/IPv6 addresses or CIDR prefixes, comma/space separated; every other source is dropped before admission. Admission only, direct carriers only: a CDN carrier or `-sni` is a startup error (the source would be the edge), and `-reverse` ignores it with a warning. The deny log is throttled to 3 lines/s over the whole server. See "Client allowlist". |
+| `-allow-clients-file FILE` | empty | Server (3.3.0): file with the `-allow-clients` list, read once at startup; replaces `-allow-clients`. Must be under `/etc/wattun` (the unit's `ProtectHome=yes` hides `/root` and `/home`); any other path is a startup error. An empty file is a startup error. |
 | `-tls-cert`, `-tls-key` | | Server: certificate files. |
 | `-sni`, `-tls-pin` | | Client: TLS name, certificate fingerprint. |
 | `-path`, `-host`, `-header`, `-plain` | `/wat` | HTTP carrier options. |
@@ -1492,11 +1820,44 @@ Every flag can also be a config key. Flags win over the file.
 | `-fake-ip ADDR` | empty (family default) | `-fake-mode fakeip`: destination of the fake SYN + hello (empty = `104.16.0.1` for an IPv4 peer, `2606:4700::6810:1` for IPv6). |
 | `-fake-split N` | 0 (3) | `-fake-mode split` (and `ff`): TCP segments the fake ClientHello is cut into, 2-16; 0 = 3 for `split`, `ff` uses 11. |
 | `-fake-ttl N` | 0 (auto) | `-fake-mode ttl`: marker hop count; 0 calibrates from the server's replies. Unused by `seq`, `sum` and `seqsum`. |
+| `-state-dir DIR` | empty (next to the config) | Both ends, needs `-config` (3.3.0): move the quota/totals state files into DIR (created 0700). The shipped unit creates `/run/wattun` (`RuntimeDirectory=wattun`) and keeps it across a service restart; tmpfs still loses the counters on reboot. See "State files". |
+| `-state-save SECONDS` | 30 | Both ends (3.3.0): seconds between state-file saves; 0 = only on shutdown. |
 | `-metrics ADDR` | off | Serve `/stats` and pprof. |
 | `-debug` | off | Log every stream. |
 | `-version` | | Print `wattun X.Y.Z` and exit. |
 
 Signals: `SIGTERM` or `SIGINT` stops. On a server, `SIGUSR1` starts a drain (below).
+
+### Client allowlist (`-allow-clients`, 3.3.0)
+
+By default any source that can reach the server's carrier port may try to open a session; the PSK is the only gate.
+On the direct carriers the server also knows the client's source IP, so `-allow-clients` / `-allow-clients-file` can
+restrict admission. It **restricts holders of the PSK/token to the listed source IPs** — it is a brake on a leaked
+token, not a scanner filter: a source without the key could never create a session anyway.
+
+- **Format.** IPv4/IPv6 addresses or CIDR prefixes, separated by comma, space, tab or newline. A bare address is
+  kept as its /32 or /128 and prefixes are masked, so `10.1.2.3/8` matches `10.0.0.0/8`. `-allow-clients-file` is
+  read once at startup and replaces `-allow-clients` (no hot reload). It must live under `/etc/wattun`: the systemd
+  unit runs with `ProtectHome=yes`, so a list at `/root/clients.txt` would pass a config check and then fail to read;
+  any other path is a startup error. An empty file, or a list with no valid entries, stops the start instead of
+  silently allowing every source.
+- **Admission only.** The check runs before a session is admitted, on the packet that would create it. Established
+  sessions are never re-checked, so a NAT/roaming client keeps working; a valid packet from a non-allowed source
+  cannot create a session either.
+- **Fail closed.** A source the carrier cannot attribute to an IP fails the check (for example a custom RawIO
+  that reports no address at all).
+- **Carriers.** It works where the carrier reports the client's own IP: `icmp`, `udp`, `tcp`, `tls`, the raw-IP
+  `gre`/`ipip`, and a bond of them. Behind a CDN (`ws`, `wss`, `h2`, `h2c`, `grpc`) the source is the proxy edge, so
+  the combination is a **startup error** (as is `-allow-clients` with `-sni`): every real client would be rejected.
+  With `reverse` the server dials the client, so there is no client source to compare: the list is ignored with a
+  warning.
+- **Log.** A rejected source produces at most one line per 10 s, with the packets dropped since the previous line
+  (`client 203.0.113.7 is not in -allow-clients: 42 packet(s) dropped`). The whole deny log is also capped at 3
+  lines/s (burst 3) over the server, and the next line reports how many were suppressed by that throttle. The
+  bookkeeping table is bounded (256 sources), so an address spray is dropped silently once it is full instead of
+  filling memory or the log.
+- **Client side.** Passing the flag to a client run is a startup error ("server option"). The server must run 3.3.0
+  or newer to read the keys; old and new peers still interoperate.
 
 ## FEC
 
@@ -1506,8 +1867,24 @@ plaintext; if exactly one of them was lost the receiver rebuilds it, processes a
 wait for a PTO (about 1.25 RTT) or for later acks. k adapts from 4 to 16 with the observed loss (more loss, smaller
 k). Full-size packets are never covered and nothing is sent while the session is cwnd-limited, so bulk transfers pay
 under 5 % extra packets. Both ends must run 1.7.0 with `fec: auto` for it to help: a peer with FEC off ignores the
-parity packet, and an older peer stops parsing at the unknown frame, which sits alone in its packet. Counters:
-`fec_sent`, `fec_recovered`.
+parity packet, and an older peer stops parsing at the unknown frame, which sits alone in its packet.
+
+**Loss gate (3.3.0).** On the target path the random loss is 0.2-2 %, and parity on a healthy link was pure
+overhead. Since 3.3.0 the sender keeps a running loss estimate and sends parity only while it is above
+`-fec-on-loss` (percentage, default 2); it stops once the loss falls below `-fec-off-loss` (default 0.5). The band
+between the two plus a 2 s dwell keeps an estimate sitting on a threshold from flapping parity on and off. This is
+local policy: the frame and its layout are unchanged, an older peer still reads the parity, and a peer without FEC
+still ignores it. A closed gate also means the send path copies nothing for FEC (`fec_state` in `/stats`).
+Values are validated at startup: `0 <= off < on <= 50`, otherwise the process refuses to start.
+
+**Receiver side (3.3.0).** The receiver keeps the plaintext of small packets for reconstruction only while parity is
+actually arriving, and stops 15 s after the last parity packet. A peer whose gate is closed sends none, so a healthy
+tunnel does no FEC work in either direction. The cost is one group that cannot be rebuilt when parity resumes: the
+packets before the first parity packet of the new burst were not kept. With FEC off the receive ring does not exist
+at all.
+
+Counters: `fec_sent`, `fec_recovered`, and `fec_state` (`on` while this end sends parity, `off` when FEC is off or
+the gate is closed; with several sessions or clients, `on` while any of them has it open).
 
 ## Per-port traffic and limits
 
@@ -1546,6 +1923,32 @@ limits:
   item lifts the cut-off.
 - Put limits in the file of the side that should enforce them (normally the client in Iran).
 - Reset: `curl -X POST 'http://127.0.0.1:19700/quota/reset?port=20001'` (loopback callers only).
+
+### State files (3.3.0)
+
+Quota usage (`<config>.quota.json`) and the lifetime totals (`<config>.totals.json`) are the state files the engine
+keeps on disk. Both are written atomically (tmp file + rename) so a reader never sees a torn file.
+
+- `state-save SECONDS` (default 30) sets the period; `0` saves only on shutdown, and the shutdown save stays either
+  way.
+- `state-dir DIR` moves the pair into DIR instead of next to the config. The directory is created mode 0700 when
+  missing, and an unusable one (a regular file, a read-only or full tmpfs) fails startup: a quota-capped port must
+  not silently reopen on every restart because its usage was never saved. The file names keep the config's base name,
+  so one directory can hold several tunnels' state.
+- Typical use: point it at tmpfs (`/run/wattun`) so a busy tunnel's periodic rewrite does not wear the disk. That is
+  the supported tmpfs path under the shipped unit: `install.sh` writes `RuntimeDirectory=wattun`,
+  `RuntimeDirectoryMode=0700`, `RuntimeDirectoryPreserve=yes` and `ReadWritePaths=/etc/wattun /run/wattun`, so the
+  directory exists and is writable inside the `ProtectSystem=strict` sandbox. The trade-off is explicit: tmpfs loses
+  the counters on reboot, so quota usage and lifetime totals start from zero. They do survive a service restart
+  (`RuntimeDirectoryPreserve=yes` keeps `/run/wattun`); before 3.3.0's fix the documented path made the unit
+  crash-loop. The totals file is machine-bound anyway (3.1.1), so a reboot is the same "fresh machine" behavior as
+  copying a config to another server.
+- The default (no `state-dir`) is the 2.5.0-3.2.x location next to the config, so every existing tunnel keeps working
+  without a change.
+- The manager follows `state-dir`: its Advanced page edits `state-dir` and `state-save`, and `reset-traffic`, delete
+  and uninstall remove or reset the files where the engine actually keeps them (a custom directory outside
+  `/etc/wattun` included).
+- Needs `-config`: the state files are named after the config, so a flags-only run keeps no state (as before).
 
 ## Metrics
 
@@ -1586,6 +1989,9 @@ metrics port, even if the port is in the allowlist.
 | `dgram_fragmented`, `dgram_reassembled` | Since 2.5.0. UDP datagrams too big for one packet that were sent in pieces / rebuilt from pieces (needs 2.5.0 on both ends; an older peer drops the pieces). |
 | `retrans` | Retransmitted packets. |
 | `fec_sent`, `fec_recovered` | FEC parity packets sent; packets rebuilt from parity. |
+| `fec_state` | Since 3.3.0. `on` while this end is sending parity (its loss gate is open, see [FEC](#fec)), `off` when FEC is off or the gate is closed. With several sessions (client) or clients (server), `on` while any one of them has it open. |
+| `shape_data_bytes` | Since 3.3.0. Plaintext bytes added by `shape-data` padding (frame header + filler). |
+| `noise_sent`, `noise_bytes` | Since 3.3.0. Idle-noise packets sent and their wire bytes, from `noise`. Noise also increases `pkts_out`/`bytes_out` and the lifetime totals; the per-port counters, rate limits and quotas stay payload-only. |
 | `send_errors` | Carrier send failures. |
 | `ack_late` | Since 2.4.18, reliable carriers. Received packets that only a late ACK reported (they arrived below the newest 64 ranges, see [Direct pools (2.4.18)](#direct-pools-2418)). |
 | `dup_recv`, `rx_too_old` | Since 2.4.18. Packets dropped on receive as already seen, and as older than the replay window (131072 packets on reliable carriers). `rx_too_old` above 0 means data was lost and resent. |
@@ -1624,7 +2030,8 @@ With `sessions` > 1 (client) the top-level numbers cover all sessions: counters,
 and `inflight` are sums, `srtt_ms` is the median of the live sessions, `min_rtt_ms` the smallest, `loss_pct` the
 highest, and `last_rx_age_ms` the newest packet on any session.
 
-The process also logs a stats line every 10 seconds when something moves (it includes `ceiling=` and `loss=`).
+The process also logs a stats line every 10 seconds when something moves (it includes `ceiling=` and `loss=`). Noise
+filler alone is not counted as movement, so an idle tunnel with `noise` on does not keep that line printing.
 
 ### Speed test (1.8.1)
 
@@ -1634,10 +2041,12 @@ server for target port 0, which the server answers itself (it sends or absorbs t
 extra port is needed and the allowlist is not involved. Both ends need 1.8.1 or newer. Only the client process serves
 the endpoint, because only that side can open streams: on Kharej the manager's speed-test key says so instead of
 reporting a version error (3.1.1), and the live monitor shows current throughput there.
-`wattun test NAME` runs it 10 MB each way. Since 2.3.0 the answer also has `"sessions"`: with `sessions` > 1 the
-test opens one stream on every live session at once, each moving its share of N MB, and reports the total over the
-wall time. N is split between the streams, and each stream carries at most 256 MB, so N is capped at
-256 Ã— `streams` (2.5.1; before, any N above 256 fell back to 10 MB). A larger N gives a longer run, which helps when
+`wattun test NAME` runs it 10 MB each way. `streams=N` (1-32) runs N streams on every session: the default is 16
+since 3.3.0 (8 before), so the figure reflects multi-connection capacity rather than one connection's share; Auto mode
+asks for 8 during its screening and 16 on its finalists. Since 2.3.0 the answer also has `"sessions"`: with
+`sessions` > 1 the test opens one stream on every live session at once, each moving its share of N MB, and reports the
+total over the wall time. N is split between the streams, and each stream carries at most 256 MB, so N is capped at
+256 × `streams` (2.5.1; before, any N above 256 fell back to 10 MB). A larger N gives a longer run, which helps when
 sampling CPU: 16 streams at 100 MB/s move 200 MB in 2 s.
 
 ### Several sessions (2.3.0)
@@ -1910,7 +2319,7 @@ Raw TCP on the same path (8 BBR connections, no tunnel) moved 78 MB/s; 32 connec
 - **Loss cuts off.** A direct pool no longer cuts its rate on loss (TCP's loss is not ours; `WAT_REL_LOSSCUT=1`
   restores it), and its window also covers 2 x srtt (`WAT_CWND_MINRTT=1` turns that off). CDN tunnels keep the
   2.4.17 rules for both. `WAT_DIRECT_LOSS_MS=N` sets a loss-timer floor for direct carriers in ms (test/experiment only; off by default).
-- **Speed test** takes `streams=N` (1-32, default 8): `/speedtest?dir=down&mb=200&streams=16`. One stream rides one
+- **Speed test** takes `streams=N` (1-32, default 16 since 3.3.0; was 8): `/speedtest?dir=down&mb=200&streams=16`. One stream rides one
   pool connection now, so a single-stream test shows one connection's speed.
 - **More connections.** `conns: 16` beat 8 on this path (73.8 against 51 MB/s); 32 fell to 26 MB/s from loss
   bursts. Both ends update for the full gain; the pool's own sending changes are local to each end.
@@ -2349,7 +2758,15 @@ A restart cuts every connection. WatTunnel avoids restarts on a live system.
 | WireGuard (or another UDP VPN) connects, small apps like Telegram work, web pages do not | Its packets are bigger than one tunnel packet. Update both ends to 2.5.0 (big datagrams are split), or set `MTU = 1280` in WireGuard (udp carrier, or icmp with `mtu: 1400`). `dgram_dropped_size` in `/stats` rising confirms it. |
 | Slow, high CPU on Iran | Two cores saturate under many processes. Run one instance, not one per port. Check `retrans` and `send_errors` in `/stats`. Lower `max-mbps` only if the link is rate limited. |
 | Time or clocks | Authentication does not compare clocks. A server restart starts its packet numbers from the current time so a nonce is never reused, so keep NTP on and never set a server clock back. |
-| Foreign traffic on the listener | Expected. Strangers' packets fail authentication and are dropped. |
+| Foreign traffic on the listener | Expected. Strangers' packets fail authentication and are dropped. On a direct carrier you can also refuse them by source address with `allow-clients` (see "Client allowlist"). |
+| `-allow-clients` rejects a client that should pass | The tunnel log names the source (`client IP is not in -allow-clients`). Check the list/CIDR, the address family, and the carrier: behind a CDN the source is the proxy edge, and the program now refuses that combination at startup; with `reverse` the list is ignored. The check is admission only, so an already-connected session is not cut. |
+| `-allow-clients-file` stops the start | The file must be under `/etc/wattun` (the systemd unit runs with `ProtectHome=yes`) and must not be empty. |
+| `fec_state` stays `off` although `fec: auto` is set | Expected on a healthy path: parity is loss-gated and the measured loss is below `fec-on-loss` (default 2 %). Lower it only if the link really needs parity; `fec_sent` staying flat confirms the gate is closed rather than FEC being off. |
+| Lifetime counters and quota usage restart from zero after a reboot | `state-dir` points at tmpfs (`/run/wattun`). They survive a service restart (`RuntimeDirectoryPreserve=yes` in the shipped unit) but not a reboot; move the state directory next to the config (or to a persistent one) when the counters must survive reboots. |
+| Startup fails with an unknown key after editing the config | The running binary is older than the keys: `state-dir`, `state-save`, `allow-clients`, `allow-clients-file`, `fec-on-loss`, `fec-off-loss`, `shape-data`, `noise`, `noise-bps` and `noise-window` are 3.3.0 keys. Run `wattun update` on that end, or remove the keys. |
+| A shaped carrier fails at startup | The raw tier (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`) needs Linux with CAP_NET_RAW on both ends; the UDP tier needs 3.3.0 on both ends and the same carrier name. Check `wattun -version` on both. |
+| Two shaped peers connect the socket but carry no data | Both ends must select the same shaped carrier name and share the key (a datagram whose key-derived fields do not match is dropped). These are wattun-internal shapes, not the real protocol: a real IPsec/VXLAN/NTP peer cannot talk to them, and a mismatched name at either end just drops traffic. |
+| `shape-data` or `noise` is set but nothing changes | `shape-data` is ignored on bonded carriers (the log warns); `noise-window` without `noise` is ignored with a warning; `noise` only fires while the session has no user data for about two keepalives. The cost shows in `/stats` as `shape_data_bytes`/`noise_sent`/`noise_bytes` and in the session totals, not in the per-port counters. |
 
 ## Security model
 
@@ -2384,6 +2801,11 @@ A restart cuts every connection. WatTunnel avoids restarts on a live system.
   WebSocket or gRPC. They do not add secrecy; the session is already encrypted. With the default self-signed
   certificate the client does not verify the server. The PSK still stops an impostor, because it cannot read or forge
   the session. Set `tls-pin` to also reject a wrong certificate.
+- **Shaping and the shaped carriers (3.3.0).** `shape-data`, `noise` and the F19 shaped carriers change only the
+  outer bytes, sizes and timing; they add no secrecy and are not interoperable with the protocols whose headers they
+  imitate. Padding and noise count in the session totals but not in the per-port counters or quotas; noise spends real
+  bandwidth (up to the configured byte rate **per session**), so a traffic quota is not bypassed. See "Spoofing and
+  shaping, explained" and "Shaped carriers".
 - **What none of this hides.** The server's address, the volume and timing of packets under load, and the fact that
   ICMP or the carrier is in use. Since 3.0.0 no byte of a packet's header is constant and idle packets vary in size
   and timing, but a long-lived, high-volume flow to one foreign address is still visible as such. WatTunnel is not an anonymity tool.
@@ -2400,12 +2822,14 @@ sh build.sh                                                     # dist/ binaries
 ```
 
 `-race` needs cgo and does not work on a Windows checkout whose MinGW gcc path contains a space (the linker splits
-the path). On Ubuntu, CI runs `go test -race -count=1 ./cmd/...` plus a selected `./wat/` subset
-(`TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback`).
+the path). On Ubuntu, CI runs `go test -race -count=1 ./cmd/...` plus a selected `./wat/` subset, now including the
+3.3.0 shaping, noise, FEC and client-allowlist tests.
 
 CI (`.github/workflows/ci.yml`) runs `go build`, `go vet`, the `gofmt` gate, the `cmd` and `wat` suites, the shell
 syntax checks plus `test-manager.sh`, the DPI self-test, Windows and linux/arm64 cross builds, and the race subset
-above. A separate job runs the ICMP/raw-IP tests under `sudo`, where they do not skip.
+above. Separate jobs run the tests on real linux/arm64 hardware, compare a few data-path benchmarks against
+`bench/baseline.txt` (a catastrophic-regression floor, not a precise benchmark), and run the ICMP/raw-IP tests under
+`sudo`, where they do not skip.
 
 Layout: `wat/` is the library (session, congestion control, streams, carriers), `cmd/wattun` the binary,
 `cmd/wprobe` a path probe (ships in `dist/` as `wattun-wprobe-<os>-<arch>`). Bump `wat/version.go` for every shipped change, and
@@ -2421,6 +2845,54 @@ tunnel, ships in `dist/` as `wattun-wprobe-<os>-<arch>`, and needs Linux + CAP_N
 Update **both** servers for every release, unless an entry says otherwise. Versions 2.4.9 to 2.4.16 were steps
 toward one fix for CDN tunnels that got slower over time. If you are on any of them, go straight to 2.4.17 or later.
 
+- **3.3.0: full-speed auto mode, safer automatic cleanup, client allowlist, 13 shaped carriers.** Update both ends
+  for the shaped carriers; everything else works in any order (no wire change to the existing carriers or frames; the
+  new `frPad2` is an ignorable last frame). (1) Auto test measurement is duration-based: screening probes 8 MB each
+  way per variant (growing to 16 MB when the measured rate needs more time), the top 3 are re-measured with 16 streams
+  for at least 1.5 s each way (20-40 MB each way), and the printed budget now counts tuning too — up to 1184 MB
+  (544 screening + 240 finalists + 400 tuning), about 3 min at the manager's conservative 8 MB/s assumption. Tuning is
+  reduced to `sessions`/`conns` at fixed 20 MB probes; `mtu`, `win-max`, `batch` and `loss-ceiling` are no longer
+  probed. The manager's limits match the engine (sessions 1-16 on one udp/pool carrier, conns 1-64, mtu 256-1400 or
+  16384 with pool legs, a bond uses its smallest leg). (2) `fec: auto` is loss-gated: parity while measured loss is
+  above `-fec-on-loss` (2 %), stops below `-fec-off-loss` (0.5 %), 2 s dwell; the receiver copies plaintexts only
+  while parity is arriving, so a healthy tunnel pays nothing; new `/stats` field `fec_state`. (3) New opt-in traffic
+  shaping, both off by default and framed by the new ignorable last frame `frPad2`: `-shape-data PCT` (0-25, budgeted
+  realistic sizes, `shape_data_bytes`) and `-noise off|low|med|custom` + `-noise-bps` + `-noise-window` (idle filler at
+  a byte budget **per session**, delivered at the configured rate; counts on the host bill and in session totals, not
+  in per-port quotas/payload counters; noise alone no longer keeps the 10 s stats line printing). (4) `-state-dir` /
+  `-state-save` move the quota/totals state files; the shipped unit now creates `/run/wattun`
+  (`RuntimeDirectory=wattun`, mode 0700, `RuntimeDirectoryPreserve=yes`, `ReadWritePaths=/etc/wattun /run/wattun`), so
+  the documented tmpfs path actually works and counters survive a service restart (they are still lost on reboot).
+  (5) Auto Kharej cleanup: after Iran's pick has been stable for `autoprune` minutes (default 12) the heal pass closes
+  the unused **reverse** companion/watchers only by default; the direct `carrier:` list is never rewritten, because a
+  bonded Iran client looks like a single leg. Full direct narrowing is opt-in
+  (`autoprune-direct=1` in `.manager.conf`, or `auto-prune NAME --direct`). The auto wizard, `auto-ip` and the next
+  manager run install the heal timer on a Kharej-only server; if no open carrier works for 3 checks the full token
+  plan is reopened (`autowiden`, default 10 minutes, 0 = off). Bond auto-retest is a bond-only setting, default off
+  (`bond-retest NAME`). (6) Server-side `-allow-clients` / `-allow-clients-file` restrict holders of the PSK/token to
+  the listed addresses/prefixes (direct carriers; the file must be under `/etc/wattun`; a CDN carrier or `-sni` is now
+  a startup error instead of a warning; the deny log is globally throttled to 3 lines/s with the suppressed count
+  reported). SECURITY.md gains a threat model and TECHNICAL a "Spoofing and shaping, explained" section. (7) 13 shaped
+  carriers: raw `sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3` (Linux + CAP_NET_RAW) and UDP `fou-gre`, `gue-ipip`,
+  `vxlan`, `geneve`, `dnscrypt-udp`, `ntp-direct`, `openvpn-dco`, `srtp-direct`; both ends need 3.3.0 and the same
+  name, and they are wattun-internal wire shapes, not real protocol interoperability. A shaped carrier is
+  single-carrier only (engine and manager refuse a `+` bond that contains one), and an explicit `-mtu` above the
+  shape's ceiling is clamped with a log line (raw tier: `sit`/`6to4` 1360, `xfrm-ipsec` 1392, `etherip` 1384,
+  `l2tpv3` 1396; UDP tier 1326-1396). Careful repeated loopback runs put them 0.3-4.5 % below plain udp; single short
+  runs scatter more. (8) Manager: Advanced rows for the new keys, gated on a 3.3.0+ engine so a 3.2.1 binary never
+  receives a key it rejects; `auto-prune` / `auto-widen` / `bond-retest` commands; a "Spoofing & shaping" help page;
+  shaped-carrier support in the unattended/token paths and the interactive picker ("More transports (advanced)");
+  the Advanced page grouped as Performance / Shaping & DPI / Safety / State & data, with FEC `a` for the band and
+  `win-max`/`loss-ceiling` rows; `delete` stops the unit before removing the state files, so a deleted tunnel's
+  quota/totals cannot come back; a coverage test ties every engine key to a UI or file-only path; the self-test ends
+  with 802 checks (`MGR_VERSION=2026110403`). (9) Hardening from the same
+  audit: the shaped raw carriers check direction and install a BPF filter (a host no longer accepts its own looped
+  proto-41/50/97/115 frames), NaN/Inf are rejected by the new float flags, and CI gained an arm64 test job, a
+  benchmark regression gate and the new shaping/noise/FEC/allowlist tests in the race subset. (10) Auto now tests
+  `gre`/`ipip` by default; an opt-in Kharej `--extended` (both ends 3.3.0) also tests the 13 shaped carriers through
+  one hidden single-carrier unit per shape (raw tier Linux+root and cloud protocols 41/50/97/115; old Iran ignores
+  them and the default prune closes unused listeners). See "Auto mode", "Shaped carriers (3.3.0)", "Stream padding
+  and idle noise (3.3.0)" and "Client allowlist".
 - **3.2.1: audit hardening.** Any order of updating works (no wire change). (1) The pool listener reaps connections it never used and caps connections per source address, so an unauthenticated peer can no longer hold every pool slot. (2) An out-of-range peer-reported ACK delay is clamped instead of overflowing the loss timer. (3) The client clears its replay window when the server restarts with a clock behind the previous run, so the tunnel recovers without restarting the client; keep NTP on. (4) The metrics server refuses state-changing cross-site requests. (5) A flag-run server with no allowlist logs a warning (the default is unchanged). (6) `/stats` has flat `rtt_ms`/`streams_total` aliases so a grepped value is not a per-carrier one. (7) The dead "emergency revive" engine is removed. (8) CI, the tag/version gate, the mandatory `openssl`/signature check in `install.sh`, and shipping `cmd/wprobe` in `dist/`. See "3.2.1: audit hardening".
 - **3.2.0: fast by default, bounded memory, gre/ipip.** Update both ends for the raw-IP carriers; the rest works in any order. (1) `max-mbps` 16 now applies to the icmp path only, so a server that lists `icmp` among its carriers no longer caps tcp/tls/wss clients at 16 MB/s. (2) Auto sessions are at most 2, and the manager no longer forces 4. (3) Send data is a queue of pooled 64 KB chunks; a process-wide `mem-budget` and a Go heap soft limit at a third of RAM bound memory. (4) A full server evicts the session silent for 10 s. (5) The bond loss penalty is `weight * (1-loss)^4`; new `gre` (IP protocol 47) and `ipip` (protocol 4) raw-IP carriers. (6) The auto test tunes sessions/conns/mtu/batch/loss-ceiling of the chosen carrier. See "3.2.0: fast by default, bounded memory, gre/ipip".
 - **3.1.2: cheaper idle tunnel, quiet-client fix.** Any order of updating works (timing only, no wire change). (1) The server's boot-id frame follows `-ping-every` instead of a fixed 1 Hz: 15.3 → 11.0 MB/day per idle session at the default, 8.9 → 4.0 at `-ping-every 20` (measured 2026-10-29). Restart detection is delayed by up to one keepalive interval; keep `-ping-every` at 20 s or less, because `wattun-heal` treats 35 s without a received packet as down. (2) A server whose client went quiet for 20 s keeps its lane set instead of sending nothing at all until the client speaks again. (3) The dead-session reset scales with `-ping-every`, so 40/60 no longer reset every open stream every 30 s. See "3.1.2: idle cost and quiet clients".
@@ -2561,7 +3033,7 @@ toward one fix for CDN tunnels that got slower over time. If you are on any of t
   settings), adds `profile save/list/show/del/apply` to re-apply a working combination after a reinstall, and
   accepts `--fake-mode seqsum`, `--pool-rotate` and `--pool-rotate-bytes` unattended. The unattended
   `--fake-sni`, `--fake-mode` and `--fake-ttl` flags were parsed as unknown options before and never worked.
-  - [Fake-SNI desync](#fake-sni-desync-whitelisting-survival) · [the flags and config keys](#the-flags-and-config-keys).
+  - [Fake-SNI desync](#fake-sni-desync-whitelisting-survival) · [the flags and config keys](#command-line-flags).
 - **2.8.0: connection churn, dual-marker mode, checksum fix.** Client-side only, server unchanged, no wire
   format changed. (1) New `pool-rotate`: recycle each healthy pool connection after a jittered lifetime budget
   (±40 % per connection, re-rolled on every recycle), so no single flow shows a months-stable lifetime to a
@@ -2571,7 +3043,7 @@ toward one fix for CDN tunnels that got slower over time. If you are on any of t
   every even checksum, so about half of the sum-mode markers shipped with a fully VALID checksum and the server
   would have accepted their payload as real stream data (flow corruption). It is now `checksum - 1` with a wrap
   guard. **If you run `fake-mode: sum` on 2.7.x, update the client.**
-  - [Fake-SNI desync](#fake-sni-desync-whitelisting-survival) · [pool-rotate](#the-flags-and-config-keys).
+  - [Fake-SNI desync](#fake-sni-desync-whitelisting-survival) · [pool-rotate](#config-file).
 - **2.7.1: fake-SNI `sum` mode, probe fix, manager support.** Three client-side fake-SNI changes, server
   unchanged, no wire format changed. (1) New `fake-mode: sum`: the marker mirrors the first data segment in-window
   (same seq/ack) with a damaged TCP checksum — for filters that validate TCP sequence numbers, where `seq`
@@ -2610,7 +3082,7 @@ toward one fix for CDN tunnels that got slower over time. If you are on any of t
   - Test tunnel: download went from 53-71 to 65-116 MB/s, and memory stayed flat (149-161 MB).
   - Production tunnel: download went from 53 to 157 MB/s, and to 195 MB/s (~1.6 Gbit) on a 2 GB run. Upload went
     from 150 to 276 MB/s.
-  - `/speedtest` accepts `mb` up to 256 Ã— `streams`.
+  - `/speedtest` accepts `mb` up to 256 × `streams`.
   - Mixed versions work. [Details](#cheaper-stream-buffers-251)
 - **2.5.0: one tunnel is no longer capped near 50-60 MB/s.** On a direct TCP pool (tcp, tls, or any reverse pool),
   every acknowledgement walked every packet in flight. Now each acknowledgement touches only the packets it covers.

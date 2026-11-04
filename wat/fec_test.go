@@ -15,6 +15,11 @@ func TestFecReconstruct(t *testing.T) {
 	// own recvLoop handles it (a direct rcv.handle would race the recvLoop under -race; simDir.send
 	// would drop it — parity packets exceed the simulated 700 B link cap).
 	snd, rcv, up, _ := newPair(t, 0, time.Millisecond, 10e6, Config{FEC: true})
+	// The receiver only keeps plaintexts while parity is arriving (F11 receiver side); this test injects parity after
+	// the data it covers, so open the ring by hand for the whole run.
+	rcv.mu.Lock()
+	rcv.fec.keep = time.Now().Add(time.Hour)
+	rcv.mu.Unlock()
 	rnd := rand.New(rand.NewSource(5))
 	for trial := 0; trial < 60; trial++ {
 		n := 1 + rnd.Intn(fecMaxK)
@@ -37,7 +42,8 @@ func TestFecReconstruct(t *testing.T) {
 		}
 		snd.mu.Lock()
 		snd.cc.tokens = 1e9
-		snd.fec.loss = 0.001 // k = 16: the whole group is covered
+		snd.fec.loss = 0.001   // k = 16: the whole group is covered
+		snd.fec.gate.on = true // F11: this test drives fecDue directly, so its loss gate is opened by hand
 		var sealed [][]byte
 		for i, p := range plains {
 			snd.nextPN = pn0 + uint64(i*2) // gaps in the pn sequence, like acks-only packets in between
@@ -81,6 +87,7 @@ func TestFecTwoMissing(t *testing.T) {
 	var sealed [][]byte
 	snd.mu.Lock()
 	snd.cc.tokens = 1e9
+	snd.fec.gate.on = true // F11: this test drives fecDue directly, so its loss gate is opened by hand
 	snd.nextPN = 500
 	for i := 0; i < 4; i++ {
 		p := append([]byte{frStream, 1, byte(i * 10), 10}, pattern(10, byte(i))...)
@@ -101,6 +108,39 @@ func TestFecTwoMissing(t *testing.T) {
 	}
 	if r := rcv.Stats().FecRecovered; r != 0 {
 		t.Fatalf("recovered %d with two packets missing", r)
+	}
+}
+
+// F11 receiver side (3.3.0): the reconstruction ring follows the peer's parity. No frFec for fecKeepAfter means no
+// plaintext copies (the peer's gate is closed, nothing will be rebuilt); the next frFec re-opens the ring.
+func TestFecRxKeepFollowsParity(t *testing.T) {
+	_, rcv, _, _ := newPair(t, 0, time.Millisecond, 10e6, Config{FEC: true})
+	now := time.Now()
+	rcv.mu.Lock()
+	defer rcv.mu.Unlock()
+	// no parity seen yet: a received plaintext must not be copied
+	rcv.fecKeep(7, pattern(100, 1), now)
+	if rcv.fec.rx[7%fecRing].pn != 0 {
+		t.Fatal("kept a plaintext before any parity arrived")
+	}
+	// one frFec (n=1, covers pn 0, parity length 100) re-opens the ring; it repairs nothing here (no stored group)
+	frame := appendUv(appendUv(appendUv(appendUv(nil, 1), 0), 0), 100)
+	frame = append(frame, make([]byte, 100)...)
+	if rcv.onFec(&reader{b: frame}, now) {
+		t.Fatal("an unreconstructable parity frame must not be ack-eliciting")
+	}
+	if !rcv.fec.keep.After(now) {
+		t.Fatal("frFec did not re-open the receive ring")
+	}
+	rcv.fecKeep(7, pattern(100, 2), now)
+	if e := &rcv.fec.rx[7%fecRing]; e.pn != 8 || len(e.buf) != 100 {
+		t.Fatalf("plaintext not kept after parity: pn=%d len=%d", e.pn, len(e.buf))
+	}
+	// and it closes again after fecKeepAfter without parity
+	rcv.fec.keep = now
+	rcv.fecKeep(9, pattern(100, 3), now.Add(fecKeepAfter+time.Second))
+	if rcv.fec.rx[9%fecRing].pn != 0 {
+		t.Fatal("kept a plaintext after the parity window lapsed")
 	}
 }
 
@@ -125,9 +165,80 @@ func TestFecAdaptiveK(t *testing.T) {
 	}
 }
 
+// F11 (3.3.0): the loss gate opens above the on threshold, closes below the off threshold, holds every decision for
+// the minimum dwell, and stays put anywhere in the band between them.
+func TestFecGateHysteresis(t *testing.T) {
+	g := fecGate{onLoss: 0.02, offLoss: 0.005, dwell: fecMinDwell}
+	t0 := time.Unix(1000, 0)
+	for _, c := range []struct {
+		name string
+		at   time.Duration // since t0
+		loss float64
+		want bool
+	}{
+		{"healthy start stays off", 0, 0.01, false},                  // first decision, no dwell yet
+		{"spike opens the gate", 100 * time.Millisecond, 0.03, true}, // immediate: nothing to hold yet
+		{"dwell holds it on", 500 * time.Millisecond, 0.001, true},   // below off, but 0.4 s < dwell
+		{"dwell over closes it", 2500 * time.Millisecond, 0.001, false},
+		{"dwell holds it off", 3 * time.Second, 0.05, false},           // 0.5 s after closing
+		{"still held off", 4400 * time.Millisecond, 0.05, false},       // 1.9 s after closing
+		{"opens after the dwell", 4600 * time.Millisecond, 0.05, true}, // 2.1 s after closing
+		{"band keeps it on", 7 * time.Second, 0.01, true},              // above off, below on: no change
+		{"band keeps it on too", 9 * time.Second, 0.019, true},         // right under the on threshold
+		{"below off closes it", 11 * time.Second, 0.004, false},        // dwell long over
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := g.step(c.loss, t0.Add(c.at)); got != c.want {
+				t.Fatalf("at %v loss %.3f: gate %v, want %v", c.at, c.loss, got, c.want)
+			}
+		})
+	}
+}
+
+// F11 (3.3.0): a wat.Config caller that sets only FEC (zero thresholds) keeps the pre-gate behavior: parity for every
+// burst. cmd/wattun always passes real thresholds.
+func TestFecGateZeroThresholdsAlwaysOn(t *testing.T) {
+	g := fecGate{dwell: fecMinDwell}
+	now := time.Unix(1000, 0)
+	if !g.step(fecInitLoss, now) {
+		t.Fatal("zero thresholds must open the gate at the initial loss estimate")
+	}
+	if !g.step(0, now.Add(time.Hour)) {
+		t.Fatal("zero thresholds must never close the gate")
+	}
+}
+
+// F11 (3.3.0): when the gate closes with a burst half-noted, the pending group is dropped: a stale txN would keep
+// busy() true and the pump spinning at 1 ms forever.
+func TestFecGateCloseDropsPendingGroup(t *testing.T) {
+	snd, _, _, _ := newPair(t, 0, time.Millisecond, 10e6, Config{FEC: true, FECOnLoss: 0.02, FECOffLoss: 0.005})
+	snd.mu.Lock()
+	defer snd.mu.Unlock()
+	snd.cc.tokens = 1e9
+	snd.fec.gate.on = true // opened by hand, as in TestFecReconstruct
+	p := append([]byte{frStream, 1, 0, 10}, pattern(10, 1)...)
+	_, pn := snd.seal(p)
+	snd.fecNoteSent(pn, p)
+	if snd.fec.txN == 0 {
+		t.Fatal("no packet noted for the next parity")
+	}
+	snd.fec.loss = 0.001 // below the off threshold: the next step must close the gate
+	if _, ok := snd.fecDue(time.Now()); ok {
+		t.Fatal("built parity with the gate closed")
+	}
+	if snd.fec.txN != 0 {
+		t.Fatalf("pending group kept (%d packets): busy() would spin the pump", snd.fec.txN)
+	}
+}
+
 // 3 flights per exchange, each a single small packet each way: a loss costs a PTO without FEC.
 func fecExchanges(t *testing.T, fec bool, n int) (lat []time.Duration, cli, srv Stats) {
-	c, s, _, _ := newPair(t, 0.02, 20*time.Millisecond, 10e6, Config{FEC: fec})
+	return fecExchangesAt(t, 0.02, Config{FEC: fec}, n)
+}
+
+// fecExchangesAt is fecExchanges over a link with the given loss and session config.
+func fecExchangesAt(t *testing.T, loss float64, cfg Config, n int) (lat []time.Duration, cli, srv Stats) {
+	c, s, _, _ := newPair(t, loss, 20*time.Millisecond, 10e6, cfg)
 	go func() {
 		for {
 			st, err := s.Accept()
@@ -202,6 +313,26 @@ func TestFecTailLatency(t *testing.T) {
 	}
 	if float64(p95on) > 0.8*float64(p95off) {
 		t.Fatalf("p95 with fec %v is not >= 20%% below %v", p95on, p95off)
+	}
+}
+
+// F11 (3.3.0): with the thresholds cmd/wattun passes (2 % on, 0.5 % off), a healthy link sends no parity at all while
+// a really lossy link opens the gate; /stats' fec_state follows the gate.
+func TestFecGateThresholds(t *testing.T) {
+	gate := Config{FEC: true, FECOnLoss: 0.02, FECOffLoss: 0.005}
+	_, cleanC, cleanS := fecExchangesAt(t, 0, gate, 60)
+	if n := cleanC.FecSent + cleanS.FecSent; n != 0 {
+		t.Fatalf("clean link: sent %d parity packets, want 0", n)
+	}
+	if cleanC.FecState != "off" || cleanS.FecState != "off" {
+		t.Fatalf("clean link: fec_state %q/%q, want off/off", cleanC.FecState, cleanS.FecState)
+	}
+	_, lossyC, lossyS := fecExchangesAt(t, 0.10, gate, 60)
+	if n := lossyC.FecSent + lossyS.FecSent; n == 0 {
+		t.Fatal("10 % loss: the gate never opened, no parity sent")
+	}
+	if lossyC.FecState != "on" && lossyS.FecState != "on" {
+		t.Fatalf("10 %% loss: fec_state %q/%q, want on on at least one side", lossyC.FecState, lossyS.FecState)
 	}
 }
 
