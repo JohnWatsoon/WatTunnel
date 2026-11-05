@@ -58,23 +58,26 @@ var rawShapeSpecs = [5]rawShapeSpec{
 	rawShapeL2TPv3:  {proto: 115, hdr: 4},
 }
 
+// rawShapeNames is the -carrier name of each shape, indexed by the rawShape values. It is the one name table:
+// rawShapeByName, newRawShapeKey and RawShapedCarrierNames all read it, so a new shape cannot drift between them.
+var rawShapeNames = [5]string{
+	rawShapeSIT:     "sit",
+	rawShape6to4:    "6to4",
+	rawShapeESP:     "xfrm-ipsec",
+	rawShapeEtherIP: "etherip",
+	rawShapeL2TPv3:  "l2tpv3",
+}
+
 // rawShapeMTU is the shape's payload ceiling in a 1400-byte wire datagram: 1400 minus the fixed header. The raw
 // carriers' Profile and Config.MaxPayload clamp both use it (M1/M15).
 func rawShapeMTU(s rawShape) int { return 1400 - rawShapeSpecs[s].hdr }
 
 // rawShapeByName maps a -carrier name to its shape.
 func rawShapeByName(name string) (rawShape, bool) {
-	switch name {
-	case "sit":
-		return rawShapeSIT, true
-	case "6to4":
-		return rawShape6to4, true
-	case "xfrm-ipsec":
-		return rawShapeESP, true
-	case "etherip":
-		return rawShapeEtherIP, true
-	case "l2tpv3":
-		return rawShapeL2TPv3, true
+	for s, n := range rawShapeNames {
+		if n == name {
+			return rawShape(s), true
+		}
 	}
 	return 0, false
 }
@@ -97,9 +100,10 @@ func (k rawShapeKey) me(server bool) int {
 	return 0
 }
 
-// newRawShapeKey derives the fixed header fields from the PSK (domain-separated from every other wat key use).
+// newRawShapeKey derives the fixed header fields from the PSK. The shape name is part of the hash input, so every
+// shape gets its own SPI/session id/MAC/IPv6 material from one PSK (L14/F27; 3.3.0 wire change, both ends must match).
 func newRawShapeKey(s rawShape, key []byte) rawShapeKey {
-	h := sha256.Sum256(append([]byte(rawShapeDomain), key...))
+	h := sha256.Sum256(append(append([]byte(rawShapeDomain), rawShapeNames[s]...), key...))
 	extra := sha256.Sum256(h[:]) // a second block for the peer role's fields
 	var k rawShapeKey
 	k.spi[0] = binary.BigEndian.Uint32(h[0:])

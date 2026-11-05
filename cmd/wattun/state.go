@@ -23,6 +23,10 @@ import (
 // stateDirMode is the permission of a -state-dir created by wattun: operator state, like /etc/wattun.
 const stateDirMode = 0o700
 
+// stateSaveMax is the upper bound of -state-save: 30 days (a week was a valid pre-3.3.0 choice). The seconds->Duration
+// multiplication overflows above ~292 years, which used to silently turn the periodic save off (audit L9/F21).
+const stateSaveMax = 30 * 24 * 60 * 60
+
 // statePaths resolves the quota and totals state files. No -config = no persistence: the names are derived from the
 // config path, so a flag-run tunnel has nowhere to put them (2.5.0-3.2.x behavior).
 func statePaths(cfgPath, dir string) (quota, totals string) {
@@ -42,12 +46,15 @@ func stateSaveInterval(secs int) (time.Duration, error) {
 	if secs < 0 {
 		return 0, fmt.Errorf("-state-save must be 0 (only on shutdown) or more seconds, got %d", secs)
 	}
+	if secs > stateSaveMax {
+		return 0, fmt.Errorf("-state-save must be at most %d seconds (30 days), got %d", stateSaveMax, secs)
+	}
 	return time.Duration(secs) * time.Second, nil
 }
 
-// prepareStateDir creates the -state-dir directory 0700 when it is missing and checks it is a usable directory.
-// Failing at startup is deliberate: a typo or a read-only tmpfs would otherwise silently drop quota usage, and a
-// quota-capped port would reopen after every restart.
+// prepareStateDir creates the -state-dir directory 0700 when it is missing, tightens a pre-existing wider mode to
+// 0700, and checks it is a usable directory. Failing at startup is deliberate: a typo or a read-only tmpfs would
+// otherwise silently drop quota usage, and a quota-capped port would reopen after every restart.
 func prepareStateDir(dir string) error {
 	if dir == "" {
 		return nil
@@ -56,6 +63,13 @@ func prepareStateDir(dir string) error {
 	case err == nil:
 		if !fi.IsDir() {
 			return fmt.Errorf("%s is not a directory", dir)
+		}
+		// L11/F24: operator state, like /etc/wattun; an operator-created 0755 must not stay group/world-accessible.
+		// Narrower modes are left alone — the write probe below decides whether they work.
+		if perm := fi.Mode().Perm(); perm&^stateDirMode != 0 {
+			if err := os.Chmod(dir, stateDirMode); err != nil {
+				return err
+			}
 		}
 	case os.IsNotExist(err):
 		if err := os.MkdirAll(dir, stateDirMode); err != nil {

@@ -153,9 +153,11 @@ Go through this on both servers after setup, and again after any change:
   reopens the carrier ports, which is the intended trade-off. Force a close with `wattun-manager auto-narrow NAME`,
   keep every carrier open with `auto-prune NAME --keep-open`, reopen with `auto-widen NAME`. With **extended Auto**
   (opt-in `--extended`, both ends 3.3.0) Kharej additionally listens on one hidden single-carrier unit per shaped
-  carrier; the default prune keeps the shape Iran picked and stops the unused ones, and delete/uninstall remove them
-  with the parent. Raw-tier extended listeners also need the cloud firewall to pass protocols 41/50/97/115, and an old
-  Iran never uses them — so close them with the default prune, `auto-prune NAME --direct` or a manual stop.
+  carrier; the default prune reads each child's own `/stats`, keeps the live shapes and stops the rest once one reports
+  a pick, keeps every shape when no child reports traffic or a running child cannot be read, and delete/uninstall
+  remove them with the parent. Raw-tier extended listeners also need the cloud firewall to pass protocols
+  41/50/97/115, and an old Iran never uses them — so close them with the default prune, `auto-prune NAME --direct`
+  or a manual stop.
 - **Keep NTP running on both ends.** The packet-number nonce must never repeat; the forward-secrecy and replay
   guarantees assume the server clock never goes backwards across restarts.
 - **Keep the systemd sandbox intact.** The installer writes the unit with the capability bounding set,

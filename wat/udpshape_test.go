@@ -39,6 +39,16 @@ func TestUDPShapeTable(t *testing.T) {
 	if UDPShapePort("udp") != 0 {
 		t.Error("udp must not be a shaped carrier")
 	}
+	// cmd/wattun builds its carrier maps from this list, so it must be exactly the table (audit L6/F15).
+	names := UDPShapedCarrierNames()
+	if len(names) != len(udpShapeTable) {
+		t.Fatalf("%d exported names, want %d", len(names), len(udpShapeTable))
+	}
+	for i, sh := range udpShapeTable {
+		if names[i] != sh.name {
+			t.Errorf("UDPShapedCarrierNames()[%d] = %q, want %q", i, names[i], sh.name)
+		}
+	}
 	if _, ok := newUDPShaper("nope", []byte("k"), false); ok {
 		t.Error("unknown shape accepted")
 	}

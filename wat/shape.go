@@ -93,6 +93,10 @@ func (s *Session) shapeData(dataBytes int, p []byte) []byte {
 	}
 	s.padAllow = min(s.padAllow+float64(dataBytes)*s.cfg.ShapeData, shapeDataBank)
 	limit := s.maxPlain
+	if s.fec != nil && limit > fecHdrMax {
+		// F34: a padded packet above maxPlain-fecHdrMax would never be FEC-noted; keep the pad inside the ring.
+		limit -= fecHdrMax
+	}
 	target := shapeTarget(limit, len(p))
 	if target == 0 {
 		return p

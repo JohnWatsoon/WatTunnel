@@ -22,6 +22,10 @@ func TestParseClientAllow(t *testing.T) {
 		{"host bits masked", "10.1.2.3/8", []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, false},
 		{"ipv6", "2001:db8::5", []netip.Prefix{netip.MustParsePrefix("2001:db8::5/128")}, false},
 		{"ipv4-mapped", "::ffff:198.51.100.4", []netip.Prefix{netip.MustParsePrefix("198.51.100.4/32")}, false},
+		// M3 (audit 2026-11-04): a 4-in-6 CIDR is stored as its IPv4 form, because sources are unmapped.
+		{"ipv4-mapped cidr", "::ffff:203.0.113.0/120", []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}, false},
+		{"ipv4-mapped cidr host bits", "::ffff:203.0.113.7/120", []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}, false},
+		{"ipv4-mapped cidr shorter than /96", "::ffff:203.0.113.0/64", nil, true},
 		{"comma and space", "192.0.2.7, 10.0.0.0/8 2001:db8::/32", []netip.Prefix{
 			netip.MustParsePrefix("192.0.2.7/32"), netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("2001:db8::/32"),
 		}, false},
@@ -50,6 +54,32 @@ func TestParseClientAllow(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// M3 (audit 2026-11-04): wat.Server unmaps every source before netip.Prefix.Contains, which requires equal address
+// bit lengths. A mapped CIDR stored as-is matched nothing and silently locked every client out.
+func TestParseClientAllowMappedCIDR(t *testing.T) {
+	for _, c := range []struct {
+		in    string
+		match netip.Addr
+		want  bool
+	}{
+		{"::ffff:203.0.113.0/120", netip.MustParseAddr("203.0.113.4"), true},
+		{"203.0.113.0/24", netip.MustParseAddr("203.0.113.4"), true},
+		{"::ffff:203.0.113.7/120", netip.MustParseAddr("203.0.113.4"), true}, // host bits still masked
+		{"::ffff:198.51.100.0/120", netip.MustParseAddr("203.0.113.4"), false},
+	} {
+		ps, err := parseClientAllow(c.in)
+		if err != nil {
+			t.Fatalf("parseClientAllow(%q): %v", c.in, err)
+		}
+		if len(ps) != 1 {
+			t.Fatalf("parseClientAllow(%q) = %v, want one prefix", c.in, ps)
+		}
+		if got := ps[0].Contains(c.match); got != c.want {
+			t.Errorf("parseClientAllow(%q)[0] = %v, Contains(%v) = %v, want %v", c.in, ps[0], c.match, got, c.want)
+		}
 	}
 }
 

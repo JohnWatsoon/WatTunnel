@@ -48,6 +48,9 @@ func TestStateSaveInterval(t *testing.T) {
 		{1, time.Second, false},
 		{30, 30 * time.Second, false}, // the default, the 3.2.x every-30-ticks behavior
 		{3600, time.Hour, false},
+		{stateSaveMax, 30 * 24 * time.Hour, false}, // the cap itself is accepted (audit L9/F21)
+		{stateSaveMax + 1, 0, true},                // one past the cap
+		{10000000000, 0, true},                     // >292 years: the old Duration multiplication overflowed
 	} {
 		got, err := stateSaveInterval(c.secs)
 		if (err != nil) != c.wantErr || got != c.want {
@@ -82,6 +85,29 @@ func TestPrepareStateDir(t *testing.T) {
 	t.Run("existing dir is accepted", func(t *testing.T) {
 		if err := prepareStateDir(t.TempDir()); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("pre-created 0755 dir becomes 0700", func(t *testing.T) {
+		// audit L11/F24: an existing -state-dir kept whatever mode it was created with; state files are 0600, so
+		// only the directory's group/world bits are exposed, but they are still tightened.
+		dir := filepath.Join(t.TempDir(), "state")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := prepareStateDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS != "windows" { // Windows synthesizes permission bits, as in the creation test above
+			if perm := fi.Mode().Perm(); perm != stateDirMode {
+				t.Fatalf("pre-created 0755 dir mode %o, want %o", perm, stateDirMode)
+			}
 		}
 	})
 	t.Run("a file is not a dir", func(t *testing.T) {

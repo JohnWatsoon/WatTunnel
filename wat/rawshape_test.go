@@ -13,8 +13,6 @@ import (
 	"golang.org/x/net/bpf"
 )
 
-var rawShapeNames = []string{"sit", "6to4", "xfrm-ipsec", "etherip", "l2tpv3"}
-
 func TestRawShapeTable(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -42,6 +40,25 @@ func TestRawShapeTable(t *testing.T) {
 	}
 	if _, ok := rawShapeByName("udp"); ok {
 		t.Error("udp must not be a raw shape")
+	}
+	// cmd/wattun builds its carrier maps from this list, so it must be exactly the table (audit L6/F15).
+	if got := RawShapedCarrierNames(); !slices.Equal(got, rawShapeNames[:]) {
+		t.Errorf("RawShapedCarrierNames() = %v, want %v", got, rawShapeNames)
+	}
+}
+
+// TestRawShapeKeyPerShape: audit L14/F27 (2026-11-04). The shape name is part of the derivation, so one PSK yields
+// independent header fields per shape. Before the fix xfrm-ipsec, etherip and l2tpv3 derived the exact same struct
+// from one hash (and sit/6to4 exposed that hash's bytes in their inner IPv6 header, which a middlebox can read).
+func TestRawShapeKeyPerShape(t *testing.T) {
+	key := []byte("one-psk")
+	seen := map[rawShapeKey]rawShape{}
+	for s := range rawShapeNames {
+		k := newRawShapeKey(rawShape(s), key)
+		if prev, dup := seen[k]; dup {
+			t.Fatalf("%s and %s derive identical keyed header fields from one PSK", rawShapeNames[prev], rawShapeNames[s])
+		}
+		seen[k] = rawShape(s)
 	}
 }
 

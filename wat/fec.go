@@ -13,7 +13,9 @@ import "time"
 // The receiver follows the same idea without a wire signal: it copies small plaintexts into the reconstruction ring
 // only while parity is arriving, and stops fecKeepAfter after the last frFec (fecKeep). A peer whose gate is closed
 // sends none, so a healthy tunnel pays no FEC work in either direction; the cost is one group that cannot be rebuilt
-// when parity resumes (the data before the first frFec was not kept). With FEC off the ring does not exist at all.
+// when parity resumes (the data before the first frFec was not kept). A zero-threshold caller has no gate at all, so
+// it keeps every eligible plaintext (the time window only applies with a gate; F33). With FEC off the ring does not
+// exist at all.
 //
 // Wire: frFec = n, base pn, n x (pn-base, plaintext length), then the parity bytes (to the end of the frame). The
 // frame sits ALONE in its packet: an old peer stops at the unknown type and loses nothing else, and the packet is not
@@ -186,11 +188,14 @@ func xorInto(dst, src []byte) {
 // fecKeep stores the plaintext of a received packet (under s.mu) while parity is arriving. The receive ring is not
 // needed when the peer's gate is closed: nothing will come to rebuild, so the copy is pure overhead on a healthy
 // path (F11 receiver side). Every frFec extends the window (onFec); the peer's gate state is not on the wire, so
-// this is a heuristic: after fecKeepAfter with no parity the copies stop until the next frFec. With FEC off s.fec is
-// nil, so the ring does not exist at all.
+// this is a heuristic: after fecKeepAfter with no parity the copies stop until the next frFec. A zero-threshold
+// caller has no gate, so it keeps every eligible plaintext (session.go, F33). With FEC off s.fec is nil, so the
+// ring does not exist at all.
 func (s *Session) fecKeep(pn uint64, plain []byte, now time.Time) {
 	f := s.fec
-	if now.After(f.keep) || len(plain) > s.maxPlain-fecHdrMax {
+	// A zero-threshold gate (no loss gate configured) never closes; the time window only applies when a gate exists.
+	gated := f.gate.onLoss != 0 || f.gate.offLoss != 0
+	if (gated && now.After(f.keep)) || len(plain) > s.maxPlain-fecHdrMax {
 		return
 	}
 	e := &f.rx[pn%fecRing]

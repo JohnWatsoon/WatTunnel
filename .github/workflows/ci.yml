@@ -38,6 +38,11 @@ jobs:
           go-version: '1.26'
       - run: go build ./...
       - run: go test -count=1 ./cmd/...
+      # A renamed test must not turn this subset into a silent no-op (audit L18/F32): check every alternative.
+      - run: |
+          for re in TestShape TestNoise TestFecGate TestFecRx TestShapedUDP TestSourceAllowed TestServerClientAllowlist; do
+            go test -list "$re" ./wat/ | grep -q '^Test' || { echo "::error::$re matched no test"; exit 1; }
+          done
       - run: go test -count=1 -run 'TestShape|TestNoise|TestFecGate|TestFecRx|TestShapedUDP|TestSourceAllowed|TestServerClientAllowlist' ./wat/
   bench:
     # Data-path regression floor (audit M6): 4x fail / 1.6x warn against bench/baseline.txt (runner-tolerant).
@@ -72,4 +77,9 @@ jobs:
       - run: go test -race -count=1 ./cmd/...
       # The 3.3.0 send-path state (noise/shapeData under s.mu, udpShaper.seq, shapedUDPBufs pool, deny map,
       # FEC gate/ring) must be race-checked too (audit M5).
+      # A renamed test must not turn this subset into a silent no-op (audit L18/F32): check every alternative.
+      - run: |
+          for re in TestKex TestWinMax TestLateAck TestFairQueue TestDgram TestBondLoopback TestShape TestNoise TestFecGate TestFecRx TestShapedUDP TestSourceAllowed TestServerClientAllowlist TestPad2; do
+            go test -list "$re" ./wat/ | grep -q '^Test' || { echo "::error::$re matched no test"; exit 1; }
+          done
       - run: go test -race -count=1 -run 'TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback|TestShape|TestNoise|TestFecGate|TestFecRx|TestShapedUDP|TestSourceAllowed|TestServerClientAllowlist|TestPad2' ./wat/

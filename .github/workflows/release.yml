@@ -27,6 +27,9 @@ jobs:
           grep -q "release-v$v" README.fa.md || { echo "::error::README.fa.md badge is not v$v"; exit 1; }
           test -f "docs/release-notes/$GITHUB_REF_NAME.md" || { echo "::error::missing docs/release-notes/$GITHUB_REF_NAME.md (publishable release notes must be tracked, not in git-ignored .dsh/)"; exit 1; }
       - run: go test -count=1 -timeout 15m ./...
+      # The raw/ICMP tests skip without root in the suite above; run the same sudo set as CI's icmp job so a tag
+      # cannot ship a raw-shaped carrier whose only end-to-end test never ran (audit L5/F13).
+      - run: sudo -E env "PATH=$PATH" go test -count=1 -timeout 15m -run 'TestICMP|TestRawIP|TestRawIPShapedLoopback' ./wat/
       - run: sh build.sh
         env:
           WAT_SIGN_KEY: ${{ secrets.WAT_SIGN_KEY }}

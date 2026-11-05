@@ -4,11 +4,13 @@
 # the value validators, and the flow gates (profiles are Linux-only; the resilience prompts are off
 # the plain wizard flow unless a flag or profile pre-fills them). No root, no systemd, no binary needed.
 cd "$(dirname "$0")" || exit 1
+# L16: a private scratch root, so two runs (or a run next to a checkout) never share or delete each other's files
+SMOKE=$(mktemp -d) || { echo "FAIL cannot create a scratch directory"; exit 1; }
+trap 'rm -rf "$SMOKE"' EXIT
 export WAT_MANAGER_LIB=1 WAT_PREFIX=wattest
-export WAT_CONF="$PWD/.smoke/conf" WAT_BIN="$PWD/.smoke/wattun"
-export WAT_AUTO_RUN="$PWD/.smoke/run-auto" WAT_RUN="$PWD/.smoke/run"
-rm -rf "$PWD/.smoke"; mkdir -p "$WAT_CONF" "$WAT_AUTO_RUN" "$WAT_RUN"
-trap 'rm -rf "$PWD/.smoke"' EXIT
+export WAT_CONF="$SMOKE/conf" WAT_BIN="$SMOKE/wattun"
+export WAT_AUTO_RUN="$SMOKE/run-auto" WAT_RUN="$SMOKE/run"
+mkdir -p "$WAT_CONF" "$WAT_AUTO_RUN" "$WAT_RUN"
 fail=0
 chk() { [ "$2" = "$3" ] && echo "ok   $1" || { echo "FAIL $1: got '$2', want '$3'"; fail=1; return; }; }
 expect_fail() { "$@" 2>/dev/null && { echo "FAIL $*: accepted a bad value"; fail=1; } || echo "ok   rejected: $*"; }
@@ -561,14 +563,14 @@ chk "shaped picker: raw tier first (A4)" "${SHAPED_OPTS[0]}/${SHAPED_OPTS[5]}/${
 chk "shaped picker: index maps to a carrier (A4)" "$(shaped_pick_index 8 2>/dev/null || true)" "vxlan"
 for i in 0 14 abc ''; do expect_fail shaped_pick_index "$i"; done
 _ni=$NONINTERACTIVE; NONINTERACTIVE=0
-printf 'q' | pick_carrier auto >"$PWD/.smoke/pick.out" 2>&1
-chk "shaped picker: the branch is offered in the picker (A4)" "$(grep -c 'More transports' "$PWD/.smoke/pick.out")" "1"
-printf 'm8\n' >"$PWD/.smoke/pick.in"
-CARRIER=''; pick_carrier auto <"$PWD/.smoke/pick.in" >/dev/null 2>&1
+printf 'q' | pick_carrier auto >"$SMOKE/pick.out" 2>&1
+chk "shaped picker: the branch is offered in the picker (A4)" "$(grep -c 'More transports' "$SMOKE/pick.out")" "1"
+printf 'm8\n' >"$SMOKE/pick.in"
+CARRIER=''; pick_carrier auto <"$SMOKE/pick.in" >/dev/null 2>&1
 chk "shaped picker: choosing vxlan returns it (A4)" "$CARRIER" "vxlan"
-rm -f "$PWD/.smoke/pick.in"
+rm -f "$SMOKE/pick.in"
 NONINTERACTIVE=$_ni
-rm -f "$PWD/.smoke/pick.out"
+rm -f "$SMOKE/pick.out"
 ( free_metrics_port() { echo 19998; }
   NONINTERACTIVE=1 NI_CARRIER=vxlan NI_NAME=t_a4u NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
 chk "shaped picker: the chosen UDP shape is written (A4)" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_a4u.yml")" "1"
@@ -596,7 +598,7 @@ expect_fail ni_parse --mtu 100
 expect_fail ni_parse --policy bogus
 
 # 3. Boost Suite: boost_status, boost_apply, boost_undo
-BOOST_SYSCTL="$PWD/.smoke/boost.conf"
+BOOST_SYSCTL="$SMOKE/boost.conf"
 boost_apply >/dev/null 2>&1
 chk "boost_apply created conf" "$([ -f "$BOOST_SYSCTL" ] && echo 1 || echo 0)" "1"
 chk "boost_apply set 64MB rmem" "$(grep -c 'rmem_max = 67108864' "$BOOST_SYSCTL" || true)" "1"
@@ -608,12 +610,12 @@ chk "boost_undo removed conf" "$([ ! -f "$BOOST_SYSCTL" ] && echo 1 || echo 0)" 
 
 # 4. Backup & Restore roundtrip
 echo "test_payload: 12345" >"$WAT_CONF/backup_sample.yml"
-backup_cmd "$PWD/.smoke/test_backup.tar.gz" >/dev/null 2>&1
-chk "backup_cmd created archive" "$([ -f "$PWD/.smoke/test_backup.tar.gz" ] && echo 1 || echo 0)" "1"
+backup_cmd "$SMOKE/test_backup.tar.gz" >/dev/null 2>&1
+chk "backup_cmd created archive" "$([ -f "$SMOKE/test_backup.tar.gz" ] && echo 1 || echo 0)" "1"
 rm -f "$WAT_CONF/backup_sample.yml"
-restore_cmd "$PWD/.smoke/test_backup.tar.gz" >/dev/null 2>&1
+restore_cmd "$SMOKE/test_backup.tar.gz" >/dev/null 2>&1
 chk "restore_cmd restored sample file" "$(grep -c 'test_payload: 12345' "$WAT_CONF/backup_sample.yml" || true)" "1"
-rm -f "$WAT_CONF/backup_sample.yml" "$PWD/.smoke/test_backup.tar.gz"
+rm -f "$WAT_CONF/backup_sample.yml" "$SMOKE/test_backup.tar.gz"
 
 # 5. at_rank policies: speed, latency, direct
 AV_LABEL=("cdn-fast" "direct-low-rtt" "direct-high-speed")
@@ -771,21 +773,21 @@ chk "state base: a root state-dir keeps its slash" "$(state_base_path kb /)" "/k
 cat >"$WAT_CONF/t_state.yml" <<EOF
 mode: client
 carrier: tcp
-state-dir: $PWD/.smoke/state
+state-dir: $SMOKE/state
 EOF
-mkdir -p "$PWD/.smoke/state"
-chk "state dir read from the config" "$(state_dir_of t_state)" "$PWD/.smoke/state"
-chk "state file: totals in the state-dir" "$(state_file t_state totals)" "$PWD/.smoke/state/t_state.yml.totals.json"
-chk "state file: quota in the state-dir" "$(state_file t_state quota)" "$PWD/.smoke/state/t_state.yml.quota.json"
-chk "state files: every file the engine can leave" "$(state_files t_state | tr '\n' ' ')" "$PWD/.smoke/state/t_state.yml.totals.json $PWD/.smoke/state/t_state.yml.totals.json.host $PWD/.smoke/state/t_state.yml.totals.json.tmp $PWD/.smoke/state/t_state.yml.quota.json $PWD/.smoke/state/t_state.yml.quota.json.tmp "
-printf 'totals\n' >"$PWD/.smoke/state/t_state.yml.totals.json"
-printf 'quota\n' >"$PWD/.smoke/state/t_state.yml.quota.json"
+mkdir -p "$SMOKE/state"
+chk "state dir read from the config" "$(state_dir_of t_state)" "$SMOKE/state"
+chk "state file: totals in the state-dir" "$(state_file t_state totals)" "$SMOKE/state/t_state.yml.totals.json"
+chk "state file: quota in the state-dir" "$(state_file t_state quota)" "$SMOKE/state/t_state.yml.quota.json"
+chk "state files: every file the engine can leave" "$(state_files t_state | tr '\n' ' ')" "$SMOKE/state/t_state.yml.totals.json $SMOKE/state/t_state.yml.totals.json.host $SMOKE/state/t_state.yml.totals.json.tmp $SMOKE/state/t_state.yml.quota.json $SMOKE/state/t_state.yml.quota.json.tmp "
+printf 'totals\n' >"$SMOKE/state/t_state.yml.totals.json"
+printf 'quota\n' >"$SMOKE/state/t_state.yml.quota.json"
 printf 'stale\n' >"$WAT_CONF/t_state.yml.totals.json" # a stale file at the old location
 reset_traffic t_state >/dev/null 2>&1
-chk "reset_traffic deletes the totals where the engine keeps them" "$([ -f "$PWD/.smoke/state/t_state.yml.totals.json" ] && echo y || echo n)" "n"
-chk "reset_traffic keeps the quota usage" "$([ -f "$PWD/.smoke/state/t_state.yml.quota.json" ] && echo y || echo n)" "y"
+chk "reset_traffic deletes the totals where the engine keeps them" "$([ -f "$SMOKE/state/t_state.yml.totals.json" ] && echo y || echo n)" "n"
+chk "reset_traffic keeps the quota usage" "$([ -f "$SMOKE/state/t_state.yml.quota.json" ] && echo y || echo n)" "y"
 chk "reset_traffic does not touch the old location" "$([ -f "$WAT_CONF/t_state.yml.totals.json" ] && echo y || echo n)" "y"
-rm -rf "$PWD/.smoke/state" "$WAT_CONF/t_state.yml" "$WAT_CONF/t_state.yml.totals.json"
+rm -rf "$SMOKE/state" "$WAT_CONF/t_state.yml" "$WAT_CONF/t_state.yml.totals.json"
 
 # F11/F8 advanced settings: the validators mirror the engine, because an out-of-range value is a startup failure
 # (cmd/wattun/fecgate.go: 0 < on <= 50 and 0 <= off < on; stateSaveInterval: >= 0 seconds; state-dir must be an
@@ -826,9 +828,10 @@ chk "wizard FEC: the non-interactive prompt takes the default (A2)" "$REPLY_V:$R
 chk "wizard FEC: both wizards use ask_fec (A2)" "$(grep -c 'ask_fec off' wattun-manager)" "2"
 v_state_save 0 && echo "ok   v_state_save 0" || { echo "FAIL v_state_save 0"; fail=1; }
 v_state_save 30 && echo "ok   v_state_save 30" || { echo "FAIL v_state_save 30"; fail=1; }
-v_state_save 2147483647 && echo "ok   v_state_save 2147483647" || { echo "FAIL v_state_save 2147483647"; fail=1; }
+v_state_save 2592000 && echo "ok   v_state_save 2592000 (the engine's 30-day cap)" || { echo "FAIL v_state_save 2592000"; fail=1; }
 expect_fail v_state_save -1
 expect_fail v_state_save 3x
+expect_fail v_state_save 2592001
 expect_fail v_state_save 2147483648
 v_state_dir /run/wattun && echo "ok   v_state_dir /run/wattun" || { echo "FAIL v_state_dir /run/wattun"; fail=1; }
 _vsd=$(v_state_dir /var/lib/wattun-test-audit 2>&1)
@@ -837,9 +840,9 @@ v_state_dir - && echo "ok   v_state_dir - (default)" || { echo "FAIL v_state_dir
 expect_fail v_state_dir relative/path
 expect_fail v_state_dir /run/../etc
 expect_fail v_state_dir '/run/x y'
-: >"$PWD/.smoke/not-a-dir"
-expect_fail v_state_dir "$PWD/.smoke/not-a-dir"
-rm -f "$PWD/.smoke/not-a-dir"
+: >"$SMOKE/not-a-dir"
+expect_fail v_state_dir "$SMOKE/not-a-dir"
+rm -f "$SMOKE/not-a-dir"
 
 # F13/W10 settings: shape-data, noise/noise-bps/noise-window and the server-side admission allowlist. Every validator
 # mirrors the engine's own startup check (cmd/wattun/noise.go, cmd/wattun/clientallow.go), because a value the engine
@@ -873,6 +876,8 @@ v_allow_clients "2001:db8::1" && echo "ok   v_allow_clients ipv6" || { echo "FAI
 v_allow_clients "" && echo "ok   v_allow_clients empty = any source" || { echo "FAIL v_allow_clients empty = any source"; fail=1; }
 expect_fail v_allow_clients "example.com"
 expect_fail v_allow_clients "10.0.0.0/33"
+v_allow_clients "::ffff:203.0.113.0/120" && echo "ok   v_allow_clients mapped CIDR" || { echo "FAIL v_allow_clients mapped CIDR"; fail=1; }
+expect_fail v_allow_clients "::ffff:203.0.113.0/64" # M3: the engine refuses mapped prefixes shorter than /96
 # M4: the shipped unit can only read /etc/wattun; in the sandbox the allowed dir is $CONF. The file must be there.
 ALLOWF=$WAT_CONF/allowlist.txt
 printf '203.0.113.5\n10.0.0.0/8\n' >"$ALLOWF"
@@ -882,7 +887,7 @@ expect_fail v_allow_clients_file "$ALLOWF"
 : >"$ALLOWF"
 expect_fail v_allow_clients_file "$ALLOWF" # the engine refuses an empty file, so a typo cannot allow every source
 rm -f "$ALLOWF"
-expect_fail v_allow_clients_file "$PWD/.smoke/outside-allowlist.txt" # outside the unit's readable dir
+expect_fail v_allow_clients_file "$SMOKE/outside-allowlist.txt" # outside the unit's readable dir
 expect_fail v_allow_clients_file /tmp/allowlist.txt
 expect_fail v_allow_clients_file relative.txt
 expect_fail v_allow_clients_file /nonexistent-wattun-allowlist.txt
@@ -949,11 +954,18 @@ role() { echo Iran; }
 adv_out=$( NONINTERACTIVE=1; adv_menu t_adv )
 chk "advanced rows: admission allowlist hidden on Iran" "$(grep -c 'allow clients' <<<"$adv_out")" "0"
 rm -f "$WAT_CONF/t_adv.yml"
-# A5: coverage test — every engine flag (cmd/wattun/main.go) must have a manager path: a cfg read/literal/set_row/
-# wizard prompt (or an explicit file-only/ports-UI exclusion). Synthetic per-carrier flags are excluded by prefix.
-# A fake name passed as an argument must be reported, proving the test can fail.
-cfg_flag_names() { grep -oE 'flag\.(String|Int|Bool|Float64|Duration)\("[^"]+"' cmd/wattun/main.go | sed -E 's/.*\("//; s/"$//'; }
-cfg_coverage_missing() { # [extra names...] -> missing engine flags, space separated (empty = complete)
+# A5: coverage test — every engine flag (cmd/wattun/main.go) must have a manager path: a cfg/set_row/set_value/
+# unset_value/ask_ok use site (or an explicit file-only/ports-UI exclusion). Synthetic per-carrier flags are excluded
+# by prefix. A fake name passed as an argument must be reported, proving the test can fail.
+cfg_flag_names() { # every engine flag, whatever the flag.<Kind>() registration shape
+  grep -oE 'flag\.(String|Int|Bool|Float64|Duration|Func|BoolFunc)\("[^"]+"' cmd/wattun/main.go | sed -E 's/.*\("//; s/"$//'
+  grep -oE 'flag\.Var\([^,]+, *"[^"]+"' cmd/wattun/main.go | sed -E 's/.*, *"//; s/"$//'
+}
+cfg_sites() { grep -E '(^|[^[:alnum:]_-])(cfg|set_row|set_value|unset_value|ask_ok)[[:space:]]' wattun-manager; }
+cfg_flag_used() { # flag -> 0 when a real use site names it; a comment, a hint or the file-only list alone does not count
+  cfg_sites | grep -qE "(^|[^[:alnum:]_-])$1([^[:alnum:]_-]|$)"
+}
+cfg_coverage_missing() { # [extra names...] -> engine flags with no manager path, space separated (empty = complete)
   local f miss=''
   for f in $(cfg_flag_names) "$@"; do
     case "$f" in
@@ -961,15 +973,20 @@ cfg_coverage_missing() { # [extra names...] -> missing engine flags, space separ
       listen-*|peer-*|src-ip-*) continue ;;
     esac
     case " $CFG_FILE_ONLY $CFG_PORTS_UI " in *" $f "*) continue ;; esac
-    grep -q -- "$f" wattun-manager || miss+="$f "
+    cfg_flag_used "$f" || miss+="$f "
   done
   printf '%s' "${miss% }"
 }
 chk "config coverage: the parser sees the engine flags (A5)" "$(cfg_flag_names | grep -c '^shape-data$')" "1"
-chk "config coverage: every engine flag has a manager path (A5)" "$(cfg_coverage_missing)" ""
+chk "config coverage: a flag.Func key is seen too (M2)" "$(cfg_flag_names | grep -c '^header$')" "1"
+chk "config coverage: every engine flag has a manager or a declared file-only path (A5)" "$(cfg_coverage_missing)" ""
 chk "config coverage: a fake flag is caught (A5)" "$(cfg_coverage_missing made-up-flag)" "made-up-flag"
+chk "config coverage: a real use site counts (M2)" "$(cfg_flag_used shape-data && echo y)" "y"
+chk "config coverage: a hint/comment mention alone is not a use site (M2)" "$(cfg_flag_used tls-pin && echo y || echo n)" "n"
+chk "config coverage: a hint/comment mention alone is not a use site either (M2)" "$(cfg_flag_used header && echo y || echo n)" "n"
+chk "config coverage: -header stays covered via the file-only list (M2)" "$(case " $CFG_FILE_ONLY " in *" header "*) echo y ;; *) echo n ;; esac)" "y"
 chk "config coverage: file-only expert keys are declared (A5)" "$(grep -c '^CFG_FILE_ONLY=' wattun-manager)" "1"
-chk "config coverage: the file-only list names the documented keys (A5)" "$(grep -o 'debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key' <<<"$CFG_FILE_ONLY" | wc -l | tr -d ' ')" "1"
+chk "config coverage: the file-only list names the documented keys (A5)" "$(grep -o 'debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header' <<<"$CFG_FILE_ONLY" | wc -l | tr -d ' ')" "1"
 chk "config coverage: the ports UI covers the allowlist flags (A5)" "$(grep -c 'allow-min allow-max allow-ports allow-file' <<<"$CFG_PORTS_UI")" "1"
 
 
@@ -1164,15 +1181,15 @@ eval "$_bvokd6"; eval "$_bvd6"; VER=$_verd6
 T_AUTO=''; AT_SKIPPED=''; AV_LABEL=(); AV_CAR=(); AV_KIND=()
 # B3: extended Auto = one hidden single-carrier server unit per shaped carrier (the engine refuses shaped-in-bond)
 _bt_sctl=$(declare -f systemctl); _bt_fmp=$(declare -f free_metrics_port); _bt_lb=$(declare -f listen_blocked)
-_bt_bv=$(declare -f bin_ver); _bt_bvok=$(declare -f bin_ver_ok); _bt_ver=$VER; _bt_autolive=$(declare -f auto_live); _bt_su=$(declare -f start_unit)
-systemctl() { printf '%s\n' "$*" >>"$PWD/.smoke/sys.log"; return 0; }
+_bt_bv=$(declare -f bin_ver); _bt_bvok=$(declare -f bin_ver_ok); _bt_ver=$VER; _bt_su=$(declare -f start_unit)
+systemctl() { printf '%s\n' "$*" >>"$SMOKE/sys.log"; return 0; }
 systemd-run() { :; }
 start_unit() { :; } # the wizard's unit start needs /etc/systemd; the config/token/unit files are what this checks
 listen_blocked() { return 1; }
 free_metrics_port() { echo $(( 26000 + $(ls "$WAT_CONF"/*.yml 2>/dev/null | wc -l) )) ; }
 VER=3.3.0; bin_ver() { echo "$VER"; }; bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
-: >"$PWD/.smoke/sys.log"
-( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_ext NI_ADDR=203.0.113.5 NI_EXTENDED=1 wizard_kharej ) >"$PWD/.smoke/ext.out" 2>&1
+: >"$SMOKE/sys.log"
+( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_ext NI_ADDR=203.0.113.5 NI_EXTENDED=1 wizard_kharej ) >"$SMOKE/ext.out" 2>&1
 chk "extended auto: parent config created (B3)" "$([ -f "$WAT_CONF/t_ext.yml" ] && echo y)" "y"
 chk "extended auto: parent keeps standard carriers + gre/ipip (B3)" "$(grep -c '^carrier: icmp+udp+tcp+tls+wss+h2+grpc+ws+h2c+gre+ipip$' "$WAT_CONF/t_ext.yml")" "1"
 chk "extended auto: parent has no shaped carrier (B3)" "$(grep -cE '^carrier:.*(vxlan|sit)' "$WAT_CONF/t_ext.yml")" "0"
@@ -1183,54 +1200,70 @@ chk "extended auto: raw shape writes no listen (B3)" "$(grep -c '^listen:' "$WAT
 chk "extended auto: hidden configs share the parent key (B3)" "$(grep -c "^key-file: $WAT_CONF/t_ext.key$" "$WAT_CONF/t_ext-e-sit.yml")" "1"
 chk "extended auto: hidden configs get unique metrics ports (B3)" "$(for f in "$WAT_CONF"/t_ext-e-*.yml; do sed -n 's/^metrics: 127.0.0.1://p' "$f"; done | sort -u | wc -l | tr -d ' ')" "13"
 chk "extended auto: sidecar names the parent (B3)" "$(cat "$WAT_CONF/t_ext-e-vxlan.autoext")" "t_ext"
-chk "extended auto: listeners were enabled and started (B3)" "$(grep -cE '(enable|restart) wattest@t_ext-e-vxlan' "$PWD/.smoke/sys.log")" "2"
+chk "extended auto: listeners were enabled and started (B3)" "$(grep -cE '(enable|restart) wattest@t_ext-e-vxlan' "$SMOKE/sys.log")" "2"
 chk "extended auto: plan carries all 13 shapes + marker (B3)" "$(read_token "$(cat "$WAT_CONF/t_ext.token")"; printf '%s/%s' "$(printf '%s' "$T_AUTO" | grep -oE '(fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct|sit|6to4|xfrm-ipsec|etherip|l2tpv3)' | sort -u | wc -l | tr -d ' ')" "$(case "$T_AUTO" in *';e=1'*) echo y ;; *) echo n ;; esac)")" "13/y"
 chk "extended auto: plan keeps the standard direct part (B3)" "$(read_token "$(cat "$WAT_CONF/t_ext.token")"; plan_part "$T_AUTO" d | grep -c '^udp:4443,tcp:4443')" "1"
 chk "extended auto: hidden from the tunnel list (B3)" "$(tunnels | grep -c '^t_ext-e-')" "0"
 chk "extended auto: tunnels_all sees the listeners (B3)" "$(tunnels_all | grep -c '^t_ext-e-')" "13"
-chk "extended auto: the hint warns old Iran leaves the ports open (B3)" "$(grep -c 'auto-prune t_ext --direct' "$PWD/.smoke/ext.out")" "2"
+chk "extended auto: the hint warns old Iran leaves the ports open (B3)" "$(grep -c 'auto-prune t_ext --direct' "$SMOKE/ext.out")" "2"
 # lifecycle: a down enabled listener is restarted by heal's helper
 systemctl() { case "$*" in
   "is-enabled -q wattest@t_ext-e-sit") return 0 ;;
   "is-active -q wattest@t_ext-e-sit") return 1 ;;
-  *"restart wattest@t_ext-e-sit"*) printf '%s\n' "$*" >>"$PWD/.smoke/sys.log"; return 0 ;; esac; return 1; }
-: >"$PWD/.smoke/sys.log"
+  *"restart wattest@t_ext-e-sit"*) printf '%s\n' "$*" >>"$SMOKE/sys.log"; return 0 ;; esac; return 1; }
+: >"$SMOKE/sys.log"
 heal_ext_listeners >/dev/null 2>&1
-chk "extended heal: restarts a down listener (B3)" "$(grep -c 'restart wattest@t_ext-e-sit' "$PWD/.smoke/sys.log")" "1"
-# prune keeps the shape Iran picked and stops the rest
-systemctl() { printf '%s\n' "$*" >>"$PWD/.smoke/sys.log"; return 0; }
-: >"$PWD/.smoke/sys.log"
-auto_live() { AN_D='vxlan'; AN_R=''; }
+chk "extended heal: restarts a down listener (B3)" "$(grep -c 'restart wattest@t_ext-e-sit' "$SMOKE/sys.log")" "1"
+# prune keeps the shape Iran picked and stops the rest. Each shaped listener is its own single-carrier server, so the
+# pick is only visible in that child's /stats — never in the parent's (H1). Fixture: a live client on vxlan, none on sit.
+systemctl() { printf '%s\n' "$*" >>"$SMOKE/sys.log"; return 0; }
+_bt_stats=$(declare -f stats)
+stats() { case "$1" in
+  t_ext-e-vxlan) echo '{"alive": true, "clients": [{"ip": "203.0.113.9", "carrier": "vxlan"}]}' ;;
+  *) echo '{"alive": true, "clients": []}' ;;
+esac; }
+: >"$SMOKE/sys.log"
 auto_ext_prune t_ext >/dev/null 2>&1
-chk "extended prune: keeps the shape Iran uses (B3)" "$(grep -c 'stop wattest@t_ext-e-vxlan' "$PWD/.smoke/sys.log")" "0"
-chk "extended prune: stops an unused shape (B3)" "$(grep -c 'stop wattest@t_ext-e-sit' "$PWD/.smoke/sys.log")" "1"
-: >"$PWD/.smoke/sys.log"
+chk "extended prune: keeps the shape Iran uses (B3)" "$(grep -c 'stop wattest@t_ext-e-vxlan' "$SMOKE/sys.log")" "0"
+chk "extended prune: stops an unused shape (B3)" "$(grep -c 'stop wattest@t_ext-e-sit' "$SMOKE/sys.log")" "1"
+# H1 guards: a running child whose /stats cannot be read is unknown (not unused), and no client at all is not a pick
+stats() { case "$1" in t_ext-e-sit) return 3 ;; *) echo '{"alive": true, "clients": [{"ip": "203.0.113.9"}]}' ;; esac; }
+chk "extended live: an unreadable child is unknown (H1)" "$(auto_ext_live t_ext; echo "$?")" "1"
+: >"$SMOKE/sys.log"; auto_ext_prune t_ext >/dev/null 2>&1
+chk "extended prune: an unknown pick keeps every shape (H1)" "$(grep -c 'stop ' "$SMOKE/sys.log")" "0"
+stats() { echo '{"alive": true, "clients": []}'; }
+chk "extended live: no live client is not a pick (H1)" "$(auto_ext_live t_ext; printf '%s/%s' "$?" "$AE_LIVE")" "0/"
+: >"$SMOKE/sys.log"; auto_ext_prune t_ext >/dev/null 2>&1
+chk "extended prune: no live client keeps every shape (H1)" "$(grep -c 'stop ' "$SMOKE/sys.log")" "0"
+eval "$_bt_stats"
+: >"$SMOKE/sys.log"
 auto_ext_start t_ext >/dev/null 2>&1
-chk "extended widen: reopens the listeners for a retest (B3)" "$(grep -c 'restart wattest@t_ext-e-vxlan' "$PWD/.smoke/sys.log")" "1"
-chk "extended wiring: both prune paths run the ext pruner (B3)" "$(grep -c 'auto_ext_prune "\$n"' wattun-manager)" "2"
-chk "extended wiring: widen and prune --direct reopen listeners (B3)" "$(grep -c 'auto_ext_start "\$n"' wattun-manager)" "2"
-chk "extended wiring: heal calls the listener helper (B3)" "$(grep -c '^  heal_ext_listeners$' wattun-manager)" "1"
+chk "extended widen: reopens the listeners for a retest (B3)" "$(grep -c 'restart wattest@t_ext-e-vxlan' "$SMOKE/sys.log")" "1"
 # delete removes the hidden listeners with their parent
-: >"$PWD/.smoke/sys.log"
+_bt_fw=$(declare -f fw_close); fw_close() { printf '%s\n' "$*" >>"$SMOKE/fw.log"; }
+: >"$SMOKE/sys.log"; : >"$SMOKE/fw.log"
 NONINTERACTIVE=1 delete_tunnel t_ext >/dev/null 2>&1
+eval "$_bt_fw"
 chk "extended delete: configs removed with the parent (B3)" "$(ls "$WAT_CONF"/t_ext*.yml 2>/dev/null | wc -l | tr -d ' ')" "0"
-chk "extended delete: the hidden units are stopped (B3)" "$(grep -c 'disable --now wattest@t_ext-e-vxlan' "$PWD/.smoke/sys.log")" "1"
+chk "extended delete: the hidden units are stopped (B3)" "$(grep -c 'disable --now wattest@t_ext-e-vxlan' "$SMOKE/sys.log")" "1"
+chk "extended delete: each UDP child's rule is closed (L8)" "$(grep -c '^4789/udp$' "$SMOKE/fw.log")" "1"
+chk "extended delete: no tcp rule is closed for a child (L8)" "$(grep -c '/tcp' "$SMOKE/fw.log")" "0"
 # default stays unchanged: no --extended, no hidden configs and no plan marker
 ( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_extn NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
 chk "extended off by default: no hidden configs (B3)" "$(ls "$WAT_CONF"/t_extn-e-*.yml 2>/dev/null | wc -l | tr -d ' ')" "0"
 chk "extended off by default: the plan has no marker (B3)" "$(read_token "$(cat "$WAT_CONF/t_extn.token")"; case "$T_AUTO" in *';e=1'*) echo y ;; *) echo n ;; esac)" "n"
 rm -f "$WAT_CONF"/t_extn*
 # an old Kharej refuses --extended with one clear message and writes nothing
-VER=3.2.1; : >"$PWD/.smoke/ext.out"
-( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_ext2 NI_ADDR=203.0.113.5 NI_EXTENDED=1 wizard_kharej ) >"$PWD/.smoke/ext.out" 2>&1
+VER=3.2.1; : >"$SMOKE/ext.out"
+( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_ext2 NI_ADDR=203.0.113.5 NI_EXTENDED=1 wizard_kharej ) >"$SMOKE/ext.out" 2>&1
 _ext_rc=$?
-chk "extended: an old Kharej refuses --extended (B3)" "$_ext_rc/$(grep -c 'needs wattun 3.3.0' "$PWD/.smoke/ext.out")" "1/1"
+chk "extended: an old Kharej refuses --extended (B3)" "$_ext_rc/$(grep -c 'needs wattun 3.3.0' "$SMOKE/ext.out")" "1/1"
 chk "extended: the refusal creates nothing (B3)" "$(ls "$WAT_CONF"/t_ext2* 2>/dev/null | wc -l | tr -d ' ')" "0"
-eval "$_bt_autolive"; eval "$_bt_fmp"; eval "$_bt_lb"; eval "$_bt_sctl"; eval "$_bt_su"
+eval "$_bt_fmp"; eval "$_bt_lb"; eval "$_bt_sctl"; eval "$_bt_su"
 eval "$_bt_bv"; eval "$_bt_bvok"; VER=$_bt_ver
 unset -f systemd-run
 NI_EXTENDED=0; AUTO_EXT=0; AUTO_EXT_D=''
-rm -f "$PWD/.smoke/sys.log" "$PWD/.smoke/ext.out"
+rm -f "$SMOKE/sys.log" "$SMOKE/ext.out"
 
 chk "tune knobs: pool lanes test sessions up to the engine max 16" "$(at_tune_knobs tcp | grep -c 'sessions:1,2,4,8,16')" "1"
 chk "tune knobs: pool lanes test conns up to 64" "$(at_tune_knobs tcp | grep -c 'conns:4,8,32,64')" "1"
@@ -1297,7 +1330,7 @@ chk "autowiden: 0 turns the automatic widen off" "$(autowiden_grace)" "0"
 rm -f "$WAT_CONF/.manager.conf"
 chk "autowiden: default cooldown is 10 minutes (D1)" "$(autowiden_grace)" "10"
 # the timer unit itself: install writes a oneshot that runs heal every minute, remove deletes both files
-UNITS=$PWD/.smoke/units; rm -rf "$UNITS"
+UNITS=$SMOKE/units; rm -rf "$UNITS"
 WAT_UNIT_DIR=$UNITS heal_enable >/dev/null 2>&1
 chk "heal timer: service installed" "$([ -f "$UNITS/$HEAL_UNIT.service" ] && echo y || echo n)" "y"
 chk "heal timer: timer installed" "$([ -f "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "y"
@@ -1333,7 +1366,7 @@ chk "widen pass: widening clears the pruned marker" "$([ -e "$WAT_RUN/t_auto.aut
 chk "widen pass: widening starts the cooldown stamp" "$([ -f "$WAT_RUN/t_auto.autowiden" ] && echo y || echo n)" "y"
 chk "widen pass: widening resets the failed-check counter" "$([ -e "$WAT_RUN/t_auto.autowiden.down" ] && echo y || echo n)" "n"
 # heal() on a Kharej-only host must never restart a client tunnel: only the prune/widen pass may run
-SYSCALLS=$PWD/.smoke/syscalls
+SYSCALLS=$SMOKE/syscalls
 cat >"$WAT_CONF/t_kh.yml" <<'EOF'
 mode: server
 carrier: icmp+tcp
@@ -1354,7 +1387,7 @@ rm -rf "$UNITS" "$SYSCALLS" "$WAT_CONF/t_kh.yml" "$WAT_CONF/t_auto.yml" "$WAT_CO
 # Release checksums: sums_has matches one exact "<sha>  <name>" line; sums_verify is the RSA check update() runs
 # before it executes the installer as root, so it is exercised here with a throwaway key. The release key embedded
 # in install.sh and in the manager must stay byte-identical (the manager's own comment requires it).
-SUMS_FILE=$PWD/.smoke/SHA256SUMS
+SUMS_FILE=$SMOKE/SHA256SUMS
 SUMS_SHA=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 printf '%s  %s\n' "$SUMS_SHA" install.sh >"$SUMS_FILE"
 chk "sums_has match install.sh" "$(sums_has "$SUMS_FILE" install.sh "$SUMS_SHA" && echo y || echo n)" "y"
@@ -1363,7 +1396,7 @@ chk "sums_has rejects another name" "$(sums_has "$SUMS_FILE" wattun-manager "$SU
 INSTALL_PEM=$(awk '/^SIG_PUB=/{on=1;next} on&&/^PEM$/{on=0} on' install.sh)
 chk "release signing key matches install.sh" "$([ "$INSTALL_PEM" = "$SIG_PUB" ] && echo y || echo n)" "y"
 if command -v openssl >/dev/null 2>&1; then
-  KEY=$PWD/.smoke/test-sign.pem PUB=$PWD/.smoke/test-sign.pub SIG=$SUMS_FILE.sig
+  KEY=$SMOKE/test-sign.pem PUB=$SMOKE/test-sign.pub SIG=$SUMS_FILE.sig
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$KEY" 2>/dev/null
   openssl pkey -in "$KEY" -pubout -out "$PUB" 2>/dev/null
   openssl dgst -sha256 -sign "$KEY" -out "$SIG" "$SUMS_FILE"
@@ -1456,6 +1489,12 @@ rm -f "$WAT_RUN/t_pr.autoprune.done"; printf 'r:icmp 0\n' >"$WAT_RUN/t_pr.autopr
 _pr_out2=$( NONINTERACTIVE=1; auto_live() { AN_D=''; AN_R='icmp'; }; auto_prune_tick t_pr ) 2>/dev/null
 chk "prune pass: a fully used reverse side is left open" "$([ -f "$WAT_RUN/t_pr.autoprune.done" ] && echo y || echo n)" "n"
 chk "prune pass: the window restarts instead of marking done" "$(cut -d' ' -f1 "$WAT_RUN/t_pr.autoprune")" "r:icmp"
+# H1: extended cleanup must not depend on the reverse/direct narrowing succeeding (reverse-only returns 2 here).
+_ext_log="$WAT_RUN/.ext-prune"; : >"$_ext_log"
+rm -f "$WAT_RUN/t_pr.autoprune.done"; printf 'r:icmp 0\n' >"$WAT_RUN/t_pr.autoprune"
+_pr_out3=$( NONINTERACTIVE=1; auto_live() { AN_D=''; AN_R='icmp'; }; auto_ext_names() { echo t_pr-e-vxlan; }; auto_ext_prune() { echo called >>"$_ext_log"; }; auto_prune_tick t_pr ) 2>/dev/null
+chk "prune pass: ext cleanup runs when every reverse leg is in use (H1)" "$(grep -c called "$_ext_log" 2>/dev/null)" "1"
+rm -f "$_ext_log"
 rm -f "$WAT_CONF/t_pr.yml" "$WAT_CONF/t_pr-r.yml" "$WAT_CONF/t_pr.token" "$WAT_CONF/.manager.conf" \
       "$WAT_RUN/t_pr.autoprune" "$WAT_RUN/t_pr.autoprune.done" "$WAT_RUN/.prune-sys"
 # M8: a hand-edited relative state-dir resolves from / in the manager (the unit's CWD), and says so out loud
@@ -1490,6 +1529,238 @@ chk "at_best_rate: a failed variant is ignored" "$(at_best_rate 0 2)" "0"
 AR_OK=(); AR_DOWN=(); AR_UP=()
 # H1: the documented tmpfs path is the one the unit makes writable
 chk "state-dir: hints/validator point at /run/wattun (H1)" "$([ "$(grep -c '/run/wattun' wattun-manager)" -ge 3 ] && echo y)" "y"
+
+# ======================================================================================
+# Finding fixes M2/L16/L17 and the behaviour behind the 2026-11-05 manager fixes
+# (H1/H2/H3/H4/M1/L1/L2/L3/L7/L8/L10/L12). Each case calls the real manager function with a temp
+# WAT_CONF/WAT_RUN/WAT_PREFIX; systemd, /stats, the firewall and the engine binary are stubs, so no root,
+# no systemd and no binary are needed.
+# ======================================================================================
+_bv_s=$(declare -f bin_ver); _bvok_s=$(declare -f bin_ver_ok); _ver_s=$VER
+VER=3.3.0; bin_ver() { echo "$VER"; }; bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
+SY=$SMOKE/sys2.log
+role() { echo Iran; }
+systemctl() { printf '%s\n' "$*" >>"$SY"; return 0; }
+
+# H1/M1: a shaped-only pick. The parent's /stats cannot name a shaped shape, so the pick is read from each hidden
+# child's own /stats ("clients" -> a live client). The parent name itself contains "-e-" to pin the exact-prefix parse.
+cat >"$WAT_CONF/a-e-b.yml" <<'EOF'
+mode: server
+carrier: icmp+tcp
+listen-tcp: ":4443"
+EOF
+make_token auto '203.0.113.10' 'testkey123' '/wat' '' '' '' '' 'd=icmp,tcp;r=icmp' >"$WAT_CONF/a-e-b.token"
+chmod 600 "$WAT_CONF/a-e-b.token"
+{ echo "mode: server"; echo "key-file: $WAT_CONF/a-e-b.key"; echo "carrier: vxlan"; echo 'listen: ":4789"'; } >"$WAT_CONF/a-e-b-e-vxlan.yml"
+{ echo "mode: server"; echo "key-file: $WAT_CONF/a-e-b.key"; echo "carrier: sit"; } >"$WAT_CONF/a-e-b-e-sit.yml"
+printf 'a-e-b\n' >"$WAT_CONF/a-e-b-e-vxlan.autoext"
+printf 'a-e-b\n' >"$WAT_CONF/a-e-b-e-sit.autoext"
+chk "shaped children: the exact prefix is parsed, not the first -e- (M1)" "$(auto_ext_names a-e-b | tr '\n' ' ')" "a-e-b-e-sit a-e-b-e-vxlan "
+chk "shaped pick: the signature names the live child alone (H1)" \
+  "$( stats() { case "$1" in a-e-b-e-vxlan) echo '{"alive": true, "clients": [{"ip": "203.0.113.9"}]}' ;; *) echo '{"alive": true, "clients": []}' ;; esac; }; auto_ext_sig a-e-b )" "e:vxlan"
+( umask 077; printf 'autoprune=1\n' >"$WAT_CONF/.manager.conf" ) # a one-minute stable-pick window
+printf 'e:vxlan 0\n' >"$WAT_RUN/a-e-b.autoprune"                # the pick has been stable since then
+rm -f "$WAT_RUN/a-e-b.autoprune.done"
+chk "prune pass: no reverse companion, so only the shapes can be the pick (H1)" "$([ -e "$WAT_CONF/a-e-b-r.yml" ] && echo y || echo n)" "n"
+: >"$SY"
+( stats() { case "$1" in
+    a-e-b-e-vxlan) echo '{"alive": true, "clients": [{"ip": "203.0.113.9", "carrier": "vxlan"}]}' ;;
+    *) echo '{"alive": true, "clients": []}' ;;
+  esac; }
+  auto_prune_tick a-e-b ) >/dev/null 2>&1
+chk "prune pass: a shaped-only live child is the pick (H1)" "$(grep -c 'stop wattest@a-e-b-e-vxlan' "$SY")" "0"
+chk "prune pass: the shapes Iran does not use are closed (H1)" "$(grep -c 'stop wattest@a-e-b-e-sit' "$SY")" "1"
+chk "prune pass: the shaped pick marks the pass done (H1)" "$([ -f "$WAT_RUN/a-e-b.autoprune.done" ] && echo y || echo n)" "y"
+printf '2' >"$WAT_RUN/a-e-b.autowiden.down"
+( stats() { case "$1" in
+    a-e-b-e-vxlan) echo '{"alive": true, "clients": [{"ip": "203.0.113.9"}]}' ;;
+    *) echo '{"alive": true, "clients": []}' ;;
+  esac; }
+  auto_widen_tick a-e-b ) >/dev/null 2>&1
+chk "widen pass: a live shaped child counts as up (H1)" "$([ -e "$WAT_RUN/a-e-b.autowiden.down" ] && echo y || echo n)" "n"
+: >"$SY"
+( systemctl() { printf '%s\n' "$*" >>"$SY"; return 0; }; NONINTERACTIVE=1 auto_widen a-e-b ) >/dev/null 2>&1
+chk "widen: the hidden listeners are re-enabled and restarted (B3)" "$(grep -c 'restart wattest@a-e-b-e-vxlan' "$SY")" "1"
+: >"$SY"
+( systemctl() { printf '%s\n' "$*" >>"$SY"; return 0; }; auto_prune_cmd a-e-b --direct ) >/dev/null 2>&1
+chk "prune --direct: reopens the listeners for a retest (B3)" "$(grep -c 'restart wattest@a-e-b-e-vxlan' "$SY")" "1"
+rm -f "$WAT_CONF/.manager.conf" "$WAT_CONF/a-e-b.yml" "$WAT_CONF/a-e-b.token" "$WAT_CONF/a-e-b-e-vxlan.yml" \
+      "$WAT_CONF/a-e-b-e-sit.yml" "$WAT_CONF/a-e-b-e-vxlan.autoext" "$WAT_CONF/a-e-b-e-sit.autoext" \
+      "$WAT_RUN/a-e-b.autoprune" "$WAT_RUN/a-e-b.autoprune.done" "$WAT_RUN/a-e-b.autowiden.down"
+
+# H2/L12: a hidden child inherits the parent's allowlist (otherwise the engine falls back to the permissive 1-65535),
+# and no metrics line is written when free_metrics_port finds no free port.
+MAPS=("47811:18899/tcp" "53:53/udp")
+cat >"$WAT_CONF/t_h2.yml" <<'EOF'
+mode: server
+allow-clients: 203.0.113.5
+metrics: 127.0.0.1:19870
+ports:
+  - 47811:18899/tcp
+limits:
+  - 18899 rate=5MB quota=1GB
+EOF
+( free_metrics_port() { echo 19871; }; fw_open() { :; }; auto_ext_write_units t_h2 'vxlan:4789' ) >/dev/null 2>&1
+chk "H2: the child carries the parent's ports: block" "$(grep -c '^  - 47811:18899$' "$WAT_CONF/t_h2-e-vxlan.yml")" "1"
+chk "H2: a UDP allowlist row is copied too" "$(grep -c '^  - 53/udp$' "$WAT_CONF/t_h2-e-vxlan.yml")" "1"
+chk "H2: the child inherits limits: (H2)" "$(grep -c '^limits:' "$WAT_CONF/t_h2-e-vxlan.yml")" "1"
+chk "H2: the child inherits allow-clients (H2)" "$(grep -c '^allow-clients: 203.0.113.5$' "$WAT_CONF/t_h2-e-vxlan.yml")" "1"
+chk "H2: the child still names its shape" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_h2-e-vxlan.yml")" "1"
+chk "H2: a free port gets a metrics line" "$(grep -c '^metrics: 127.0.0.1:19871$' "$WAT_CONF/t_h2-e-vxlan.yml")" "1"
+MAPS=()
+( free_metrics_port() { return 1; }; fw_open() { :; }; auto_ext_write_units t_l12 'vxlan:4789' ) >/dev/null 2>&1
+chk "L12: no free port means no metrics line, not an invalid one (F25)" "$(grep -c '^metrics:' "$WAT_CONF/t_l12-e-vxlan.yml")" "0"
+chk "L12: the child config is still complete (F25)" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_l12-e-vxlan.yml")" "1"
+_pb2=$(declare -f port_busy)
+port_busy() { return 0; } # every port taken
+_merr=$(WAT_METRICS_BASE=20399 free_metrics_port 2>&1 >/dev/null); _mrc=$?
+chk "L12: an exhausted range is a failure, not 20400+ (F25)" "$_mrc" "1"
+chk "L12: it says the tunnel gets no /stats listener (F25)" "$(grep -c 'No free metrics port' <<<"$_merr")" "1"
+chk "L12: it prints no port (F25)" "$(WAT_METRICS_BASE=20399 free_metrics_port 2>/dev/null)" ""
+eval "$_pb2"
+( free_metrics_port() { return 1; }; start_unit() { :; }; fw_open() { :; }
+  NONINTERACTIVE=1 NI_CARRIER=fou-gre NI_NAME=t_l12w NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
+chk "L12: the Kharej wizard omits the metrics line too (F25)" "$(grep -c '^metrics:' "$WAT_CONF/t_l12w.yml")" "0"
+chk "L12: the Kharej wizard still writes the tunnel (F25)" "$(grep -c '^carrier: fou-gre$' "$WAT_CONF/t_l12w.yml")" "1"
+
+# H3: a new key must reach the hidden shaped listeners (they read key-file only at startup); a disabled (pruned) one
+# stays closed.
+{ echo "mode: server"; echo "carrier: tcp"; } >"$WAT_CONF/t_h3.yml"
+make_token tcp '203.0.113.10:4443' 'oldkey' '/wat' '' '' '' '' >"$WAT_CONF/t_h3.token"
+{ echo "mode: server"; echo "carrier: vxlan"; } >"$WAT_CONF/t_h3-e-vxlan.yml"
+{ echo "mode: server"; echo "carrier: sit"; } >"$WAT_CONF/t_h3-e-sit.yml"
+printf 't_h3\n' >"$WAT_CONF/t_h3-e-vxlan.autoext"
+printf 't_h3\n' >"$WAT_CONF/t_h3-e-sit.autoext"
+: >"$SY"
+( role() { echo Kharej; }; confirm() { return 0; }
+  systemctl() { case "$1" in
+    is-enabled) [ "${3:-}" = "wattest@t_h3-e-sit" ] && return 1; return 0 ;;
+  esac
+    printf '%s\n' "$*" >>"$SY"; return 0; }
+  change_key t_h3 ) >/dev/null 2>&1
+chk "H3: the new key restarts the parent" "$(grep -c '^restart wattest@t_h3$' "$SY")" "1"
+chk "H3: an enabled hidden listener restarts with the new key" "$(grep -c 'restart wattest@t_h3-e-vxlan' "$SY")" "1"
+chk "H3: a disabled (pruned) listener stays closed" "$(grep -c 'restart wattest@t_h3-e-sit' "$SY")" "0"
+rm -f "$WAT_CONF"/t_h3*
+
+# H4: shaped carriers and bare/portless plan entries are never offered as bond legs, and a composed carrier list the
+# engine would refuse is not written and does not restart the tunnel. The plan repeats tls (a hand-edited token) so the
+# composed list has a duplicate leg — the refusal the guard exists for.
+chk "bond candidates: a shaped plan carrier is skipped (H4)" "$(bond_candidates_plan 'tcp+udp' 'udp:4443,vxlan:4789,tls:8443' '203.0.113.10')" $'icmp 203.0.113.10\ntls 203.0.113.10:8443'
+chk "bond candidates: a bare raw entry has no port to probe (H4)" "$(bond_candidates_plan 'tcp+udp' 'udp:4443,gre,ipip' '203.0.113.10')" "icmp 203.0.113.10"
+chk "bond candidates: an out-of-range port is skipped (H4)" "$(bond_candidates_plan 'tcp' 'tls:0,ws:70000,tls:8443' '203.0.113.10')" $'icmp 203.0.113.10\ntls 203.0.113.10:8443'
+chk "bond retest: the composed list would be refused (H4)" "$(v_carrier_list 'tcp+udp+icmp+tls+tls' >/dev/null 2>&1 && echo ok || echo refused)" "refused"
+printf 'mode: client\ncarrier: tcp+udp\npeer: 203.0.113.10:4443\n' >"$WAT_CONF/t_h4.yml"
+printf 'k' >"$WAT_CONF/t_h4.key"
+make_token auto '203.0.113.10' 'k' '/wat' '' '' '' '' 'd=udp:4443,tls:8443,tls:9443,ws:2053;r=icmp' >"$WAT_CONF/t_h4.auto"
+chmod 600 "$WAT_CONF/t_h4.auto"
+: >"$SY"; : >"$SMOKE/h4.log"
+( role() { echo Iran; }
+  logger() { printf 'LOG %s\n' "$*" >>"$SMOKE/h4.log"; }
+  systemctl() { printf '%s\n' "$*" >>"$SY"; return 0; }
+  at_probe() { AR_OK[0]=1; AR_DOWN[0]=10; AR_UP[0]=10; AR_RTT[0]=20; AR_WHY[0]=''; }
+  at_cleanup() { :; }
+  bond_retest_job t_h4 ) >/dev/null 2>&1
+chk "H4: the refused list is reported, not silently dropped" "$(grep -c 'is not a carrier list this engine can run' "$SMOKE/h4.log")" "1"
+chk "H4: a refused carrier list is not written" "$(cfg t_h4 carrier)" "tcp+udp"
+chk "H4: a refused carrier list does not restart the tunnel" "$(grep -c 'restart wattest@t_h4$' "$SY")" "0"
+rm -f "$WAT_CONF"/t_h4*
+
+# M1/L1/L8: a user tunnel that merely looks like a hidden child is never one; delete removes the real child's config,
+# its own state files and its UDP rule, and leaves the user's tunnel alone.
+{ echo "mode: server"; echo "carrier: tcp"; } >"$WAT_CONF/bar.yml"
+printf 'mode: client\ncarrier: tcp\npeer: 203.0.113.9:443\n' >"$WAT_CONF/bar-e-vxlan.yml" # user tunnel, no .autoext
+{ echo "mode: server"; echo "carrier: geneve"; echo 'listen: ":6081"'; echo "state-dir: $SMOKE/l1state"; } >"$WAT_CONF/bar-e-geneve.yml"
+printf 'bar\n' >"$WAT_CONF/bar-e-geneve.autoext"
+mkdir -p "$SMOKE/l1state"; printf 'totals\n' >"$SMOKE/l1state/bar-e-geneve.yml.totals.json"
+chk "M1: a user NAME-e-* tunnel is not a hidden child" "$(auto_ext_names bar)" "bar-e-geneve"
+chk "M1: writing units refuses to overwrite a user tunnel" "$(auto_ext_write_units bar 'vxlan:4789' >/dev/null 2>&1; echo "$?")" "1"
+chk "M1: the refusal leaves the user tunnel untouched" "$(cfg bar-e-vxlan carrier)" "tcp"
+_bt_fw2=$(declare -f fw_close); fw_close() { printf '%s\n' "$*" >>"$SMOKE/fw2.log"; }
+: >"$SMOKE/fw2.log"
+NONINTERACTIVE=1 delete_tunnel bar >/dev/null 2>&1
+eval "$_bt_fw2"
+chk "L1: delete removes the hidden child's state files (F08)" "$([ -e "$SMOKE/l1state/bar-e-geneve.yml.totals.json" ] && echo y || echo n)" "n"
+chk "L1: delete removes the hidden child's config (B3)" "$([ -e "$WAT_CONF/bar-e-geneve.yml" ] && echo y || echo n)" "n"
+chk "M1: delete keeps the user's NAME-e-* tunnel" "$([ -e "$WAT_CONF/bar-e-vxlan.yml" ] && echo y || echo n)" "y"
+chk "L8: delete closes the child's UDP listen rule (F17)" "$(grep -c '^6081/udp$' "$SMOKE/fw2.log")" "1"
+rm -f "$WAT_CONF/bar-e-vxlan.yml"; rm -rf "$SMOKE/l1state"
+
+# L8: uninstall closes every hidden child's UDP rule while its config is still readable (isolated CONF/RUN).
+mkdir -p "$SMOKE/u/conf" "$SMOKE/u/run" "$SMOKE/u/units"
+{ echo "mode: server"; echo "carrier: vxlan"; echo 'listen: ":4789"'; } >"$SMOKE/u/conf/u_ext-e-vxlan.yml"
+{ echo "mode: server"; echo "carrier: sit"; } >"$SMOKE/u/conf/u_ext-e-sit.yml"
+printf 'u_ext\n' >"$SMOKE/u/conf/u_ext-e-vxlan.autoext"
+printf 'u_ext\n' >"$SMOKE/u/conf/u_ext-e-sit.autoext"
+( CONF=$SMOKE/u/conf; RUN=$SMOKE/u/run; AUTO_RUN=$SMOKE/u/autorun; BIN=$SMOKE/u/wattun
+  MGR=$SMOKE/u/mgr; WAT_UNIT_DIR=$SMOKE/u/units
+  tunnels_all() { printf 'u_ext\nu_ext-e-vxlan\nu_ext-e-sit\n'; }
+  systemctl() { :; }
+  fw_close() { printf '%s\n' "$*" >>"$SMOKE/u/fw"; }
+  NONINTERACTIVE=1 uninstall_all ) >/dev/null 2>&1
+chk "L8: uninstall closes a hidden child's UDP rule (F17)" "$(grep -c '^4789/udp$' "$SMOKE/u/fw")" "1"
+chk "L8: only the shaped child had a rule to close (F17)" "$(grep -c . "$SMOKE/u/fw")" "1"
+rm -rf "$SMOKE/u"
+
+# L2: a busy conventional UDP port is not handed out as the listen port; the fallback probes UDP, not TCP.
+_lb2=$(declare -f listen_blocked)
+listen_blocked() { printf '%s %s\n' "$1" "$2" >>"$SMOKE/lb2.log"; [ "$2" = 4789 ]; }
+: >"$SMOKE/lb2.log"
+chk "L2: a free conventional port is used as-is (F19)" "$(listen_blocked() { return 1; }; default_listen vxlan)" "4789"
+chk "L2: a busy conventional port falls back (F10)" "$(default_listen vxlan)" "4443"
+eval "$_lb2"
+chk "L2: the fallback probe is udp for a shaped carrier (F10)" "$(grep -c '^udp 4443$' "$SMOKE/lb2.log")" "1"
+
+# L3: "0" in the Advanced state-dir row means the engine default, never a "/0" directory.
+printf 'mode: client\ncarrier: tcp\nstate-dir: /run/wattun\n' >"$WAT_CONF/t_l3.yml"
+( NONINTERACTIVE=0; IS_TTY=0; printf 't0\nb' | adv_menu t_l3 ) >/dev/null 2>&1
+chk "L3: Advanced state-dir 0 unsets the key (F11)" "$(grep -c '^state-dir:' "$WAT_CONF/t_l3.yml")" "0"
+chk "L3: the state-dir validator accepts 0 (F11)" "$(v_state_dir 0 && echo y)" "y"
+rm -f "$WAT_CONF/t_l3.yml"
+
+# L7: auto_apply keeps a backup and restores it when the new variant does not connect; quiet (heal) applies drop it.
+printf 'mode: client\ncarrier: tcp\npeer: 203.0.113.10:4443\nkey-file: /etc/wattun/t_l7.key\n' >"$WAT_CONF/t_l7.yml"
+printf 'old-token\n' >"$WAT_CONF/t_l7.token"
+_T_CARRIER_s=$T_CARRIER; _T_PEER_s=$T_PEER; _T_KEY_s=${T_KEY:-}; _T_PATH_s=$T_PATH; _T_SNI_s=$T_SNI
+_T_ICMP_s=$T_ICMP; _T_PORTS_s=$T_PORTS; _T_REV_s=$T_REV; _AT_EXTRA_s=$AT_EXTRA
+_AT_TUNE_KEYS_s=$AT_TUNE_KEYS; _AT_QUIET_s=$AT_QUIET; _AT_SEL_KEY_s=$AT_SEL_KEY
+T_CARRIER=tcp; T_PEER='203.0.113.99:9999'; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''
+AT_EXTRA=''; AT_TUNE_KEYS=''; AT_SEL_KEY=''
+( systemctl() { :; }; wait_link() { return 1; }; NONINTERACTIVE=1 AT_QUIET=0 auto_apply t_l7 ) >/dev/null 2>&1
+_rc7=$?
+chk "L7: a failed link check restores the previous config (F16)" "$(cfg t_l7 peer)" "203.0.113.10:4443"
+chk "L7: the restore removes the backup (F16)" "$([ -e "$WAT_CONF/t_l7.yml.bak" ] && echo y || echo n)" "n"
+chk "L7: the token is restored with the config (F16)" "$(cat "$WAT_CONF/t_l7.token" 2>/dev/null)" "old-token"
+chk "L7: the token backup is removed (F16)" "$([ -e "$WAT_CONF/t_l7.token.bak" ] && echo y || echo n)" "n"
+chk "L7: the failure is reported to the caller (F16)" "$_rc7" "1"
+( systemctl() { :; }; wait_link() { LINK_RTT=12; return 0; }; NONINTERACTIVE=1 AT_QUIET=0 auto_apply t_l7 ) >/dev/null 2>&1
+chk "L7: a successful check keeps the new config and drops the backup (F16)" "$(cfg t_l7 peer)/$([ -e "$WAT_CONF/t_l7.yml.bak" ] && echo bak || echo clean)" "203.0.113.99:9999/clean"
+( systemctl() { :; }; wait_link() { return 1; }; NONINTERACTIVE=1 AT_QUIET=1 auto_apply t_l7 ) >/dev/null 2>&1
+chk "L7: a quiet apply drops the backup without waiting (F16)" "$([ -e "$WAT_CONF/t_l7.yml.bak" ] && echo bak || echo clean)" "clean"
+T_CARRIER=$_T_CARRIER_s; T_PEER=$_T_PEER_s; T_KEY=$_T_KEY_s; T_PATH=$_T_PATH_s; T_SNI=$_T_SNI_s; T_ICMP=$_T_ICMP_s
+T_PORTS=$_T_PORTS_s; T_REV=$_T_REV_s; AT_EXTRA=$_AT_EXTRA_s; AT_TUNE_KEYS=$_AT_TUNE_KEYS_s
+AT_QUIET=$_AT_QUIET_s; AT_SEL_KEY=$_AT_SEL_KEY_s
+rm -f "$WAT_CONF"/t_l7*
+
+# L10: one manager pass at a time. A fake flock keeps this deterministic on a host without util-linux flock.
+mkdir -p "$SMOKE/bin"
+printf '#!/bin/sh\nexit 1\n' >"$SMOKE/bin/flock"; chmod +x "$SMOKE/bin/flock"
+_lk=$( PATH="$SMOKE/bin:$PATH"; mgr_lock 2>&1; echo "rc=$?" )
+chk "L10: a held lock skips this pass (flock -n)" "$(tail -1 <<<"$_lk")" "rc=1"
+chk "L10: it says why the pass was skipped" "$(grep -c 'Another wattun-manager pass is running' <<<"$_lk")" "1"
+printf '#!/bin/sh\nexit 0\n' >"$SMOKE/bin/flock"; chmod +x "$SMOKE/bin/flock"
+chk "L10: an uncontended pass runs" "$( PATH="$SMOKE/bin:$PATH"; mgr_lock >/dev/null 2>&1; echo "rc=$?" )" "rc=0"
+chk "L10: the lock file lives in WAT_RUN" "$([ -f "$WAT_RUN/manager.lock" ] && echo y || echo n)" "y"
+
+# L17: the documented state directory must stay writable in the shipped unit, or the engine would stop at startup.
+chk "installer unit: RuntimeDirectory=wattun (L17)" "$(grep -c '^RuntimeDirectory=wattun$' install.sh)" "1"
+chk "installer unit: RuntimeDirectoryMode=0700 (L17)" "$(grep -c '^RuntimeDirectoryMode=0700$' install.sh)" "1"
+_rwp=$(grep '^ReadWritePaths=' install.sh)
+chk "installer unit: ReadWritePaths keeps /run/wattun (L17)" "$(case "$_rwp" in *"/run/wattun"*) echo y ;; *) echo n ;; esac)" "y"
+chk "installer unit: ReadWritePaths keeps /etc/wattun (L17)" "$(case "$_rwp" in *"/etc/wattun"*) echo y ;; *) echo n ;; esac)" "y"
+
+rm -f "$WAT_CONF"/t_h2.yml "$WAT_CONF"/t_h2-e-* "$WAT_CONF"/t_l12-e-* "$WAT_CONF"/t_l12w*
+eval "$_bv_s"; eval "$_bvok_s"; VER=$_ver_s
 
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

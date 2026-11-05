@@ -36,36 +36,44 @@ import (
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
 
-var carrierNames = []string{"icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip",
-	"sit", "6to4", "xfrm-ipsec", "etherip", "l2tpv3",
-	"fou-gre", "gue-ipip", "vxlan", "geneve", "dnscrypt-udp", "ntp-direct", "openvpn-dco", "srtp-direct"}
+// nameSet turns a carrier name list into the lookup maps below.
+func nameSet(names []string) map[string]bool {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
+}
+
+// carrierNames is every -carrier name in a stable order (base carriers first, then the F19 shaped tables). The shaped
+// names come from wat, not a copy, so a shape the engine ships cannot stay rejected here (audit L6/F15).
+var carrierNames = append(append([]string{
+	"icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip",
+}, wat.RawShapedCarrierNames()...), wat.UDPShapedCarrierNames()...)
 
 // rawIPCarrier: the carriers on a raw IP socket, which take a bare IP and run one session.
-var rawIPCarrier = map[string]bool{"icmp": true, "gre": true, "ipip": true,
-	"sit": true, "6to4": true, "xfrm-ipsec": true, "etherip": true, "l2tpv3": true}
+var rawIPCarrier = nameSet(append([]string{"icmp", "gre", "ipip"}, wat.RawShapedCarrierNames()...))
 
 // shapedUDPCarrier: F19 phase-2 (3.3.0) wattun-internal UDP shapes: the udp carrier with a fixed per-protocol header
 // and conventional port. Both ends must run 3.3.0 and pick the same name; they do not talk to the real protocol.
-var shapedUDPCarrier = map[string]bool{"fou-gre": true, "gue-ipip": true, "vxlan": true, "geneve": true,
-	"dnscrypt-udp": true, "ntp-direct": true, "openvpn-dco": true, "srtp-direct": true}
+var shapedUDPCarrier = nameSet(wat.UDPShapedCarrierNames())
 
 // shapedRawCarrier: F19 phase-1 raw-tier shaped carriers (Linux + CAP_NET_RAW). D7: shaped carriers, raw or UDP tier,
 // are single-carrier in 3.3.0 and are rejected inside a '+' bond.
-var shapedRawCarrier = map[string]bool{"sit": true, "6to4": true, "xfrm-ipsec": true, "etherip": true, "l2tpv3": true}
+var shapedRawCarrier = nameSet(wat.RawShapedCarrierNames())
 
-var validCarrier = map[string]bool{
-	"icmp": true, "udp": true, "tcp": true, "tls": true, "ws": true, "wss": true, "h2": true, "h2c": true, "grpc": true, "gre": true, "ipip": true,
-	"sit": true, "6to4": true, "xfrm-ipsec": true, "etherip": true, "l2tpv3": true,
-	"fou-gre": true, "gue-ipip": true, "vxlan": true, "geneve": true, "dnscrypt-udp": true, "ntp-direct": true, "openvpn-dco": true, "srtp-direct": true,
-	"fortress": true,
-}
+// validCarrier adds the manager's fortress alias on top of every -carrier name.
+var validCarrier = func() map[string]bool {
+	m := nameSet(carrierNames)
+	m["fortress"] = true
+	return m
+}()
 
 var poolCarriers = map[string]bool{"tcp": true, "tls": true, "ws": true, "wss": true, "h2": true, "h2c": true, "grpc": true}
 
 // carrierNoListen: carriers with no -listen / -listen-NAME (raw sockets bind the whole protocol; icmp is a raw socket
-// that only answers).
-var carrierNoListen = map[string]bool{"icmp": true, "gre": true, "ipip": true,
-	"sit": true, "6to4": true, "xfrm-ipsec": true, "etherip": true, "l2tpv3": true}
+// that only answers). The raw set is exactly rawIPCarrier.
+var carrierNoListen = rawIPCarrier
 
 func main() {
 	runManager()
@@ -152,8 +160,8 @@ func main() {
 			listenBy[c] = flag.String("listen-"+c, "", "server (or -reverse client), bonded carriers: listen address of the "+c+" carrier (default: -listen)")
 		}
 	}
-	stateDir := flag.String("state-dir", "", "directory for the quota-usage and lifetime-totals state files (<config>.quota.json, <config>.totals.json); created 0700 when missing; needs -config. Empty = next to the config, the 2.5.0-3.2.x location (3.3.0). Point it at tmpfs (e.g. /run/wattun) to spare the disk: tmpfs loses the counters on reboot")
-	stateSave := flag.Int("state-save", 30, "seconds between state-file saves (quota usage and lifetime totals); 0 = only on shutdown (3.3.0)")
+	stateDir := flag.String("state-dir", "", "directory for the quota-usage and lifetime-totals state files (<config>.quota.json, <config>.totals.json); created 0700 when missing, an existing wider mode is tightened; needs -config. Empty = next to the config, the 2.5.0-3.2.x location (3.3.0). Point it at tmpfs (e.g. /run/wattun) to spare the disk: tmpfs loses the counters on reboot")
+	stateSave := flag.Int("state-save", 30, "seconds between state-file saves (quota usage and lifetime totals); 0 = only on shutdown, at most 2592000 (30 days; 3.3.0)")
 	cfgPath := flag.String("config", "", "YAML-subset config file: keys are flag names, plus a ports: list (hot-reloaded); command-line flags win")
 	var hdrs []string
 	flag.Func("header", "client, ws|wss|h2|h2c|grpc carrier: extra request header 'Name: value' (repeatable)", func(v string) error {

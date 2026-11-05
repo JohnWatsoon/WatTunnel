@@ -3,15 +3,15 @@ package main
 // F19 (3.3.0) carrier wiring: the name/port tables and the shaped-carrier address defaulting, which runs on every
 // platform even though the raw-tier sockets are Linux-only.
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/JohnWatsoon/WatTunnel/wat"
+)
 
 func TestF19CarrierTables(t *testing.T) {
-	rawShapes := []string{"sit", "6to4", "xfrm-ipsec", "etherip", "l2tpv3"}
-	udpShapes := []string{"fou-gre", "gue-ipip", "vxlan", "geneve", "dnscrypt-udp", "ntp-direct", "openvpn-dco", "srtp-direct"}
-	inCarrierNames := map[string]bool{}
-	for _, n := range carrierNames {
-		inCarrierNames[n] = true
-	}
+	inCarrierNames := nameSet(carrierNames)
+	rawShapes, udpShapes := wat.RawShapedCarrierNames(), wat.UDPShapedCarrierNames()
 	for _, n := range rawShapes {
 		if !validCarrier[n] || !inCarrierNames[n] {
 			t.Errorf("%s: missing from validCarrier/carrierNames", n)
@@ -31,7 +31,7 @@ func TestF19CarrierTables(t *testing.T) {
 			t.Errorf("%s: must be a shaped udp carrier that listens", n)
 		}
 	}
-	for _, n := range append(append([]string{}, rawShapes...), udpShapes...) {
+	for _, n := range append(rawShapes, udpShapes...) {
 		if carrierRealName[n] == "" {
 			t.Errorf("%s: missing from carrierRealName", n)
 		}

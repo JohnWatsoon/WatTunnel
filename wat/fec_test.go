@@ -111,10 +111,121 @@ func TestFecTwoMissing(t *testing.T) {
 	}
 }
 
-// F11 receiver side (3.3.0): the reconstruction ring follows the peer's parity. No frFec for fecKeepAfter means no
-// plaintext copies (the peer's gate is closed, nothing will be rebuilt); the next frFec re-opens the ring.
-func TestFecRxKeepFollowsParity(t *testing.T) {
+// F33 (audit 2026-11-04): a Config.FEC caller that leaves both loss-gate thresholds at zero keeps the documented
+// pre-3.3.0 behavior, and that includes the FIRST group: no gate means no time window, so a loss there is rebuilt.
+// With thresholds set the gate starts closed and the first group is not kept (TestFecRxKeepFollowsParity).
+func TestFecZeroThresholdFirstGroup(t *testing.T) {
+	snd, rcv, up, _ := newPair(t, 0, time.Millisecond, 10e6, Config{FEC: true})
+	const n, miss = 4, 1
+	var want []byte
+	plains := make([][]byte, n)
+	off := 0
+	for i := 0; i < n; i++ {
+		d := pattern(50+i*30, byte(i))
+		want = append(want, d...)
+		typ := byte(frStream)
+		if i == n-1 {
+			typ = frStreamFin
+		}
+		p := append([]byte{typ}, appendUv(appendUv(appendUv(nil, 1), uint64(off)), uint64(len(d)))...)
+		plains[i] = append(p, d...)
+		off += len(d)
+	}
+	snd.mu.Lock()
+	snd.cc.tokens = 1e9
+	// Zero thresholds: this first fecDue steps the gate open, exactly as the pump does before the first burst. The
+	// gate is deliberately not opened by hand here (unlike TestFecReconstruct/TestFecTwoMissing).
+	if _, ok := snd.fecDue(time.Now()); ok {
+		snd.mu.Unlock()
+		t.Fatal("parity built with nothing noted")
+	}
+	var sealed [][]byte
+	for i, p := range plains {
+		snd.nextPN = 1000 + uint64(i*2)
+		pkt, pn := snd.seal(p)
+		sealed = append(sealed, append([]byte(nil), pkt...))
+		snd.fecNoteSent(pn, p)
+	}
+	snd.nextPN = 1000 + uint64(2*n)
+	o, ok := snd.fecDue(time.Now())
+	snd.mu.Unlock()
+	if !ok {
+		t.Fatal("zero thresholds: no parity built for the first group")
+	}
+	for i, pkt := range sealed {
+		if i != miss {
+			up.out <- pkt // the first burst's loss reaches the receiver before any parity, as on the wire
+		}
+	}
+	up.out <- append([]byte(nil), o.p...)
+	st, err := rcv.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan []byte, 1)
+	go func() { b, _ := readAll(st); got <- b }()
+	select {
+	case b := <-got:
+		if !bytes.Equal(b, want) {
+			t.Fatalf("first group: rebuilt stream differs (%d vs %d bytes)", len(b), len(want))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first-group loss was never rebuilt: the receive window was not seeded")
+	}
+	if r := rcv.Stats().FecRecovered; r != 1 {
+		t.Fatalf("first-group loss rebuilt %d packets, want 1", r)
+	}
+}
+
+// F34 (audit 2026-11-04): -shape-data + FEC. fecNoteSent only covers plaintexts up to maxPlain-fecHdrMax, so
+// shapeData caps its padding target for FEC sessions; every padded packet must stay inside the ring.
+func TestFecShapeDataCovered(t *testing.T) {
+	snd, _, _, _ := newPair(t, 0, time.Millisecond, 10e6, Config{FEC: true, ShapeData: 0.25, MaxPayload: 640})
+	snd.mu.Lock()
+	defer snd.mu.Unlock()
+	cover := snd.maxPlain - fecHdrMax
+	base := pattern(200, 1)
+	snd.fec.gate.on = true // this test calls shapeData/fecNoteSent directly, so the gate is opened by hand
+	var padded int
+	for i := 0; i < 500; i++ {
+		p := snd.shapeData(1000, append([]byte(nil), base...))
+		if len(p) == len(base) {
+			continue
+		}
+		padded++
+		if len(p) > cover {
+			t.Fatalf("a %d-byte padded packet exceeds the FEC line %d", len(p), cover)
+		}
+		snd.fec.txN = 0 // the ring holds at most fecMaxK entries; reset so "noted" is unambiguous per packet
+		snd.fecNoteSent(uint64(i+1), p)
+		if snd.fec.txN == 0 {
+			t.Fatalf("a %d-byte padded packet (FEC line %d) was not noted", len(p), cover)
+		}
+	}
+	if padded == 0 {
+		t.Fatal("shapeData never padded: the draw changed")
+	}
+}
+
+// F33 follow-up (audit fix review): a zero-threshold gate has no time window, so a long quiet gap must not lose
+// the next first group (the old one-shot seed did).
+func TestFecZeroThresholdKeepsAfterQuiet(t *testing.T) {
 	_, rcv, _, _ := newPair(t, 0, time.Millisecond, 10e6, Config{FEC: true})
+	rcv.mu.Lock()
+	defer rcv.mu.Unlock()
+	rcv.fec.keep = time.Now().Add(-time.Hour) // the old seed would have expired
+	p := pattern(200, 1)
+	rcv.fecKeep(1, p, time.Now())
+	if got := rcv.fec.rx[1%fecRing].pn; got != 2 {
+		t.Fatalf("zero-threshold FEC dropped a plaintext after a quiet gap (rx pn=%d, want 2)", got)
+	}
+}
+
+// F11 receiver side (3.3.0): the reconstruction ring follows the peer's parity. No frFec for fecKeepAfter means no
+// plaintext copies (the peer's gate is closed, nothing will be rebuilt); the next frFec re-opens the ring. Thresholds
+// are set here on purpose: the zero-threshold case keeps by design (TestFecZeroThresholdFirstGroup).
+func TestFecRxKeepFollowsParity(t *testing.T) {
+	_, rcv, _, _ := newPair(t, 0, time.Millisecond, 10e6, Config{FEC: true, FECOnLoss: 0.02, FECOffLoss: 0.005})
 	now := time.Now()
 	rcv.mu.Lock()
 	defer rcv.mu.Unlock()

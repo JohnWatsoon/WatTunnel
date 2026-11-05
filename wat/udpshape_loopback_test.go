@@ -68,10 +68,22 @@ func TestShapedUDPLoopback(t *testing.T) {
 				t.Fatal(err)
 			}
 			go func() { st.Write(append([]byte{'U'}, up...)); st.CloseWrite() }()
-			sum, err := readAll(st)
-			want := sha256.Sum256(up)
-			if err != nil || !bytes.Equal(sum, want[:]) {
-				t.Fatalf("upload digest: err=%v got %x want %x", err, sum, want)
+			// F29 (audit 2026-11-04): bound the read, or a stuck stream runs into the package timeout instead of
+			// failing this test.
+			type readResult struct {
+				b   []byte
+				err error
+			}
+			done := make(chan readResult, 1)
+			go func() { b, rerr := readAll(st); done <- readResult{b, rerr} }()
+			select {
+			case r := <-done:
+				want := sha256.Sum256(up)
+				if r.err != nil || !bytes.Equal(r.b, want[:]) {
+					t.Fatalf("upload digest: err=%v got %x want %x", r.err, r.b, want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("upload read did not finish within 10 s")
 			}
 		})
 	}
@@ -97,11 +109,20 @@ func TestShapedUDPMismatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// F29 (audit 2026-11-04): no fixed sleep. Two send attempts with no authenticated reply is the no-admission
+		// condition: on loopback a server that admitted the first packet would have answered it before the second one
+		// was built (the handshake retry is at least 1 s; poll for the packet counter instead of sleeping).
 		cli, err := NewSession(Config{Key: key}, pio)
 		if err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(1200 * time.Millisecond)
+		deadline := time.Now().Add(5 * time.Second)
+		for cli.Stats().PktsOut < 2 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if n := cli.Stats().PktsOut; n < 2 {
+			t.Fatalf("%s client made %d send attempts, want at least 2", name, n)
+		}
 		if cli.Alive() {
 			t.Errorf("%s client got a session against a vxlan-shaped server", name)
 		}

@@ -468,8 +468,9 @@ leg), `state-dir`/`state-save`, the FEC loss band (`fec-on-loss`/`fec-off-loss`,
 is grouped into Performance / Shaping & DPI / Safety / State & data; `win-max` (4-64) and `loss-ceiling` are in
 Performance. The FEC choice itself stays a one-key `off`/`auto`; answering `a` at that prompt opens the loss-band rows
 (3.3.0+). Keys with no UI path (`debug`, `ping-every`, `udp-idle`, `tcp-cc`, `slack-ms`, `hedge`, `lanes`,
-`mem-budget`, `plain`, plus `port-offset` and the TLS cert/key paths) are documented as file-only expert keys in
-`/etc/wattun/NAME.yml`.
+`mem-budget`, `plain`, `header`, `keep-slow`, `tls-small-ch`, `hdr-mask`, `tcp-mimic`, `tls-pin`, `fake-ip`,
+`fake-split`, plus `port-offset` and the TLS cert/key paths) are documented as file-only expert
+keys in `/etc/wattun/NAME.yml`.
 
 When a link is down, the doctor names the likely cause — and when a direct pool carrier's TCP port is
 still reachable but the tunnel cannot connect (the SNI-allowlist tell), it points at `wattun blackout`.
@@ -579,8 +580,9 @@ uses its smallest leg's bound). The 3.3.0 shaped carriers have their own, lower 
 Thirteen carrier names put a fixed, key-derived header in front of every datagram so a classifier sees the
 datagram of a protocol it knows. They are wattun-internal wire shapes between **two 3.3.0 wattun peers**, not
 implementations of those protocols: no inner packet is produced or parsed and a real peer of that protocol will not
-talk to them. Both ends must run 3.3.0, select the same carrier name and share the key; a datagram whose key-derived
-fields do not match is dropped, so a third party speaking the same protocol number cannot inject into the session.
+talk to them. Both ends must run the same 3.3.0 build (the raw tier hashes the shape name into its key, so mixed
+builds cannot match), select the same carrier name and share the key; a datagram whose key-derived fields do not
+match is dropped, so a third party speaking the same protocol number cannot inject into the session.
 
 **Raw tier** (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`) — one raw-IP socket per IP protocol, a bare-IP
 `peer` like `icmp`/`gre`, no `listen` and no `-listen-NAME`, no `-reverse`, one session (`-sessions` > 1 is
@@ -626,7 +628,8 @@ transports (advanced)…** branch, and from a shaped token pasted on Iran (the I
 writing a config it checks that the local binary is 3.3.0+, refuses the raw tier on a non-Linux host, warns about
 root/CAP_NET_RAW and about allowing the raw tier's IP protocols in the cloud firewalls (41 for `sit` and `6to4`, 50
 for `xfrm-ipsec`, 97 for `etherip`, 115 for `l2tpv3`), and for the UDP tier writes and opens the conventional port
-unless `--listen` gives another. It refuses a `+` bond that contains a shaped carrier, matching the engine. Change
+unless `--listen` gives another or that port is already in use (then the first free UDP port in its fallback list).
+It refuses a `+` bond that contains a shaped carrier, matching the engine. Change
 peer takes a bare host for the raw tier and `host:port` for the UDP tier.
 
 **Manager limits.** Where the type is shown (change connection type) the manager repeats the not-real warning but
@@ -971,7 +974,9 @@ forwarded payload only.
 
 - `shape-data PCT` (0-25, default 0): pads packets that carry stream data to a randomized realistic total size (small
   100-300 B, medium 500-900 B, or near the path MTU), so a size classifier sees a spread instead of the
-  request/response pattern. The padding is budgeted as a percent of the stream bytes actually sent, plus a 4 KB bank
+  request/response pattern. With `fec: auto` the padding target is capped 80 bytes below the datagram cap
+  (`maxPlain-fecHdrMax`), so a padded packet stays FEC-coverable. The padding is budgeted as a percent of the stream
+  bytes actually sent, plus a 4 KB bank
   so a small interactive packet can spend the allowance earlier bulk traffic earned; the budget is never exceeded
   (total padding <= the configured percent plus the bank). Bulk traffic is already full and pays almost nothing
   (in-process benchmark: under 0.004 % padded bytes); a small request/response flow pays up to the configured percent.
@@ -1343,16 +1348,21 @@ finalist that fails the longer run keeps its screening numbers. The table is ran
 **Extended transports (3.3.0, opt-in).** The Kharej wizard asks once whether to also test the 13 shaped carriers
 (unattended `--extended`); the question and the flag are offered only when the local engine is 3.3.0. Because the
 engine refuses a shaped leg inside the auto bond, extended creates one hidden single-carrier server unit per shape
-(`NAME-e-<shape>`, shared `NAME.key`, own metrics port; `listen` only for the eight UDP shapes, conventional port or a
-free fallback recorded in the plan; the five raw shapes have no listen/peer) and appends the shapes to the plan. Iran
-tests them like any other direct variant (a bare peer for the raw tier, `addr:port` for the UDP tier) and can pick one;
-an extended plan needs 3.3.0 on **both** ends, and the raw tier needs Linux + root/CAP_NET_RAW plus the cloud firewall
-allowing protocols 41/50/97/115. Anti-censor still adds variants only for the direct pool carriers (the shapes have no
-desync layer); there are no reverse or count-based tuning variants for them. The extended listeners are hidden from the
-tunnel list but follow the parent's life: heal restarts a down one, delete/uninstall remove them, the default
-reverse-side prune keeps the shape Iran picked and stops the rest, and `auto-widen` / `auto-prune NAME --direct`
-re-enable them for a retest (a normal Auto test can also re-test them). An older Iran ignores their plan entries; their
-Kharej ports then stay open until that prune/manual close — that trade is why extended is opt-in.
+(`NAME-e-<shape>`, shared `NAME.key`, own metrics port, the parent's `ports:` allowlist, per-port `limits:` and
+`allow-clients`/`allow-clients-file`; `listen` only for the eight
+UDP shapes, conventional port or a free fallback recorded in the plan; the five raw shapes have no listen/peer) and
+appends the shapes to the plan. Iran tests them like any other direct variant (a bare peer for the raw tier,
+`addr:port` for the UDP tier) and can pick one; an extended plan needs 3.3.0 on **both** ends, and the raw tier needs
+Linux + root/CAP_NET_RAW plus the cloud firewall allowing protocols 41/50/97/115. Anti-censor still adds variants only
+for the direct pool carriers (the shapes have no desync layer); there are no reverse or count-based tuning variants
+for them. The extended listeners are hidden from the tunnel list but follow the parent's life: heal restarts a down
+one, a key change restarts the enabled ones, and delete/uninstall remove them with their state files and UDP firewall
+rules. The default prune reads each child's own `/stats`: it keeps the shapes with a live client and stops the rest
+once one reports a pick, keeps every shape when no child reports traffic or a running child's stats cannot be read,
+and in a shaped-only tunnel with no reverse companion narrows on that pick alone after the same grace; a live hidden
+child also counts as a working carrier for the widen net. `auto-widen` / `auto-prune NAME --direct` re-enable them
+for a retest (a normal Auto test can also re-test them). An older Iran ignores their plan entries; their Kharej
+ports then stay open until that prune/manual close — that trade is why extended is opt-in.
 
 **Auto tuning (3.3.0).** After the type (or the bond) is chosen, the manager tries the settings that change its speed,
 one setting at a time, starting from the engine auto values and keeping a value only when it beats the best so far by
@@ -1398,8 +1408,9 @@ by default, because the engine reports one carrier per session and cannot tell a
 leg. Full direct-side narrowing stays available but is opt-in: `.manager.conf autoprune-direct=1`, or
 `wattun-manager auto-prune NAME --direct` (the old `auto-narrow`, both sides). A changed pick restarts the window, so
 a flapping selection is never pruned. Configs and tokens always stay, and `auto-widen` brings everything back. Hidden
-extended listeners follow the same rule: the default pass keeps the shape Iran picked and stops the unused ones;
-`auto-widen` / `auto-prune --direct` re-enable them.
+extended listeners are decided from each child's own `/stats` (see "Extended transports"): the pass keeps the shapes
+with a live client and stops the rest once one reports a pick, keeps every shape when that pick is unknown or
+unreadable, and `auto-widen` / `auto-prune --direct` re-enable the stopped ones.
 
 The pass runs inside `heal`. The manager installs the heal timer where it is needed: the auto Kharej wizard and
 `auto-ip` install it, and any later manager run does the same for an existing auto Kharej tunnel, so a Kharej-only
@@ -1629,7 +1640,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `path` | `/wat` | both | URL path for ws, wss, h2, h2c, grpc (grpc: service name). Same on both ends, also with `reverse`. The manager picks a random `/api/...` path for each new tunnel (3.0.1); the program default stays `/wat`. |
 | `host` | = `peer` | client (server with `reverse`) | Host header / authority, set on whichever side dials. |
 | `plain` | false | both (dialer with `reverse`) | grpc without TLS. |
-| `header` | | client (server with `reverse`) | Extra request header `Name: value`. Repeatable. |
+| `header` | | client (server with `reverse`) | Extra request header `Name: value` for the ws, wss, h2, h2c and grpc carriers. Repeatable; file-only (no manager row). |
 | `fp` | `go` | client (server with `reverse`) | TLS ClientHello fingerprint (utls): `go`, `chrome`, `firefox`, `safari`, `edge` or `random`. Since 2.2.0. |
 | `ech` | `off` | client (server with `reverse`) | Encrypted Client Hello, hides the SNI: `off`, `auto`, `ladder` or a base64 ECHConfigList. `auto` fetches the domain's HTTPS DNS record over DoH, by IP (1.1.1.1, 1.0.0.1, 8.8.8.8, 9.9.9.9), and falls back to no ECH. `ladder` (2.9.0) adds the through-the-tunnel DNS relay as the second rung when every direct DoH server fails (both ends 2.9.0). Since 2.2.0. |
 | `ech-cache` | empty (off) | client, with `ech: auto` | File that keeps the last good ECHConfigList (`name base64` per line, written atomically, 0600). On start it is used at once while DoH refreshes in the background; cache errors are logged once and never stop the tunnel. Since 2.2.3. |
@@ -1649,8 +1660,8 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `dns-listen` | empty (off) | client | Local address for the DNS relay used by `ech: ladder` (e.g. `127.0.0.1:53`). |
 | `dns-relay-upstream` | `8.8.8.8:53` | server | Resolver used by the built-in DNS relay behind target port 53 (with `ech: ladder`). |
 | `metrics` | off | both | Serve `/stats` and pprof on this address. Always loopback (see Metrics). |
-| `state-dir` | empty (next to the config) | both, needs `-config` (3.3.0) | Directory that holds the quota-usage and lifetime-totals files (`<config>.quota.json`, `<config>.totals.json`). Created 0700 when missing; the file names keep the config's base name, so one directory can hold several tunnels. Point it at tmpfs (`/run/wattun`) to spare the disk: the shipped unit creates that directory and keeps it across a service restart, but the counters are still lost on reboot. See "State files". |
-| `state-save` | 30 | both (3.3.0) | Seconds between state-file saves (quota usage and lifetime totals); `0` = only on shutdown. The save itself is atomic (tmp + rename), as before. |
+| `state-dir` | empty (next to the config) | both, needs `-config` (3.3.0) | Directory that holds the quota-usage and lifetime-totals files (`<config>.quota.json`, `<config>.totals.json`). Created 0700 when missing; an existing directory with wider permissions is tightened to 0700 (chmod failure stops startup). The file names keep the config's base name, so one directory can hold several tunnels. Point it at tmpfs (`/run/wattun`) to spare the disk: the shipped unit creates that directory and keeps it across a service restart, but the counters are still lost on reboot. See "State files". |
+| `state-save` | 30 | both (3.3.0) | Seconds between state-file saves (quota usage and lifetime totals); `0` = only on shutdown, at most 2592000 (30 days; a larger value stops startup). The save itself is atomic (tmp + rename), as before. |
 | `debug` | false | both | Log every stream open and close. |
 
 ### Example: ICMP (the production setup)
@@ -1820,8 +1831,8 @@ Every flag can also be a config key. Flags win over the file.
 | `-fake-ip ADDR` | empty (family default) | `-fake-mode fakeip`: destination of the fake SYN + hello (empty = `104.16.0.1` for an IPv4 peer, `2606:4700::6810:1` for IPv6). |
 | `-fake-split N` | 0 (3) | `-fake-mode split` (and `ff`): TCP segments the fake ClientHello is cut into, 2-16; 0 = 3 for `split`, `ff` uses 11. |
 | `-fake-ttl N` | 0 (auto) | `-fake-mode ttl`: marker hop count; 0 calibrates from the server's replies. Unused by `seq`, `sum` and `seqsum`. |
-| `-state-dir DIR` | empty (next to the config) | Both ends, needs `-config` (3.3.0): move the quota/totals state files into DIR (created 0700). The shipped unit creates `/run/wattun` (`RuntimeDirectory=wattun`) and keeps it across a service restart; tmpfs still loses the counters on reboot. See "State files". |
-| `-state-save SECONDS` | 30 | Both ends (3.3.0): seconds between state-file saves; 0 = only on shutdown. |
+| `-state-dir DIR` | empty (next to the config) | Both ends, needs `-config` (3.3.0): move the quota/totals state files into DIR (created 0700; an existing wider mode is tightened to 0700, and a chmod failure stops startup). The shipped unit creates `/run/wattun` (`RuntimeDirectory=wattun`) and keeps it across a service restart; tmpfs still loses the counters on reboot. See "State files". |
+| `-state-save SECONDS` | 30 | Both ends (3.3.0): seconds between state-file saves; 0 = only on shutdown, at most 2592000 (30 days; a larger value stops startup). |
 | `-metrics ADDR` | off | Serve `/stats` and pprof. |
 | `-debug` | off | Log every stream. |
 | `-version` | | Print `wattun X.Y.Z` and exit. |
@@ -1836,7 +1847,9 @@ restrict admission. It **restricts holders of the PSK/token to the listed source
 token, not a scanner filter: a source without the key could never create a session anyway.
 
 - **Format.** IPv4/IPv6 addresses or CIDR prefixes, separated by comma, space, tab or newline. A bare address is
-  kept as its /32 or /128 and prefixes are masked, so `10.1.2.3/8` matches `10.0.0.0/8`. `-allow-clients-file` is
+  kept as its /32 or /128 and prefixes are masked, so `10.1.2.3/8` matches `10.0.0.0/8`. A mapped prefix
+  (`::ffff:10.0.0.0/104`) is stored as its IPv4 form (`10.0.0.0/8`), so it matches the unmapped source; a mapped
+  prefix shorter than `/96` stops startup. `-allow-clients-file` is
   read once at startup and replaces `-allow-clients` (no hot reload). It must live under `/etc/wattun`: the systemd
   unit runs with `ProtectHome=yes`, so a list at `/root/clients.txt` would pass a config check and then fail to read;
   any other path is a startup error. An empty file, or a list with no valid entries, stops the start instead of
@@ -1880,8 +1893,9 @@ Values are validated at startup: `0 <= off < on <= 50`, otherwise the process re
 **Receiver side (3.3.0).** The receiver keeps the plaintext of small packets for reconstruction only while parity is
 actually arriving, and stops 15 s after the last parity packet. A peer whose gate is closed sends none, so a healthy
 tunnel does no FEC work in either direction. The cost is one group that cannot be rebuilt when parity resumes: the
-packets before the first parity packet of the new burst were not kept. With FEC off the receive ring does not exist
-at all.
+packets before the first parity packet of the new burst were not kept. A zero-threshold FEC config (both thresholds
+0, which the flags cannot produce) has no gate, so no time window applies and the first group is
+covered too. With FEC off the receive ring does not exist at all.
 
 Counters: `fec_sent`, `fec_recovered`, and `fec_state` (`on` while this end sends parity, `off` when FEC is off or
 the gate is closed; with several sessions or clients, `on` while any of them has it open).
@@ -1930,7 +1944,7 @@ Quota usage (`<config>.quota.json`) and the lifetime totals (`<config>.totals.js
 keeps on disk. Both are written atomically (tmp file + rename) so a reader never sees a torn file.
 
 - `state-save SECONDS` (default 30) sets the period; `0` saves only on shutdown, and the shutdown save stays either
-  way.
+  way. The period is capped at 2592000 seconds (30 days); a larger value stops startup.
 - `state-dir DIR` moves the pair into DIR instead of next to the config. The directory is created mode 0700 when
   missing, and an unusable one (a regular file, a read-only or full tmpfs) fails startup: a quota-capped port must
   not silently reopen on every restart because its usage was never saved. The file names keep the config's base name,
@@ -1945,9 +1959,9 @@ keeps on disk. Both are written atomically (tmp file + rename) so a reader never
   copying a config to another server.
 - The default (no `state-dir`) is the 2.5.0-3.2.x location next to the config, so every existing tunnel keeps working
   without a change.
-- The manager follows `state-dir`: its Advanced page edits `state-dir` and `state-save`, and `reset-traffic`, delete
-  and uninstall remove or reset the files where the engine actually keeps them (a custom directory outside
-  `/etc/wattun` included).
+- The manager follows `state-dir`: its Advanced page edits `state-dir` and `state-save` (`0` or `-` there goes back
+  to next to the config), and `reset-traffic`, delete and uninstall remove or reset the files where the engine
+  actually keeps them (a custom directory outside `/etc/wattun` included).
 - Needs `-config`: the state files are named after the config, so a flags-only run keeps no state (as before).
 
 ## Metrics
@@ -2885,7 +2899,7 @@ toward one fix for CDN tunnels that got slower over time. If you are on any of t
   the Advanced page grouped as Performance / Shaping & DPI / Safety / State & data, with FEC `a` for the band and
   `win-max`/`loss-ceiling` rows; `delete` stops the unit before removing the state files, so a deleted tunnel's
   quota/totals cannot come back; a coverage test ties every engine key to a UI or file-only path; the self-test ends
-  with 802 checks (`MGR_VERSION=2026110403`). (9) Hardening from the same
+  with 875 checks (`MGR_VERSION=2026110501`). (9) Hardening from the same
   audit: the shaped raw carriers check direction and install a BPF filter (a host no longer accepts its own looped
   proto-41/50/97/115 frames), NaN/Inf are rejected by the new float flags, and CI gained an arm64 test job, a
   benchmark regression gate and the new shaping/noise/FEC/allowlist tests in the race subset. (10) Auto now tests

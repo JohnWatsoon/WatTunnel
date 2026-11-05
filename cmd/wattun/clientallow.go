@@ -6,6 +6,7 @@ package main
 //
 // Format: IPv4/IPv6 addresses (one host) or CIDR prefixes, separated by comma, space or newline. A bare address is
 // kept as its /32 or /128. Entries are masked, so a non-network prefix such as 10.1.2.3/8 also matches its block.
+// An IPv4-mapped prefix (::ffff:10.0.0.0/104) is stored as 10.0.0.0/8: wat.Server unmaps every source before matching.
 // -allow-clients-file replaces -allow-clients (like -allow-file overrides -allow-ports) and is read once at startup:
 // there is no hot reload, a change needs a restart (the same as every other server-side admission setting).
 
@@ -27,6 +28,14 @@ func parseClientAllow(txt string) ([]netip.Prefix, error) {
 	var out []netip.Prefix
 	for _, f := range strings.FieldsFunc(txt, isClientSeparator) {
 		if p, err := netip.ParsePrefix(f); err == nil {
+			// M3 (audit 2026-11-04): every source is unmapped in wat/server.go, and Prefix.Contains needs equal
+			// address bit lengths, so a 4-in-6 prefix stored as-is matches nothing. Convert it to its IPv4 form.
+			if p.Addr().Is4In6() {
+				if p.Bits() < 96 {
+					return nil, fmt.Errorf("%q is an IPv4-mapped IPv6 prefix shorter than /96; use an IPv4 prefix", f)
+				}
+				p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+			}
 			out = append(out, p.Masked())
 			continue
 		}

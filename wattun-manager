@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110403   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110501   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -531,13 +531,20 @@ state_files() { # name -> every state file the engine can leave for it (delete/r
 }
 
 free_metrics_port() { # first free port from WAT_METRICS_BASE (default 19750, sandbox 19850); never 19700-19709 or 18990-18999
-  local p=${WAT_METRICS_BASE:-}
+  local p=${WAT_METRICS_BASE:-} lim
   [[ "$p" =~ ^[0-9]{4,5}$ ]] || { p=19750; [ "$SANDBOX" = 1 ] && p=19850; }
-  while [ "$p" -lt 20400 ]; do
+  lim=$((p + 650)); [ "$lim" -le 65535 ] || lim=65535 # F25: the range follows the base; 650 ports at the default
+  while [ "$p" -lt "$lim" ]; do
     if { [ "$p" -ge 19700 ] && [ "$p" -le 19709 ]; } || { [ "$p" -ge 18990 ] && [ "$p" -le 18999 ]; }; then p=$((p+1)); continue; fi
     port_busy "$p" tcp || grep -qhE "^metrics:.*:$p\"?[[:space:]]*\$" "$CONF"/*.yml 2>/dev/null || break
     p=$((p+1))
   done
+  # F25: fail closed instead of returning a busy/out-of-range port. Callers then write no metrics: line.
+  # shortcut: only 650 metrics ports exist, so write no metrics listener after that; widen the range if a real host hits it.
+  if [ "$p" -ge "$lim" ]; then
+    printf '  ! No free metrics port below %s; this tunnel gets no /stats listener (auto-heal/prune cannot read it).\n' "$lim" >&2
+    return 1
+  fi
   echo "$p"
 }
 valid_name() { [[ "$1" =~ ^[a-zA-Z0-9_-]{1,32}$ ]] && [ ! -e "$CONF/$1.yml" ]; }
@@ -833,12 +840,12 @@ listen_conflict_desc() { # proto port -> explanation string
   if [ -n "$u" ]; then echo "$u"; return; fi
   echo "another process or tunnel"
 }
-default_listen() { # carrier -> a free listen port; F19 UDP shapes use their conventional port (engine default)
+default_listen() { # carrier -> a free listen port; F19 UDP shapes keep their conventional port while it is free
   local base proto=tcp c sp
   sp=$(shaped_udp_port "$1")
-  if [ -n "$sp" ]; then echo "$sp"; return; fi
+  if [ -n "$sp" ] && ! listen_blocked udp "$sp"; then echo "$sp"; return; fi # F10: a busy conventional port falls back below
   case "$1" in ws|h2c) base=8080 ;; wss|tls|grpc|h2) base=443 ;; *) base=4443 ;; esac
-  [ "$1" = udp ] && proto=udp
+  is_udp_carrier "$1" && proto=udp
   for c in "$base" 8443 2053 2083 2087 2096 $((base+1)) $((base+2)) $((base+3)); do
     listen_blocked "$proto" "$c" || { echo "$c"; return; }
   done
@@ -860,7 +867,9 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   debug/ping-every/udp-idle/tcp-cc/slack-ms/hedge/lanes/mem-budget/plain: diagnostics and hand-tuned internals
 #   port-offset: the "second slot" of a one-server handover, set by the installer docs
 #   tls-cert/tls-key: a custom certificate pair for the tls carrier (self-signed is the default)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key'
+#   header: extra request headers for the ws/wss/h2/h2c/grpc carriers (repeatable; flag.Func, no UI row)
+#   keep-slow/tls-small-ch/hdr-mask/tcp-mimic/tls-pin/fake-ip/fake-split: anti-censor/diagnostic file-only keys
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask tcp-mimic tls-pin fake-ip fake-split'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'
@@ -1158,12 +1167,12 @@ v_state_dir() { # absolute directory, or empty/-/default for the engine default 
   [ -d "$v" ] && [ ! -w "$v" ] && { err "$v is not writable; wattun would fail at startup (the shipped unit only makes /run/wattun writable via RuntimeDirectory)."; return 1; }
   return 0
 }
-v_state_save() { # whole seconds >= 0 (0 = only on shutdown); mirrors stateSaveInterval
+v_state_save() { # whole seconds 0..2592000 (0 = only on shutdown); mirrors stateSaveInterval's cap
   local v=${1:-}
   [ -z "$v" ] && return 0
   case "$v" in -|default) return 0 ;; esac
-  [[ "$v" =~ ^[0-9]{1,10}$ ]] && [ "$((10#$v))" -le 2147483647 ] && return 0
-  err "Enter the save interval in whole seconds (0 = only on shutdown)."
+  [[ "$v" =~ ^[0-9]{1,7}$ ]] && [ "$((10#$v))" -le 2592000 ] && return 0
+  err "Enter the save interval in whole seconds, at most 2592000 (30 days; 0 = only on shutdown)."
   return 1
 }
 # -shape-data / -noise / -noise-bps / -noise-window (F13, 3.3.0): every one is validated at startup in
@@ -1238,7 +1247,10 @@ ip_or_cidr_ok() { # one allowlist entry: bare IPv4/IPv6 address or CIDR prefix
   fi
   if ipv6_ok "$addr"; then
     [ -z "$pfx" ] && return 0
-    [[ "$pfx" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$pfx))" -le 128 ] && return 0
+    [[ "$pfx" =~ ^[0-9]{1,3}$ ]] && [ "$((10#$pfx))" -le 128 ] || return 1
+    # M3: the engine normalizes a mapped prefix to IPv4 and refuses mapped bits < /96; reject it here instead.
+    case "$addr" in ::ffff:*|::FFFF:*) [ "$((10#$pfx))" -lt 96 ] && return 1 ;; esac
+    return 0
   fi
   return 1
 }
@@ -2222,7 +2234,7 @@ wizard_kharej() {
       fi
       [ -n "$mbps" ] && echo "max-mbps: $mbps"
       [ "$fec" = auto ] && echo "fec: auto"
-      echo "metrics: 127.0.0.1:$m"
+      [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: free_metrics_port found no port; write no invalid line
       maps_yaml_block
     } >"$CONF/$name.yml"
     make_token "$cr" "$peer" "$key" "${path:-${udpdns:+dns}}" "$sni" "$itype" "$allow" "$rev" >"$CONF/$name.token"
@@ -3044,7 +3056,7 @@ wizard_iran() {
       sessions_line
       conns_line
       mtu_line
-      echo "metrics: 127.0.0.1:$m"
+      [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: free_metrics_port found no port; write no invalid line
       maps_yaml_block
     } >"$CONF/$name.yml"
     umask "$old"
@@ -3193,10 +3205,18 @@ auto_plan_intro() { # plan-d -> human lines for the test screen ("standard carri
 # gre/ipip; a `.autoext` sidecar (holding the parent name) hides each child from tunnel lists/pickers while delete,
 # uninstall, heal, prune and widen still manage them.
 is_auto_ext() { [ -f "$CONF/$1.autoext" ]; }
-auto_ext_names() { # parent -> its extended unit names ($parent-e-<shape>)
+auto_ext_names() { # parent -> its extended unit names ($parent-e-<shape>); only units whose .autoext names this parent
   local f b
-  for f in "$CONF/$1-e-"*.yml; do [ -e "$f" ] || continue; b=${f##*/}; echo "${b%.yml}"; done
+  for f in "$CONF/$1-e-"*.yml; do
+    [ -e "$f" ] || continue
+    b=${f##*/}; b=${b%.yml}
+    [ "$(cat "$CONF/$b.autoext" 2>/dev/null)" = "$1" ] || continue # M1: a user tunnel named NAME-e-* is not a child
+    echo "$b"
+  done
   return 0
+}
+auto_ext_space_taken() { # name : is any NAME-e-* config present (the hidden-child namespace stays reserved)
+  local f; for f in "$CONF/$1-e-"*.yml; do [ -e "$f" ] && return 0; done; return 1
 }
 auto_ext_child() { printf '%s-e-%s' "$1" "$2"; }
 auto_ext_plan_entries() { # -> "vxlan:4789,...,sit,..." for every shaped carrier (UDP: conventional or fallback port)
@@ -3221,8 +3241,14 @@ auto_ext_plan_entries() { # -> "vxlan:4789,...,sit,..." for every shaped carrier
   printf '%s' "$out"
 }
 auto_ext_write_units() { # name entries : write the hidden per-shape server configs + sidecars and open their UDP ports
-  local name=$1 entries=$2 e c p u m fw='' keyf="$CONF/$1.key"
+  local name=$1 entries=$2 e c p u m fw='' keyf="$CONF/$1.key" bad=''
   mkdir -p "$CONF"
+  for e in ${entries//,/ }; do # M1: never overwrite a .yml that is not already a child of this parent
+    u=$(auto_ext_child "$name" "${e%%:*}")
+    [ -e "$CONF/$u.yml" ] || continue
+    [ "$(cat "$CONF/$u.autoext" 2>/dev/null)" = "$name" ] || bad=$u
+  done
+  [ -z "$bad" ] || { err "Refusing to overwrite $CONF/$bad.yml: it is not an extended listener of '$name'."; return 1; }
   for e in ${entries//,/ }; do
     c=${e%%:*}; p=$(plan_entry_port "$e"); u=$(auto_ext_child "$name" "$c"); m=$(free_metrics_port)
     {
@@ -3231,7 +3257,12 @@ auto_ext_write_units() { # name entries : write the hidden per-shape server conf
       echo "key-file: $keyf"
       echo "carrier: $c"
       [ -n "$p" ] && echo "listen: \":$p\""
-      echo "metrics: 127.0.0.1:$m"
+      [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: free_metrics_port found no port; write no invalid line
+      maps_yaml_block # H2: without the parent's allowlist the engine falls back to its permissive 1-65535 default
+      # H2: inherit the parent's per-port limits and source allowlist too (copied verbatim; ports come from MAPS above).
+      if [ -f "$CONF/$name.yml" ]; then
+        awk '/^(limits|allow-clients|allow-clients-file):/{f=1} f && /^[a-zA-Z0-9_-]+:/ && !/^(limits|allow-clients|allow-clients-file):/{f=0; next} f{print}' "$CONF/$name.yml" 2>/dev/null
+      fi
     } >"$CONF/$u.yml" || return 1
     chmod 600 "$CONF/$u.yml"
     ( umask 077; printf '%s\n' "$name" >"$CONF/$u.autoext" )
@@ -3248,12 +3279,38 @@ auto_ext_start() { # parent : (re)enable+restart every extended listener of an a
   done
   return 0
 }
-auto_ext_prune() { # parent : stop+disable the extended listeners whose shape Iran is not using (keep the stable pick)
-  local parent=$1 n c keep
-  auto_live "$parent"; keep=" $AN_D "
+auto_ext_live() { # parent -> AE_LIVE = child units with a live client; rc 1 when a running child's /stats cannot be read
+  # H1 (2026-11-04): each shaped listener is a single-carrier server with its own metrics port, and the parent's /stats
+  # cannot show which shape Iran picked. A stopped unit has no metrics server (expected, not unknown); an unreadable
+  # one is treated as unknown so the caller keeps every shape instead of guessing.
+  local n s live='' any=0 bad=0
+  for n in $(auto_ext_names "$1"); do
+    any=1
+    systemctl is-active -q "${WAT_PREFIX}@$n" 2>/dev/null || continue
+    if s=$(stats "$n") && grep -q '"clients"' <<<"$s"; then
+      grep -q '"ip"' <<<"$(grep -o '"clients": *\[[^]]*\]' <<<"$s")" && live="$live${live:+ }$n"
+    else
+      bad=1
+    fi
+  done
+  AE_LIVE=$live
+  [ "$any" = 1 ] || return 2
+  [ "$bad" = 0 ]
+}
+auto_ext_sig() { # parent -> the live hidden pick ("e:vxlan"), empty when no child is provably in use
+  local n out=''
+  auto_ext_live "$1" || return 0
+  for n in $AE_LIVE; do out="$out${out:+,}e:${n#"$1"-e-}"; done
+  printf '%s' "$out"
+}
+auto_ext_prune() { # parent : stop+disable the hidden shaped listeners Iran is not using (keep the live ones)
+  local parent=$1 n c keep=''
+  auto_ext_live "$parent" || return 0 # no children, or a running child's stats is unreadable: keep every shape
+  [ -n "$AE_LIVE" ] || return 0 # no child sees a client yet: that is not a pick, keep every shape
+  for n in $AE_LIVE; do keep="$keep ${n#"$parent"-e-}"; done
   for n in $(auto_ext_names "$parent"); do
-    c=${n#*-e-}
-    case "$keep" in *" $c "*) ;; *)
+    c=${n#"$parent"-e-}
+    case "$keep " in *" $c "*) ;; *)
       systemctl stop "${WAT_PREFIX}@$n" >/dev/null 2>&1
       systemctl disable "${WAT_PREFIX}@$n" >/dev/null 2>&1 ; ;; esac
   done
@@ -3385,9 +3442,10 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   fi
   command -v systemd-run >/dev/null 2>&1 || { err "Auto needs systemd (systemd-run) on this server."; return 1; }
   if [ -n "$NI_NAME" ]; then
-    { [ -e "$CONF/$name.yml" ] || [ -e "$CONF/$name-r.yml" ]; } && { err "A tunnel named '$name' (or '$name-r') already exists."; return 1; }
+    { [ -e "$CONF/$name.yml" ] || [ -e "$CONF/$name-r.yml" ] || auto_ext_space_taken "$name"; } \
+      && { err "A tunnel named '$name', '$name-r' or '$name-e-*' already exists."; return 1; }
   fi
-  while { [ -e "$CONF/$name.yml" ] || [ -e "$CONF/$name-r.yml" ]; } && [ "$n" -lt 99 ]; do n=$((n+1)); name="kharej-$n"; done
+  while { [ -e "$CONF/$name.yml" ] || [ -e "$CONF/$name-r.yml" ] || auto_ext_space_taken "$name"; } && [ "$n" -lt 99 ]; do n=$((n+1)); name="kharej-$n"; done
   cdn=$NI_CDN # by hand Iran adds the Cloudflare domain when it tests
   [ -n "$cdn" ] && { v_domain_opt "$cdn" || return 1; }
   auto_pick_ports || { err "Could not find a free port for $AUTO_FAIL on this server."; hint "Check what listens there: ss -ltnup"; return 1; }
@@ -3436,7 +3494,7 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
       echo "carrier: icmp$cars"
       for c in ${AUTO_D//,/ }; do p=$(plan_entry_port "$c"); [ -n "$p" ] && echo "listen-${c%%:*}: \":$p\""; done
       echo "path: $apath"
-      echo "metrics: 127.0.0.1:$m"
+      [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: free_metrics_port found no port; write no invalid line
       maps_yaml_block
     } >"$CONF/$name.yml"
     make_token auto "$AUTO_ADDR" "$key" "$apath" "$cdn" "" "$allow" "" "$plan" >"$CONF/$name.token"
@@ -3451,7 +3509,17 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   done
   fw_open "${fwl# }"
   if [ "$AUTO_EXT" = 1 ]; then # B3: one hidden single-carrier listener per extended shape
-    step "Writing extended listeners" auto_ext_write_units "$name" "$AUTO_EXT_D" || return 1
+    if ! step "Writing extended listeners" auto_ext_write_units "$name" "$AUTO_EXT_D"; then
+      # F16: this tunnel is fresh, so a child-write failure rolls it back instead of leaving a running parent whose
+      # token promises `;e=1` shapes with no (or only partial) listeners.
+      systemctl disable --now "${WAT_PREFIX}@$name" >/dev/null 2>&1 # stop before the state files: the engine saves on SIGTERM
+      while IFS= read -r line; do rm -f "$line"; done < <(state_files "$name")
+      rm -f "$CONF/$name"-e-*.yml "$CONF/$name"-e-*.autoext
+      fw_close "${fwl# }"
+      rm -f "$CONF/$name".yml "$CONF/$name".key "$CONF/$name".token
+      err "Could not write the extended listeners; the new tunnel was removed and nothing is running."
+      return 1
+    fi
     auto_ext_start "$name" >/dev/null 2>&1 || warn "Could not start the extended listeners; heal will retry."
   fi
   start_watcher "$name" || warn "Could not start the watcher. After Iran connects run: $SELF auto-ip $name IRAN_IP"
@@ -3500,7 +3568,7 @@ companion_create() { # name ip
     for c in ${rp//,/ }; do echo "peer-${c%%:*}: $ip:${c##*:}"; done
     echo "path: ${T_PATH:-/wat}"
     echo "pool-rotate: 30m"
-    echo "metrics: 127.0.0.1:$m"
+    [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: write no invalid metrics: line when the range is exhausted
     maps_yaml_block
   } >"$tmp"
   chmod 600 "$tmp"; mv -f "$tmp" "$f"; umask "$old"
@@ -3739,7 +3807,7 @@ auto_prune_reverse_only() { # name : close the unused reverse companion / stale 
   prune_done_mark "$n"
 }
 auto_prune_tick() { # name : one heal pass for an auto Kharej tunnel; reverse-side only unless autoprune-direct=1
-  local n=$1 mins grace in_use_d in_use_r sig targets direct_on comp act seen now psig psince rc
+  local n=$1 mins grace in_use_d in_use_r sig targets direct_on comp act seen now psig psince rc ext
   is_auto_kharej "$n" || return 0
   [ -f "$CONF/$n.keepopen" ] && return 0
   [ -f "$RUN/$n.autoprune.done" ] && return 0
@@ -3750,8 +3818,15 @@ auto_prune_tick() { # name : one heal pass for an auto Kharej tunnel; reverse-si
   auto_live "$n"
   in_use_d=$(echo $AN_D | tr ' ' '+'); in_use_r=$(echo $AN_R | tr ' ' '+')
   targets=$(prune_targets "$direct_on" "$in_use_d" "$in_use_r" "$comp")
-  if [ "$targets" = none ]; then rm -f "$RUN/$n.autoprune"; return 0; fi
+  ext=$(auto_ext_names "$n")
   sig=$(prune_signature "$direct_on" "$in_use_d" "$in_use_r" "$comp")
+  if [ "$targets" = none ]; then
+    # H1 (2026-11-04): with no reverse companion and no parent traffic, the only pick visible on Kharej is a hidden
+    # child's own /stats. auto_ext_sig is empty when no child reports a client or a running child cannot be read; then
+    # every shape stays open (never guess).
+    sig=''; [ -n "$ext" ] && sig=$(auto_ext_sig "$n")
+  fi
+  [ -n "$sig" ] || { rm -f "$RUN/$n.autoprune"; return 0; }
   psig=''; psince=''; read -r psig psince <<<"$(prune_stamp_get "$n")"
   now=$(date +%s)
   read -r act seen <<<"$(prune_decision "$sig" "$psig" "$psince" "$now" "$grace" | awk '{print $1, $3}')"
@@ -3759,20 +3834,26 @@ auto_prune_tick() { # name : one heal pass for an auto Kharej tunnel; reverse-si
     idle) rm -f "$RUN/$n.autoprune" ;;
     reset|wait) prune_stamp_set "$n" "$sig" "$seen" ;;
     prune)
-      logger -t wattun-auto "auto tunnel $n: Iran's pick '$sig' stable for ${mins} min, closing the unused side (${targets})"
+      if [ "$targets" = none ]; then
+        logger -t wattun-auto "auto tunnel $n: extended pick '$sig' stable for ${mins} min, closing the other shapes"
+      else
+        logger -t wattun-auto "auto tunnel $n: Iran's pick '$sig' stable for ${mins} min, closing the unused side (${targets})"
+      fi
+      # B3/H1: close the shapes Iran did not pick, independent of the reverse/direct narrowing below (an unknown pick
+      # keeps them all; auto_ext_prune is fail-safe). The reverse-only pass can return 2 when every leg is in use, and
+      # that must not leave the hidden listeners open forever.
+      [ -n "$ext" ] && auto_ext_prune "$n"
       if [ "$targets" = both ]; then
         if ( NONINTERACTIVE=1; auto_narrow "$n" ) >/dev/null 2>&1; then
           prune_done_mark "$n"
-          [ -n "$(auto_ext_names "$n")" ] && auto_ext_prune "$n" # B3: close the shapes Iran did not pick
           logger -t wattun-auto "auto tunnel $n: narrowed to the carriers Iran uses (configs kept; auto-widen $n reopens)"
         else
           logger -t wattun-auto "auto tunnel $n: narrowing failed, retrying after another ${mins} min"
           prune_stamp_set "$n" "$sig" "$now"
         fi
-      else
+      elif [ "$targets" = reverse ]; then
         if ( NONINTERACTIVE=1; auto_prune_reverse_only "$n" ) >/dev/null 2>&1; then
           prune_done_mark "$n"
-          [ -n "$(auto_ext_names "$n")" ] && auto_ext_prune "$n" # B3: stop the shapes Iran never uses (keep the pick)
           logger -t wattun-auto "auto tunnel $n: unused reverse side closed (default scope; autoprune-direct=1 also narrows direct)"
         else
           rc=$?
@@ -3783,7 +3864,10 @@ auto_prune_tick() { # name : one heal pass for an auto Kharej tunnel; reverse-si
             prune_stamp_set "$n" "$sig" "$now"
           fi
         fi
-      fi ;;
+      else
+        prune_done_mark "$n" # a shaped-only pick: the hidden children are the whole scope
+      fi
+      ;;
   esac
   return 0
 }
@@ -3876,6 +3960,7 @@ auto_widen_tick() { # name : reopen the plan when a pruned auto tunnel lost ever
   mins=$(autowiden_grace); [ "$mins" -gt 0 ] || return 0
   auto_live "$n"
   [ -n "$AN_D$AN_R" ] && up=1
+  auto_ext_live "$n"; [ -n "$AE_LIVE" ] && up=1 # H1: a shaped-only pick never shows up in the parent's /stats
   downs=$(cat "$RUN/$n.autowiden.down" 2>/dev/null || echo 0)
   stamp="$RUN/$n.autowiden"
   if [ -f "$stamp" ]; then
@@ -4672,11 +4757,15 @@ auto_current_key() { # name -> carrier/kind of the running config (d direct, c C
   if is_reverse "$1"; then echo "$c/r"; elif [ -n "$(cfg "$1" sni)" ]; then echo "$c/c"; else echo "$c/d"; fi
 }
 auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, restart, wait for the link
-  local n=$1 f="$CONF/$1.yml" ol oldrev=0 oldpool=0 l k v rport='' curkey c
+  local n=$1 f="$CONF/$1.yml" ol oldrev=0 oldpool=0 l k v rport='' curkey c bak tokbak=''
   # B2: the guard that makes "applying a skipped carrier" impossible even if a caller bypasses the variant builder
   for c in ${T_CARRIER//+/ }; do
     carrier_ok_here "$c" || { err "Carrier '$c' needs wattun $(carrier_min_ver "$c") on this server; not writing it into '$n'."; return 1; }
   done
+  bak="$f.bak"
+  cp -p "$f" "$bak" || { err "Could not back up $f; not applying."; return 1; } # F16: restore on a failed link check
+  tokbak="$CONF/$n.token.bak"
+  [ -f "$CONF/$n.token" ] && cp -p "$CONF/$n.token" "$tokbak" # the token is rewritten below; restore it too when the link fails
   AT_APPLIED=1
   curkey=$(auto_current_key "$n")
   ol=$(cfg "$n" listen); ol=${ol##*:}
@@ -4727,8 +4816,26 @@ auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, 
   if [ "$T_CARRIER" = icmp ] && [ "$T_REV" = 1 ]; then
     [ "$AT_QUIET" = 1 ] || kreply_offer
   else kreply_users_left || kreply_restore; fi
-  [ "$AT_QUIET" = 1 ] && return 0
-  if wait_link "$n" 25; then ok "CONNECTED (RTT ${LINK_RTT} ms)"; else warn "Not connected yet."; [ "$NONINTERACTIVE" = 1 ] && return 1; fi
+  # AT_QUIET=1 (heal/auto-retest) applies and restarts without waiting for the link; the next heal pass verifies it.
+  [ "$AT_QUIET" = 1 ] && { rm -f "$bak" "$tokbak"; return 0; }
+  if wait_link "$n" 25; then
+    ok "CONNECTED (RTT ${LINK_RTT} ms)"; rm -f "$bak" "$tokbak"
+  else
+    warn "Not connected yet; restoring the previous config."
+    if cp -p "$bak" "$f"; then
+      [ -f "$tokbak" ] && cp -p "$tokbak" "$CONF/$n.token"
+      rm -f "$bak" "$tokbak"
+      AT_APPLIED=0 # the variant was rolled back; change_key must not treat its key as applied
+      [ -n "$rport" ] && fw_close "$rport/$(rproto "$T_CARRIER")"
+      [ "$oldpool" = 1 ] && [ -n "$ol" ] && fw_open "$ol/$oldproto"
+    else
+      warn "Could not restore $f; the backup is kept at $bak (and $tokbak)."
+      [ "$NONINTERACTIVE" = 1 ] && return 1
+      return 0
+    fi
+    systemctl restart "${WAT_PREFIX}@$n" >/dev/null 2>&1
+    [ "$NONINTERACTIVE" = 1 ] && return 1
+  fi
   return 0
 }
 auto_test_cmd() { # name : re-run the test for an existing auto Iran tunnel and offer to switch
@@ -6027,7 +6134,7 @@ change_peer() {
   wait_link "$n" 20 && ok "CONNECTED (RTT ${LINK_RTT} ms)" || warn "Not connected yet."
 }
 change_key() {
-  local n=$1 k t
+  local n=$1 k t u
   if [ "$(role "$n")" = Kharej ]; then
     warn "Every Iran server on this tunnel disconnects until it gets the new token."
     confirm "Make a new key and token?" n || return 0
@@ -6037,6 +6144,12 @@ change_key() {
     fi
     step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n"
     [ -f "$CONF/$n-r.yml" ] && is_auto_kharej "$n" && step "Restarting ${WAT_PREFIX}@$n-r" systemctl restart "${WAT_PREFIX}@$n-r"
+    # H3 (2026-11-04): hidden shaped listeners read key-file only at startup; without a restart they keep accepting the
+    # old key (and cannot be reached with the new token). Disabled units are pruned on purpose: leave them closed.
+    for u in $(auto_ext_names "$n"); do
+      systemctl is-enabled -q "${WAT_PREFIX}@$u" 2>/dev/null || continue
+      step "Restarting extended listener ${WAT_PREFIX}@$u" systemctl restart "${WAT_PREFIX}@$u"
+    done
     echo; ok "New token. Paste it on each Iran server (tunnel page, t):"; echo
     show_token "$n"
   else
@@ -6115,7 +6228,7 @@ change_key() {
   fi
 }
 delete_tunnel() {
-  local n=$1 f
+  local n=$1 f s p
   warn "This stops '$n' and deletes its config, key and token."
   if [ "$NONINTERACTIVE" = 1 ]; then REPLY_V=$n # --yes is the confirmation
   else ask "Type $n to delete it (Enter cancels)" ""; fi
@@ -6129,6 +6242,9 @@ delete_tunnel() {
   fi
   for f in $(auto_ext_names "$n"); do # B3: the hidden extended listeners belong to this tunnel too
     systemctl disable --now "${WAT_PREFIX}@$f" >/dev/null 2>&1
+    p=$(cfg "$f" listen); p=${p##*:}
+    [ -n "$p" ] && is_shaped_udp "$(cfg "$f" carrier)" && fw_close "$p/udp" # F17: the child's UDP rule goes with it
+    while IFS= read -r s; do rm -f "$s"; done < <(state_files "$f") # F08: a child keeps its own state files
     rm -f "$CONF/$f".yml "$CONF/$f".autoext
   done
   systemctl stop "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
@@ -6348,16 +6464,16 @@ adv_menu() { # name : max-mbps, fec, bind, icmp-type, direction, state files, FE
          hint "writable tmpfs (RuntimeDirectory), so that is the supported place; the files are then lost on reboot."
          hint "Any other absolute path works only if the unit can write it (ReadWritePaths); the engine stops at startup."
          [ "$SANDBOX" = 1 ] && hint "Sandbox $WAT_PREFIX: these are test configs, the installed unit's sandbox does not apply."
-         ask_ok "State directory (absolute; /run/wattun is the supported tmpfs, - = next to the config)" "$(cfg "$n" state-dir)" v_state_dir || continue
+         ask_ok "State directory (absolute; /run/wattun is the supported tmpfs, 0 or - = next to the config)" "$(cfg "$n" state-dir)" v_state_dir || continue
          case "$REPLY_V" in
-           ''|-|default) unset_value "$n" state-dir; ok "State files stay next to the config." ;;
+           ''|-|default|0) unset_value "$n" state-dir; ok "State files stay next to the config." ;; # F11: 0 = default, never a /0 dir
            *) set_value "$n" state-dir "${REPLY_V%/}"; ok "State files will live in ${REPLY_V%/} (created 0700 by wattun)." ;;
          esac
          hint "On restart the engine reads that directory; counters start from zero if they lived elsewhere."
          changed=1 ;;
       v) adv_33 || { sleep 1; continue; }
          echo; hint "How often quota usage and lifetime totals are written to disk; 0 = only on shutdown."
-         ask_ok "State save interval in seconds (0 = shutdown only)" "$(cfg "$n" state-save)" v_state_save || continue
+         ask_ok "State save interval in seconds (0 = shutdown only; max 2592000 = 30 days)" "$(cfg "$n" state-save)" v_state_save || continue
          case "$REPLY_V" in
            ''|-|default) unset_value "$n" state-save; ok "Engine default: every 30 s." ;;
            *) set_value "$n" state-save "$REPLY_V"; ok "Saved: every $REPLY_V s$([ "$REPLY_V" = 0 ] && echo ' (shutdown only)')." ;;
@@ -7409,11 +7525,16 @@ bond_retest_set() { # name value : store the setting and install/remove its time
 bond_candidates_plan() { # bond-carriers plan-d token-peer -> "carrier peer" for every planned carrier the bond lacks
   # An auto tunnel's token lists what Kharej listens on, so a carrier that failed at auto-test time is known even
   # though the chosen bond never had a peer-<carrier> line for it. icmp has no listen port: it uses the bare peer.
+  # H4 (2026-11-04): the engine refuses a shaped carrier inside a '+' bond (D7), and a bare raw plan entry has no
+  # ':<port>' to probe. Both are skipped here rather than written into a bond the engine would reject.
   local cur=" ${1//+/ } " pd=$2 addr=$3 c p out=''
   case "$cur" in *" icmp "*) ;; *) out="icmp $addr" ;; esac
   for x in ${pd//,/ }; do
     c=${x%%:*}; p=${x##*:}
     case "$cur" in *" $c "*) continue ;; esac
+    is_shaped_carrier "$c" && continue
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || continue
     out="${out:+$out
 }$c $addr:$p"
   done
@@ -7537,9 +7658,19 @@ bond_retest_job() { # name : probe the bond's carriers + the last failures, add 
     esac
   done
   at_cleanup
+  local new='' oknew=1
   if [ -n "$added" ]; then
-    local new="$cur" a
+    local a
+    new="$cur"
     for a in $added; do new="$new+$a"; done
+    v_carrier_list "$new" || oknew=0 # H4: never write/restart into a carrier list the engine refuses
+    for a in $added; do carrier_ok_here "$a" || oknew=0; done
+    if [ "$oknew" = 0 ]; then
+      logger -t wattun-bondretest "$n: '$new' is not a carrier list this engine can run; keeping the bond unchanged"
+      added=''
+    fi
+  fi
+  if [ -n "$added" ]; then
     set_value "$n" carrier "$new"
     logger -t wattun-bondretest "$n: adding ${added% } to the bond ($cur -> $new), restarting the tunnel"
     systemctl restart "${WAT_PREFIX}@$n" >/dev/null 2>&1
@@ -8305,6 +8436,14 @@ heal_ext_listeners() { # B3: restart enabled-but-down hidden extended listeners 
   done
   return 0
 }
+mgr_lock() { # L10: one manager pass at a time; fd 9 holds the lock until this process exits (no explicit unlock)
+  mkdir -p "$RUN" 2>/dev/null
+  command -v flock >/dev/null 2>&1 || return 0 # no flock (a stripped test host): run unlocked, never refuse to work
+  exec 9>"$RUN/manager.lock" || return 0
+  flock -n 9 && return 0
+  warn "Another wattun-manager pass is running; skipping this one."
+  return 1
+}
 heal() { # restart Iran tunnels whose link is down or breaches SLA 3 checks in a row
   local n cnt f st cyc sla_f b_f
   mkdir -p "$RUN"
@@ -8497,7 +8636,7 @@ rollback() {
   return 0
 }
 uninstall_all() {
-  local n list=() u units
+  local n list=() u units p
   for n in $(tunnels_all); do list+=("$n"); done # B3: hidden extended listeners are removed with their parent
   echo
   if [ "${#list[@]}" -gt 0 ]; then
@@ -8514,6 +8653,12 @@ uninstall_all() {
   for n in "${list[@]}"; do units+=$'\n'"${WAT_PREFIX}@$n.service"; done
   for u in $(printf '%s\n' "$units" | sort -u); do
     systemctl disable --now "$u" >/dev/null 2>&1
+  done
+  # F17: the hidden extended listeners had a UDP rule opened per child; close them while their configs are readable
+  for n in "${list[@]}"; do
+    is_auto_ext "$n" || continue
+    p=$(cfg "$n" listen); p=${p##*:}
+    [ -n "$p" ] && is_shaped_udp "$(cfg "$n" carrier)" && fw_close "$p/udp"
   done
   kreply_restore
   # every timer/transient unit the manager created for a tunnel goes with it (bond-retest, watcher, retest, matrix)
@@ -8843,17 +8988,17 @@ main() {
     blackout) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run blackout_cmd "${NI_POS[0]:-${2:-}}" "${NI_POS[1]:-${3:-}}" ;;
     arm-blackout) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run arm_blackout_cmd "${NI_POS[0]:-${2:-}}" ;;
     audit-blackout) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run audit_blackout_cmd "${NI_POS[0]:-${2:-}}" ;;
-    matrix|anti-censor-matrix) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run ac_matrix_cmd "${NI_POS[0]:-${2:-}}" ;;
+    matrix|anti-censor-matrix) need_tunnel "${NI_POS[0]:-${2:-}}" || return 1; mgr_lock || return 0; ni_run ac_matrix_cmd "${NI_POS[0]:-${2:-}}" ;;
     reset-traffic) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run reset_traffic "${NI_POS[0]:-${2:-}}" ;;
-    heal) heal ;;
-    auto-test) need_tunnel "${NI_POS[0]:?name}" && ni_run auto_test_cmd "${NI_POS[0]}" ;;
-    auto-ip) need_tunnel "${2:?name}" && auto_ip "$2" "${3:-}" ;;
+    heal) mgr_lock || return 0; heal ;;
+    auto-test) need_tunnel "${NI_POS[0]:?name}" || return 1; mgr_lock || return 0; ni_run auto_test_cmd "${NI_POS[0]}" ;;
+    auto-ip) need_tunnel "${2:?name}" || return 1; mgr_lock || return 0; auto_ip "$2" "${3:-}" ;;
     auto-narrow) need_tunnel "${NI_POS[0]:?name}" && ni_run auto_narrow "${NI_POS[0]}" ;;
-    auto-widen) need_tunnel "${NI_POS[0]:?name}" && ni_run auto_widen "${NI_POS[0]}" ;;
-    auto-prune) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run auto_prune_cmd "${NI_POS[0]:-${2:-}}" "${NI_POS[1]:-${3:-}}" ;;
+    auto-widen) need_tunnel "${NI_POS[0]:?name}" || return 1; mgr_lock || return 0; ni_run auto_widen "${NI_POS[0]}" ;;
+    auto-prune) need_tunnel "${NI_POS[0]:-${2:-}}" || return 1; mgr_lock || return 0; ni_run auto_prune_cmd "${NI_POS[0]:-${2:-}}" "${NI_POS[1]:-${3:-}}" ;;
     auto-watch) need_tunnel "${2:?name}" && auto_watch "$2" ;;
-    auto-retest) need_tunnel "${2:?name}" && auto_retest "$2" ;;
-    bond-retest) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run bond_retest_job "${NI_POS[0]:-${2:-}}" ;;
+    auto-retest) need_tunnel "${2:?name}" || return 1; mgr_lock || return 0; auto_retest "$2" ;;
+    bond-retest) need_tunnel "${NI_POS[0]:-${2:-}}" || return 1; mgr_lock || return 0; ni_run bond_retest_job "${NI_POS[0]:-${2:-}}" ;;
     cdn-tune) need_tunnel "${NI_POS[0]:?name}" && ni_run cdn_tune_cmd "${NI_POS[0]}" "${NI_POS[1]:-}" ;;
     iran-firewall|anti-access) shift; iran_firewall_cmd "$@" ;;
     update) shift; update "$@" ;;
