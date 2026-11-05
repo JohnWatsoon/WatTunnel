@@ -1726,12 +1726,16 @@ _T_ICMP_s=$T_ICMP; _T_PORTS_s=$T_PORTS; _T_REV_s=$T_REV; _AT_EXTRA_s=$AT_EXTRA
 _AT_TUNE_KEYS_s=$AT_TUNE_KEYS; _AT_QUIET_s=$AT_QUIET; _AT_SEL_KEY_s=$AT_SEL_KEY
 T_CARRIER=tcp; T_PEER='203.0.113.99:9999'; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''
 AT_EXTRA=''; AT_TUNE_KEYS=''; AT_SEL_KEY=''
-( systemctl() { :; }; wait_link() { return 1; }; NONINTERACTIVE=1 AT_QUIET=0 auto_apply t_l7 ) >/dev/null 2>&1
-_rc7=$?
+_l7_fail=$( systemctl() { :; }; wait_link() { return 1; }; NONINTERACTIVE=1 AT_QUIET=0
+  auto_apply t_l7; _rc=$?; printf '\n%s/%s' "$_rc" "$AT_APPLIED" ) 2>/dev/null
+_l7_state=$(printf '%s\n' "$_l7_fail" | tail -n 1) # auto_apply's warning is also stdout; the state is the last line
+_rc7=${_l7_state%%/*}
+_l7_applied=${_l7_state##*/}
 chk "L7: a failed link check restores the previous config (F16)" "$(cfg t_l7 peer)" "203.0.113.10:4443"
 chk "L7: the restore removes the backup (F16)" "$([ -e "$WAT_CONF/t_l7.yml.bak" ] && echo y || echo n)" "n"
 chk "L7: the token is restored with the config (F16)" "$(cat "$WAT_CONF/t_l7.token" 2>/dev/null)" "old-token"
 chk "L7: the token backup is removed (F16)" "$([ -e "$WAT_CONF/t_l7.token.bak" ] && echo y || echo n)" "n"
+chk "L7: a rolled-back apply clears AT_APPLIED (F16)" "$_l7_applied" "0"
 chk "L7: the failure is reported to the caller (F16)" "$_rc7" "1"
 ( systemctl() { :; }; wait_link() { LINK_RTT=12; return 0; }; NONINTERACTIVE=1 AT_QUIET=0 auto_apply t_l7 ) >/dev/null 2>&1
 chk "L7: a successful check keeps the new config and drops the backup (F16)" "$(cfg t_l7 peer)/$([ -e "$WAT_CONF/t_l7.yml.bak" ] && echo bak || echo clean)" "203.0.113.99:9999/clean"

@@ -2899,7 +2899,7 @@ toward one fix for CDN tunnels that got slower over time. If you are on any of t
   the Advanced page grouped as Performance / Shaping & DPI / Safety / State & data, with FEC `a` for the band and
   `win-max`/`loss-ceiling` rows; `delete` stops the unit before removing the state files, so a deleted tunnel's
   quota/totals cannot come back; a coverage test ties every engine key to a UI or file-only path; the self-test ends
-  with 875 checks (`MGR_VERSION=2026110501`). (9) Hardening from the same
+  with 876 checks (`MGR_VERSION=2026110501`). (9) Hardening from the same
   audit: the shaped raw carriers check direction and install a BPF filter (a host no longer accepts its own looped
   proto-41/50/97/115 frames), NaN/Inf are rejected by the new float flags, and CI gained an arm64 test job, a
   benchmark regression gate and the new shaping/noise/FEC/allowlist tests in the race subset. (10) Auto now tests
