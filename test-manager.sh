@@ -963,7 +963,9 @@ cfg_flag_names() { # every engine flag, whatever the flag.<Kind>() registration 
 }
 cfg_sites() { grep -E '(^|[^[:alnum:]_-])(cfg|set_row|set_value|unset_value|ask_ok)[[:space:]]' wattun-manager; }
 cfg_flag_used() { # flag -> 0 when a real use site names it; a comment, a hint or the file-only list alone does not count
-  cfg_sites | grep -qE "(^|[^[:alnum:]_-])$1([^[:alnum:]_-]|$)"
+  local sites
+  sites=$(cfg_sites) || return 1
+  grep -qE "(^|[^[:alnum:]_-])$1([^[:alnum:]_-]|$)" <<<"$sites" # capture first: a pipe into grep -q trips pipefail on a large file
 }
 cfg_coverage_missing() { # [extra names...] -> engine flags with no manager path, space separated (empty = complete)
   local f miss=''
