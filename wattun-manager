@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110501   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110502   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -1790,6 +1790,7 @@ start_unit() { # name : with feedback
 link_alive() { [ "$(jget "$(stats "$1")" alive)" = true ]; }
 wait_link() { # name seconds : spinner + progress bar while waiting for the link
   local n=$1 max=${2:-25} t0=$SECONDS el i=0 f
+  if is_reverse "$n" && [ "$max" -lt 45 ]; then max=45; fi # Kharej reverse dialer backoff is up to 30 s
   [ "$ANIM" = 1 ] && cur_hide || printf '  Waiting for the link (up to %ss)...\n' "$max"
   while :; do
     if link_alive "$n"; then
@@ -4410,7 +4411,7 @@ at_tune() { # AT_SEL -> AT_TUNE (config lines) and AT_TUNE_KEYS (the settings it
   # grid is short and its values are compared against each other, so every probe must cost the same.
   AT_MB=$AT_TUNE_PROBE_MB
   AT_STOP=0; AT_ACT=''
-  [ "$kind" = reverse ] && [ "${AV_CAR[$target]}" = icmp ] && w=30
+  [ "$kind" = reverse ] && w=45 # Kharej reverse dialer backoff is up to 30 s; match at_pool_batch
   [ "$AT_QUIET" = 1 ] || { echo; say "  ${BOLD}Tuning ${AV_LABEL[$target]}${RST} (one setting at a time, $AT_MB MB each way)"; }
   at_tune_try() { # flags label -> i (the new variant) ; prints its row
     local extra="${AV_X[$target]:+${AV_X[$target]}}"

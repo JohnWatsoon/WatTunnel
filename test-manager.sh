@@ -1287,6 +1287,12 @@ chk "bond tune variant: one extra row probes the whole bond" "${#AV_LABEL[@]}" "
 chk "bond tune variant: its label names the carrier list" "${AV_LABEL[2]}" "bond tcp+tls"
 chk "bond tune variant: every leg's peer goes in as a flag" "${AV_X[2]}" "-peer-tcp 203.0.113.10:4443 -peer-tls 203.0.113.10:8443"
 chk "bond tune variant: base index" "$AT_TUNE_BASE" "2"
+# Reverse tuning: Kharej dialer has up to 30 s backoff, so tuning probes wait 45 s
+AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=(); AV_FS=(); AV_FM=(); AV_X=()
+av_add "ws reverse" ws r '203.0.113.10:24433' '24433' ''
+AT_SEL=(0)
+_tune_w=$( at_probe() { printf '%s' "$2"; return 0; }; at_cleanup() { :; }; at_prep() { return 0; }; AT_QUIET=1; at_tune )
+chk "at_tune: reverse pool carrier probes with 45 s wait" "$_tune_w" "45"
 # H2/H3: the budget now counts all three phases, and the probe size is duration-based
 chk "at_budget: screening+finalists+tuning worst case" "$(at_budget 17 16 40 10 20)" "up to 1184 MB, about 3 min"
 chk "at_budget: an empty plan stays at the minimum" "$(at_budget 0 0 0 0 0)" "up to 0 MB, about 1 min"
@@ -1747,6 +1753,17 @@ T_CARRIER=$_T_CARRIER_s; T_PEER=$_T_PEER_s; T_KEY=$_T_KEY_s; T_PATH=$_T_PATH_s; 
 T_PORTS=$_T_PORTS_s; T_REV=$_T_REV_s; AT_EXTRA=$_AT_EXTRA_s; AT_TUNE_KEYS=$_AT_TUNE_KEYS_s
 AT_QUIET=$_AT_QUIET_s; AT_SEL_KEY=$_AT_SEL_KEY_s
 rm -f "$WAT_CONF"/t_l7*
+
+# Reverse wait_link: Kharej dialer has up to 30 s backoff, so reverse tunnels wait at least 45 s
+cat >"$WAT_CONF/t_wl_r.yml" <<EOF
+mode: client
+carrier: ws
+reverse: true
+listen: ":24433"
+EOF
+_wl_max=$( link_alive() { return 0; }; ANIM=0; wait_link t_wl_r 25 )
+chk "wait_link: reverse tunnel extends max wait to 45 s" "$(grep -o 'up to 45s' <<<"$_wl_max")" "up to 45s"
+rm -f "$WAT_CONF/t_wl_r.yml"
 
 # L10: one manager pass at a time. A fake flock keeps this deterministic on a host without util-linux flock.
 mkdir -p "$SMOKE/bin"
