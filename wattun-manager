@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110502   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110601   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -438,6 +438,12 @@ run_flow() { # fn args... : run in a subshell; Ctrl+C cancels just this flow
 # ======================================================================================
 tunnels() { # every *visible* tunnel: the hidden per-shape auto listeners are left out of lists/pickers (B3)
   local f b; for f in "$CONF"/*.yml; do [ -e "$f" ] || continue; b=${f##*/}; b=${b%.yml}; is_auto_ext "$b" && continue; echo "$b"; done
+}
+listed_tunnels() { # what a status list shows: an auto reverse side the cleanup stopped is not a tunnel of its own
+  local n; for n in $(tunnels); do
+    [ -n "$(companion_of "$n")" ] && ! systemctl is-active -q "${WAT_PREFIX}@$n" 2>/dev/null && continue
+    echo "$n"
+  done
 }
 tunnels_all() { # every config, hidden extended listeners included (delete/uninstall/heal/prune)
   local f b; for f in "$CONF"/*.yml; do [ -e "$f" ] || continue; b=${f##*/}; echo "${b%.yml}"; done
@@ -1450,13 +1456,31 @@ parse_carriers() { # json
     CAR_COUNT=$((CAR_COUNT+1))
   done < <(grep -o '{[^{}]*}' <<<"$carr_block")
 }
-tinfo() { # name -> TI_*  (state: up | degraded | down | stopped)
-  TI_STATE=stopped; TI_RTT=0; TI_STREAMS=0; TI_SESS=0; TI_IN=0; TI_OUT=0; TI_RATE=0; TI_RAW=''
+tinfo() { # name -> TI_*  (state: up | degraded | down | standby | unknown | stopped), TI_WHY says why when it is not obvious
+  local par other='' s='' on=0 miss=0
+  TI_STATE=stopped; TI_RTT=0; TI_STREAMS=0; TI_SESS=0; TI_IN=0; TI_OUT=0; TI_RATE=0; TI_RAW=''; TI_WHY=''
   TI_CAR_COUNT=0; TI_CAR_ALIVE=0; TI_CAR_MUTED=0; TI_LIVE=$(cfg "$1" carrier); TI_AUTO=0
-  is_auto_kharej "$1" || [ -n "$(companion_of "$1")" ] && TI_AUTO=1 # all types open, Iran uses one: the dead rest is normal
-  systemctl is-active -q "${WAT_PREFIX}@$1" 2>/dev/null || return 0
-  TI_RAW=$(stats "$1")
-  if [ "$(jget "$TI_RAW" alive)" = true ]; then TI_STATE=up; else TI_STATE=down; fi
+  par=$(companion_of "$1")
+  if [ -n "$par" ]; then TI_AUTO=1; other=$par # all types open, Iran uses one: the dead rest is normal
+  elif is_auto_kharej "$1"; then TI_AUTO=1; fi
+  [ -z "$par" ] && [ "$(companion_of "$1-r")" = "$1" ] && other=$1-r
+  systemctl is-active -q "${WAT_PREFIX}@$1" 2>/dev/null && on=1
+  # an auto Kharej is one tunnel on two units: Iran's link may be on either, and only that one reports it.
+  # A busy host can miss the 2 s stats limit, so try twice: no answer is not "no link".
+  if [ -n "$other" ] && systemctl is-active -q "${WAT_PREFIX}@$other" 2>/dev/null; then
+    s=$(stats "$other") || s=$(stats "$other") || miss=1
+  fi
+  if [ "$on" = 1 ]; then
+    TI_RAW=$(stats "$1") || TI_RAW=$(stats "$1") || TI_RAW=''
+    if [ -z "$TI_RAW" ]; then TI_STATE=unknown; TI_WHY='stats did not answer, status not known'; return 0; fi
+  elif [ -z "$par" ] && [ -n "$s" ]; then TI_RAW=$s
+  elif [ -z "$par" ] && [ "$miss" = 1 ]; then TI_STATE=unknown; TI_WHY="$other stats did not answer, status not known"; return 0
+  else return 0; fi
+  if [ "$on" = 1 ] && [ "$(jget "$TI_RAW" alive)" = true ]; then TI_STATE=up
+  elif [ "$miss" = 1 ]; then TI_STATE=unknown; TI_WHY="$other stats did not answer, status not known"
+  elif [ "$(jget "$s" alive)" != true ]; then TI_STATE=down
+  elif [ -n "$par" ]; then TI_STATE=standby; TI_WHY="not in use, Iran is connected through $par"
+  else TI_STATE=up; TI_RAW=$s; TI_WHY="Iran is connected through $other"; fi
   TI_RTT=$(jget_flat "$TI_RAW" rtt_ms srtt_ms); TI_STREAMS=$(jget_flat "$TI_RAW" streams_total streams); TI_SESS=$(jget "$TI_RAW" sessions)
   TI_IN=$(jget "$TI_RAW" bytes_in_total); TI_OUT=$(jget "$TI_RAW" bytes_out_total); TI_RATE=$(jget "$TI_RAW" rate_bps)
   [ -n "$TI_IN" ] || { TI_IN=$(jget "$TI_RAW" bytes_in); TI_OUT=$(jget "$TI_RAW" bytes_out); } # before 2.4.19: since the last restart
@@ -1480,14 +1504,7 @@ tinfo() { # name -> TI_*  (state: up | degraded | down | stopped)
     done
     TI_CAR_ALIVE=$unmuted_live
     if [ "$unmuted_total" -gt 1 ] && [ "$unmuted_live" -lt "$unmuted_total" ]; then
-      TI_STATE=degraded
-    fi
-  fi
-  if [ "$TI_STATE" = up ] && has_dgram "$TI_LIVE"; then
-    local loss
-    loss=$(jget "$TI_RAW" loss_pct)
-    if [ -n "$loss" ] && [ "${loss%.*}" -ge 5 ] 2>/dev/null; then
-      TI_STATE=degraded
+      TI_STATE=degraded; TI_WHY="$((unmuted_total - unmuted_live)) of $unmuted_total carriers down"
     fi
   fi
 }
@@ -1495,7 +1512,9 @@ SC_COL=''; SC_TXT=''; SC_DOT='●'
 state_cell() { # role state
   case "$2" in
     up) SC_COL=$GRN; SC_DOT='●'; SC_TXT=up ;;
-    degraded) SC_COL=$YEL; SC_DOT='◐'; SC_TXT=degraded ;;
+    degraded) SC_COL=$YEL; SC_DOT='◐'; SC_TXT=partial ;;
+    standby) SC_COL=$GRY; SC_DOT='◌'; SC_TXT=standby ;;
+    unknown) SC_COL=$YEL; SC_DOT='◐'; SC_TXT=unknown ;;
     down) SC_COL=$RED; SC_DOT='○'; if [ "$1" = Kharej ]; then SC_TXT=waiting; else SC_TXT=down; fi ;;
     *) SC_COL=$GRY; SC_DOT='◌'; SC_TXT=stopped ;;
   esac
@@ -1558,7 +1577,7 @@ dash_row() { # idx name
 }
 dash_table() {
   local n i=0; DASH_N=()
-  for n in $(tunnels); do DASH_N+=("$n"); done
+  for n in $(listed_tunnels); do DASH_N+=("$n"); done
   if [ "${#DASH_N[@]}" -eq 0 ]; then
     case "$(server_side)" in
       kharej) printf '  No tunnels yet. Press %s to make a token for the Iran server.\n' "$(key_label n)" ;;
@@ -3616,7 +3635,10 @@ auto_live() { # name -> AN_D (direct carriers with a live client on NAME) and AN
   local n=$1 s
   AN_D=''; AN_R=''
   if s=$(stats "$n"); then
-    AN_D=$(grep -o '"clients": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep -o '"carrier": *"[^"]*"' | cut -d'"' -f4 | sort -u | tr '\n' ' ')
+    # clients[] names one carrier per session (the last one heard); carriers[] has every leg of a bonded client
+    AN_D=$({ grep -o '"clients": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep -o '"carrier": *"[^"]*"' | cut -d'"' -f4
+      grep -o '"carriers": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep '"alive": *true' | grep -o '"name": *"[^"]*"' | cut -d'"' -f4
+    } | sed '/^$/d' | sort -u | tr '\n' ' ')
   fi
   if [ -f "$CONF/$n-r.yml" ] && s=$(stats "$n-r"); then
     AN_R=$(grep -o '"carriers": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep '"alive": *true' | grep -o '"name": *"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')
@@ -3731,21 +3753,14 @@ auto_widen() { # name : open every carrier of the token's plan again
 # ---- R3: automatic lifecycle cleanup of an auto Kharej tunnel ----
 # The auto tunnel listens on every carrier so Iran's test (and later auto-heal) can reach any of them. Running every
 # carrier open for weeks is pure attack surface once Iran has picked, so after Iran's selection has been stable for a
-# grace window the manager closes what is provably unused: by default the unused reverse companion/watchers only
-# (D1), because the engine reports one carrier per session and cannot tell a bonded Iran client from a single leg.
-# Direct-carrier narrowing (the full auto-narrow, both sides) is opt-in with .manager.conf autoprune-direct=1; all
-# configs are kept so auto-widen works, nothing is ever deleted. The window is .manager.conf key autoprune (minutes,
-# default 12; 0 turns the automatic pass off), per tunnel $CONF/NAME.keepopen turns it off, and `auto-narrow NAME
-# --yes` stays the manual path.
-AUTOPRUNE_DEFAULT_MIN=12
-# H10/D1: the engine reports ONE carrier per session (the last-heard lane), so a bonded Iran client looks like a single
-# direct carrier. The automatic pass therefore must not narrow the direct side by itself: by default it closes only the
-# unused reverse companion/stale watchers. Full narrowing (carrier: on both sides) is opt-in with .manager.conf
-# autoprune-direct=1. Manual `auto-narrow` is unchanged. The widen safety net still reopens the token plan.
-autoprune_direct_setting() { # .manager.conf autoprune-direct (0/1; junk = 0 = reverse-side cleanup only)
-  local v; v=$(conf_get autoprune-direct 0)
-  [ "$v" = 1 ] && { echo 1; return 0; }
-  echo 0
+# grace window the manager closes everything Iran does not use, on both sides (auto_narrow). All configs are kept so
+# auto-widen works, nothing is ever deleted. The window is .manager.conf key autoprune (minutes, default 5; 0 turns the
+# automatic pass off), per tunnel $CONF/NAME.keepopen turns it off, and autoprune-direct=0 limits it to the reverse side.
+AUTOPRUNE_DEFAULT_MIN=5
+autoprune_direct_setting() { # .manager.conf autoprune-direct (0 = reverse-side cleanup only; anything else = both sides)
+  local v; v=$(conf_get autoprune-direct 1)
+  [ "$v" = 0 ] && { echo 0; return 0; }
+  echo 1
 }
 prune_targets() { # direct-on sig-direct sig-reverse has-companion -> "both" | "reverse" | "none" (pure)
   local on=${1:-0} d=$2 r=$3 comp=${4:-0}
@@ -3845,6 +3860,8 @@ auto_prune_tick() { # name : one heal pass for an auto Kharej tunnel; reverse-si
       # that must not leave the hidden listeners open forever.
       [ -n "$ext" ] && auto_ext_prune "$n"
       if [ "$targets" = both ]; then
+        systemctl stop "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
+        systemctl reset-failed "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
         if ( NONINTERACTIVE=1; auto_narrow "$n" ) >/dev/null 2>&1; then
           prune_done_mark "$n"
           logger -t wattun-auto "auto tunnel $n: narrowed to the carriers Iran uses (configs kept; auto-widen $n reopens)"
@@ -5905,7 +5922,7 @@ mon_frame() {
   local n r any=0 sp rate pad
   printf '\n  %sWatTun ·%s %sLive monitor%s  %s%s · every 2 s · any key goes back%s\e[K\n\e[K\n' "$GRY" "$RST" "$BOLD" "$RST" "$GRY" "$(date '+%H:%M:%S')" "$RST"
   printf '  %sname        state         rtt     rate         history             load%s\e[K\n' "$GRY" "$RST"
-  for n in $(tunnels); do
+  for n in $(listed_tunnels); do
     any=1; r=$(role "$n"); tinfo "$n"; state_cell "$r" "$TI_STATE"
     hist_push "$n" "$TI_RATE"; sp=$(spark "${HIST[$n]}")
     rate=$(human "$TI_RATE"); pad=$((16-${#sp}))
@@ -5933,7 +5950,7 @@ live_monitor() {
 # ======================================================================================
 status_all() { # plain, scriptable list
   local n any=0
-  for n in $(tunnels); do any=1; status_row "$n"; done
+  for n in $(listed_tunnels); do any=1; status_row "$n"; done
   [ "$any" = 1 ] || { warn "No tunnels yet. Start with Kharej: run $SELF and press n."; return 1; }
 }
 status_row() {
@@ -5957,12 +5974,14 @@ tunnel_card() {
 
   local boot='not started at boot'; [ "$srv_en" = enabled ] && boot='starts at boot'
   # state lives in the page header; the card keeps the detail that is not repeated there
+  [ -n "$TI_WHY" ] && box_row "${SC_COL}${TI_WHY}${RST}"
   if [ "$srv_act" = active ]; then box_row "${GRY}service running${srv_up:+ for $srv_up} · $boot${RST}"
   else box_row "${GRY}service $srv_act · $boot${RST}"; fi
   if is_auto_kharej "$n"; then
     auto_live "$n"; c=$(echo $AN_D ${AN_R:+r:$AN_R}); c=${c// /+}; x=$(cfg "$n" carrier | tr '+' ' ' | wc -w)
     if [ -n "$c" ]; then k="picked by Iran"; else k="$x open"; fi
     row_2col "$(kv carrier "${c:-auto} ${GRY}($k)${RST}")" "$routing_txt"
+  elif [ -n "$par" ] && [ "$TI_STATE" = up ] && [ -n "$TI_LIVE" ]; then row_2col "$(kv carrier "$TI_LIVE ${GRY}(picked by Iran)${RST}")" "$routing_txt"
   elif [ -n "$par" ]; then row_2col "$(kv carrier "auto ${GRY}($(wc -w <<<"${cr//+/ }") types open)${RST}")" "$routing_txt"
   else row_2col "$(kv carrier "$cr")" "$routing_txt"; fi
 
@@ -6027,7 +6046,8 @@ tunnel_card() {
       if has_dgram "$TI_LIVE"; then row_2col "$(kv loss "$(printf '%.1f' "$(jget "$TI_RAW" loss_pct)") %")" "$([ "${uf:-0}" -gt 0 ] 2>/dev/null && kv 'udp flows' "$uf")"
       elif [ "${uf:-0}" -gt 0 ] 2>/dev/null; then box_row "$(kv 'udp flows' "$uf")"; fi
     else
-      if [ "$r" = Kharej ]; then box_row "${GRY}no link yet, waiting for Iran to connect${RST}"; else box_row "${GRY}no link yet, d runs a diagnosis${RST}"; fi
+      if [ -n "$TI_WHY" ]; then :
+      elif [ "$r" = Kharej ]; then box_row "${GRY}no link yet, waiting for Iran to connect${RST}"; else box_row "${GRY}no link yet, d runs a diagnosis${RST}"; fi
       [ "${TI_IN%.*}" -gt 0 ] 2>/dev/null && box_row "$(kv total "↓$(human "$TI_IN")  ↑$(human "$TI_OUT")")"
     fi
     # one row per carrier of a bond; an auto side lists only what Iran uses, and nothing when that is one type

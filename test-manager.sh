@@ -1320,7 +1320,7 @@ chk "autoprune: a custom window" "$(autoprune_grace)" "7"
 printf 'autoprune=soon\n' >"$WAT_CONF/.manager.conf"
 chk "autoprune: junk falls back to the default" "$(autoprune_grace)" "$AUTOPRUNE_DEFAULT_MIN"
 rm -f "$WAT_CONF/.manager.conf"
-chk "autoprune: default is 12 minutes" "$(autoprune_grace)" "12"
+chk "autoprune: default is 5 minutes" "$(autoprune_grace)" "5"
 
 # R3 scheduling + widen safety net: the automatic prune pass runs from heal(), so a Kharej-only server must get that
 # timer installed; and a narrowed tunnel that loses every open carrier reopens the plan, bounded by autowiden minutes.
@@ -1465,9 +1465,9 @@ chk "prune scope: direct opt-in with nothing live -> none" "$(prune_targets 1 ''
 chk "prune signature: reverse-only ignores the direct set" "$(prune_signature 0 'tcp' 'icmp' 1)" "r:icmp"
 chk "prune signature: an unused companion is still watched" "$(prune_signature 0 'tcp' '' 1)" "r:-"
 chk "prune signature: the opt-in covers both sides" "$(prune_signature 1 'tcp' 'icmp' 1)" "tcp+r:icmp"
-chk "prune scope: autoprune-direct defaults to off" "$(autoprune_direct_setting)" "0"
-( umask 077; printf 'autoprune-direct=1\n' >"$WAT_CONF/.manager.conf" )
-chk "prune scope: autoprune-direct=1 is read from .manager.conf" "$(autoprune_direct_setting)" "1"
+chk "prune scope: both sides close by default" "$(autoprune_direct_setting)" "1"
+( umask 077; printf 'autoprune-direct=0\n' >"$WAT_CONF/.manager.conf" )
+chk "prune scope: autoprune-direct=0 is read from .manager.conf" "$(autoprune_direct_setting)" "0"
 rm -f "$WAT_CONF/.manager.conf"
 chk "prune: the reverse-only pass is a separate function" "$(grep -c '^auto_prune_reverse_only()' wattun-manager)" "1"
 chk "prune: the default pass cannot call auto_narrow directly" "$(awk '/^auto_prune_tick\(\)/,/^}/' wattun-manager | grep -c 'targets.*= both')" "1"
@@ -1484,7 +1484,7 @@ carrier: icmp
 peer: 203.0.113.5
 EOF
 printf 'wat1:%s\n' "$(printf 'auto|203.0.113.5|k||||||d:icmp,tcp;r:icmp' | base64 | tr -d '\n')" >"$WAT_CONF/t_pr.token"
-( umask 077; printf 'autoprune=1\n' >"$WAT_CONF/.manager.conf" )
+( umask 077; printf 'autoprune=1\nautoprune-direct=0\n' >"$WAT_CONF/.manager.conf" )
 mkdir -p "$WAT_RUN"; printf 'r:- 0\n' >"$WAT_RUN/t_pr.autoprune"
 _pr_sys="$WAT_RUN/.prune-sys"; rm -f "$_pr_sys"
 _pr_out=$( NONINTERACTIVE=1; systemctl() { echo "$*" >>"$_pr_sys"; return 0; }; auto_prune_tick t_pr ) 2>/dev/null
@@ -1784,6 +1784,46 @@ chk "installer unit: ReadWritePaths keeps /etc/wattun (L17)" "$(case "$_rwp" in 
 
 rm -f "$WAT_CONF"/t_h2.yml "$WAT_CONF"/t_h2-e-* "$WAT_CONF"/t_l12-e-* "$WAT_CONF"/t_l12w*
 eval "$_bv_s"; eval "$_bvok_s"; VER=$_ver_s
+
+# Real status: an auto Kharej is one tunnel on two units, and no stats answer is not "no link".
+_ti_stats=$(declare -f stats); _ti_sys=$(declare -f systemctl); _ti_tun=$(declare -f tunnels)
+tunnels() { printf 't_ti
+t_ti-r
+'; }
+printf 'mode: server\ncarrier: tcp+wss\nmetrics: 127.0.0.1:1\n' >"$WAT_CONF/t_ti.yml"
+printf 'mode: server\ncarrier: tcp+wss\nreverse: true\nmetrics: 127.0.0.1:2\n' >"$WAT_CONF/t_ti-r.yml"
+printf 'wat1:%s\n' "$(printf 'auto|203.0.113.5|k||||||d:tcp;r:tcp' | base64 | tr -d '\n')" >"$WAT_CONF/t_ti.token"
+printf 'mode: client\ncarrier: udp\nmetrics: 127.0.0.1:3\n' >"$WAT_CONF/t_tb.yml"
+systemctl() { local u=${!#}; case "$1" in is-active) case " $_ACT " in *" ${u##*@} "*) return 0 ;; esac; return 1 ;; esac; return 0; }
+stats() { local v=''; case "$1" in t_ti) v=$_SP ;; t_ti-r) v=$_SR ;; t_tb) v=$_SB ;; esac; [ -n "$v" ] && printf '%s' "$v"; }
+_on='{"alive":true,"sessions":1}'; _off='{"alive":false,"sessions":0}'
+_ACT='t_ti t_ti-r'; _SP=$_off; _SR=$_on; tinfo t_ti
+chk "status: a parent with the link on its reverse side is up" "$TI_STATE|$TI_WHY" "up|Iran is connected through t_ti-r"
+_ACT='t_ti-r'; _SP=''; tinfo t_ti
+chk "status: a parent the cleanup stopped is still up through its reverse side" "$TI_STATE" "up"
+_ACT='t_ti t_ti-r'; _SP=$_on; _SR=$_off; tinfo t_ti-r
+chk "status: the reverse side stands by while Iran is on the direct side" "$TI_STATE" "standby"
+_SP=$_off; tinfo t_ti
+chk "status: no link on either side is down" "$TI_STATE" "down"
+_SP=''; _SR=$_on; tinfo t_ti
+chk "status: a silent stats port is unknown, not down" "$TI_STATE" "unknown"
+_SP=$_off; _SR=''; tinfo t_ti
+chk "status: a silent other side is unknown, not down" "$TI_STATE" "unknown"
+_ACT=''; tinfo t_ti
+chk "status: both units stopped is stopped" "$TI_STATE" "stopped"
+_ACT='t_tb'; _SB='{"alive":true,"loss_pct":9.2}'; tinfo t_tb
+chk "status: packet loss alone does not change the state" "$TI_STATE" "up"
+_SB='{"alive":true,"carriers":[{"alive":true,"name":"tcp"},{"alive":false,"name":"wss"}]}'; tinfo t_tb
+chk "status: a dead bond leg is partial, with the reason" "$TI_STATE|$TI_WHY" "degraded|1 of 2 carriers down"
+state_cell Iran degraded; chk "status: degraded reads partial" "$SC_TXT" "partial"
+_SP='{"alive":true,"clients":[{"carrier":"tcp"}],"carriers":[{"alive":true,"name":"tcp"},{"alive":true,"name":"wss"},{"alive":false,"name":"h2"}]}'; _SR=''
+rm -f "$WAT_CONF/t_ti-r.yml"; auto_live t_ti
+chk "cleanup: every live leg of a bond counts as in use" "$AN_D" "tcp wss "
+printf 'mode: server\ncarrier: tcp+wss\nreverse: true\nmetrics: 127.0.0.1:2\n' >"$WAT_CONF/t_ti-r.yml"
+_ACT='t_ti'; chk "lists: a stopped reverse side is hidden" "$(listed_tunnels | grep -c '^t_ti-r$')" "0"
+_ACT='t_ti t_ti-r'; chk "lists: a running reverse side is shown" "$(listed_tunnels | grep -c '^t_ti-r$')" "1"
+rm -f "$WAT_CONF"/t_ti.yml "$WAT_CONF"/t_ti-r.yml "$WAT_CONF"/t_ti.token "$WAT_CONF"/t_tb.yml
+eval "$_ti_stats"; eval "$_ti_sys"; eval "$_ti_tun"
 
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

@@ -59,8 +59,9 @@ and the full list of 92 configurations: [docs/TECHNICAL.md](docs/TECHNICAL.md#fi
   smallest leg).
 - **Cleaner, quieter, safer (3.3.0).** `fec: auto` sends parity only while the link is really losing packets (above
   2 %, stops below 0.5 %), so a healthy tunnel pays nothing — `fec_state` in `/stats` shows it. An auto Kharej tunnel
-  closes only the unused reverse side (its old reverse companion and stale watchers) about 12 minutes after your
-  choice; direct-carrier narrowing is opt-in (`autoprune-direct=1`) because a bonded Iran client looks like one leg.
+  closes everything Iran does not use, on both sides, about 5 minutes after your choice (`autoprune-direct=0` limits
+  it to the reverse side). Tunnel status shows the real link: `up` even when the link is on the other auto side,
+  `standby` for the side not in use, `partial` with the reason when a bond leg is down.
   If the open carriers all fail it reopens everything (10 minute cooldown). Bonded tunnels can retest their legs on a
   schedule (off by default). A server-side `-allow-clients` list restricts the holder of the key/token to the client
   IPs you name. Counters can live on tmpfs with `-state-dir`/`-state-save` (the shipped unit supports `/run/wattun`

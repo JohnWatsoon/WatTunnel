@@ -1400,13 +1400,13 @@ failed. If your server is billed by traffic, pick a fixed carrier instead of Aut
 
 **After Iran has picked.** The Kharej auto tunnel is the real server for the carrier Iran chose, so it is never
 deleted. It keeps every carrier port open so that Iran's test and auto-heal can reach any of them — which is attack
-surface once Iran has picked. Since 3.3.0 the heal pass closes what is provably unused by itself, and the default
-scope is deliberately the **reverse side only**: it stops the stale `wattun-autowatch` helper and, once Iran's pick
-has been stable for `autoprune` minutes (`.manager.conf`, default 12, `0` = off), stops `NAME-r` when no reverse
-carrier is alive or narrows `NAME-r` to the reverse carriers that are. The direct `carrier:` list is **not** rewritten
-by default, because the engine reports one carrier per session and cannot tell a bonded Iran client from a single
-leg. Full direct-side narrowing stays available but is opt-in: `.manager.conf autoprune-direct=1`, or
-`wattun-manager auto-prune NAME --direct` (the old `auto-narrow`, both sides). A changed pick restarts the window, so
+surface once Iran has picked. The heal pass closes what is unused by itself: it stops the stale `wattun-autowatch`
+helper and, once Iran's pick has been stable for `autoprune` minutes (`.manager.conf`, default 5, `0` = off), runs the
+full `auto-narrow` on both sides. A side with nothing in use stops, and the other keeps only the carriers in use. A
+bonded Iran client keeps all its legs, because the live legs are read from `carriers[]` in `/stats`, not only from
+`clients[]`. `.manager.conf autoprune-direct=0` limits the pass to the reverse side. To try another carrier afterwards,
+run `wattun-manager auto-widen NAME` on Kharej first; otherwise the widen safety net reopens the plan after 3 failed
+heal checks. A re-test on Iran only sees what is still open. A changed pick restarts the window, so
 a flapping selection is never pruned. Configs and tokens always stay, and `auto-widen` brings everything back. Hidden
 extended listeners are decided from each child's own `/stats` (see "Extended transports"): the pass keeps the shapes
 with a live client and stops the rest once one reports a pick, keeps every shape when that pick is unknown or
@@ -2877,10 +2877,9 @@ toward one fix for CDN tunnels that got slower over time. If you are on any of t
   `-state-save` move the quota/totals state files; the shipped unit now creates `/run/wattun`
   (`RuntimeDirectory=wattun`, mode 0700, `RuntimeDirectoryPreserve=yes`, `ReadWritePaths=/etc/wattun /run/wattun`), so
   the documented tmpfs path actually works and counters survive a service restart (they are still lost on reboot).
-  (5) Auto Kharej cleanup: after Iran's pick has been stable for `autoprune` minutes (default 12) the heal pass closes
-  the unused **reverse** companion/watchers only by default; the direct `carrier:` list is never rewritten, because a
-  bonded Iran client looks like a single leg. Full direct narrowing is opt-in
-  (`autoprune-direct=1` in `.manager.conf`, or `auto-prune NAME --direct`). The auto wizard, `auto-ip` and the next
+  (5) Auto Kharej cleanup: after Iran's pick has been stable for `autoprune` minutes (default 5 since manager
+  2026110601) the heal pass closes everything unused on both sides, a bond's live legs included in what stays
+  (`autoprune-direct=0` in `.manager.conf` limits it to the reverse side). The auto wizard, `auto-ip` and the next
   manager run install the heal timer on a Kharej-only server; if no open carrier works for 3 checks the full token
   plan is reopened (`autowiden`, default 10 minutes, 0 = off). Bond auto-retest is a bond-only setting, default off
   (`bond-retest NAME`). (6) Server-side `-allow-clients` / `-allow-clients-file` restrict holders of the PSK/token to
