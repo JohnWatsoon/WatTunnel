@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110601   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110602   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -3642,6 +3642,10 @@ auto_live() { # name -> AN_D (direct carriers with a live client on NAME) and AN
   fi
   if [ -f "$CONF/$n-r.yml" ] && s=$(stats "$n-r"); then
     AN_R=$(grep -o '"carriers": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep '"alive": *true' | grep -o '"name": *"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')
+    # a narrowed side has one carrier and /stats lists no carriers[] for it: alive means that carrier is in use
+    if [ -z "$AN_R" ] && [ "$(jget "$s" alive)" = true ]; then
+      local one; one=$(cfg "$n-r" carrier); case "$one" in *+*|'') ;; *) AN_R="$one " ;; esac
+    fi
   fi
 }
 auto_set_carriers() { # name "direct carriers" "reverse carriers" : rewrite the carrier lists of NAME and NAME-r from the token's plan
@@ -3989,7 +3993,7 @@ auto_widen_tick() { # name : reopen the plan when a pruned auto tunnel lost ever
   case "$act" in
     reset) rm -f "$RUN/$n.autowiden.down" ;;
     widen)
-      logger -t wattun-auto "auto tunnel $n: no open carrier has worked for $cnt checks; reopening the whole plan (autowiden ${mins} min)"
+      logger -t wattun-auto "auto tunnel $n: no open carrier has worked for $((downs+1)) checks; reopening the whole plan (autowiden ${mins} min)"
       if ( NONINTERACTIVE=1; auto_widen "$n" ) >/dev/null 2>&1; then
         : >"$stamp"; rm -f "$RUN/$n.autowiden.down"
         logger -t wattun-auto "auto tunnel $n: reopened every carrier; it narrows again after a stable Iran pick"

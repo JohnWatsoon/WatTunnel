@@ -1487,7 +1487,7 @@ printf 'wat1:%s\n' "$(printf 'auto|203.0.113.5|k||||||d:icmp,tcp;r:icmp' | base6
 ( umask 077; printf 'autoprune=1\nautoprune-direct=0\n' >"$WAT_CONF/.manager.conf" )
 mkdir -p "$WAT_RUN"; printf 'r:- 0\n' >"$WAT_RUN/t_pr.autoprune"
 _pr_sys="$WAT_RUN/.prune-sys"; rm -f "$_pr_sys"
-_pr_out=$( NONINTERACTIVE=1; systemctl() { echo "$*" >>"$_pr_sys"; return 0; }; auto_prune_tick t_pr ) 2>/dev/null
+_pr_out=$( NONINTERACTIVE=1; systemctl() { echo "$*" >>"$_pr_sys"; return 0; }; stats() { echo '{"alive": false, "clients": []}'; }; auto_prune_tick t_pr ) 2>/dev/null
 chk "prune pass: the default scope closes the unused reverse side" "$(grep -c 'stop wattest@t_pr-r' "$_pr_sys" 2>/dev/null)" "1"
 chk "prune pass: it never touches the direct unit" "$(grep -cE '(stop|restart|disable).*@t_pr($|[^-])' "$_pr_sys")" "0"
 chk "prune pass: it never rewrites the direct carrier list" "$(cfg t_pr carrier)" "tcp+icmp"
@@ -1820,6 +1820,8 @@ _SP='{"alive":true,"clients":[{"carrier":"tcp"}],"carriers":[{"alive":true,"name
 rm -f "$WAT_CONF/t_ti-r.yml"; auto_live t_ti
 chk "cleanup: every live leg of a bond counts as in use" "$AN_D" "tcp wss "
 printf 'mode: server\ncarrier: tcp+wss\nreverse: true\nmetrics: 127.0.0.1:2\n' >"$WAT_CONF/t_ti-r.yml"
+printf 'mode: server\ncarrier: tcp\nreverse: true\nmetrics: 127.0.0.1:2\n' >"$WAT_CONF/t_ti-r.yml"; _SP=$_off; _SR=$_on; auto_live t_ti
+chk "cleanup: a narrowed reverse side with one carrier still counts as in use" "$AN_R" "tcp "
 _ACT='t_ti'; chk "lists: a stopped reverse side is hidden" "$(listed_tunnels | grep -c '^t_ti-r$')" "0"
 _ACT='t_ti t_ti-r'; chk "lists: a running reverse side is shown" "$(listed_tunnels | grep -c '^t_ti-r$')" "1"
 rm -f "$WAT_CONF"/t_ti.yml "$WAT_CONF"/t_ti-r.yml "$WAT_CONF"/t_ti.token "$WAT_CONF"/t_tb.yml
