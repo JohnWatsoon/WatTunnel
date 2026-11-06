@@ -2869,6 +2869,10 @@ tunnel, ships in `dist/` as `wattun-wprobe-<os>-<arch>`, and needs Linux + CAP_N
 Update **both** servers for every release, unless an entry says otherwise. Versions 2.4.9 to 2.4.16 were steps
 toward one fix for CDN tunnels that got slower over time. If you are on any of them, go straight to 2.4.17 or later.
 
+- **3.3.1: real tunnel status and full automatic cleanup (manager only).** The engine and wire format are unchanged, so
+  old and new peers work together. An auto Kharej now reports its two units as one tunnel (`up`, `standby`, `unknown`,
+  `partial`), the cleanup closes everything unused on both sides after 5 minutes, and reverse tuning allows 45 s for the
+  link. Details: `docs/release-notes/v3.3.1.md`.
 - **3.3.0: full-speed auto mode, safer automatic cleanup, client allowlist, 13 shaped carriers.** Update both ends
   for the shaped carriers; everything else works in any order (no wire change to the existing carriers or frames; the
   new `frPad2` is an ignorable last frame). (1) Auto test measurement is duration-based: screening probes 8 MB each
