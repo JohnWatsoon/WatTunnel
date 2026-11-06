@@ -431,6 +431,16 @@ Do not start a second instance on a port that a live one already uses (see [Trou
 
 ## Managing tunnels
 
+The status words mean the same on every screen. An auto Kharej is one tunnel on two units (`NAME`, `NAME-r`), so each
+reads both before it reports:
+
+- `up`: the link works. On an auto parent this includes a link on `NAME-r`, and the page says so.
+- `partial`: the link works but a bond leg is down, and the page shows how many. Packet loss alone does not change it.
+- `standby`: `NAME-r` is running while Iran uses `NAME`.
+- `waiting` (Kharej) or `down` (Iran): no link on either unit.
+- `unknown`: a running unit's `/stats` did not answer two tries, so the state is not known.
+- `stopped`: the service is not running. A stopped `NAME-r` leaves the status lists.
+
 Run `wattun` for the dashboard of all tunnels (`wattun-manager` still works). Keys:
 
 - A tunnel's number: manage that tunnel.

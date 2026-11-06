@@ -19,231 +19,7 @@
 
 ---
 
-WatTunnel connects an **Iran** server (where your users connect) to a **Kharej** server (where your service runs)
-and forwards any TCP or UDP port between them. One static binary, no dependencies, and a menu that sets everything
-up from one pasted token.
-
-**3.0.0 is the anti-censorship release.** When the route is filtered, the tunnel does not slow down: it changes shape.
-It rides whatever your route lets through (`icmp`, `udp`, `tcp`, `tls`, `ws`, `wss`, `h2`, `h2c`, `grpc`, Cloudflare
-with ECH, reverse mode, or several of them bonded into one tunnel), and since 2.6.0 it has learned to get past
-permit-lists, flow cutters and traffic classifiers that kill every ordinary tunnel.
-
-## 🔥 Built for the worst days
-
-On a route that **cuts every direct Iran → Kharej flow within a second** (UDP after 3 datagrams, TCP after 3 KB, on every
-port, with every payload), a plain tunnel connects for a moment and dies. WatTunnel 3.0.0 was field-tested on exactly
-such a pair, and these are the results through that filter:
-
-| Setup on the filtered route | Download | Upload |
-|---|---|---|
-| **Direct `udp-dns`: every datagram looks like DNS on port 53** (400 MB run) | **36 MB/s** | **29 MB/s** |
-| Direct `udp-dns`, 4 sessions | **32 MB/s** | 24 MB/s |
-| **Direct `tcp` + fake-SNI `rst`**, pool-rotate | **28 MB/s** | **32 MB/s** |
-| Direct `tcp` + fake-SNI `rst`, 4 sessions | 21 MB/s | 29 MB/s |
-| **Reverse `tcp`** (Kharej dials Iran), pool-rotate | **28 MB/s** | **32 MB/s** |
-| Reverse `wss` / `tls` / `h2` | 22-25 MB/s | 27-30 MB/s |
-| Reverse `udp` (Iran never sends first) | 21 MB/s | 19 MB/s |
-
-One vCPU per server, 82 ms round trip, one run each, so read these as orders of magnitude (the pair also passes ICMP, at 7-10 MB/s). Every one of them is a tunnel
-that **plain tools cannot bring up at all** on this route. Old and new releases work together. Conditions, failures
-and the full list of 92 configurations: [docs/TECHNICAL.md](docs/TECHNICAL.md#field-numbers).
-
-## What changed since 3.0.0
-
-- **Auto mode at full speed (3.3.0).** Measurement is duration-based now: screening probes 8-16 MB each way and the
-  finalists are re-measured with 16 streams and a sustained 20-40 MB run, so a fast link is not judged on slow start.
-  The tuning is down to the settings that moved speed (sessions and conns, one fixed 20 MB probe each) and its traffic
-  is part of the printed budget: up to 1184 MB worst case for a normal plan, shown before the test starts (544 MB
-  screening + 240 MB finalists + 400 MB tuning; far less on a filtered route). The manager's limits finally match the
-  engine (sessions 1-16 on one udp/pool carrier, conns 1-64, mtu 256-1400 or 16384 with pool legs, a bond uses its
-  smallest leg).
-- **Cleaner, quieter, safer (3.3.0).** `fec: auto` sends parity only while the link is really losing packets (above
-  2 %, stops below 0.5 %), so a healthy tunnel pays nothing — `fec_state` in `/stats` shows it. An auto Kharej tunnel
-  closes everything Iran does not use, on both sides, about 5 minutes after your choice (`autoprune-direct=0` limits
-  it to the reverse side). Tunnel status shows the real link: `up` even when the link is on the other auto side,
-  `standby` for the side not in use, `partial` with the reason when a bond leg is down.
-  If the open carriers all fail it reopens everything (10 minute cooldown). Bonded tunnels can retest their legs on a
-  schedule (off by default). A server-side `-allow-clients` list restricts the holder of the key/token to the client
-  IPs you name. Counters can live on tmpfs with `-state-dir`/`-state-save` (the shipped unit supports `/run/wattun`
-  and keeps it across a restart; a reboot loses them), and the opt-in `shape-data`/`noise` knobs shape packet sizes or
-  idle traffic when a filter needs it (they cost bandwidth and count on the bill; the noise budget is per session).
-- **13 shaped carriers (3.3.0).** Raw `sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3` (Linux, root) and UDP
-  `fou-gre`, `gue-ipip`, `vxlan`, `geneve`, `dnscrypt-udp`, `ntp-direct`, `openvpn-dco`, `srtp-direct`: every packet
-  carries a known protocol's header so the flow reads as that protocol. Both ends need 3.3.0 and the same carrier name;
-  these are WatTunnel-internal shapes, not real IPsec/VXLAN/... interop, and they work as a single carrier only (a
-  bond with a shaped leg is refused). Repeated loopback bench runs put them 0.3-4.5 % below plain udp; one short run
-  scatters more.
-- **More transports in Auto and the manager (3.3.0).** Auto now tests `gre`/`ipip` too (raw IP, no listen port). An
-  opt-in **extended** mode on the Kharej side (`--extended`, both ends 3.3.0) also tests the 13 shaped carriers through
-  one hidden single-carrier listener per shape — raw tier needs Linux + root and the cloud firewall to pass protocols
-  41/50/97/115. The manager's connection-type picker can create one shaped carrier directly (More transports), the
-  Advanced page is grouped into Performance / Shaping & DPI / Safety / State & data, FEC keeps its one-key off/auto
-  toggle with `a` for the loss band, and `win-max`/`loss-ceiling` are editable there.
-- **Fast by default (3.2.0).** Tunnels made by the manager were held to 16 MB/s per session: every auto Kharej server
-  lists `icmp`, and that capped all its carriers. Now only ICMP traffic is capped, the manager stops forcing 4 sessions,
-  and memory is bounded (one server with 32 clients used to be killed for running out of RAM). On a 2 vCPU pair at
-  80 ms a default `tcp` tunnel now does **271.7 MB/s (2.17 Gbit/s) down sustained** and 146 MB/s up; one download
-  stream went from 67 to ~150 MB/s. Update both ends.
-- **New `gre` and `ipip` carriers (3.2.0)** for routes where UDP is dropped but GRE or IP-in-IP passes. Root and Linux,
-  like icmp; both ends need 3.2.0. Bonds also move traffic off a lossy carrier much faster now.
-- **Auto mode tunes what it picked (3.2.0).** After choosing the fastest connection type, the auto test tries sessions,
-  conns, mtu, batching and loss-ceiling on that type and keeps a value only when it is clearly faster (10 %) on your
-  route. Adds 30-70 s to the test.
-
-- **Counters stay with their server; the matrix handles bonds (3.1.1).** A config copied to a new VPS starts its
-  lifetime traffic counters from zero instead of showing the old server's total (`wattun-manager reset-traffic NAME`
-  zeroes them on purpose, and deleting a tunnel removes its saved counters). The anti-censor matrix now tests bonded
-  tunnels leg by leg (before it refused them), only offers modes the installed binary really supports (an older binary
-  silently ran `synrst` as `seq`), includes `paws`, and re-measures the top 3 variants at 20 MB so the winner is not
-  noise. The manager now ships inside the signed release checksums, so `install.sh` verifies it like the binary.
-- **Smaller fixes (3.1.1).** The Kharej speed-test button says the test runs on Iran instead of claiming an old
-  version. `-ping-every` is validated (0-60 s) and the liveness/idle limits scale with it. A captured packet can no
-  longer keep a closed server session alive or open a new one. `-sessions` clones keep their `tcp-mimic` hello, and a
-  UDP flow keeps its session while it lives, so a flapping session cannot reorder its datagrams.
-- **Defaults follow the machine (3.1.0).** The program reads the CPU count and the RAM it may use (container limits
-  included) and picks connections, sessions and window sizes by itself: a small VPS stays light, a 2-vCPU / 2 GB+
-  server opens more connections and a second session. The start line shows what it chose; `conns`, `sessions` and the
-  new `win-max` override it. On a 2-vCPU pair with 81 ms between them this takes `tcp` to **1.06 Gbit/s down / 0.98 up**.
-- **Two bugs that hurt real tunnels (3.1.0).** After the first speed test the server's receive loop could hang for good
-  (the tunnel looked up and moved nothing); bonded tunnels sent all bulk traffic over one carrier.
-- **A dead pool recovers in seconds (3.0.1).** If every connection of a `tcp`/`tls`/`ws`/`wss`/`h2`/`grpc` pool stalls
-  together, it redials after about 5 s instead of waiting about 15 minutes; on the test pair upload was back 8-9 s after
-  a total blackhole.
-- **Reverse tunnels no longer keep one connection for hours (3.0.2).** `pool-rotate` now works on the side that dials,
-  so Kharej recycles its connections (the manager sets `30m` on new reverse tunnels). A 20 s rotation kept every
-  connection under 20 s old at 80 MB/s down and 68 MB/s up; the run without it lost all traffic on its 150 s old
-  connections. Add `pool-rotate: 30m` to existing reverse tunnels by hand.
-- **Auto test with two presets (3.0.2).** The manager asks first: *normal* (the manager prints its worst-case traffic
-  and a rough time before it starts) or *anti-censor* (every desync
-  mode, SNI, TLS fragment, fingerprint and ECH variant on every carrier, about 195 variants). `s` skips a variant, `g` a
-  carrier, `q` stops and lets you choose from what was measured.
-- **Looks more like a web server (3.0.2).** HTTP carriers answer with the stock nginx pages, a random throwaway
-  certificate, a Chrome-like WebSocket request, and a random URL path for new tunnels; new `fake-mode: paws`
-  (experimental) and `tls-frag: -1` (split inside the SNI).
-
-## What changed since 2.5.0
-
-Everything below is shipped, tested and reachable from the menu (`wattun` → tunnel page → `z` for the anti-censor
-presets).
-
-**Looks like nothing a classifier knows (3.0.0)**
-
-- **No constant byte in any packet.** The session id and packet number are masked (`hdr-mask`), so there is no fixed
-  prefix and no counter to fingerprint. Idle packets are padded to random sizes and the keepalive interval is
-  jittered (`shape`).
-- **Reverse `udp`.** The Iran server only listens and never starts a flow towards a foreign address. Kharej sends
-  authenticated punches. Previously only the TCP-family carriers had a reverse mode.
-- **`udp-dns`.** Every UDP datagram starts like a DNS query (and every answer like a DNS answer) on port 53, with a
-  fresh id and name each time. It is the one shape the measured filter let through at full speed.
-- **TLS-shaped raw `tcp` (`tcp-mimic`).** The first bytes of a `tcp` tunnel are a Chrome-like 517-byte ClientHello
-  carrying the authentication, with masked frame lengths, not a plain pool id.
-- **Pick the source address** of the tunnel from the manager (`src-ip`), for servers with several IPs.
-- **Lower ping under a download.** Pool queues are capped in bytes and interactive packets get a connection of their
-  own, so a ping or a game packet no longer waits behind a bulk transfer.
-
-**Gets past permit-lists and flow cutters (2.6.0 - 2.10.12)**
-
-- **Fake-SNI desync (`fake-sni`).** When a filter lets a flow live only if its TLS name is on a list, the tunnel sends
-  a decoy hello that the filter reads and the server ignores. Modes: `seq`, `ttl` (calibrated automatically), `sum`,
-  `seqsum`, `rst`, `synrst`, `split`, `hlen0`, `fakeip`, `all`, and `auto`, which tests which mode keeps a real flow alive on your route and picks it (3.0.0).
-  Works on `tcp`, `tls`, `ws`, `wss`, `h2`, `grpc`, over IPv4 and IPv6, also from a reverse server. Field result: a
-  `wss` tunnel through Cloudflare connected under a Cloudflare-only whitelist with `rst`, while every other mode did not.
-- **Churn (`pool-rotate`).** Connections are recycled at random times or byte budgets, so none shows a stable lifetime.
-- **ECH, even when DNS is hijacked** (`ech: ladder`): the ECH config is fetched through the tunnel itself.
-- **`tls-small-ch`** keeps the ClientHello at about 250 bytes for DPIs that drop large hellos.
-- **ICMP volume governor** learns a path's reroute ceiling, so the tunnel stays under it.
-- **`wattun blackout NAME`** turns the whole kit on with one command, **`wattun matrix NAME`** tries every
-  combination from the Iran server and applies the best one.
-
-**Safer and tougher**
-
-- **Forward secrecy** on every session (X25519 key exchange, 2.10.0): recorded traffic stays unreadable even if a key
-  file leaks later.
-- **Signed installer**: `install.sh` requires `openssl` and verifies the RSA-signed checksum list before running
-  anything; a download whose signature is missing or invalid is refused, so a mirror cannot swap the binary.
-- **Reliability**: no stall after a short one-way blackout, no hang after a Kharej restart, honest `alive` in `/stats`,
-  a header mask that no longer stays off when the client starts before its server, fixed data races and buffer reuse.
-- **Manager**: anti-censor toggle with presets (Cloudflare first, `rst-fast`), reverse switch, resilience profiles, DNS-shaped
-  option in the Kharej wizard, auto-heal, update with rollback.
-
-[Full release history](docs/TECHNICAL.md#release-history).
-
-## Speed
-
-Measured on real Iran ⇄ Europe servers (2 vCPU each), October 2026, on an unfiltered path. Ping is the round trip
-through the tunnel while it is fully loaded; the route's own ping is about 40 ms.
-
-| Connection type | Download | Upload | Ping under load |
-|---|---|---|---|
-| **TCP / TLS / reverse** (2.5.1, production tunnel with users on it) | **195 MB/s (~1.6 Gbit)** | **276 MB/s (~2.2 Gbit)** | 40-51 ms |
-| **ICMP** (only ping passes on the route) | **up to ~33 MB/s**, the route's maximum | 26 MB/s | 40-45 ms |
-| **Cloudflare CDN** (`wss` + ECH, 4 sessions) | 44-48 MB/s | up to 82 MB/s | 109-116 ms (CDN base 86) |
-| **TCP / TLS / WS** (3.1.0, 2 vCPU pair, 81 ms, 16 streams, raw TCP 1.5 Gbit/s) | **132-143 MB/s (1.06-1.14 Gbit)** | 101-123 MB/s | 94-127 ms down, ~400 up at full load |
-| **Same pair, `tcp` / `tls` + fake-SNI** (`rst`, `synrst`, `paws`) | 110-139 MB/s (0.89-1.11 Gbit) | 96-124 MB/s | same as above |
-
-Plain TCP with no tunnel at all reaches 243 MB/s down on the same route with 16 connections. WatTunnel, encrypted,
-reaches **80 % of that**. Full tables, every version and how each was measured:
-[docs/TECHNICAL.md](docs/TECHNICAL.md#field-numbers).
-
-### On the owner's filtered Iran route (2.10.12 field test)
-
-Same servers, 2026-10-25, on a route where Iran → Kharej directly is cut about a second into every flow, and Iran →
-Cloudflare passes only flows whose TLS name is `www.cloudflare.com`.
-
-| Setup | Result |
-|---|---|
-| Reverse `tcp` (Kharej dials Iran), with or without `fake-sni` | 36-40 MB/s down, 30-36 MB/s up, 38-46 ms idle |
-| `wss` through a Cloudflare edge, real name filtered, `fake-mode: rst` | connected in 2 s: 9-15 MB/s down, 2-5 MB/s up, ~125 ms; 100 MB test 13.8 MB/s down, 4.9 MB/s up |
-
-Details and the failures: [docs/TECHNICAL.md](docs/TECHNICAL.md#fake-sni-field-test-21012).
-
-## Compared to other tunnels
-
-Same servers, same filtered route (only ICMP passes), real VLESS traffic through each tunnel:
-
-| Tool | Throughput | Latency p50 | Iran CPU per MB | RAM |
-|---|---|---|---|---|
-| **WatTunnel** | **up to ~33 MB/s** | **40-45 ms** | **0.026 CPU-s** | **~40 MB** |
-| GOST v3 ICMP | 1.6-5.4 MB/s | ~51 ms | 0.15-0.20 CPU-s | 50-70 MB |
-| BackPack (tuned) | ~6.1 MB/s | 102 ms | - | - |
-| Hans | 1.1-3.8 MB/s | - | - | - |
-| WireGuard over pingtunnel | 0.25-2.7 MB/s | - | - | - |
-| pingtunnel | ~0.5 MB/s under load | - | CPU saturates | - |
-| ptunnel-ng | ~20 KB/s | - | - | - |
-
-That is **about 5x the next best ICMP tunnel, 6-20x GOST at 6-7x less CPU**, and one process carries 250-300 real
-users.
-
-| | WatTunnel | GOST | pingtunnel | Hans | ptunnel-ng |
-|---|:-:|:-:|:-:|:-:|:-:|
-| ICMP carrier | ✅ | ✅ | ✅ | ✅ | ✅ |
-| UDP / TCP / TLS / WS / gRPC carriers | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Cloudflare/CDN with ECH | ✅ | - | ❌ | ❌ | ❌ |
-| Fake-SNI desync, DNS-shaped UDP, masked headers | ✅ | ❌ | ❌ | ❌ | ❌ |
-| One token tests every connection type for you | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Loss does not slow it down (delay-based pacing) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| All ports in one process | ✅ | ✅ | ❌ | ✅ (tun) | ❌ |
-| Add or remove ports without a restart | ✅ | ❌ | ❌ | - | ❌ |
-| Reverse mode / reverse ICMP | ✅ / ✅ | ✅ / ❌ | ❌ | ❌ | ❌ |
-| Per-port traffic stats and quotas | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Guided menu, auto-heal, update and rollback | ✅ | ❌ | ❌ | ❌ | ❌ |
-
-On a clean, unfiltered link every tunnel reaches line rate and GOST uses a little less CPU; WatTunnel still halves
-small-request latency there (43 ms vs 83 ms) because interactive traffic goes first.
-[Benchmark details](docs/TECHNICAL.md#field-numbers).
-
-## Light when idle
-
-An idle tunnel sends about 2 small packets a second, about 133 bytes/s with headers on `udp` or `icmp`. That is
-~11.5 MB a day, or ~345 MB a month. It uses 0.1-0.2 % of one CPU core and 10-17 MB of RAM with no users. A busy ICMP
-tunnel with 250-300 users runs in about 40 MB.
-
-Under load, the tunnel adds +0.25 % to the bytes your users move on `tcp` (16 KB packets), and about +5 % on `udp` or
-`icmp` with `mtu: 1400`, headers included.
-
-[Idle and bandwidth details](docs/TECHNICAL.md#resource-usage-idle-ram-cpu-and-bandwidth)
-
-## Setup
+## Install
 
 You need two Linux servers (amd64 or arm64) with systemd and root. **Set up Kharej first**: it makes the token that
 Iran needs.
@@ -261,13 +37,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/i
 WAT_PROXY=https://ghproxy.net/ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/install.sh)
 ```
 
-The proxy is a third-party mirror: it sees and could alter the bytes. The release binary and `wattun-manager` are
-checked against an RSA-signed `SHA256SUMS`, with the public key baked into the installer; a download whose signature
-is missing or invalid, or whose hash is not in the signed list, is refused. The `install.sh` script you fetch through
-the mirror is only trust-on-first-use (a mirror could change the script itself), so prefer the release asset or a
-`git clone`. A release that does not ship `wattun-manager` refuses to install an unsigned copy unless you set
-`WAT_ALLOW_UNSIGNED_MANAGER=1`; `wattun-manager update` verifies the installer against the signed release before
-running it (`WAT_ALLOW_UNSIGNED_UPDATE=1` overrides).
+The proxy is a third-party mirror. The binary and manager are still checked against the signed release, but the
+`install.sh` you fetch through it is not, so prefer the release files or a `git clone` when you can.
 
 Or download `wattun-linux-amd64`, `install.sh` and `wattun-manager` from the
 [releases](https://github.com/JohnWatsoon/WatTunnel/releases) page, put the binary in `dist/` next to `install.sh`,
@@ -281,10 +52,9 @@ get a token:
 wat1:aWNtcHwyMDMuMC4xMTMuMTB8a1E3...
 ```
 
-**3. Iran.** Run `wattun`, press `n`, choose **Iran**, and paste the token. The menu tests every connection type
-(it prints its worst-case traffic and a rough time before it starts) and offers the fastest that works: press
-**Enter** to take it. Then enter your ports, for example
-`443, 8443:443, 53/udp` (`8443:443` means users connect to Iran port 8443 and reach Kharej port 443).
+**3. Iran.** Run `wattun`, press `n`, choose **Iran**, and paste the token. The menu tests every connection type and
+offers the fastest that works: press **Enter** to take it. Then enter your ports, for example `443, 8443:443, 53/udp`
+(`8443:443` means users connect to Iran port 8443 and reach Kharej port 443).
 
 ```
   ✔ Writing key and config
@@ -296,23 +66,9 @@ wat1:aWNtcHwyMDMuMC4xMTMuMTB8a1E3...
 
 Done. Users connect to the Iran server's IP, and Kharej forwards only to its own `127.0.0.1`.
 
-**Day to day.** `wattun` opens the dashboard: press a tunnel's number for its page (logs, diagnose, speed test,
-ports, change connection type with **c**; arrow keys move, Enter opens), `u` updates, `s` holds rollback and
-auto-heal. Auto-heal is on for Iran
-tunnels and restarts one whose link has been down for 3 minutes.
-
-```bash
-wattun status          # one line per tunnel
-wattun test NAME       # connection doctor + speed test
-wattun ports NAME      # edit port mappings (applied live)
-wattun update          # update the binary and the menu
-```
-
-**Auto uses data.** The test on Iran screens every type with an 8-16 MB probe each way (sized so it runs at least 1.5 s each way at the measured rate), re-measures the best three with 16 streams and a sustained 20-40 MB run, then tunes the chosen type's sessions/conns with 20 MB probes. The manager prints the worst-case budget before an interactive run: up to **1184 MB** for a normal plan (544 screening + 240 finalists + 400 tuning); on a filtered route where few types connect it moves far less. If the Kharej token was created with `--extended`, the test also screens up to 13 shaped carriers (both ends 3.3.0) and the printed budget grows by up to about 416 MB. On a traffic-billed server, pick a type yourself. After Iran has picked, the Kharej auto tunnel closes only the unused **reverse** side (its old companion and stale watchers) once the choice has been stable for 12 minutes (`autoprune` in `.manager.conf`, 0 = off); the direct carrier list is not rewritten by default because a bonded Iran client looks like one leg, and full direct narrowing is opt-in (`autoprune-direct=1` or `auto-prune NAME --direct`). The auto Kharej wizard installs the timer that runs this pass, so a Kharej-only server needs no extra step, and if the tunnel later loses every open carrier for 3 checks the manager reopens the whole plan automatically (at most once per `autowiden` minutes, default 10). Force a close with `wattun-manager auto-narrow NAME`, keep every carrier open with `auto-prune NAME --keep-open`, or reopen them with `auto-widen NAME`.
-
-**Under the hood.** `fec: auto` is nearly free now (parity only while the link is actually losing packets), `/speedtest` defaults to 16 streams, and `state-dir`/`state-save` can move the quota and lifetime counters to tmpfs so a busy tunnel stops writing the disk (the manager follows them; the shipped unit supports `/run/wattun` and keeps it across a service restart, but a reboot loses the counters). Two opt-in knobs trade bandwidth for harder-to-classify traffic: `shape-data PCT` pads stream packets, and `noise` sends idle filler inside an optional `noise-window` (about 11 MB/day on `low` and 88 MB/day on `med`, **per session** — two sessions double it, and each Kharej client has its own). Thirteen new carriers dress each datagram as a common tunnelling or voice protocol (`sit`, `vxlan`, `dnscrypt-udp`, `ntp-direct`, ...): they are wattun-internal shapes between two 3.3.0 peers, not real-protocol interoperability, the raw tier needs Linux + root, and they run one at a time (the engine and the manager refuse a shaped leg inside a `+` bond). The manager can set them from the command line (`wattun kharej --carrier vxlan ...`) or from its connection-type picker (More transports); opt-in extended Auto tests all of them, one hidden listener per shape. Its interactive Kharej wizard can create one shaped carrier directly. The Advanced page (grouped Performance / Shaping & DPI / Safety / State & data) edits the tuning and shaping keys; FEC keeps a one-key off/auto with `a` for the band; change the connection type with **c** on the tunnel page.
-
-If you already know what your route allows, you can pick a type yourself in step 2:
+**Auto uses data.** The manager prints the worst case before it starts: up to 1184 MB for a normal test, about 416 MB
+more if the token was made with `--extended`, and far less on a filtered route. On a traffic-billed server, pick a type
+yourself:
 
 | Your route | Use |
 |---|---|
@@ -322,30 +78,137 @@ If you already know what your route allows, you can pick a type yourself in step
 | Only a CDN gets out, or SNI is filtered | `wss` through Cloudflare ([CDN setup](docs/TECHNICAL.md#cdn-tuning)) |
 | Only Kharej can reach Iran | any of the above with [reverse mode](docs/TECHNICAL.md#reverse-mode) |
 
+## Day to day
+
+`wattun` opens the dashboard. Press a tunnel's number for its page (logs, diagnose, speed test, ports, change connection
+type with **c**), `u` updates, and `s` holds rollback and auto-heal. Auto-heal restarts an Iran tunnel whose link has
+been down for 3 minutes.
+
+```bash
+wattun status          # one line per tunnel
+wattun test NAME       # connection doctor + speed test
+wattun ports NAME      # edit port mappings (applied live)
+wattun update          # update the binary and the menu
+```
+
+| Status | Meaning |
+|---|---|
+| `up` | The link works, also when an auto tunnel's link is on its other side |
+| `partial` | The link works but a bond leg is down; the tunnel page shows how many |
+| `standby` | The side of an auto tunnel that Iran is not using |
+| `waiting` / `down` | No link (`waiting` on Kharej, `down` on Iran) |
+| `unknown` | The tunnel's stats did not answer, so the state is not known |
+| `stopped` | The service is not running |
+
+**After Iran picks a type,** an auto Kharej tunnel closes everything unused about 5 minutes later and restarts the side
+that stays open, so its connections drop once. To change the type or re-test later, first reopen everything on Kharej:
+
+```bash
+wattun-manager auto-widen NAME
+```
+
+If you skip that, the manager reopens by itself after 3 failed checks (at most once per 10 minutes). Keep every type open
+with `wattun-manager auto-prune NAME --keep-open`.
+
+## What it does
+
+WatTunnel connects an **Iran** server (where your users connect) to a **Kharej** server (where your service runs) and
+forwards any TCP or UDP port between them. One static binary, no dependencies.
+
+- **Rides what your route lets through:** `icmp`, `udp`, `tcp`, `tls`, `ws`, `wss`, `h2`, `h2c`, `grpc`, `gre`, `ipip`,
+  Cloudflare with ECH, reverse mode, or several of them bonded into one tunnel.
+- **Gets past filters:** fake-SNI desync, `udp-dns`, `tcp-mimic`, connection rotation with `pool-rotate`, and `wattun matrix NAME` to
+  try the combinations and apply the best. `wattun blackout NAME` turns the whole kit on.
+- **Hard to classify:** no constant byte in a packet header, idle packets at random sizes, HTTP carriers that answer like
+  nginx, and 13 shaped carriers such as `vxlan` and `ntp-direct`. Opt-in `shape-data` and `noise` cost bandwidth.
+- **Tunes itself:** defaults follow the CPU and RAM, and the auto test tunes sessions and conns on your route.
+- **Loss does not slow it down:** pacing follows delay, and `fec: auto` sends parity only while packets are really being lost.
+- **Runs itself:** live port changes, per-port stats and quotas, auto-heal, update with rollback.
+
+## Speed
+
+Real servers, unfiltered path. Full tables and how each was measured:
+[docs/TECHNICAL.md](docs/TECHNICAL.md#field-numbers).
+
+| Connection type | Download | Upload | Ping under load |
+|---|---|---|---|
+| **`tcp`, default settings** (3.2.0, 2 vCPU pair, 80 ms, 16 streams) | **224-282 MB/s (272 MB/s = 2.17 Gbit sustained)** | 146 MB/s | - |
+| **`tls`** (same pair) | 187-209 MB/s | 140 MB/s | - |
+| **TCP / TLS / reverse** (2.5.1, production tunnel with users on it) | 195 MB/s | 276 MB/s | 40-51 ms |
+| **ICMP** (only ping passes on the route) | up to ~33 MB/s, the route's maximum | 26 MB/s | 40-45 ms |
+| **Cloudflare CDN** (`wss` + ECH, 4 sessions) | 44-48 MB/s | up to 82 MB/s | 109-116 ms (CDN base 86) |
+
+### On filtered routes
+
+On a route that **cuts every direct Iran → Kharej flow within a second** (UDP after 3 datagrams, TCP after 3 KB, on every
+port, with every payload), plain tunnels connect for a moment and die. Through that filter (3.0.0, one vCPU per server,
+82 ms, one run each, so read these as orders of magnitude):
+
+| Setup | Download | Upload |
+|---|---|---|
+| Direct `udp-dns`: every datagram looks like DNS on port 53 | **36 MB/s** | **29 MB/s** |
+| Direct `tcp` + fake-SNI `rst`, pool-rotate | 28 MB/s | 32 MB/s |
+| Reverse `tcp` (Kharej dials Iran), pool-rotate | 28 MB/s | 32 MB/s |
+| Reverse `wss` / `tls` / `h2` | 22-25 MB/s | 27-30 MB/s |
+| Reverse `udp` (Iran never sends first) | 21 MB/s | 19 MB/s |
+
+On another route, where Cloudflare passes only flows named `www.cloudflare.com`, `wss` with `fake-mode: rst` connected in
+2 s at 9-15 MB/s down and 2-5 MB/s up
+([field test](docs/TECHNICAL.md#fake-sni-field-test-21012)).
+
+## Compared to other tunnels
+
+Same servers, same filtered route (only ICMP passes), real VLESS traffic through each tunnel:
+
+| Tool | Throughput | Latency p50 | Iran CPU per MB | RAM |
+|---|---|---|---|---|
+| **WatTunnel** | **up to ~33 MB/s** | **40-45 ms** | **0.026 CPU-s** | **~40 MB** |
+| GOST v3 ICMP | 1.6-5.4 MB/s | ~51 ms | 0.15-0.20 CPU-s | 50-70 MB |
+| BackPack (tuned) | ~6.1 MB/s | 102 ms | - | - |
+| Hans | 1.1-3.8 MB/s | - | - | - |
+| WireGuard over pingtunnel | 0.25-2.7 MB/s | - | - | - |
+| pingtunnel | ~0.5 MB/s under load | - | CPU saturates | - |
+| ptunnel-ng | ~20 KB/s | - | - | - |
+
+| | WatTunnel | GOST | pingtunnel | Hans | ptunnel-ng |
+|---|:-:|:-:|:-:|:-:|:-:|
+| ICMP carrier | ✅ | ✅ | ✅ | ✅ | ✅ |
+| UDP / TCP / TLS / WS / gRPC carriers | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Cloudflare/CDN with ECH | ✅ | - | ❌ | ❌ | ❌ |
+| Fake-SNI desync, DNS-shaped UDP, masked headers | ✅ | ❌ | ❌ | ❌ | ❌ |
+| One token tests every connection type for you | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Loss does not slow it down (delay-based pacing) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| All ports in one process | ✅ | ✅ | ❌ | ✅ (tun) | ❌ |
+| Add or remove ports without a restart | ✅ | ❌ | ❌ | - | ❌ |
+| Reverse mode / reverse ICMP | ✅ / ✅ | ✅ / ❌ | ❌ | ❌ | ❌ |
+| Per-port traffic stats and quotas | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Guided menu, auto-heal, update and rollback | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+On a clean, unfiltered link every tunnel reaches line rate and GOST uses a little less CPU; WatTunnel still halves
+small-request latency there (43 ms vs 83 ms) because interactive traffic goes first.
+
+## Resource use
+
+An idle tunnel sends about 2 small packets a second: ~11.5 MB a day on `udp` or `icmp`, 0.1-0.2 % of one CPU core and
+10-17 MB of RAM. A busy ICMP tunnel with 250-300 users runs in about 40 MB. Under load the overhead is +0.25 % on `tcp`
+and about +5 % on `udp` or `icmp` with `mtu: 1400`.
+[Details](docs/TECHNICAL.md#resource-usage-idle-ram-cpu-and-bandwidth).
+
 ## Security
 
-Traffic is encrypted with ChaCha20-Poly1305 under a key derived from the pre-shared key and a random per-session
-id; from 2.10.0 the two ends also run an ephemeral X25519 exchange on every session, so traffic recorded before a
-later key-file leak stays unreadable. That protects the **Iran ↔ Kharej leg only**: between your users and the Iran
-server the traffic is whatever the forwarded service itself provides, so run an end-to-end encrypted protocol
-(VLESS+Reality, TLS, WireGuard) inside the tunnel. Kharej dials only its own `127.0.0.1`, and only ports on the
-allowlist; on a direct carrier `allow-clients` can also pin the holder of the key/token to the client source IPs you
-name (its list file must live under `/etc/wattun`; a CDN carrier refuses the combination at startup).
-From 3.0.0 no byte of a packet header is constant (the session id and packet number are masked), idle packets are
-padded to random sizes with a jittered keepalive, and `udp` has a [reverse mode](docs/TECHNICAL.md#reverse-udp-300): the Iran
-server only listens and never starts a flow towards a foreign address. Raw `tcp` opens with a TLS ClientHello-shaped
-hello and masked frame lengths instead of a plain pool id (`tcp-mimic`). On a route that cuts every UDP flow after a few
-packets but passes DNS, `udp-dns: true` starts each `udp` datagram like a DNS message on port 53
-([DNS shape](docs/TECHNICAL.md#dns-shaped-udp-udp-dns-300), [traffic shape](docs/TECHNICAL.md#traffic-shape-what-a-dpi-sees-300)).
-The installer verifies the release binary, the manager and their `SHA256SUMS` against an RSA public key baked into
-it, so a `WAT_PROXY` mirror (or any tampered copy) cannot slip in a changed binary or manager; `wattun-manager
-update` checks the installer the same way before running it as root. The installer script fetched through a
-third-party mirror is only trust-on-first-use (prefer the release asset or a `git clone`). The overrides
-`WAT_ALLOW_UNSIGNED_MANAGER=1` and `WAT_ALLOW_UNSIGNED_UPDATE=1` are explicit and off by default. The connection
-token contains the key: treat it like a password and share it only over a private channel. Keep `metrics` on
-`127.0.0.1`. What stays visible to the network: the server's address, and the volume and timing of packets. What each
-anti-censor option actually hides — and what none of them hides — is in
-[spoofing and shaping](docs/TECHNICAL.md#spoofing-and-shaping-explained). Details:
+- **Encryption:** ChaCha20-Poly1305 with an X25519 exchange on every session, so recorded traffic stays unreadable if a key
+  file leaks later.
+- **Only the Iran ↔ Kharej leg is protected.** Between your users and Iran, run an end-to-end encrypted protocol such as
+  VLESS+Reality, TLS or WireGuard inside the tunnel.
+- **The token contains the key.** Treat it like a password and share it only over a private channel.
+- **Kharej dials only its own `127.0.0.1`,** and only allowed ports. On a direct carrier, `allow-clients` also limits the key
+  to the client IPs you name. Keep `metrics` on `127.0.0.1`.
+- **Signed installs:** the installer checks the binary and manager against an RSA-signed `SHA256SUMS` and refuses a bad
+  signature. The script itself, fetched through a mirror, is only trust-on-first-use.
+- **Still visible to the network:** the server's address, and the volume and timing of packets.
+
+What each anti-censor option hides, and what none of them hides:
+[spoofing and shaping](docs/TECHNICAL.md#spoofing-and-shaping-explained). Full
 [security model](docs/TECHNICAL.md#security-model).
 
 ## More
@@ -359,7 +222,7 @@ Everything else is in [docs/TECHNICAL.md](docs/TECHNICAL.md):
 [config file](docs/TECHNICAL.md#config-file) ·
 [monitoring](docs/TECHNICAL.md#metrics) ·
 [troubleshooting](docs/TECHNICAL.md#troubleshooting) ·
-[security](docs/TECHNICAL.md#security-model) ·
+[release history](docs/TECHNICAL.md#release-history) ·
 [Windows and building from source](docs/TECHNICAL.md#build-and-test)
 
 - Telegram channel (news and releases): [@WatxDev](https://t.me/WatxDev), developer: [@watxox](https://t.me/watxox)
