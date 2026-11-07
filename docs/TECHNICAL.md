@@ -1408,8 +1408,7 @@ auto-heal or the off-peak optimizer run the screening phase (8-16 MB each way pe
 a normal plan if every variant connects); auto-heal runs one at most every 30 minutes and only after the tunnel
 failed. If your server is billed by traffic, pick a fixed carrier instead of Auto.
 
-**After Iran has picked.** The Kharej auto tunnel is the real server for the carrier Iran chose, so it is never
-deleted. It keeps every carrier port open so that Iran's test and auto-heal can reach any of them — which is attack
+**After Iran has picked.** The Kharej auto tunnel is the real server for the carrier Iran chose. It keeps every carrier port open so that Iran's test and auto-heal can reach any of them — which is attack
 surface once Iran has picked. The heal pass closes what is unused by itself: it stops the stale `wattun-autowatch`
 helper and, once Iran's pick has been stable for `autoprune` minutes (`.manager.conf`, default 5, `0` = off), runs the
 full `auto-narrow` on both sides. A side with nothing in use stops, and the other keeps only the carriers in use. A
@@ -1417,17 +1416,30 @@ bonded Iran client keeps all its legs, because the live legs are read from `carr
 `clients[]`. `.manager.conf autoprune-direct=0` limits the pass to the reverse side. To try another carrier afterwards,
 run `wattun-manager auto-widen NAME` on Kharej first; otherwise the widen safety net reopens the plan after 3 failed
 heal checks. A re-test on Iran only sees what is still open. A changed pick restarts the window, so
-a flapping selection is never pruned. Configs and tokens always stay, and `auto-widen` brings everything back. Hidden
+a flapping selection is never pruned. Hidden
 extended listeners are decided from each child's own `/stats` (see "Extended transports"): the pass keeps the shapes
 with a live client and stops the rest once one reports a pick, keeps every shape when that pick is unknown or
 unreadable, and `auto-widen` / `auto-prune --direct` re-enable the stopped ones.
+
+**The pick becomes the tunnel.** On the next heal pass after that close, the manager keeps the one unit Iran uses as
+the tunnel and deletes every test part (`auto_finalize`). A reverse pick moves `NAME-r.yml` into `NAME.yml`, and a
+shaped pick moves its `NAME-e-<shape>.yml` the same way. Both keep the same key file and the traffic counters. A direct
+pick keeps `NAME.yml`. Then the other units, their state files, their firewall rules and `NAME.token` are deleted, so
+`NAME` is an ordinary tunnel without `auto-widen` or the widen safety net. To test again, make a new auto tunnel.
+Nothing is deleted while Iran is not connected, while its pick cannot be read, or when Iran bonds across both sides.
+`autoprune-direct=0`, `autoprune=0` and `NAME.keepopen` also prevent it.
+Deleting an auto tunnel while Iran runs on its reverse side or on a shaped child runs this same step instead of a
+plain delete, so the test tunnel never takes Iran's link with it. A second delete removes the tunnel. The port check
+of new tunnels reads every `listen:` and `listen-<carrier>:` line of every config, stopped ones too, so a new tunnel
+never takes a port an existing one owns.
 
 The pass runs inside `heal`. The manager installs the heal timer where it is needed: the auto Kharej wizard and
 `auto-ip` install it, and any later manager run does the same for an existing auto Kharej tunnel, so a Kharej-only
 server is cleaned up without operator action. `wattun-manager heal` triggers one pass by hand.
 
-**Widen safety net (3.3.0).** A pruned tunnel keeps only the carriers Iran used, so if that carrier is blocked there
-is nothing left to fail over to. When the heal pass sees a pruned auto tunnel with no working open carrier for 3
+**Widen safety net (3.3.0).** It applies only while the tunnel is still auto: with `autoprune-direct=0`, with
+`NAME.keepopen`, or before the pick becomes the tunnel (above). A pruned tunnel keeps only the carriers Iran used, so
+if that carrier is blocked there is nothing left to fail over to. When the heal pass sees a pruned auto tunnel with no working open carrier for 3
 consecutive checks, it reopens the full token plan (`auto-widen`) and logs
 `wattun-auto: ... reopening the whole plan`. It does so at most once per `autowiden` minutes (`.manager.conf`, default
 10; `0` disables the automatic widen), and a reopen starts a fresh stable-selection window, so the tunnel narrows again

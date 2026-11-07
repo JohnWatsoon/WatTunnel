@@ -103,6 +103,8 @@ wattun update          # update the binary and the menu
 **After Iran picks a type,** an auto Kharej tunnel closes everything unused about 5 minutes later and restarts the side
 that stays open, so its connections drop once. The Kharej main menu shows `carriers open` or `closed` under each auto
 tunnel, with the count and the time left. Press `c` there to switch it: what you open stays open until you close it.
+On the next check after that close, the type Iran uses becomes the tunnel under the same name, and the test listeners
+are deleted. Deleting the auto tunnel before that never deletes the side Iran is connected through.
 
 To change the type or re-test later, open the carriers on Kharej first. If you skip that, the manager reopens by itself
 after 3 failed checks (at most once per 10 minutes).

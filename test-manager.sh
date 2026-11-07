@@ -1398,6 +1398,88 @@ chk "carriers: the main menu offers the switch" "$(dash_actions 2>/dev/null | gr
 DASH_N=()
 chk "carriers: no auto tunnel, no switch" "$(dash_actions 2>/dev/null | grep -c 'open/close carriers' || true)" "0"
 rm -f "$WAT_RUN/t_auto.autoprune.done"
+# finalize (owner rule 2026-11-07): Iran's pick becomes the tunnel, the test parts are deleted, never the real link
+_fin_setup() {
+  printf 'mode: server
+key-file: %s/t_fin.key
+carrier: icmp+udp+tcp
+listen-udp: ":4443"
+listen-tcp: ":4443"
+metrics: 127.0.0.1:19751
+' "$WAT_CONF" >"$WAT_CONF/t_fin.yml"
+  printf '# companion
+mode: server
+key-file: %s/t_fin.key
+carrier: icmp+tcp
+reverse: true
+peer-icmp: 198.51.100.7
+peer-tcp: 198.51.100.7:24431
+metrics: 127.0.0.1:19752
+' "$WAT_CONF" >"$WAT_CONF/t_fin-r.yml"
+  make_token auto '203.0.113.10' 'k' '/wat' '' '' '' '' 'd=udp:4443,tcp:4443;r=tcp:24431' >"$WAT_CONF/t_fin.token"
+  : >"$WAT_RUN/t_fin.autoprune.done"
+}
+_fin_stubs='systemctl() { return 0; }; fw_close() { echo "$1" >>"$WAT_RUN/fin.fw"; }; auto_ext_live() { AE_LIVE=""; return 2; }'
+_fin_setup; rm -f "$WAT_RUN/fin.fw"
+( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R='tcp'; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "finalize: a reverse pick moves into the tunnel's own name" "$(grep -c '^reverse: true$' "$WAT_CONF/t_fin.yml")" "1"
+chk "finalize: the reverse side's own config is gone" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
+chk "finalize: the auto token is gone, so it is a plain tunnel" "$([ -e "$WAT_CONF/t_fin.token" ] && echo y || echo n)" "n"
+chk "finalize: the direct test ports are closed" "$(sort "$WAT_RUN/fin.fw" 2>/dev/null | tr '
+' ' ')" "4443/tcp 4443/udp "
+chk "finalize: a single reverse carrier gets the plain peer key" "$(grep -c '^peer: 198.51.100.7:24431$' "$WAT_CONF/t_fin.yml")" "1"
+rm -f "$WAT_CONF/t_fin.yml"
+_fin_setup
+( eval "$_fin_stubs"; auto_live() { AN_D='tcp'; AN_R=''; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "finalize: a direct pick keeps only that carrier" "$(grep -c '^carrier: tcp$' "$WAT_CONF/t_fin.yml")" "1"
+chk "finalize: a direct pick deletes the reverse side" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
+chk "finalize: a single direct carrier gets the plain listen key" "$(grep -c '^listen: ":4443"$' "$WAT_CONF/t_fin.yml")" "1"
+rm -f "$WAT_CONF/t_fin.yml"
+_fin_setup; rm -f "$WAT_RUN/fin.fw"
+printf '# child
+mode: server
+key-file: %s/t_fin.key
+carrier: vxlan
+listen: ":4789"
+' "$WAT_CONF" >"$WAT_CONF/t_fin-e-vxlan.yml"
+printf 't_fin
+' >"$WAT_CONF/t_fin-e-vxlan.autoext"
+( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R=''; }; auto_ext_live() { AE_LIVE="t_fin-e-vxlan"; return 0; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "finalize: a shaped pick moves into the tunnel's own name" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_fin.yml")" "1"
+chk "finalize: a shaped pick keeps its UDP rule" "$(cat "$WAT_RUN/fin.fw" 2>/dev/null | grep -c '4789' || true)" "0"
+chk "finalize: a shaped pick's child config is gone" "$([ -e "$WAT_CONF/t_fin-e-vxlan.yml" ] && echo y || echo n)" "n"
+chk "finalize: a shaped pick deletes the reverse side" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
+rm -f "$WAT_CONF/t_fin.yml"
+_fin_setup
+( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R=''; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "finalize: no pick visible, nothing is deleted" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && [ -e "$WAT_CONF/t_fin.token" ] && echo y || echo n)" "y"
+( eval "$_fin_stubs"; auto_live() { AN_D='udp'; AN_R='tcp'; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "finalize: a bond across both sides keeps the auto tunnel" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "y"
+( umask 077; printf 'autoprune-direct=0
+' >"$WAT_CONF/.manager.conf" )
+( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R='tcp'; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "finalize: autoprune-direct=0 keeps the direct side" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "y"
+rm -f "$WAT_CONF/.manager.conf"
+( eval "$_fin_stubs"; NONINTERACTIVE=1; auto_live() { AN_D=''; AN_R='tcp'; }; delete_tunnel t_fin ) >/dev/null 2>&1
+chk "delete: deleting the test tunnel keeps Iran's reverse link" "$(grep -c '^reverse: true$' "$WAT_CONF/t_fin.yml" 2>/dev/null)" "1"
+_del_out=$( eval "$_fin_stubs"; NONINTERACTIVE=1; sleep() { :; }; stats() { return 1; }; is_auto_kharej() { [ "$1" = t_fin ]; }
+  auto_ext_names() { :; }; touch "$WAT_CONF/t_fin-r.yml"; delete_tunnel t_fin 2>&1 )
+chk "delete: an unreadable pick names the running side before deleting" "$(grep -c "Could not read which side Iran uses. Still running: t_fin-r" <<<"$_del_out")" "1"
+_fin_setup
+( eval "$_fin_stubs"; NONINTERACTIVE=1; delete_tunnel t_fin ) >/dev/null 2>&1
+chk "delete: a second delete removes it" "$([ -e "$WAT_CONF/t_fin.yml" ] && echo y || echo n)" "n"
+rm -f "$WAT_CONF/t_fin"* "$WAT_RUN/t_fin"* "$WAT_RUN/fin.fw"
+# the port check sees an auto tunnel's listen-<carrier> ports even when it is stopped
+printf 'mode: server
+carrier: ws+wss
+listen-ws: ":2052"
+listen-wss: ":2053"
+' >"$WAT_CONF/t_lp.yml"
+_tul=$(sed -n '/^tunnel_using_listen()/,/^}/p' wattun-manager) # an earlier check stubs it; test the real one
+chk "port check: listen-<carrier> keys count" "$(eval "$_tul"; tunnel_using_listen 2052)" "t_lp"
+chk "port check: the excluded tunnel is skipped" "$(eval "$_tul"; tunnel_using_listen 2052 t_lp || true)" ""
+chk "port check: a free port is free" "$(eval "$_tul"; tunnel_using_listen 2099 || true)" ""
+rm -f "$WAT_CONF/t_lp.yml"
 # heal() on a Kharej-only host must never restart a client tunnel: only the prune/widen pass may run
 SYSCALLS=$SMOKE/syscalls
 cat >"$WAT_CONF/t_kh.yml" <<'EOF'

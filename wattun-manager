@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110701   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110702   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -827,10 +827,14 @@ tunnel_using_public() { # port proto [exclude] -> name of another Iran tunnel pu
   return 1
 }
 tunnel_using_listen() { # port [exclude] -> name of a tunnel (Kharej, or Iran in reverse) listening on it
-  local n
-  for n in $(tunnels); do
+  # every config counts, hidden auto children too, and every listen key: an auto tunnel keeps its ports as
+  # listen-<carrier>: lines, and a stopped one still owns them (it starts again on widen or reboot)
+  local f n
+  for f in "$CONF"/*.yml; do
+    [ -e "$f" ] || continue
+    n=${f##*/}; n=${n%.yml}
     [ "$n" = "${2:-}" ] && continue
-    [[ "$(cfg "$n" listen)" == *:"$1" ]] && { echo "$n"; return 0; }
+    grep -qE "^listen(-[a-z0-9-]+)?:[[:space:]]*\"?[^\"]*:$1\"?[[:space:]]*\$" "$f" && { echo "$n"; return 0; }
   done
   return 1
 }
@@ -3902,12 +3906,86 @@ auto_prune_reverse_only() { # name : close the unused reverse companion / stale 
   step "Restarting ${WAT_PREFIX}@$n-r" systemctl restart "${WAT_PREFIX}@$n-r"
   prune_done_mark "$n"
 }
+auto_drop_unit() { # unit : stop, disable and delete one test unit of an auto tunnel (config, state files, its UDP rule)
+  local u=$1 p s
+  systemctl disable --now "${WAT_PREFIX}@$u" >/dev/null 2>&1 # H8: stop before the state files go
+  p=$(cfg "$u" listen); p=${p##*:}
+  [ -n "$p" ] && is_auto_ext "$u" && is_shaped_udp "$(cfg "$u" carrier)" && [ -z "$(tunnel_using_listen "$p" "$u")" ] \
+    && fw_close "$p/udp" # F17; a port another tunnel also owns keeps its rule
+  while IFS= read -r s; do rm -f "$s"; done < <(state_files "$u")
+  rm -f "$CONF/$u".yml "$CONF/$u".ech "$CONF/$u".autoext
+}
+auto_winner() { # auto Kharej name -> AF_W: the one unit Iran uses (NAME direct, NAME-r reverse, or one NAME-e-<shape>)
+  # rc 1 when Iran is not connected, uses both sides at once (a bond across them), or a child cannot be read
+  local n=$1 rc=0
+  AF_W=''
+  auto_live "$n"
+  auto_ext_live "$n" || rc=$?
+  [ "$rc" = 1 ] && return 1
+  set -- $AE_LIVE
+  if [ -n "$AN_D" ] && [ -z "$AN_R" ] && [ $# = 0 ]; then AF_W=$n
+  elif [ -z "$AN_D" ] && [ -n "$AN_R" ] && [ $# = 0 ]; then AF_W=$n-r
+  elif [ -z "$AN_D$AN_R" ] && [ $# = 1 ]; then AF_W=$1
+  fi
+  [ -n "$AF_W" ]
+}
+auto_plain_keys() { # name : a single-carrier kept config gets the plain peer:/listen: keys a wizard-made tunnel has
+  local n=$1 f="$CONF/$1.yml" c pv lv tmp
+  c=$(cfg "$n" carrier); case "$c" in *+*|'') return 0 ;; esac # a bond keeps its per-carrier keys
+  pv=$(cfg "$n" "peer-$c"); lv=$(cfg "$n" "listen-$c")
+  [ -n "$pv$lv" ] || return 0
+  tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
+  awk -v pv="$pv" -v lv="$lv" '/^(peer|listen)-[a-z0-9-]+:/ { next }
+    { print } /^carrier:/ { if (pv != "") print "peer: " pv; if (lv != "") print "listen: \"" lv "\"" }' "$f" >"$tmp" \
+    && chmod 600 "$tmp" && mv -f "$tmp" "$f" || rm -f "$tmp"
+}
+auto_finalize() { # name : keep the unit Iran uses as plain tunnel NAME and delete every test part of the auto tunnel
+  # Owner rule (2026-11-07): once Iran has picked, the test tunnel must not linger and must never own the real one.
+  # The pick moves into NAME.yml (same key file), NAME.token goes, so NAME is an ordinary tunnel from then on.
+  local n=$1 w d u x tmp a b
+  { is_auto_kharej "$n" && read_token "$(cat "$CONF/$n.token")" && [ -n "$T_AUTO" ]; } || return 1
+  d=$(plan_part "$T_AUTO" d)
+  auto_winner "$n" || return 1
+  w=$AF_W
+  if [ "$w" = "$n" ]; then ( NONINTERACTIVE=1; auto_narrow "$n" ) >/dev/null 2>&1 || return 1; fi
+  systemctl stop "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
+  systemctl reset-failed "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
+  for u in "$n-r" $(auto_ext_names "$n"); do
+    [ "$u" = "$w" ] || [ ! -f "$CONF/$u.yml" ] || auto_drop_unit "$u"
+  done
+  if [ "$w" != "$n" ]; then
+    [ "$w" = "$n-r" ] && { auto_set_carriers "$n" '' "$AN_R" || return 1; } # only the reverse legs Iran uses
+    systemctl disable --now "${WAT_PREFIX}@$n" "${WAT_PREFIX}@$w" >/dev/null 2>&1 # H8: stop both before moving state
+    for x in $(fw_port_list "$(auto_plan_standard "$d")" "$d"); do # a tunnel made by <=3.3.2 may share a port: keep its rule
+      [ -n "$(tunnel_using_listen "${x%/*}" "$n")" ] || fw_close "$x"
+    done
+    paste -d' ' <(state_files "$w") <(state_files "$n") | while read -r a b; do rm -f "$b"; [ -e "$a" ] && mv -f "$a" "$b"; done
+    tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
+    if ! { echo "# WatTunnel - Kharej (server). Kept by wattun-manager from auto tunnel '$n': the carrier Iran picked."
+           sed '1{/^#/d}' "$CONF/$w.yml"; } >"$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$CONF/$n.yml"; then
+      rm -f "$tmp"; return 1
+    fi
+    rm -f "$CONF/$w".yml "$CONF/$w".ech "$CONF/$w".autoext
+    systemctl enable --now "${WAT_PREFIX}@$n" >/dev/null 2>&1
+  fi
+  auto_plain_keys "$n"
+  rm -f "$CONF/$n".token "$CONF/$n".keepopen "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" "$RUN/$n.autowiden" "$RUN/$n.autowiden.down"
+  [ "$w" = "$n" ] && systemctl restart "${WAT_PREFIX}@$n" >/dev/null 2>&1 # the plain keys take effect
+  ok "'$n' now runs only the carrier Iran uses; the test listeners are deleted."
+}
 auto_prune_tick() { # name : one heal pass for an auto Kharej tunnel; reverse-side only unless autoprune-direct=1
   local n=$1 mins grace in_use_d in_use_r sig targets direct_on comp act seen now psig psince rc ext
   is_auto_kharej "$n" || return 0
   [ -f "$CONF/$n.keepopen" ] && return 0
-  [ -f "$RUN/$n.autoprune.done" ] && return 0
   mins=$(autoprune_grace); [ "$mins" -gt 0 ] || return 0
+  if [ -f "$RUN/$n.autoprune.done" ]; then
+    # the rest is closed and Iran's pick held for the grace window: keep that side as NAME, delete the test parts.
+    # Retried every pass until Iran's pick is readable; autoprune-direct=0 keeps the direct side, so no finalize then.
+    if [ "$(autoprune_direct_setting)" = 1 ] && ( auto_finalize "$n" ) >/dev/null 2>&1; then
+      logger -t wattun-auto "auto tunnel $n: kept Iran's pick as '$n' and deleted the test listeners"
+    fi
+    return 0
+  fi
   grace=$((mins * 60))
   direct_on=$(autoprune_direct_setting)
   comp=0; [ -f "$CONF/$n-r.yml" ] && comp=1
@@ -6329,25 +6407,32 @@ change_key() {
   fi
 }
 delete_tunnel() {
-  local n=$1 f s p
-  warn "This stops '$n' and deletes its config, key and token."
+  local n=$1 f s p extra='' cnt u run=''
+  if is_auto_kharej "$n" && ! { auto_winner "$n" || { sleep 2; auto_winner "$n"; }; }; then
+    # a busy host can miss the stats limit: never let an unreadable pick turn into a silent delete of Iran's link
+    for u in "$n-r" $(auto_ext_names "$n"); do systemctl is-active -q "${WAT_PREFIX}@$u" 2>/dev/null && run="$run $u"; done
+    [ -n "$run" ] && warn "Could not read which side Iran uses. Still running:$run. Iran may be connected through one of them, and deleting removes them too."
+  elif is_auto_kharej "$n" && [ "$AF_W" != "$n" ]; then
+    # Iran's link runs on a test unit of this tunnel: deleting the test tunnel must keep it (owner rule 2026-11-07)
+    warn "Iran is connected through '$AF_W'. This keeps that connection as tunnel '$n' and deletes only the test listeners."
+    hint "To remove the tunnel completely, delete '$n' again afterwards."
+    if [ "$NONINTERACTIVE" = 1 ]; then REPLY_V=$n
+    else ask "Type $n to continue (Enter cancels)" ""; fi
+    [ "$REPLY_V" = "$n" ] || { warn "Nothing changed."; return 1; }
+    auto_finalize "$n"; return
+  fi
+  [ -f "$CONF/$n-r.yml" ] && is_auto_kharej "$n" && extra=", its reverse side '$n-r'"
+  cnt=$(auto_ext_names "$n" | wc -w); [ "$cnt" -gt 0 ] && extra="$extra and its $cnt hidden test listeners"
+  warn "This stops '$n' and deletes its config, key and token${extra}."
   if [ "$NONINTERACTIVE" = 1 ]; then REPLY_V=$n # --yes is the confirmation
   else ask "Type $n to delete it (Enter cancels)" ""; fi
   [ "$REPLY_V" = "$n" ] || { warn "Not deleted."; return 1; }
   state_dir_relative_warn "$n" # M8: the service resolves a relative state-dir from /; say so before resolving it
   if [ -f "$CONF/$n-r.yml" ] && is_auto_kharej "$n"; then # the auto reverse companion goes with its parent
-    systemctl disable --now "${WAT_PREFIX}@$n-r" >/dev/null 2>&1
-    while IFS= read -r f; do rm -f "$f"; done < <(state_files "$n-r")
-    rm -f "$CONF/$n-r".yml "$CONF/$n-r".ech
+    auto_drop_unit "$n-r"
     ok "Reverse side '$n-r' deleted."
   fi
-  for f in $(auto_ext_names "$n"); do # B3: the hidden extended listeners belong to this tunnel too
-    systemctl disable --now "${WAT_PREFIX}@$f" >/dev/null 2>&1
-    p=$(cfg "$f" listen); p=${p##*:}
-    [ -n "$p" ] && is_shaped_udp "$(cfg "$f" carrier)" && fw_close "$p/udp" # F17: the child's UDP rule goes with it
-    while IFS= read -r s; do rm -f "$s"; done < <(state_files "$f") # F08: a child keeps its own state files
-    rm -f "$CONF/$f".yml "$CONF/$f".autoext
-  done
+  for f in $(auto_ext_names "$n"); do auto_drop_unit "$f"; done # B3/F08/F17: the hidden listeners, their state and UDP rules
   systemctl stop "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
   systemctl reset-failed "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
   # H8: stop the unit BEFORE removing its state files. The engine saves quota/totals on SIGTERM (and every state-save
