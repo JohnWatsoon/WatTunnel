@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110602   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110701   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -1574,6 +1574,29 @@ dash_row() { # idx name
   printf ' %s%2s%s  %-13s %-6s %-10s %s%s%s %s%-9s%s %6s  %s\n' "$CYN" "$i" "$RST" "${n:0:13}" "$r" "$car_display" \
     "$SC_COL" "$SC_DOT" "$RST" "$SC_COL" "$SC_TXT" "$RST" "$rtt" "$load"
   printf '     %s%s   %s%s\n' "$GRY" "$tr" "$pl" "$RST"
+  if is_auto_kharej "$n" && [ -z "$par" ]; then
+    local cs; cs=$(auto_carrier_status "$n")
+    printf '     %scarriers%s %s%s%s %s%s%s\n' "$GRY" "$RST" "$([ "${cs%%|*}" = open ] && echo "$GRN" || echo "$CYN")" "${cs%%|*}" "$RST" "$GRY" "${cs#*|}" "$RST"
+  fi
+}
+dash_auto_names() { # the auto Kharej tunnels on the dashboard
+  local n
+  for n in ${DASH_N[@]+"${DASH_N[@]}"}; do is_auto_kharej "$n" && [ -z "$(companion_of "$n")" ] && echo "$n"; done
+  return 0
+}
+main_carriers() { # main menu c: open or close the carriers of an auto Kharej tunnel
+  local names n
+  names=$(dash_auto_names)
+  [ -n "$names" ] || { flash "No auto tunnel on this server, so there are no carriers to open or close."; return 0; }
+  n=$names
+  if [ "$(wc -l <<<"$names")" -gt 1 ]; then
+    ask "Tunnel number (Enter = back)" ''
+    [ -n "$REPLY_V" ] || return 0
+    [[ "$REPLY_V" =~ ^[0-9]+$ ]] && [ "$REPLY_V" -ge 1 ] && [ "$REPLY_V" -le "${#DASH_N[@]}" ] || { flash "No tunnel number $REPLY_V."; return 0; }
+    n=${DASH_N[$((REPLY_V-1))]}
+    grep -qxF -- "$n" <<<"$names" || { flash "'$n' is not an auto tunnel."; return 0; }
+  fi
+  run_flow auto_carriers_toggle "$n"; pause
 }
 dash_table() {
   local n i=0; DASH_N=()
@@ -1597,7 +1620,8 @@ dash_actions() {
   [ "$cnt" -gt 1 ] && open=("1-$cnt" open)
   echo; hr
   menu_line ${open[@]+"${open[@]}"} n new a batch m monitor
-  menu_line u update s settings q quit
+  if [ -n "$(dash_auto_names)" ]; then menu_line c 'open/close carriers' u update s settings q quit
+  else menu_line u update s settings q quit; fi
 }
 
 # ======================================================================================
@@ -3706,7 +3730,7 @@ auto_narrow() { # name : close every carrier port Iran does not use
   [ -n "$gone_d" ] && say "  Closing direct:             $gone_d"
   [ -n "$gone_r" ] && say "  Closing reverse:            $gone_r"
   hint "The tunnel restarts for a moment. Auto-heal on Iran can then only use the carriers that stay open."
-  hint "To open them all again: $SELF auto-widen $n"
+  hint "To open them all again: press c on the main menu, or run $SELF auto-widen $n"
   confirm "Close the unused carriers?" y || { warn "Nothing changed."; return 1; }
   fwa=$(fw_port_list "$gone_d" "$d"); fwb=$(fw_port_list "$keep_d" "$d")
   if [ -n "$gone_d" ]; then
@@ -3731,17 +3755,21 @@ auto_narrow() { # name : close every carrier port Iran does not use
   ok "Done. Only the carriers Iran uses are open."
   prune_done_mark "$n"
 }
+auto_plan_lists() { # plan -> AP_D, AP_R: the carriers of the token's plan; shaped entries are hidden units, not bond legs (B3)
+  local c
+  AP_D='icmp'; AP_R='icmp'
+  for c in $(plan_part "$1" d | tr ',' ' '); do
+    is_shaped_carrier "${c%%:*}" && continue
+    case "${c%%:*}" in icmp) ;; *) AP_D="$AP_D ${c%%:*}" ;; esac
+  done
+  for c in $(plan_part "$1" r | tr ',' ' '); do case "${c%%:*}" in icmp) ;; *) AP_R="$AP_R ${c%%:*}" ;; esac; done
+}
 auto_widen() { # name : open every carrier of the token's plan again
-  local n=$1 d r c dl='icmp' rl='icmp'
+  local n=$1 d dl rl
   is_auto_kharej "$n" || { err "'$n' is not an auto Kharej tunnel."; return 1; }
   read_token "$(cat "$CONF/$n.token")" && [ -n "$T_AUTO" ] || { err "No auto token for '$n'."; return 1; }
   rm -f "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" # a widen starts a fresh stable-selection window
-  d=$(plan_part "$T_AUTO" d); r=$(plan_part "$T_AUTO" r)
-  for c in ${d//,/ }; do # B3: shaped entries are separate hidden units, never legs of the parent bond
-    is_shaped_carrier "${c%%:*}" && continue
-    case "${c%%:*}" in icmp) ;; *) dl="$dl ${c%%:*}" ;; esac
-  done
-  for c in ${r//,/ }; do case "${c%%:*}" in icmp) ;; *) rl="$rl ${c%%:*}" ;; esac; done
+  d=$(plan_part "$T_AUTO" d); auto_plan_lists "$T_AUTO"; dl=$AP_D; rl=$AP_R
   auto_set_carriers "$n" "$dl" "$rl" || return 1
   fw_open "$(fw_port_list "$dl" "$d")"
   systemctl enable "${WAT_PREFIX}@$n" >/dev/null 2>&1
@@ -3752,6 +3780,54 @@ auto_widen() { # name : open every carrier of the token's plan again
   fi
   [ -n "$(auto_ext_names "$n")" ] && auto_ext_start "$n" # B3: reopen the extended listeners for a retest
   ok "Every carrier of '$n' is open again."
+}
+unit_on() { systemctl is-active -q "${WAT_PREFIX}@$1" 2>/dev/null || systemctl is-enabled -q "${WAT_PREFIX}@$1" 2>/dev/null; }
+auto_carrier_status() { # name -> "open|detail" or "closed|detail": how many carriers are open and what happens next
+  local n=$1 u total open=0 cur st sig since left mins AP_D AP_R plan
+  plan=$(read_token "$(cat "$CONF/$n.token")" >/dev/null 2>&1 && [ -n "$T_AUTO" ] && auto_plan_lists "$T_AUTO" && echo "$AP_D|$AP_R")
+  IFS='|' read -r AP_D AP_R <<<"$plan"
+  [ -n "$AP_D" ] || { echo "open|plan unknown"; return 0; }
+  set -- $AP_D; total=$#
+  cur=$(cfg "$n" carrier); set -- ${cur//+/ }
+  unit_on "$n" && open=$#
+  if [ -f "$CONF/$n-r.yml" ]; then
+    set -- $AP_R; total=$((total + $#))
+    cur=$(cfg "$n-r" carrier); set -- ${cur//+/ }
+    unit_on "$n-r" && open=$((open + $#))
+  fi
+  for u in $(auto_ext_names "$n"); do
+    total=$((total + 1))
+    unit_on "$u" && open=$((open + 1))
+  done
+  [ "$open" -lt "$total" ] && { echo "closed|$open of $total open"; return 0; }
+  st="all $total open"
+  mins=$(autoprune_grace)
+  if [ -f "$CONF/$n.keepopen" ]; then st="$st · stays open until you close it"
+  elif [ "$mins" -le 0 ] || [ -f "$RUN/$n.autoprune.done" ]; then :
+  else
+    read -r sig since <<<"$(prune_stamp_get "$n")"
+    case "$since" in
+      ''|*[!0-9]*) st="$st · closes $mins min after Iran connects" ;;
+      *) left=$(( (mins * 60 - ($(date +%s) - since) + 59) / 60 )); [ "$left" -ge 1 ] || left=1
+         st="$st · closes in about $left min" ;;
+    esac
+  fi
+  echo "open|$st"
+}
+auto_carriers_toggle() { # name : open every carrier and hold them open, or close the unused ones and hand back to the automatic pass
+  local n=$1
+  mgr_lock || return 1
+  if [ "$(auto_carrier_status "$n" | cut -d'|' -f1)" = open ]; then
+    page "Close carriers" "$n"; echo
+    auto_narrow "$n" || return 1
+    rm -f "$CONF/$n.keepopen"
+  else
+    page "Open carriers" "$n"; echo
+    hint "Every carrier opens and stays open until you close it here. The tunnel restarts, so its connections drop once."
+    confirm "Open every carrier of '$n'?" y || { warn "Nothing changed."; return 1; }
+    auto_widen "$n" || return 1
+    ( umask 077; : >"$CONF/$n.keepopen" )
+  fi
 }
 
 # ---- R3: automatic lifecycle cleanup of an auto Kharej tunnel ----
@@ -8142,7 +8218,10 @@ tunnel_menu_build() { # name role run boot carrier z_ok reverse auto_kharej has_
   if [ "$r" = Kharej ]; then
     tmenu_radd t Token 'share to Iran' "Show ${WAT_PREFIX}@$n's token; paste it on the Iran server."
     tmenu_radd k 'New key' 'rotate the key' 'Make a new key and token; update the other side to match.'
-    [ "$auto" = 1 ] && tmenu_radd u 'Close unused' 'free ports' 'Close the carrier ports Iran does not use.'
+    if [ "$auto" = 1 ]; then
+      if [ "$(auto_carrier_status "$n" | cut -d'|' -f1)" = open ]; then tmenu_radd u 'Close carriers' 'free ports' 'Close the carrier ports Iran does not use.'
+      else tmenu_radd u 'Open carriers' 'reopen all' 'Open every carrier again and keep them open until you close them.'; fi
+    fi
     [ "$rev" = 1 ] && [ "$comp" = 0 ] && tmenu_radd h 'Iran IP' 'change peer' 'Change the Iran address Kharej dials (reverse tunnel).'
   else
     tmenu_radd t 'New token' 'from Kharej' 'Replace Kharej, key and carrier from a new token; ports stay.'
@@ -8368,7 +8447,7 @@ tunnel_page() {
                [ "$(cfg "$n" carrier)" != icmp ] && { page "Carrier listen port" "$n"; echo; run_flow change_peer "$n"; pause; }
              else page "Kharej address" "$n"; echo; run_flow change_peer "$n"; pause; fi
            fi ;;
-      u|U) if [ "$r" = Kharej ] && is_auto_kharej "$n"; then echo; run_flow auto_narrow "$n"; pause; fi ;;
+      u|U) if [ "$r" = Kharej ] && is_auto_kharej "$n"; then run_flow auto_carriers_toggle "$n"; pause; fi ;;
       t|T) if [ "$r" = Kharej ]; then
            par=$(companion_of "$n")
            page "Token" "$n"; echo
@@ -8768,6 +8847,7 @@ main_menu() {
           else flash "No tunnel number $num."; fi ;;
         n|N) new_tunnel; break ;;
         a|A) batch_actions_menu; break ;;
+        c|C) main_carriers; break ;;
         m|M) if [ "${#DASH_N[@]}" -gt 0 ]; then run_flow live_monitor; fi; break ;;
         s|S) settings_menu; break ;;
         u|U) page "Update"; echo; if update; then echo; hint "The manager reloads itself to show the new version."; pause; exec "$MGR"; fi; pause; break ;;

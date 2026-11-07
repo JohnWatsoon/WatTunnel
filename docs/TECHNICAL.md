@@ -1435,6 +1435,11 @@ after a new stable pick. Manual control is always available: `wattun-manager aut
 carrier now (both sides); `wattun-manager auto-prune NAME --keep-open` opts one tunnel out of both automatic passes (every carrier stays
 open), `--auto` turns them back on, `--direct` opts into direct-side narrowing and `--reverse-only` returns to the
 default; `wattun-manager auto-widen NAME` opens every carrier of the token's plan again.
+The manager's main menu shows `carriers open` or `closed` under each auto Kharej tunnel, with the open count and the
+time until the automatic close, and key `c` switches it (key `u` on the tunnel page does the same). Opening there runs
+`auto-widen` and sets `NAME.keepopen`, so everything stays open; closing runs `auto-narrow` and removes that file, which
+returns the tunnel to the automatic passes. The bare `auto-widen` command sets no hold, so the tunnel narrows again
+after a new stable pick.
 `auto-narrow` reads which carriers have a live Iran session (`/stats` `clients` on `NAME`, alive `carriers` on
 `NAME-r`). The tunnel card shows "Iran uses ..." and how many carriers are still open.
 

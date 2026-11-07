@@ -101,14 +101,11 @@ wattun update          # update the binary and the menu
 | `stopped` | The service is not running |
 
 **After Iran picks a type,** an auto Kharej tunnel closes everything unused about 5 minutes later and restarts the side
-that stays open, so its connections drop once. To change the type or re-test later, first reopen everything on Kharej:
+that stays open, so its connections drop once. The Kharej main menu shows `carriers open` or `closed` under each auto
+tunnel, with the count and the time left. Press `c` there to switch it: what you open stays open until you close it.
 
-```bash
-wattun-manager auto-widen NAME
-```
-
-If you skip that, the manager reopens by itself after 3 failed checks (at most once per 10 minutes). Keep every type open
-with `wattun-manager auto-prune NAME --keep-open`.
+To change the type or re-test later, open the carriers on Kharej first. If you skip that, the manager reopens by itself
+after 3 failed checks (at most once per 10 minutes).
 
 ## What it does
 

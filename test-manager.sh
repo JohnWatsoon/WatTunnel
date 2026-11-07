@@ -1373,6 +1373,31 @@ chk "widen pass: the third check reopens every planned carrier" "$(grep -c '^car
 chk "widen pass: widening clears the pruned marker" "$([ -e "$WAT_RUN/t_auto.autoprune.done" ] && echo y || echo n)" "n"
 chk "widen pass: widening starts the cooldown stamp" "$([ -f "$WAT_RUN/t_auto.autowiden" ] && echo y || echo n)" "y"
 chk "widen pass: widening resets the failed-check counter" "$([ -e "$WAT_RUN/t_auto.autowiden.down" ] && echo y || echo n)" "n"
+# main menu carriers switch: the status word follows the units and configs, the switch flips it and holds it open
+rm -f "$WAT_CONF/.manager.conf" "$WAT_RUN/t_auto.autowiden"
+systemctl() { return 0; }
+chk "carriers: all open before Iran connects" "$(auto_carrier_status t_auto)" "open|all 3 open · closes 5 min after Iran connects"
+printf 'tcp %s\n' "$(( $(date +%s) - 120 ))" >"$WAT_RUN/t_auto.autoprune"
+chk "carriers: a stable pick shows the time left" "$(auto_carrier_status t_auto)" "open|all 3 open · closes in about 3 min"
+rm -f "$WAT_RUN/t_auto.autoprune"
+_cs_narrow() { NONINTERACTIVE=1; auto_live() { AN_D='tcp'; AN_R=''; }; auto_carriers_toggle t_auto; }
+( _cs_narrow ) >/dev/null 2>&1
+chk "carriers: closing keeps what Iran uses" "$(grep -c '^carrier: tcp$' "$WAT_CONF/t_auto.yml")" "1"
+chk "carriers: closed shows the count" "$(auto_carrier_status t_auto)" "closed|1 of 3 open"
+( NONINTERACTIVE=1; auto_carriers_toggle t_auto ) >/dev/null 2>&1
+chk "carriers: opening restores the plan" "$(grep -c '^carrier: icmp+udp+tcp$' "$WAT_CONF/t_auto.yml")" "1"
+chk "carriers: opening holds them open" "$(auto_carrier_status t_auto)" "open|all 3 open · stays open until you close it"
+( _cs_narrow ) >/dev/null 2>&1
+chk "carriers: closing hands back to the automatic pass" "$([ -e "$WAT_CONF/t_auto.keepopen" ] && echo y || echo n)" "n"
+systemctl() { return 1; }
+chk "carriers: a stopped and disabled side is closed" "$(auto_carrier_status t_auto)" "closed|0 of 3 open"
+systemctl() { return 0; }
+DASH_N=(t_auto)
+chk "carriers: the main menu row shows the status" "$(dash_row 1 t_auto 2>/dev/null | grep -c 'carriers.*closed.*1 of 3 open')" "1"
+chk "carriers: the main menu offers the switch" "$(dash_actions 2>/dev/null | grep -c 'open/close carriers')" "1"
+DASH_N=()
+chk "carriers: no auto tunnel, no switch" "$(dash_actions 2>/dev/null | grep -c 'open/close carriers' || true)" "0"
+rm -f "$WAT_RUN/t_auto.autoprune.done"
 # heal() on a Kharej-only host must never restart a client tunnel: only the prune/widen pass may run
 SYSCALLS=$SMOKE/syscalls
 cat >"$WAT_CONF/t_kh.yml" <<'EOF'
