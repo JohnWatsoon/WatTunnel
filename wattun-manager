@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110702   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110801   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -7508,6 +7508,7 @@ change_type() { # name : one place to change how the two servers connect, whatev
 #  Kernel Speed Boost (/boost)
 # ======================================================================================
 BOOST_SYSCTL=/etc/sysctl.d/99-$WAT_PREFIX-boost.conf
+BOOST_OFF=$CONF/.boost-off # written by boost --undo: the installer's automatic boost leaves this server alone
 is_container() {
   if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then return 0; fi
   if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --container -q 2>/dev/null; then return 0; fi
@@ -7528,6 +7529,33 @@ boost_status() {
   say "  $(kv 'rmem max' "$(human "$rmax")")"
   say "  $(kv 'wmem max' "$(human "$wmax")")"
   is_container && warn "This is a container: some kernel settings cannot be changed here."
+  boost_nic_hint
+  return 0
+}
+default_dev() { ip route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit }}'; }
+boost_qdisc() { # put the default-route interface on fq now: default_qdisc alone only covers interfaces created later
+  # Field 2026-11-08 (Iran VPS): boost had set default_qdisc=fq, eth0 stayed pfifo_fast until a reboot.
+  local dev cur
+  [ "$SANDBOX" = 1 ] && return 0
+  command -v tc >/dev/null 2>&1 || return 0
+  dev=$(default_dev); [ -n "$dev" ] || return 0
+  cur=$(tc qdisc show dev "$dev" root 2>/dev/null | awk '{print $2; exit}')
+  case "$cur" in
+    mq) tc qdisc replace dev "$dev" root mq 2>/dev/null ;; # re-creates the per-queue children with default_qdisc
+    pfifo_fast|pfifo|fq_codel) tc qdisc replace dev "$dev" root fq 2>/dev/null ;;
+  esac # any other root (htb, cake, tbf ...) is someone's own shaping: left alone
+  return 0
+}
+boost_nic_hint() { # an emulated NIC is the usual 1 Gbit/s limit on a cheap VPS, and no setting here fixes it
+  local dev drv
+  command -v ethtool >/dev/null 2>&1 || return 0
+  dev=$(default_dev); [ -n "$dev" ] || return 0
+  drv=$(ethtool -i "$dev" 2>/dev/null | sed -n 's/^driver: //p')
+  case "$drv" in
+    e1000|e1000e|8139cp|8139too|rtl8139|pcnet32|ne2k-pci)
+      warn "Network card: $drv (emulated). One CPU core handles every packet, which usually caps the server below 1 Gbit/s."
+      hint "Ask your provider to switch this VPS to a virtio network card." ;;
+  esac
   return 0
 }
 boost_apply() {
@@ -7556,11 +7584,14 @@ EOF
   if command -v sysctl >/dev/null 2>&1; then
     sysctl -p "$BOOST_SYSCTL" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
   fi
+  boost_qdisc
+  rm -f "$BOOST_OFF"
   ok "Boost parameters written to $BOOST_SYSCTL and applied."
   boost_status
 }
 boost_undo() {
   rm -f "$BOOST_SYSCTL"
+  mkdir -p "$CONF" && : >"$BOOST_OFF"
   if command -v sysctl >/dev/null 2>&1; then
     sysctl --system >/dev/null 2>&1 || true
   fi
@@ -7572,6 +7603,8 @@ boost_cmd() {
     --status|-s|status) boost_status ;;
     --undo|-u|undo) boost_undo ;;
     --yes|-y|apply|"") boost_apply ;;
+    auto) # the installer and wattun update: on by default, except in a container or after boost --undo
+      [ -f "$BOOST_OFF" ] || is_container || boost_apply >/dev/null 2>&1; return 0 ;;
     *) err "Usage: $SELF boost [--status|--undo|--yes]"; return 1 ;;
   esac
 }

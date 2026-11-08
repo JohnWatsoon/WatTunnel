@@ -588,6 +588,13 @@ if [ -n "$stale_names" ]; then
 fi
 echo
 
+# ---- kernel network tuning: bbr, fq and large socket buffers, on by default (wattun-manager boost --undo opts out) ----
+# Field 2026-11-08: an untuned Iran VPS (cubic, pfifo_fast, 212 KB buffers) moved 7 MB/s up over 16 raw TCP
+# connections, 68 MB/s after boost; the tunnel's upload went from 49 to 66 MB/s.
+if [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && [ "${WAT_REQUIRE_SANDBOX:-0}" != 1 ]; then
+  "$MGR" boost auto >/dev/null 2>&1 || true
+fi
+
 # ---- interactive first-run wizard ----
 if [ "${WAT_FROM_MANAGER:-0}" = 1 ]; then exit 0; fi
 if [ -t 0 ] && [ -t 1 ]; then

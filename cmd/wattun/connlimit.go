@@ -8,9 +8,11 @@ import (
 
 // Public TCP listeners otherwise have no cap: a stranger can open connections until every stream slot in the
 // session (8192) is taken. The limits are per process, and a slot comes back when its connection closes.
+// The per-IP cap is high because Iranian mobile carriers put many users behind one CGNAT address: at 256 a
+// production Iran server had refused 242 connections, and one mobile address held 88 at a quiet hour (2026-11-08).
 const (
 	maxPublicConns = 4096
-	maxPublicPerIP = 256
+	maxPublicPerIP = 1024
 )
 
 var publicConns = newConnLimiter(maxPublicConns, maxPublicPerIP)

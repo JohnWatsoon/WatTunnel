@@ -114,6 +114,33 @@ Ping through the tunnel:
 - **2.5.0:** the download was limited by the Iran server's CPU, not the route. The receiving tunnel used 103-117 % of one of its two cores.
 - **2.5.1:** removed a large part of that CPU cost (see [Cheaper stream buffers](#cheaper-stream-buffers-251)). Its download reaches 80 % of what plain, unencrypted TCP gets on the same route with 16 connections.
 
+### Production pair: kernel tuning and an emulated network card (3.3.3, 2026-11-08)
+
+Iran 2 vCPU / 1.9 GB with an emulated `e1000` network card, Kharej 2 vCPU / 3.8 GB with `virtio`, 88 ms apart, reverse `ws`,
+measured beside about 350 live user connections. Direct Iran -> Kharej connections are blocked on this route, so the upload
+was measured with Kharej connecting and Iran sending. Speed tests ran with 16 streams and 1500 MB each way.
+
+| | Raw TCP, 16 connections | Tunnel down | Tunnel up |
+|---|---|---|---|
+| Iran untuned (cubic, `pfifo_fast`, 212 KB `rmem_max`) | down 112 MB/s, up 7 MB/s | 83 MB/s | 49 MB/s |
+| Iran after `boost` (bbr, `fq`, 64 MB buffers) | up 68 MB/s | 82-87 MB/s | 66-72 MB/s |
+
+- **Upload:** the untuned Iran kernel was the limit. Since 3.3.4 the installer and `wattun update` apply `boost` by default on both
+  ends (see [Kernel boost](#kernel-boost)).
+- **Download:** the Iran network card was the limit. One core ran at 95 % softirq, because the emulated `e1000` has one receive queue
+  and costs a VM exit per packet. Spreading it with RPS, or turning on its receive checksum offload, did not raise the rate. No
+  tunnel setting fixes this. A `virtio` card, which the provider has to switch, is what this server needs for 1 Gbit/s.
+  `wattun-manager boost --status` names an emulated card.
+
+### Kernel boost
+
+`wattun-manager boost` writes `/etc/sysctl.d/99-wattun-boost.conf`: `fq` as the default qdisc, BBR, 64 MB maximum socket buffers,
+larger backlogs, no slow start after idle. It also moves the default-route interface onto `fq` at once (`mq` is re-created
+so its queues get `fq`), because `default_qdisc` alone only covers interfaces created later. Another root qdisc (`htb`, `cake`,
+`tbf` ...) is someone's own shaping and is left alone. Since 3.3.4 the installer and `wattun update` run `boost auto`, which applies
+it unless the server is a container or `boost --undo` was run once (`/etc/wattun/.boost-off`). `boost --yes` applies it again
+and clears that marker.
+
 ### Fast pair: every carrier and anti-censor variant (3.1.0, 2026-10-27)
 
 Iran 2 vCPU / 1.9 GB, Kharej 2 vCPU / 3.8 GB, 81 ms apart, host buffers raised to 16 MB with BBR, 16 streams, 1024 MB each way,
@@ -2045,7 +2072,7 @@ metrics port, even if the port is in the allowlist.
 | `pool_drops` | Since 2.4.18. Packets dropped because a pool connection's queue was full (should stay 0; the session waits instead). |
 | `pool_conn_deaths` | Since 2.4.18. Pool connections that died (both ends count their own). |
 | `pool_conns` | Since 2.4.18. One entry per open pool connection, oldest first: `age_s`, `tx` and `rx` (datagrams), `queue`, `stalled_ms` (how long its current socket write has been blocked). Uneven `tx` deltas show a skewed spread. |
-| `conn_limit_drops` | Client: connections refused by the public TCP listeners' cap (4096 in total, 256 per source IP). |
+| `conn_limit_drops` | Client: connections refused by the public TCP listeners' cap (4096 in total, 1024 per source IP). |
 | `conns_active` | Client: TCP connections the public listeners currently hold (the cap counts these). Not the per-port `conns_active` in `ports`. |
 | `pool_slow_closed` | Since 2.4.7, pool carriers. Pool connections this process closed for delivering far below their share (see [Stalled pool connections](#stalled-pool-connections-245)). |
 | `cc` | Since 2.4.10. Pacer diagnostics, see below. |
@@ -2511,7 +2538,7 @@ No wire-format change: an older peer keeps working, and either order of updating
   reset (RST) and over-cap fragment pieces are dropped, instead of a key-holding peer pinning gigabytes. The 4 MB
   base windows are deliberately not charged, so ordinary stream concurrency is unchanged. The received-datagram queue
   is 64 entries (it can hold reassembled `MaxDatagram` frames).
-- **Public listeners are capped** at 4096 connections in total and 256 per source IP; refused connections are closed
+- **Public listeners are capped** at 4096 connections in total and 1024 per source IP (256 before 3.3.4; mobile CGNAT puts many users behind one address); refused connections are closed
   and counted in `/stats` as `conn_limit_drops`, with `conns_active` for the live count.
 - **`pprof` and the read metrics endpoints reject cross-site browser requests** like the side-effect routes already
   did, so a visited page cannot start a CPU profile on the loopback metrics port.

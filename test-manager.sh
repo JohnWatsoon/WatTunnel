@@ -607,6 +607,19 @@ boost_status >/dev/null 2>&1
 chk "boost_status exit code" "$?" "0"
 boost_undo >/dev/null 2>&1
 chk "boost_undo removed conf" "$([ ! -f "$BOOST_SYSCTL" ] && echo 1 || echo 0)" "1"
+chk "boost_undo opts the server out of the automatic boost" "$([ -f "$BOOST_OFF" ] && echo 1 || echo 0)" "1"
+( is_container() { return 1; }; boost_cmd auto ) >/dev/null 2>&1
+chk "boost auto: an opted-out server is left alone" "$([ -f "$BOOST_SYSCTL" ] && echo 1 || echo 0)" "0"
+rm -f "$BOOST_OFF"
+( is_container() { return 1; }; boost_cmd auto ) >/dev/null 2>&1
+chk "boost auto: applies by default" "$([ -f "$BOOST_SYSCTL" ] && echo 1 || echo 0)" "1"
+rm -f "$BOOST_SYSCTL"
+( is_container() { return 0; }; boost_cmd auto ) >/dev/null 2>&1
+chk "boost auto: a container is left alone" "$([ -f "$BOOST_SYSCTL" ] && echo 1 || echo 0)" "0"
+chk "boost: the emulated-card hint names e1000" "$(ethtool() { printf 'driver: e1000
+'; }; default_dev() { echo eth0; }; boost_nic_hint 2>&1 | grep -c 'e1000 (emulated)')" "1"
+chk "boost: no hint for virtio" "$(ethtool() { printf 'driver: virtio_net
+'; }; default_dev() { echo eth0; }; boost_nic_hint 2>&1 | wc -l | tr -d ' ')" "0"
 
 # 4. Backup & Restore roundtrip
 echo "test_payload: 12345" >"$WAT_CONF/backup_sample.yml"
