@@ -2913,6 +2913,10 @@ tunnel, ships in `dist/` as `wattun-wprobe-<os>-<arch>`, and needs Linux + CAP_N
 Update **both** servers for every release, unless an entry says otherwise. Versions 2.4.9 to 2.4.16 were steps
 toward one fix for CDN tunnels that got slower over time. If you are on any of them, go straight to 2.4.17 or later.
 
+- **3.3.4: kernel boost by default, per-IP cap 1024.** The wire format is unchanged, so old and new peers work together.
+  The installer and `wattun update` apply `boost` (bbr, `fq`, 64 MB buffers) unless the server is a container or opted out,
+  and `boost` moves the live interface onto `fq`. The public listeners allow 1024 connections per source IP instead of 256.
+  Details: `docs/release-notes/v3.3.4.md`.
 - **3.3.3: Iran's pick becomes the tunnel (manager only).** The engine and wire format are unchanged, so old and new
   peers work together. Once Iran's pick is stable, the side it uses is kept as the tunnel and every test listener is
   deleted; deleting an auto tunnel never deletes the side Iran is connected through; the port check reads
