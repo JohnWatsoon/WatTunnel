@@ -1482,6 +1482,21 @@ _fin_setup
 ( eval "$_fin_stubs"; NONINTERACTIVE=1; delete_tunnel t_fin ) >/dev/null 2>&1
 chk "delete: a second delete removes it" "$([ -e "$WAT_CONF/t_fin.yml" ] && echo y || echo n)" "n"
 rm -f "$WAT_CONF/t_fin"* "$WAT_RUN/t_fin"* "$WAT_RUN/fin.fw"
+# abandoned (field 2026-11-08): Iran moved to another tunnel here, the auto tunnel never got a client
+_ab='auto_live() { AN_D=""; AN_R=""; }'
+_fin_setup
+( eval "$_fin_stubs"; eval "$_ab"; other_kharej_live() { return 0; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "abandoned: the first pass only starts the clock" "$([ -e "$WAT_CONF/t_fin.yml" ] && [ -s "$WAT_RUN/t_fin.abandoned" ] && echo y || echo n)" "y"
+( eval "$_fin_stubs"; eval "$_ab"; other_kharej_live() { return 1; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "abandoned: Iran offline everywhere keeps it and resets the clock" "$([ -e "$WAT_CONF/t_fin.yml" ] && [ ! -e "$WAT_RUN/t_fin.abandoned" ] && echo y || echo n)" "y"
+echo $(( $(date +%s) - 7200 )) >"$WAT_RUN/t_fin.abandoned"
+( eval "$_fin_stubs"; auto_live() { AN_D=""; AN_R="tcp"; }; other_kharej_live() { return 0; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "abandoned: a client on its own side keeps it" "$([ -e "$WAT_CONF/t_fin.token" ] || [ -e "$WAT_CONF/t_fin.yml" ] && echo y || echo n)" "y"
+rm -f "$WAT_CONF/t_fin"* "$WAT_RUN/t_fin"*; _fin_setup
+echo $(( $(date +%s) - 7200 )) >"$WAT_RUN/t_fin.abandoned"
+( eval "$_fin_stubs"; eval "$_ab"; other_kharej_live() { return 0; }; auto_prune_tick t_fin ) >/dev/null 2>&1
+chk "abandoned: after the grace it is deleted with its reverse side" "$([ -e "$WAT_CONF/t_fin.yml" ] || [ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
+rm -f "$WAT_CONF/t_fin"* "$WAT_RUN/t_fin"* "$WAT_RUN/fin.fw"
 # the port check sees an auto tunnel's listen-<carrier> ports even when it is stopped
 printf 'mode: server
 carrier: ws+wss

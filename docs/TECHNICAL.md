@@ -1460,6 +1460,14 @@ plain delete, so the test tunnel never takes Iran's link with it. A second delet
 of new tunnels reads every `listen:` and `listen-<carrier>:` line of every config, stopped ones too, so a new tunnel
 never takes a port an existing one owns.
 
+**An auto tunnel Iran left is deleted.** If Iran moves to a tunnel made outside the auto flow (for example a bot-made
+reverse tunnel), no auto unit ever becomes the pick and the step above never runs. So each heal pass also checks:
+no unit of the auto tunnel (parent, `NAME-r`, hidden children) has a client, and another Kharej tunnel on the host
+does. When that holds for `max(autoprune, 60)` minutes in a row (`$RUN/NAME.abandoned` keeps the start time), the
+auto tunnel is deleted like `delete NAME`, together with its reverse side and hidden listeners. If Iran is offline
+everywhere, or a child's stats cannot be read, nothing is deleted and the clock starts over.
+`autoprune=0` and `NAME.keepopen` turn this off too.
+
 The pass runs inside `heal`. The manager installs the heal timer where it is needed: the auto Kharej wizard and
 `auto-ip` install it, and any later manager run does the same for an existing auto Kharej tunnel, so a Kharej-only
 server is cleaned up without operator action. `wattun-manager heal` triggers one pass by hand.

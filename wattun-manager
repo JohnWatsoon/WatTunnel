@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110801   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026110802   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -3973,11 +3973,38 @@ auto_finalize() { # name : keep the unit Iran uses as plain tunnel NAME and dele
   [ "$w" = "$n" ] && systemctl restart "${WAT_PREFIX}@$n" >/dev/null 2>&1 # the plain keys take effect
   ok "'$n' now runs only the carrier Iran uses; the test listeners are deleted."
 }
+other_kharej_live() { # auto name -> rc 0 when another (non-test) Kharej tunnel on this host has a connected client
+  local t s
+  for t in $(tunnels); do
+    [ "$t" = "$1" ] || [ "$t" = "$1-r" ] || [ "$(role "$t")" != Kharej ] && continue
+    systemctl is-active -q "${WAT_PREFIX}@$t" 2>/dev/null || continue
+    s=$(stats "$t") || continue
+    [ "$(jget "$s" sessions)" -gt 0 ] 2>/dev/null && return 0
+  done
+  return 1
+}
+auto_abandon_tick() { # name mins : delete an auto tunnel Iran left for another tunnel; rc 0 when it was deleted
+  # Field 2026-11-08: Iran moved to a tunnel made outside the auto flow (bot rwss1/rtcp1), so no auto unit ever became
+  # the pick and finalize never ran; the auto tunnel and its 13 hidden listeners stayed up with no client for good.
+  # Only when no unit of it has a client AND another Kharej tunnel here has one, for max(grace, 60) min straight:
+  # Iran merely offline (nothing live anywhere) or an unreadable child never deletes anything.
+  local n=$1 g=$(($2 > 60 ? $2 : 60)) f="$RUN/$1.abandoned" since now rc=0
+  auto_live "$n"
+  auto_ext_live "$n" || rc=$?
+  if [ "$rc" = 1 ] || [ -n "$AN_D$AN_R$AE_LIVE" ] || ! other_kharej_live "$n"; then rm -f "$f"; return 1; fi
+  now=$(date +%s)
+  since=$(head -1 "$f" 2>/dev/null); [[ "$since" =~ ^[0-9]+$ ]] || { echo "$now" >"$f"; return 1; }
+  [ $((now - since)) -ge $((g * 60)) ] || return 1
+  ( NONINTERACTIVE=1; delete_tunnel "$n" ) >/dev/null 2>&1 || return 1
+  rm -f "$f"
+  logger -t wattun-auto "auto tunnel $n: no client for $g min while Iran uses another tunnel here; deleted it and its test listeners"
+}
 auto_prune_tick() { # name : one heal pass for an auto Kharej tunnel; reverse-side only unless autoprune-direct=1
   local n=$1 mins grace in_use_d in_use_r sig targets direct_on comp act seen now psig psince rc ext
   is_auto_kharej "$n" || return 0
   [ -f "$CONF/$n.keepopen" ] && return 0
   mins=$(autoprune_grace); [ "$mins" -gt 0 ] || return 0
+  auto_abandon_tick "$n" "$mins" && return 0
   if [ -f "$RUN/$n.autoprune.done" ]; then
     # the rest is closed and Iran's pick held for the grace window: keep that side as NAME, delete the test parts.
     # Retried every pass until Iran's pick is readable; autoprune-direct=0 keeps the direct side, so no finalize then.
@@ -6433,6 +6460,9 @@ delete_tunnel() {
     ok "Reverse side '$n-r' deleted."
   fi
   for f in $(auto_ext_names "$n"); do auto_drop_unit "$f"; done # B3/F08/F17: the hidden listeners, their state and UDP rules
+  if is_auto_kharej "$n" && [ ! -f "$CONF/$n-r.yml" ]; then # the reverse side's config may be gone already: its state files go too
+    while IFS= read -r f; do rm -f "$f"; done < <(state_files "$n-r")
+  fi
   systemctl stop "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
   systemctl reset-failed "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
   # H8: stop the unit BEFORE removing its state files. The engine saves quota/totals on SIGTERM (and every state-save
@@ -6442,7 +6472,7 @@ delete_tunnel() {
   bond_retest_disable "$n" # the bond-retest timer belongs to this tunnel
   rm -f "$CONF/$n".yml "$CONF/$n".ech "$CONF/$n".key "$CONF/$n".token "$CONF/$n".auto "$RUN/$n.down" "$RUN/$n.cycles" "$RUN/$n.retest" \
         "$CONF/$n".bondretest "$CONF/$n".bondretest.tmp "$CONF/$n".bondfail "$CONF/$n".bondfail.tmp "$CONF/$n".keepopen \
-        "$RUN/$n.autoprune" "$RUN/$n.autoprune.done"
+        "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" "$RUN/$n.autowiden" "$RUN/$n.autowiden.down" "$RUN/$n.abandoned"
   ok "Tunnel '$n' deleted."
   kreply_users_left || kreply_restore
   return 0
