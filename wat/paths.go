@@ -208,6 +208,15 @@ func (ps *pathSet) ToggleMute(i int) bool {
 	return false
 }
 
+// setMute sets the mute state of path i (the server applies its one muted set to every session's paths).
+func (ps *pathSet) setMute(i int, muted bool) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if i >= 0 && i < len(ps.p) {
+		ps.p[i].muted = muted
+	}
+}
+
 func (ps *pathSet) isLiveOrSuspect(i int) bool {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()

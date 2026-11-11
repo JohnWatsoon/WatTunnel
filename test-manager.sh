@@ -660,6 +660,7 @@ cat >"$WAT_CONF/t_sla.yml" <<'EOF'
 mode: client
 carrier: tcp
 peer: 198.51.100.1:443
+metrics: 127.0.0.1:1
 EOF
 cat >"$WAT_CONF/t_sla.sla" <<'EOF'
 sla_min_rate_kbps=1000
@@ -792,7 +793,7 @@ mkdir -p "$SMOKE/state"
 chk "state dir read from the config" "$(state_dir_of t_state)" "$SMOKE/state"
 chk "state file: totals in the state-dir" "$(state_file t_state totals)" "$SMOKE/state/t_state.yml.totals.json"
 chk "state file: quota in the state-dir" "$(state_file t_state quota)" "$SMOKE/state/t_state.yml.quota.json"
-chk "state files: every file the engine can leave" "$(state_files t_state | tr '\n' ' ')" "$SMOKE/state/t_state.yml.totals.json $SMOKE/state/t_state.yml.totals.json.host $SMOKE/state/t_state.yml.totals.json.tmp $SMOKE/state/t_state.yml.quota.json $SMOKE/state/t_state.yml.quota.json.tmp "
+chk "state files: every file the engine can leave" "$(state_files t_state | tr '\n' ' ')" "$SMOKE/state/t_state.yml.totals.json $SMOKE/state/t_state.yml.totals.json.host $SMOKE/state/t_state.yml.totals.json.tmp $SMOKE/state/t_state.yml.quota.json $SMOKE/state/t_state.yml.quota.json.tmp $SMOKE/state/t_state.yml.pn $SMOKE/state/t_state.yml.pn.tmp "
 printf 'totals\n' >"$SMOKE/state/t_state.yml.totals.json"
 printf 'quota\n' >"$SMOKE/state/t_state.yml.quota.json"
 printf 'stale\n' >"$WAT_CONF/t_state.yml.totals.json" # a stale file at the old location
@@ -1961,6 +1962,38 @@ _ACT='t_ti'; chk "lists: a stopped reverse side is hidden" "$(listed_tunnels | g
 _ACT='t_ti t_ti-r'; chk "lists: a running reverse side is shown" "$(listed_tunnels | grep -c '^t_ti-r$')" "1"
 rm -f "$WAT_CONF"/t_ti.yml "$WAT_CONF"/t_ti-r.yml "$WAT_CONF"/t_ti.token "$WAT_CONF"/t_tb.yml
 eval "$_ti_stats"; eval "$_ti_sys"; eval "$_ti_tun"
+
+# heal SLA: the min rate is measured kbit/s from the byte counters between checks, judged only with open streams;
+# a tunnel with no metrics: line is never counted as down.
+( tunnels() { echo t_sla t_nom; }; role() { echo Iran; }; systemctl() { return 0; }; heal_ext_listeners() { :; }
+  stats() { printf '%s' "$_SLA"; }; heal_retest() { :; }
+  printf 'mode: client
+carrier: udp
+metrics: 127.0.0.1:1
+' >"$WAT_CONF/t_sla.yml"
+  printf 'mode: client
+carrier: udp
+' >"$WAT_CONF/t_nom.yml"
+  printf 'sla_min_rate_kbps=1000
+sla_max_rtt_ms=0
+sla_max_loss_pct=0
+' >"$WAT_CONF/t_sla.sla"
+  rm -f "$RUN"/t_sla.* "$RUN"/t_nom.*
+  _SLA='{"alive":true,"last_rx_age_ms":10,"rate_bps":5e+07,"bytes_in_total":7500000,"bytes_out_total":0,"streams_total":1}'
+  heal; chk "heal sla: first check gives no rate verdict" "$(cat "$RUN/t_sla.sla_breach" 2>/dev/null)" ""
+  echo "0 $(( $(date +%s) - 600 ))" >"$RUN/t_sla.sla_bytes" # 7.5 MB in 600 s = 100 kbit/s
+  heal; chk "heal sla: slow measured traffic is a breach despite a high rate_bps" "$(cat "$RUN/t_sla.sla_breach" 2>/dev/null)" "1"
+  rm -f "$RUN/t_sla.sla_breach"; echo "0 $(( $(date +%s) - 600 ))" >"$RUN/t_sla.sla_bytes"
+  _SLA=${_SLA/'"streams_total":1'/'"streams_total":0'}
+  heal; chk "heal sla: an idle tunnel is not a breach" "$(cat "$RUN/t_sla.sla_breach" 2>/dev/null)" ""
+  echo "0 $(( $(date +%s) - 30 ))" >"$RUN/t_sla.sla_bytes" # 7.5 MB in 30 s = 2000 kbit/s
+  _SLA=${_SLA/'"streams_total":0'/'"streams_total":2'}
+  heal; chk "heal sla: enough measured traffic passes" "$(cat "$RUN/t_sla.sla_breach" 2>/dev/null)" ""
+  echo "99999999 1" >"$RUN/t_sla.sla_bytes"
+  heal; chk "heal sla: a counter that went back gives no verdict" "$(cat "$RUN/t_sla.sla_breach" 2>/dev/null)" ""
+  chk "heal: a tunnel without metrics is never counted down" "$(cat "$RUN/t_nom.down" 2>/dev/null)" ""
+  rm -f "$WAT_CONF"/t_sla.* "$WAT_CONF"/t_nom.yml "$RUN"/t_sla.* "$RUN"/t_nom.*
+  exit "$fail" ) || fail=1
 
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

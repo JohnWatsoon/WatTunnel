@@ -473,3 +473,43 @@ func TestServerEvictsStaleWhenFull(t *testing.T) {
 		t.Fatalf("%d sessions, want 1", n)
 	}
 }
+
+// The default cap fits more than the old fixed 32: a client auto-tunes up to 16 sessions and a handover runs two.
+func TestServerDefaultSessionCap(t *testing.T) {
+	_, srv := newHub(t)
+	if srv.MaxSessions != 128 {
+		t.Fatalf("default MaxSessions = %d, want 128", srv.MaxSessions)
+	}
+}
+
+// A bonded server mutes a carrier once for all sessions: toggling never splits the sessions into muted and unmuted,
+// and a session admitted later starts with the server's state.
+func TestServerToggleMuteShared(t *testing.T) {
+	names := []string{"a", "b"}
+	mr := &MultiRaw{raws: make([]RawIO, 2), names: names}
+	sub := func() *multiSubIO { return &multiSubIO{ps: newPathSet(names, false, PathTimings{})} }
+	s1, s2 := sub(), sub()
+	s2.ps.ToggleMute(1) // diverged before the fix: one session muted, the other not
+	srv := &Server{raw: mr, sessions: map[uint64]*srvSess{1: {s: &Session{io: s1}}, 2: {s: &Session{io: s2}}}}
+	if !srv.ToggleMute(1) {
+		t.Fatal("first toggle must mute")
+	}
+	for i, m := range []*multiSubIO{s1, s2} {
+		if !m.ps.stats()[1].Muted {
+			t.Fatalf("session %d not muted after the server toggle", i+1)
+		}
+	}
+	if srv.ToggleMute(5) {
+		t.Fatal("an out-of-range carrier must not report muted")
+	}
+	s3 := sub()
+	for i, muted := range srv.muted { // what admit applies to a new session
+		s3.ps.setMute(i, muted)
+	}
+	if !s3.ps.stats()[1].Muted || s3.ps.stats()[0].Muted {
+		t.Fatal("a new session must start with the server's muted set")
+	}
+	if srv.ToggleMute(1) || s1.ps.stats()[1].Muted || s2.ps.stats()[1].Muted {
+		t.Fatal("second toggle must unmute every session")
+	}
+}

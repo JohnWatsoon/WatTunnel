@@ -1682,6 +1682,8 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `max-mbps` | 0 (carrier default) | both | Pacing ceiling, MB/s per direction, per session. 0 = 16 when `icmp` is among the carriers, 1250 (10 Gbit, i.e. no practical cap) for udp, tcp, tls, ws, wss, h2, h2c and grpc since 2.4.18 (200 from 2.3.0; before that 16 for every carrier; the server's value caps the download). See "ICMP path limits and pacing". |
 | `tcp-cc` | `bbr` | both | Since 2.4.18, Linux. TCP congestion control set on every pool socket (tcp, tls, ws, wss, h2, h2c, grpc). BBR does not back off on random loss; the kernel default (cubic) halves its window on every lost segment. `system` keeps the kernel default. Each end sets it for what it sends. `tcp_cc` in `/stats` shows what the kernel accepted (falls back to the default if the `tcp_bbr` module is missing). |
 | `sessions` | 0 (auto) | client | Independent sessions to the server, 1 to 16 (2.3.0, client only; the server is unchanged). 0 picks 1 on a lean host and 2-4 on a host with 2+ CPUs and enough RAM (3.1.0), and always 1 for `icmp`, bonds and `reverse`; older versions used 1. See "Several sessions". |
+| `max-sessions` | 128 | server | Client sessions admitted at once, 1 to 4096 (3.3.5; fixed at 32 before). Every client `sessions` slot counts one, and a handover runs two clients. File-only in the manager. |
+| `max-conns` | 4096 | client | Connections the public TCP listeners hold at once in total, 1 to 1000000 (3.3.5; fixed at 4096 before). One source IP holds at most 1024, or this value when it is lower. File-only in the manager. |
 | `icmp-type` | `echo` | both | ICMP carrier: `echo` or `timestamp` (Linux does not answer `info`/`mask`). Both ends must match. |
 | `loss-ceiling` | false | both | Opt-in loss-aware ceiling for the pacer (see "ICMP path limits and pacing"). Off = delay only. |
 | `slack-ms` | 8 | both | RTT growth tolerated before slowing down. |
@@ -1719,7 +1721,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `keep-slow` | empty (carrier default) | pool carriers | `on`/`off`: never close a pool connection for delivering below its share (default on for reverse and direct tcp/tls, off for CDN HTTP carriers). |
 | `governor` | false | both | ICMP paths: learn the path's volume ceiling from the reroute signature and hold the rate under it. Opt-in experiment, not field-validated. |
 | `ping-every` | 2 | both | Idle keepalive interval, seconds (0-60). Raise it on paths that rate-limit periodic packets; the liveness and server idle limits scale with it. |
-| `dns-listen` | empty (off) | client | Local address for the DNS relay used by `ech: ladder` (e.g. `127.0.0.1:53`). |
+| `dns-listen` | empty (off) | client | Local address for the DNS relay used by `ech: ladder` (e.g. `127.0.0.1:53`). A non-loopback address logs a warning at startup (3.3.5): it is an open resolver for anyone who can reach it. |
 | `dns-relay-upstream` | `8.8.8.8:53` | server | Resolver used by the built-in DNS relay behind target port 53 (with `ech: ladder`). |
 | `metrics` | off | both | Serve `/stats` and pprof on this address. Always loopback (see Metrics). |
 | `state-dir` | empty (next to the config) | both, needs `-config` (3.3.0) | Directory that holds the quota-usage and lifetime-totals files (`<config>.quota.json`, `<config>.totals.json`). Created 0700 when missing; an existing directory with wider permissions is tightened to 0700 (chmod failure stops startup). The file names keep the config's base name, so one directory can hold several tunnels. Point it at tmpfs (`/run/wattun`) to spare the disk: the shipped unit creates that directory and keeps it across a service restart, but the counters are still lost on reboot. See "State files". |
@@ -1865,7 +1867,9 @@ Every flag can also be a config key. Flags win over the file.
 | `-noise-window HH:MM-HH:MM` | empty (all day) | Both ends (3.3.0): local-clock window for noise, may cross midnight; requires `-noise` (ignored with a warning otherwise). |
 | `-ping-every N` | 2 | Idle keepalive interval, seconds, 0-60; both ends use their own value, and liveness scales with it. |
 | `-sessions N` | 0 (auto) | Client: N independent sessions, udp and the pool carriers only (2.3.0, server unchanged). Rejected for the raw and shaped carriers. |
-| `-dns-listen ADDR` | empty | Client: listen here for DNS queries and forward them through the tunnel's DNS relay, e.g. `127.0.0.1:53` (2.9.0). |
+| `-max-sessions N` | 128 | Server (3.3.5): client sessions admitted at once, 1-4096. Every client `-sessions` slot counts one and a handover runs two clients. Before 3.3.5: fixed at 32. |
+| `-max-conns N` | 4096 | Client (3.3.5): connections the public TCP listeners hold at once in total, 1-1000000. One source IP holds at most 1024, or N when N is lower. Before 3.3.5: fixed at 4096. |
+| `-dns-listen ADDR` | empty | Client: listen here for DNS queries and forward them through the tunnel's DNS relay, e.g. `127.0.0.1:53` (2.9.0). A non-loopback address logs a warning at startup (3.3.5): anyone who can reach it resolves names through the tunnel. |
 | `-dns-relay-upstream ADDR` | `8.8.8.8:53` | Kharej: resolver the internal DNS relay queries (port 53, `-ech ladder`); empty = `8.8.8.8:53`. |
 | `-icmp-type T` | `echo` | ICMP carrier: `echo`, `timestamp` (both ends the same; Linux does not answer `info`/`mask`). |
 | `-loss-ceiling` | off | Pacer: also cut the rate when loss jumps far above its learned baseline (opt-in). |
@@ -2025,6 +2029,10 @@ keeps on disk. Both are written atomically (tmp file + rename) so a reader never
   to next to the config), and `reset-traffic`, delete and uninstall remove or reset the files where the engine
   actually keeps them (a custom directory outside `/etc/wattun` included).
 - Needs `-config`: the state files are named after the config, so a flags-only run keeps no state (as before).
+- A server also keeps `<config>.pn` (3.3.5, same directory, 0600, atomic): a packet-number high-water mark, saved at
+  startup and every minute. A server session's packet numbers start at the wall clock in microseconds; with the mark a
+  clock stepped back across a restart still starts above the previous run, so no nonce is reused under the key. On
+  tmpfs the mark is lost on reboot and the wall clock alone applies, as before 3.3.5.
 
 ## Metrics
 
@@ -2035,6 +2043,10 @@ Since 2.0.2 the metrics address is always loopback: a non-loopback value (`0.0.0
 `:19700`) is rewritten to `127.0.0.1` with the same port, and a log line says so, because `/stats`, pprof and
 `/speedtest` must never be reachable from outside. The server also never forwards a tunnel stream to its own
 metrics port, even if the port is in the allowlist.
+
+Since 3.3.5 every endpoint refuses a request whose `Host` is not `localhost`, a loopback IP or `0.0.0.0`/`::` (a
+DNS-rebinding page arrives with its own name), and `/carrier/toggle` takes POST only (405 otherwise; the manager
+sends `curl -X POST`).
 
 | Field | Meaning |
 |---|---|
@@ -2080,7 +2092,7 @@ metrics port, even if the port is in the allowlist.
 | `pool_drops` | Since 2.4.18. Packets dropped because a pool connection's queue was full (should stay 0; the session waits instead). |
 | `pool_conn_deaths` | Since 2.4.18. Pool connections that died (both ends count their own). |
 | `pool_conns` | Since 2.4.18. One entry per open pool connection, oldest first: `age_s`, `tx` and `rx` (datagrams), `queue`, `stalled_ms` (how long its current socket write has been blocked). Uneven `tx` deltas show a skewed spread. |
-| `conn_limit_drops` | Client: connections refused by the public TCP listeners' cap (4096 in total, 1024 per source IP). |
+| `conn_limit_drops` | Client: connections refused by the public TCP listeners' cap (`-max-conns` in total, default 4096; 1024 per source IP). |
 | `conns_active` | Client: TCP connections the public listeners currently hold (the cap counts these). Not the per-port `conns_active` in `ports`. |
 | `pool_slow_closed` | Since 2.4.7, pool carriers. Pool connections this process closed for delivering far below their share (see [Stalled pool connections](#stalled-pool-connections-245)). |
 | `cc` | Since 2.4.10. Pacer diagnostics, see below. |
@@ -2142,7 +2154,8 @@ separate processes added up.
   that session is down does the flow use the next live one.
 - With several `peer` addresses the sessions share one TLS engine (fingerprint, ECH state and cache) and one view of
   which edges work; session k's connections continue the edge rotation where session k-1's stopped.
-- Every session counts against the server's limit of 32 sessions (a handover runs two clients), hence the cap of 16.
+- Every session counts against the server's `-max-sessions` limit (default 128 since 3.3.5, 32 before; a handover
+  runs two clients). The client cap is 16.
 - Not for `icmp`, bonded carriers (`a+b`) or `reverse`: the client refuses to start with a clear message.
 - Wire: nothing new. The server has always run one session per session id (that is how the two slots of a
   handover share it), so any 2.x server serves a multi-session client.

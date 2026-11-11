@@ -127,7 +127,9 @@ func main() {
 	poolRotate := flag.String("pool-rotate", "0", "client, pool carriers (tcp|tls|ws|wss|h2|grpc): recycle each healthy pool connection after this long, so no flow shows a months-stable lifetime; accepts 30m, 4h or seconds; jittered +/-40% per connection so the redials never line up; 0 = off (2.8.0; a -reverse server dials too, so it honours it since 3.0.2)")
 	poolRotateBytes := flag.String("pool-rotate-bytes", "0", "client, pool carriers, with -pool-rotate or alone: also recycle each healthy pool connection after this many bytes handed to its socket (500MB, 4GB, 300k; 1MB = 1e6); jittered +/-25% like the time axis; whichever limit hits first recycles (2.8.1; a -reverse server honours it since 3.0.2)")
 	tcpCC := flag.String("tcp-cc", wat.PoolTCPCC, "tcp|tls|ws|wss|h2|h2c|grpc: TCP congestion control set on every pool socket, Linux (bbr ignores random loss, the kernel default cubic halves the window on it; 'system' keeps the kernel default; 2.4.18, before: system)")
-	nSess := flag.Int("sessions", 0, "client: independent sessions to the server (0 = auto-tuned from host CPU, 1-16), each with its own -conns pool, pacer and session id; new TCP streams go to the least loaded live one, UDP flows stick to one, /speedtest uses all; udp|tcp|tls|ws|wss|h2|h2c|grpc only (not icmp, bonded carriers or -reverse); each counts against the server's 32-session limit (client only, 2.3.0; server unchanged)")
+	nSess := flag.Int("sessions", 0, "client: independent sessions to the server (0 = auto-tuned from host CPU, 1-16), each with its own -conns pool, pacer and session id; new TCP streams go to the least loaded live one, UDP flows stick to one, /speedtest uses all; udp|tcp|tls|ws|wss|h2|h2c|grpc only (not icmp, bonded carriers or -reverse); each counts against the server's -max-sessions limit (client only, 2.3.0; server unchanged)")
+	maxSess := flag.Int("max-sessions", 128, "server: sessions admitted at once, 1-4096; every client -sessions slot counts one, and a handover runs two clients (3.3.5, before: fixed 32)")
+	maxConns := flag.Int("max-conns", maxPublicConns, "public TCP listeners: connections held at once in total, 1-1000000; one source IP holds at most 1024 or this, whichever is lower (3.3.5, before: fixed 4096)")
 	tlsCert := flag.String("tls-cert", "", "server, tls carrier: certificate file (empty = self-signed in memory)")
 	tlsKey := flag.String("tls-key", "", "server, tls carrier: private key file")
 	sni := flag.String("sni", "", "client, tls carrier: server name sent in the ClientHello")
@@ -346,6 +348,15 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	if *maxSess < 1 || *maxSess > 4096 {
+		fmt.Fprintf(os.Stderr, "-max-sessions must be 1..4096, got %d\n", *maxSess)
+		os.Exit(2)
+	}
+	if *maxConns < 1 || *maxConns > 1000000 {
+		fmt.Fprintf(os.Stderr, "-max-conns must be 1..1000000, got %d\n", *maxConns)
+		os.Exit(2)
+	}
+	publicConns.max, publicConns.maxPer = *maxConns, min(maxPublicPerIP, *maxConns)  // set before any listener starts
 	if *reverse && *fakeSNI != "" && (*fakeMode == "sum" || *fakeMode == "seqsum") { // 3.0.0
 		fmt.Fprintf(os.Stderr, "-fake-mode %s does not work with -reverse: checksum markers need a middlebox that drops the damaged segment; on an open reverse path the peer can take it and the tunnel dies. Use rst or synrst.\n", *fakeMode)
 		os.Exit(2)
@@ -802,7 +813,11 @@ func main() {
 		if *nSess != 1 {
 			log.Printf("-sessions is a client option, ignored on the server")
 		}
+		if totalsPath != "" { // needs -config, like the other state files: <config>.pn
+			keepPNFloor(strings.TrimSuffix(totalsPath, ".totals.json") + ".pn")
+		}
 		srv = wat.NewServer(cfg, raw)
+		srv.MaxSessions = *maxSess
 	} else {
 		pios := []wat.PacketIO{pio}
 		for k := 1; k < *nSess; k++ { // -sessions: more independent carriers to the same peer(s)
@@ -836,6 +851,9 @@ func main() {
 		tun = newTunnel(list)
 		tunRef.Store(tun) // -ech ladder's DoH hook (2.9.0)
 		if *dnsListen != "" {
+			if h, _, err := net.SplitHostPort(*dnsListen); err == nil && !loopbackHost(h) {
+				log.Printf("dns-listen %s is not a loopback address: anyone who can reach it can resolve names through the tunnel (an open resolver); bind it to 127.0.0.1 unless that is intended", *dnsListen)
+			}
 			dnsCloser, err := startDNSListener(*dnsListen, func() *tunnel { return tunRef.Load() }, log.Printf)
 			if err != nil {
 				log.Fatalf("dns-listen %s: %v", *dnsListen, err)
@@ -922,6 +940,11 @@ func main() {
 			mux.HandleFunc("/carrier/toggle", func(w http.ResponseWriter, r *http.Request) {
 				if crossSiteRequest(r) {
 					http.Error(w, "cross-site request refused", http.StatusForbidden)
+					return
+				}
+				if r.Method != http.MethodPost { // it changes state: a GET (a link, a prefetch) must not
+					w.Header().Set("Allow", http.MethodPost)
+					http.Error(w, "POST only", http.StatusMethodNotAllowed)
 					return
 				}
 				pStr := r.URL.Query().Get("path")
@@ -1031,17 +1054,25 @@ func main() {
 		}()
 	}
 	go func() {
-		var last wat.Stats
+		var last, prev wat.Stats // last: at the last printed line (its deltas); prev: at the previous tick
 		var lw linkWatch
 		for range time.Tick(10 * time.Second) {
 			st := stats()
 			if !server {
-				if note := lw.tick(10*time.Second, st.PktsIn, st.PktsOut-last.PktsOut, alive()); note != "" {
+				if note := lw.tick(10*time.Second, st.PktsIn, st.PktsOut-prev.PktsOut, alive()); note != "" {
 					log.Print(note)
 				}
 			}
+			var nSess int
+			if srv != nil {
+				nSess = srv.Sessions()
+			} else {
+				nSess = len(tun.list)
+			}
 			// M7 (3.3.0): noise filler is never acked and must not keep the quiet-idle stats line alive forever.
-			if quietStats(st, last) {
+			quiet := quietStats(st, prev, nSess)
+			prev = st
+			if quiet {
 				continue
 			}
 			log.Printf("stats: streams=%d rate=%.1fMB/s srtt=%v min=%v out=%d in=%d retrans=%d errs=%d ceiling=%.1fMB/s loss=%.1f%%", st.Streams, st.RateBps/1e6,
@@ -1342,13 +1373,19 @@ func loopbackMetricsAddr(addr string) (string, bool) {
 		}
 		return addr, false // unparseable: let ListenAndServe report it
 	}
-	if strings.EqualFold(host, "localhost") {
-		return addr, false
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+	if loopbackHost(host) {
 		return addr, false
 	}
 	return net.JoinHostPort("127.0.0.1", port), true
+}
+
+// loopbackHost reports whether host (no port, no brackets) is "localhost" or a loopback IP.
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // guard refuses a cross-site browser request before h runs; the metrics server is loopback-bound, but a page
@@ -1371,8 +1408,20 @@ func statsAliases(st wat.Stats) map[string]any {
 // crossSiteRequest reports whether r was started by a web page on another origin. The metrics server is
 // loopback-bound, but a browser page can still issue a plain GET at 127.0.0.1:port with no preflight.
 // Browsers send Sec-Fetch-Site (and an Origin header for CORS-relevant requests); curl/the manager send
-// neither, so absent headers stay allowed.
+// neither, so absent headers stay allowed. A Host that is not localhost or a loopback IP is refused too: a
+// DNS-rebinding page is same-origin with its own name, which then resolves to 127.0.0.1.
 func crossSiteRequest(r *http.Request) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	} else {
+		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	}
+	// 0.0.0.0/:: too: curl to a hand-edited "metrics: 0.0.0.0:N" (served on loopback) sends that Host, and a
+	// rebinding page always arrives with a name
+	if ip := net.ParseIP(host); !loopbackHost(host) && (ip == nil || !ip.IsUnspecified()) {
+		return true
+	}
 	if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" && s != "none" {
 		return true
 	}
@@ -1384,11 +1433,7 @@ func crossSiteRequest(r *http.Request) bool {
 	if err != nil {
 		return true // an unparseable Origin cannot be proven to be this host
 	}
-	if strings.EqualFold(u.Hostname(), "localhost") {
-		return false
-	}
-	ip := net.ParseIP(u.Hostname())
-	return ip == nil || !ip.IsLoopback()
+	return !loopbackHost(u.Hostname())
 }
 
 func serve(sess *wat.Session, lo, hi int, al *allow) {
@@ -1679,11 +1724,14 @@ func clampMaxPayload(explicit int, prof wat.Profile) (int, bool) {
 	return explicit, false
 }
 
-// quietStats reports whether the 10 s stats line has nothing to say: no non-noise packet moved in either direction and
-// no stream is live. Noise alone is deliberately quiet (M7: with -noise an otherwise idle tunnel otherwise logged a
-// "stats:" line every 10 s, ~8.6k lines/day, for traffic that is never acked).
-func quietStats(st, last wat.Stats) bool {
-	return st.PktsIn == last.PktsIn && st.PktsOut-st.NoiseSent == last.PktsOut-last.NoiseSent && st.Streams == 0
+// quietStats reports whether the 10 s stats line has nothing to say: no stream is live and the non-noise packets that
+// moved since the previous tick (prev) are no more than keepalives. Noise alone is deliberately quiet (M7: with -noise
+// an otherwise idle tunnel otherwise logged a "stats:" line every 10 s, ~8.6k lines/day, for traffic that is never
+// acked); so are keepalives, which moved PktsIn on every idle but connected tunnel (3.3.5).
+func quietStats(st, prev wat.Stats, sessions int) bool {
+	const keepalivePkts = 40 // per session per 10 s: an idle udp pair measured ~15 (in+out, both directions' pings and acks)
+	moved := st.PktsIn - prev.PktsIn + (st.PktsOut - st.NoiseSent) - (prev.PktsOut - prev.NoiseSent)
+	return st.Streams == 0 && moved <= uint64(keepalivePkts*max(sessions, 1))
 }
 
 // shapedBondCarrier returns the first shaped carrier in a bonded '+' list ("" when none). D7 (3.3.0): the F19 raw-tier

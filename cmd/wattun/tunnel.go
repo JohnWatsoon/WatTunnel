@@ -18,7 +18,7 @@ import (
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
 
-const maxSessions = 16 // the server admits 32 sessions per process; a handover runs two clients at once
+const maxSessions = 16 // the server admits -max-sessions (default 128) per process; a handover runs two clients at once
 
 type tunnel struct {
 	list []*wat.Session

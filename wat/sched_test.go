@@ -216,3 +216,17 @@ func TestStreamBulkyDecays(t *testing.T) {
 		t.Fatal("still bulk after going quiet")
 	}
 }
+
+// TestYoungSmallLatePacket: a small packet is hedged even deep into its stream; a large late one is not.
+func TestYoungSmallLatePacket(t *testing.T) {
+	s := &Session{streams: map[uint64]*Stream{4: {}}}
+	if !s.young(&sentPkt{frames: []frameRef{{sid: 4, off: 64 << 10, n: 300}}}) {
+		t.Fatal("a 300-byte frame at 64 KB must be young")
+	}
+	if s.young(&sentPkt{frames: []frameRef{{sid: 4, off: 64 << 10, n: 1200}}}) {
+		t.Fatal("a 1200-byte frame at 64 KB must not be young")
+	}
+	if !s.young(&sentPkt{frames: []frameRef{{sid: 4, off: 0, n: 1200}}}) {
+		t.Fatal("a large frame at the start of its stream must be young")
+	}
+}

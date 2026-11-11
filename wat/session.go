@@ -439,9 +439,10 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 	// A client run has its own random session id and with it its own key, so its packet numbers can start at 0 and two
 	// clients on one key (two slots) are independent sessions. A restarted SERVER meets the same session id again, so
 	// its packet numbers start at the wall clock in microseconds: a new run always continues above the old one (no
-	// nonce reuse, and the client does not mistake the new packets for replays of the old ones).
+	// nonce reuse, and the client does not mistake the new packets for replays of the old ones). SetPNFloor keeps that
+	// true when the wall clock steps back across a restart.
 	if cfg.Server {
-		s.nextPN = dirServerBit | uint64(time.Now().UnixMicro())&(1<<62-1)
+		s.nextPN = dirServerBit | max(uint64(time.Now().UnixMicro()), pnFloor.Load())&(1<<62-1)
 	}
 	s.acceptC = sync.NewCond(&s.mu)
 	if !cfg.Server {
@@ -1994,16 +1995,23 @@ func (s *Session) LastPN() uint64 {
 	return s.rxLargest
 }
 
+// pnFloor is the lowest packet number a new server session may start from (SetPNFloor).
+var pnFloor atomic.Uint64
+
+// SetPNFloor raises the start of new server sessions' packet numbers to at least floor (microseconds, like the wall
+// clock base). The binary persists a high-water mark across runs, so a clock stepped back never reuses a nonce.
+func SetPNFloor(floor uint64) { pnFloor.Store(floor) }
+
 // young: the packet is small, or carries only the first bytes of its streams (handshakes, requests, replies):
 // those are the ones a single random loss would hurt most, so they are sent twice on different lanes.
 func (s *Session) young(sp *sentPkt) bool {
-	n := 0
+	n, old := 0, false
 	for _, f := range sp.frames {
 		n += f.n
-		st := s.streams[f.sid]
-		if st == nil || f.off > 32<<10 {
+		if s.streams[f.sid] == nil {
 			return false
 		}
+		old = old || f.off > 32<<10
 	}
-	return n <= 330 || len(sp.frames) > 0
+	return n <= 330 || !old
 }

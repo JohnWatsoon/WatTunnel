@@ -62,22 +62,25 @@ func TestShapedBondCarrier(t *testing.T) {
 	}
 }
 
-// M7: noise-only traffic must not keep the 10 s stats line alive; real packets or a live stream must.
+// M7: noise-only traffic and keepalives must not keep the 10 s stats line alive; real traffic or a live stream must.
 func TestQuietStats(t *testing.T) {
 	base := wat.Stats{PktsIn: 10, PktsOut: 20, NoiseSent: 5}
 	for _, c := range []struct {
-		name  string
-		st    wat.Stats
-		quiet bool
+		name     string
+		st       wat.Stats
+		sessions int
+		quiet    bool
 	}{
-		{"nothing moved", base, true},
-		{"noise-only growth", wat.Stats{PktsIn: 10, PktsOut: 30, NoiseSent: 15}, true},
-		{"input moved", wat.Stats{PktsIn: 11, PktsOut: 20, NoiseSent: 5}, false},
-		{"non-noise output moved", wat.Stats{PktsIn: 10, PktsOut: 21, NoiseSent: 5}, false},
-		{"live stream", wat.Stats{PktsIn: 10, PktsOut: 20, NoiseSent: 5, Streams: 1}, false},
+		{"nothing moved", base, 1, true},
+		{"noise-only growth", wat.Stats{PktsIn: 10, PktsOut: 30, NoiseSent: 15}, 1, true},
+		{"keepalives only", wat.Stats{PktsIn: 18, PktsOut: 28, NoiseSent: 5}, 1, true},
+		{"input moved", wat.Stats{PktsIn: 51, PktsOut: 20, NoiseSent: 5}, 1, false},
+		{"non-noise output moved", wat.Stats{PktsIn: 10, PktsOut: 61, NoiseSent: 5}, 1, false},
+		{"keepalives of 4 sessions", wat.Stats{PktsIn: 90, PktsOut: 100, NoiseSent: 5}, 4, true},
+		{"live stream", wat.Stats{PktsIn: 10, PktsOut: 20, NoiseSent: 5, Streams: 1}, 1, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := quietStats(c.st, base); got != c.quiet {
+			if got := quietStats(c.st, base, c.sessions); got != c.quiet {
 				t.Fatalf("quietStats(%+v) = %v, want %v", c.st, got, c.quiet)
 			}
 		})

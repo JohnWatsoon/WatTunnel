@@ -465,15 +465,17 @@ step_stage4_install_binaries() {
   fi
 
   install -m 755 "$TMP/wattun" "$BIN.new" && mv -f "$BIN.new" "$BIN" || { ERRMSG="cannot write $BIN"; return 1; }
+  # No file capabilities: on a mode-755 binary they would give every local user raw sockets through wattun. The
+  # systemd unit grants what the service needs; clear any left by an older installer.
   if command -v setcap >/dev/null 2>&1; then
-    setcap cap_net_raw,cap_net_admin,cap_net_bind_service=+ep "$BIN" 2>/dev/null || true
+    setcap -r "$BIN" 2>/dev/null || true
   fi
 
   local now; now=$("$BIN" -version 2>/dev/null | awk '{print $2; exit}')
   [ "$now" = "$NEW" ] || { ERRMSG="$BIN reports ${now:-nothing} after installing $NEW"; return 1; }
 
   install -m 755 "$TMP/mgr" "$MGR.new" && mv -f "$MGR.new" "$MGR" || { ERRMSG="cannot write $MGR"; return 1; }
-  DETAIL="$NEW installed to ${BIN%/*} (capabilities enabled)"
+  DETAIL="$NEW installed to ${BIN%/*}"
 }
 
 # Stage 5: Systemd Service Unit Generation

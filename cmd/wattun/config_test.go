@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -150,6 +151,35 @@ func TestHotReloadServerAllow(t *testing.T) {
 	w.check()
 	if al.ok(400, 1, 65535) {
 		t.Fatal("empty ports list must deny everything")
+	}
+}
+
+// A failed listen is retried on the next poll even though the file did not change again.
+func TestHotReloadRetriesFailedListen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wat.yml")
+	writeCfg(t, path, "mode: client\nports:\n  - 100\n", 1)
+	c, _ := parseConfig(mustRead(t, path), knownKeys)
+	calls := 0
+	w := &cfgWatcher{path: path, known: knownKeys, onPorts: func(*fileConfig) []error {
+		calls++
+		if calls == 1 {
+			return []error{errors.New("port busy")}
+		}
+		return nil
+	}}
+	w.start(c)
+	writeCfg(t, path, "mode: client\nports:\n  - 200\n", 2)
+	w.check()
+	if calls != 1 || !w.retry {
+		t.Fatalf("after a failed listen: calls=%d retry=%v, want 1 true", calls, w.retry)
+	}
+	w.check() // file untouched
+	if calls != 2 || w.retry {
+		t.Fatalf("retry tick: calls=%d retry=%v, want 2 false", calls, w.retry)
+	}
+	w.check()
+	if calls != 2 {
+		t.Fatalf("an untouched file after a successful retry must not re-apply: calls=%d", calls)
 	}
 }
 

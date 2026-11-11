@@ -77,14 +77,15 @@ is expanded in [docs/TECHNICAL.md](docs/TECHNICAL.md), mainly in
   never forwarded.
 - **Operator surface.** `metrics` is rewritten to loopback (`127.0.0.1`) even when a public address is configured;
   `/stats`, `/ports`, `/speedtest`, pprof, `/quota/reset` and `/carrier/toggle` live there, and the handlers reject
-  cross-site browser requests (curl and the manager send no cross-site headers and are unaffected).
+  cross-site browser requests (curl and the manager send no cross-site headers and are unaffected) and any request
+  whose `Host` is not `localhost` or a loopback IP (DNS rebinding). `/carrier/toggle` changes state and takes POST only.
 - **Supply chain.** `install.sh` verifies the RSA signature over `SHA256SUMS` and the exact hash of the downloaded
   binary and manager before installing; `wattun-manager update` checks the installer against the signed release before
   running it as root. `WAT_ALLOW_UNSIGNED_MANAGER=1` and `WAT_ALLOW_UNSIGNED_UPDATE=1` are explicit downgrades, off by
   default. The installer keeps the previous binary as `wattun.prev` for rollback.
-- **Resource caps (denial-of-service bounds, not isolation).** The server admits 32 sessions per process; a pool holds
-  up to 64 connections; a client runs up to 16 sessions; public listeners accept 4096 connections in total and 256 per
-  source IP; UDP flows are bounded (4096 per listening port/session); streams have receive-window caps and a
+- **Resource caps (denial-of-service bounds, not isolation).** The server admits 128 sessions per process
+  (`-max-sessions`); a pool holds up to 64 connections; a client runs up to 16 sessions; public listeners accept 4096
+  connections in total (`-max-conns`) and 1024 per source IP; UDP flows are bounded (4096 per listening port/session); streams have receive-window caps and a
   process-wide memory budget; ports have optional rate limits and quotas.
 - **Host hardening from the installer.** The systemd unit runs with `NoNewPrivileges=yes`, a capability bounding set
   of `CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE`, `ProtectSystem=strict` with

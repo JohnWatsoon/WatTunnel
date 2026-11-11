@@ -41,6 +41,7 @@ type Server struct {
 
 	MaxSessions int
 	IdleTimeout time.Duration
+	muted       map[int]bool // bonded server: carriers muted by ToggleMute, applied to every session (guarded by mu)
 
 	// Client allowlist (W10, Config.AllowClients): a new session is admitted only from a source inside allow.
 	// deny is owned by run() (the single receive goroutine): one log line per rejected source per denyEvery, so a
@@ -227,7 +228,7 @@ func NewServer(cfg Config, raw RawIO) *Server {
 		cfg.Boot = binary.BigEndian.Uint64(b[:]) | 1
 	}
 	srv := &Server{cfg: cfg, raw: raw, sessions: map[uint64]*srvSess{}, New: make(chan *Session, 64),
-		stop: make(chan struct{}), free: make(chan []byte, 1024), MaxSessions: 32, retiredPN: map[uint64]uint64{},
+		stop: make(chan struct{}), free: make(chan []byte, 1024), MaxSessions: 128, retiredPN: map[uint64]uint64{},
 		// a raised -ping-every means longer silences between authenticated packets (see Alive)
 		IdleTimeout: max(45*time.Second, 3*cfg.PingEvery)}
 	if len(cfg.AllowClients) > 0 {
@@ -347,17 +348,25 @@ func (srv *Server) Clients() []ClientInfo {
 	return out
 }
 
-// ToggleMute toggles mute on the given path across active sessions.
+// ToggleMute toggles mute on the given path of a bonded server once, and applies the result to every live session;
+// sessions admitted later start with it too.
 func (srv *Server) ToggleMute(idx int) bool {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	muted := false
+	mr, ok := srv.raw.(*MultiRaw)
+	if !ok || idx < 0 || idx >= len(mr.raws) {
+		return false
+	}
+	if srv.muted == nil {
+		srv.muted = map[int]bool{}
+	}
+	srv.muted[idx] = !srv.muted[idx]
 	for _, ss := range srv.sessions {
-		if pm, ok := ss.s.IO().(PathMuter); ok {
-			muted = pm.ToggleMute(idx)
+		if m, ok := ss.s.IO().(*multiSubIO); ok {
+			m.ps.setMute(idx, srv.muted[idx])
 		}
 	}
-	return muted
+	return srv.muted[idx]
 }
 
 func addrIP(a net.Addr) string {
@@ -580,7 +589,11 @@ func (srv *Server) admit(hdr [hdrLen]byte, p []byte, src net.Addr) *srvSess {
 	}
 	var pio PacketIO = io
 	if mr, ok := srv.raw.(*MultiRaw); ok { // bonded server: reply on the best live carrier of this client
-		pio = newMultiSubIO(io, mr, cfg.Bond, admittingIdx)
+		m := newMultiSubIO(io, mr, cfg.Bond, admittingIdx)
+		for i, muted := range srv.muted {
+			m.ps.setMute(i, muted)
+		}
+		pio = m
 	}
 	// Direct TCP auto-promotion: if admitted on TCP/TLS pool and reliable, activate directMTU (16384)
 	if prof := profileOf(pio); prof.Reliable && prof.MaxMTU >= directMTU {

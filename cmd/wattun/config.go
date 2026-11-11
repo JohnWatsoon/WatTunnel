@@ -317,7 +317,11 @@ func (w *cfgWatcher) check() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	st, err := os.Stat(w.path)
-	if err != nil || (st.ModTime().Equal(w.mtime) && st.Size() == w.size) {
+	if err != nil {
+		return
+	}
+	changed := !st.ModTime().Equal(w.mtime) || st.Size() != w.size
+	if !changed && !w.retry { // a pending listen retry re-reads the unchanged file
 		return
 	}
 	b, err := os.ReadFile(w.path)
@@ -327,7 +331,9 @@ func (w *cfgWatcher) check() {
 	cfg, err := parseConfig(string(b), w.known)
 	w.mtime, w.size = st.ModTime(), st.Size() // a broken file is not re-parsed (and re-logged) until it changes again
 	if err != nil {
-		log.Printf("config %s: %v (keeping the previous config)", w.path, err)
+		if changed { // a retry tick must not re-log the same broken file
+			log.Printf("config %s: %v (keeping the previous config)", w.path, err)
+		}
 		return
 	}
 	now := flatten(cfg)

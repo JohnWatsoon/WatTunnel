@@ -8,10 +8,18 @@ import (
 
 func TestCrossSiteRequest(t *testing.T) {
 	for _, c := range []struct {
-		name, fetchSite, origin string
-		want                    bool
+		name, fetchSite, origin, host string
+		want                          bool
 	}{
 		{name: "no browser headers (curl, manager)", want: false},
+		{name: "localhost host", host: "localhost:19700", want: false},
+		{name: "loopback v6 host", host: "[::1]:19700", want: false},
+		{name: "loopback v6 host without port", host: "[::1]", want: false},
+		{name: "host without port", host: "127.0.0.1", want: false},
+		{name: "DNS-rebinding host", host: "evil.example:19700", fetchSite: "same-origin", want: true},
+		{name: "LAN host", host: "192.168.1.5:19700", want: true},
+		{name: "unspecified host (hand-edited metrics: 0.0.0.0)", host: "0.0.0.0:19700", want: false},
+		{name: "empty host", host: "-", want: true},
 		{name: "same-origin page", fetchSite: "same-origin", want: false},
 		{name: "direct navigation", fetchSite: "none", want: false},
 		{name: "cross-site page", fetchSite: "cross-site", want: true},
@@ -24,6 +32,12 @@ func TestCrossSiteRequest(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := httptest.NewRequest("GET", "/stats", nil)
+			r.Host = "127.0.0.1:19700"
+			if c.host == "-" {
+				r.Host = ""
+			} else if c.host != "" {
+				r.Host = c.host
+			}
 			if c.fetchSite != "" {
 				r.Header.Set("Sec-Fetch-Site", c.fetchSite)
 			}
@@ -49,6 +63,7 @@ func TestGuard(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := httptest.NewRequest("GET", "/stats", nil)
+			r.Host = "127.0.0.1:19700"
 			if c.fetchSite != "" {
 				r.Header.Set("Sec-Fetch-Site", c.fetchSite)
 			}

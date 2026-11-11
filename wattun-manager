@@ -533,7 +533,7 @@ state_file() { # name totals|quota -> resolved path, exactly where the engine re
 }
 state_files() { # name -> every state file the engine can leave for it (delete/reset cleanup), one per line
   local b; b=$(state_base "$1")
-  printf '%s\n' "$b.totals.json" "$b.totals.json.host" "$b.totals.json.tmp" "$b.quota.json" "$b.quota.json.tmp"
+  printf '%s\n' "$b.totals.json" "$b.totals.json.host" "$b.totals.json.tmp" "$b.quota.json" "$b.quota.json.tmp" "$b.pn" "$b.pn.tmp"
 }
 
 free_metrics_port() { # first free port from WAT_METRICS_BASE (default 19750, sandbox 19850); never 19700-19709 or 18990-18999
@@ -686,7 +686,8 @@ write_ports() { # name : replace the ports: block of NAME.yml with the array MAP
 set_value() { # name key value : set or add a top-level key
   local f="$CONF/$1.yml" tmp
   tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
-  grep -v "^$2:" "$f" | awk -v k="$2" -v v="$3" '/^(metrics|ports):/ && !d {print k ": " v; d=1} {print} END{if(!d) print k ": " v}' >"$tmp"
+  # key and value through the environment: awk -v would expand backslash escapes in the value
+  grep -v "^$2:" "$f" | K="$2" V="$3" awk '/^(metrics|ports):/ && !d {print ENVIRON["K"] ": " ENVIRON["V"]; d=1} {print} END{if(!d) print ENVIRON["K"] ": " ENVIRON["V"]}' >"$tmp"
   chmod 600 "$tmp"; mv -f "$tmp" "$f"
 }
 unset_value() { # same tmp+mv pattern as set_value: the 3 s hot-reloader must never see an interleaved rewrite
@@ -879,7 +880,8 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   tls-cert/tls-key: a custom certificate pair for the tls carrier (self-signed is the default)
 #   header: extra request headers for the ws/wss/h2/h2c/grpc carriers (repeatable; flag.Func, no UI row)
 #   keep-slow/tls-small-ch/hdr-mask/tcp-mimic/tls-pin/fake-ip/fake-split: anti-censor/diagnostic file-only keys
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask tcp-mimic tls-pin fake-ip fake-split'
+#   max-sessions/max-conns: denial-of-service caps (server sessions, public connections); the defaults fit (3.3.5)
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'
@@ -8049,7 +8051,7 @@ bonding_menu() { # name
         local pidx=$REPLY_V m=$(cfg "$n" metrics)
         if [ -n "$m" ]; then
           local res
-          res=$(curl -fs --noproxy '*' --max-time 3 "http://$m/carrier/toggle?path=$pidx" 2>/dev/null)
+          res=$(curl -fs -X POST --noproxy '*' --max-time 3 "http://$m/carrier/toggle?path=$pidx" 2>/dev/null)
           if [ -n "$res" ]; then
             ok "Toggled mute on path $pidx (muted: $(jget "$res" muted))."
           else
@@ -8703,31 +8705,39 @@ heal() { # restart Iran tunnels whose link is down or breaches SLA 3 checks in a
     [ "$(role "$n")" = Iran ] && systemctl is-enabled -q "${WAT_PREFIX}@$n" || continue
     f="$RUN/$n.down"
     b_f="$RUN/$n.sla_breach"
+    # no metrics: line means no /stats to judge by: never count it as down (it would restart every 3 checks forever)
+    if [ -z "$(cfg "$n" metrics)" ]; then rm -f "$f" "$RUN/$n.cycles" "$b_f" "$RUN/$n.sla_bytes"; continue; fi
     st=$(systemctl is-active "${WAT_PREFIX}@$n" 2>/dev/null)
-    if [ "$st" = inactive ]; then rm -f "$f" "$RUN/$n.cycles" "$b_f"; continue; fi # stopped on purpose: leave it alone
+    if [ "$st" = inactive ]; then rm -f "$f" "$RUN/$n.cycles" "$b_f" "$RUN/$n.sla_bytes"; continue; fi # stopped on purpose: leave it alone
     local s_raw; s_raw=$(stats "$n")
     local rx_age; rx_age=$(jget "$s_raw" last_rx_age_ms 2>/dev/null || echo -1)
     if [ "$(jget "$s_raw" alive)" = true ] && [ "$rx_age" -ge 0 ] && [ "$rx_age" -lt 35000 ]; then
       rm -f "$f" "$RUN/$n.cycles"
       sla_f="$CONF/$n.sla"
       if [ -f "$sla_f" ]; then
-        local min_r max_rtt max_loss rtt loss rate rate_kbps breached=0
+        local min_r max_rtt max_loss rtt loss tot now prev_tot prev_t act rate_kbps="" breached=0
         min_r=$(grep '^sla_min_rate_kbps=' "$sla_f" 2>/dev/null | cut -d= -f2)
         max_rtt=$(grep '^sla_max_rtt_ms=' "$sla_f" 2>/dev/null | cut -d= -f2)
         max_loss=$(grep '^sla_max_loss_pct=' "$sla_f" 2>/dev/null | cut -d= -f2)
         rtt=$(jget_flat "$s_raw" rtt_ms srtt_ms)
         loss=$(jget "$s_raw" loss_pct)
-        rate=$(jget "$s_raw" rate_bps) # float64 in /stats: take the integer part, never do bash arithmetic on "1.2e+07"
-        rate_kbps=$(awk -v r="${rate:-0}" 'BEGIN { printf "%d", r / 1000 }' 2>/dev/null)
-        [ -n "$rate_kbps" ] || rate_kbps=0
+        # measured throughput in kbit/s from the byte counters since the last check (rate_bps is the pacer's allowed
+        # rate in bytes/s, not traffic). awk does the math: the counters outgrow bash on 32-bit and may print as 1.2e+07.
+        tot=$(awk -v a="$(jget "$s_raw" bytes_in_total)" -v b="$(jget "$s_raw" bytes_out_total)" 'BEGIN { printf "%.0f", a + b }')
+        now=$(date +%s)
+        if [ -f "$RUN/$n.sla_bytes" ] && read -r prev_tot prev_t <"$RUN/$n.sla_bytes"; then # first run or a restart (counter went back): no verdict
+          rate_kbps=$(awk -v t="$tot" -v p="${prev_tot:-0}" -v n="$now" -v q="${prev_t:-0}" 'BEGIN { if (t >= p && n > q) printf "%d", (t - p) * 8 / 1000 / (n - q) }')
+        fi
+        echo "$tot $now" >"$RUN/$n.sla_bytes"
+        act=$(jget_flat "$s_raw" streams_total streams) # an idle tunnel is not slow: judge the rate only while streams are open
         [ -n "$max_rtt" ] && [ "$max_rtt" -gt 0 ] && [ "${rtt%.*}" -gt "$max_rtt" ] 2>/dev/null && breached=1
         [ -n "$max_loss" ] && [ "$max_loss" -gt 0 ] && [ "${loss%.*}" -gt "$max_loss" ] 2>/dev/null && breached=1
-        [ -n "$min_r" ] && [ "$min_r" -gt 0 ] && [ "$rate_kbps" -lt "$min_r" ] 2>/dev/null && breached=1
+        [ -n "$min_r" ] && [ "$min_r" -gt 0 ] && [ -n "$rate_kbps" ] && [ "${act:-0}" -gt 0 ] && [ "$rate_kbps" -lt "$min_r" ] 2>/dev/null && breached=1
         if [ "$breached" = 1 ]; then
           local b_cnt=$(( $(cat "$b_f" 2>/dev/null || echo 0) + 1 ))
           echo "$b_cnt" >"$b_f"
           if [ "$b_cnt" -ge 3 ]; then
-            logger -t wattun-heal "tunnel $n breached SLA for 3 consecutive checks (rtt=${rtt}ms, loss=${loss}%, rate=${rate_kbps}kbps), triggering re-evaluation"
+            logger -t wattun-heal "tunnel $n breached SLA for 3 consecutive checks (rtt=${rtt}ms, loss=${loss}%, rate=${rate_kbps:-?}kbps), triggering re-evaluation"
             rm -f "$b_f"
             touch "$RUN/$n.sla_triggered"
             if [ -f "$CONF/$n.auto" ]; then
@@ -8813,12 +8823,13 @@ update() { # [installer args...]
     say "  Sandbox $WAT_PREFIX: the update writes only $BIN, $imgr and $CONF (not /usr/local/bin, not wattun@.service)."
   fi
   before=$(bin_ver); mbefore=$(cksum <"${imgr:-$MGR}" 2>/dev/null)
-  tmp=$(mktemp /tmp/wattun-install.XXXXXX)
-  local sums=$tmp.SHA256SUMS sig=$tmp.SHA256SUMS.sig mkeep
-  trap 'rm -f ${tmp:+"$tmp"} ${tmp:+"$tmp.unit"} ${sums:+"$sums"} ${sig:+"$sig"} ${mkeep:+"$mkeep"}' EXIT # a kill mid-update must not leave root-owned temp files
+  local udir; udir=$(mktemp -d /tmp/wattun-update.XXXXXX) || { err "Cannot create a temporary directory"; return 1; }
+  tmp=$udir/install.sh # every temp file lives in one private (0700) directory: no guessable names in /tmp
+  local sums=$udir/SHA256SUMS sig=$udir/SHA256SUMS.sig mkeep=$udir/manager.keep
+  trap 'rm -rf ${udir:+"$udir"}' EXIT # a kill mid-update must not leave root-owned temp files
   [ "$SANDBOX" = 1 ] && ienv=(WAT_BIN="$BIN" WAT_MGR="$imgr" WAT_CONF="$CONF" WAT_UNIT="$tmp.unit" WAT_REQUIRE_SANDBOX=1) # the installer's unit file goes to a throwaway path
   # keep the current manager so a bad replacement can be undone
-  mkeep=$(mktemp /tmp/wattun-mgr.XXXXXX); cp -f "${imgr:-$MGR}" "$mkeep" 2>/dev/null || { rm -f "$mkeep"; mkeep=""; }
+  cp -f "${imgr:-$MGR}" "$mkeep" 2>/dev/null || { rm -f "$mkeep"; mkeep=""; }
   if [ "${WAT_ALLOW_UNSIGNED_UPDATE:-0}" = 1 ]; then
     warn "WAT_ALLOW_UNSIGNED_UPDATE=1: fetching the installer without a signature check (only if you trust the source)."
     # raw.githubusercontent.com caches main for minutes: resolve main to a commit sha and fetch everything by it
@@ -8830,7 +8841,7 @@ update() { # [installer args...]
     curl -fsSL --max-time 60 --retry 2 -o "$tmp" "${WAT_PROXY:-}$url"; rc=$?
     spin_stop
     if [ "$rc" -ne 0 ] || ! head -c 2 "$tmp" | grep -q '#!'; then
-      rm -f "$tmp" "$mkeep"; err "Update failed (could not download the installer). If GitHub is blocked: WAT_PROXY=https://ghproxy.net/ $SELF update"; return 1
+      rm -rf "$udir"; err "Update failed (could not download the installer). If GitHub is blocked: WAT_PROXY=https://ghproxy.net/ $SELF update"; return 1
     fi
     ok "Installer downloaded UNSIGNED${mref:+ (${mref:0:7})}"
   else
@@ -8852,7 +8863,7 @@ update() { # [installer args...]
       warn "openssl is required to check the release signature."
     fi
     if [ "$verified" != 1 ]; then
-      rm -f "$tmp" "$sums" "$sig" "$mkeep"
+      rm -rf "$udir"
       hint "The latest release must ship install.sh with SHA256SUMS and SHA256SUMS.sig signed by the pinned key."
       err "$refusal"; return 1
     fi
@@ -8861,13 +8872,13 @@ update() { # [installer args...]
   env ${ienv[@]+"${ienv[@]}"} WAT_FROM_MANAGER=1 bash "$tmp" "$@"; rc=$?
   rm -f "$tmp" "$tmp.unit" "$sums" "$sig"
   trap - EXIT
-  [ "$rc" -eq 0 ] || { rm -f "$mkeep"; err "The installer reported an error. Nothing was changed: still wattun ${before:-?}."; return 1; }
+  [ "$rc" -eq 0 ] || { rm -rf "$udir"; err "The installer reported an error. Nothing was changed: still wattun ${before:-?}."; return 1; }
   # self-check: in a sandbox the new manager must understand WAT_PREFIX, or it would drive the production paths
   if [ "$SANDBOX" = 1 ] && [ -n "$mkeep" ] && ! grep -q 'WAT_PREFIX' "${imgr:-$MGR}" 2>/dev/null; then
     install -m 755 "$mkeep" "${imgr:-$MGR}.new" && mv -f "${imgr:-$MGR}.new" "${imgr:-$MGR}"
-    rm -f "$mkeep"; err "The new manager has no sandbox (WAT_PREFIX) support; the previous manager was restored."; return 1
+    rm -rf "$udir"; err "The new manager has no sandbox (WAT_PREFIX) support; the previous manager was restored."; return 1
   fi
-  rm -f "$mkeep"
+  rm -rf "$udir"
   after=$(bin_ver)
   echo
   if [ -z "$after" ]; then err "$BIN does not run after the update. Roll back from the dashboard ([r])."; return 1
