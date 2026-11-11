@@ -701,7 +701,30 @@ chk "set_port_limit wrote limit" "$(grep -c '8080 rate=5MB quota=10GB' "$WAT_CON
 set_port_limit t_lim 8080 10MB 0
 chk "set_port_limit updated limit" "$(grep -c '8080 rate=10MB' "$WAT_CONF/t_lim.yml" || true)" "1"
 chk "set_port_limit preserved ports after update" "$(grep -c '^[[:space:]]*- 8080$' "$WAT_CONF/t_lim.yml" || true)" "1"
+# quota period (3.3.6): written with a quota only
+set_port_limit t_lim 9090 0 100GB month
+chk "set_port_limit wrote period" "$(grep -c '9090 quota=100GB period=month$' "$WAT_CONF/t_lim.yml" || true)" "1"
+set_port_limit t_lim 9090 5MB 0 month
+chk "set_port_limit drops period without a quota" "$(grep -c '9090 rate=5MB$' "$WAT_CONF/t_lim.yml" || true)" "1"
+v_quota_period month && v_quota_period - && echo "ok   v_quota_period accepts month and -" || { echo "FAIL v_quota_period"; fail=1; }
+expect_fail v_quota_period year
 rm -f "$WAT_CONF/t_lim.yml"
+# stats_flat + jget (3.3.6): the flat form, an older binary's JSON answer, and an empty flat answer
+( printf 'mode: client\nmetrics: 127.0.0.1:1\n' >"$WAT_CONF/t_fl.yml"
+  stats() { echo '{"carriers": [{"rtt_ms": 99}], "alive": true, "rtt_ms": 21.5, "sessions": 2}'; }
+  curl() { printf 'alive=true\nsrtt_ms=0\nrtt_ms=21.5\nsessions=2\nversion=3.3.6\n'; }
+  s=$(stats_flat t_fl)
+  chk "flat stats: alive" "$(jget "$s" alive)" "true"
+  chk "flat stats: exact key (srtt_ms is not rtt_ms)" "$(jget_flat "$s" rtt_ms srtt_ms)" "21.5"
+  chk "flat stats: missing key" "$(jget "$s" ms)" ""
+  curl() { stats; } # an older binary ignores ?flat=1 and answers JSON
+  s=$(stats_flat t_fl)
+  chk "flat stats: JSON answer read as JSON" "$(jget "$s" sessions)" "2"
+  curl() { return 7; } # flat request failed: one plain /stats
+  s=$(stats_flat t_fl)
+  chk "flat stats: empty answer falls back" "$(jget "$s" alive)" "true"
+  exit "$fail" ) || fail=1
+rm -f "$WAT_CONF/t_fl.yml"
 
 # 9. pe_from: the port rows of another tunnel can be copied, and the copy can move them off it
 cat >"$WAT_CONF/t_src.yml" <<'EOF'

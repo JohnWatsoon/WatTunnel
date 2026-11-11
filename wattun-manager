@@ -451,8 +451,19 @@ tunnels_all() { # every config, hidden extended listeners included (delete/unins
 cfg()     { sed -n "s/^$2:[[:space:]]*//p" "$CONF/$1.yml" 2>/dev/null | head -1 | tr -d "\"'"; }
 role()    { [ "$(cfg "$1" mode)" = server ] && echo Kharej || echo Iran; }
 stats()   { local m; m=$(cfg "$1" metrics); [ -n "$m" ] && curl -fs --noproxy '*' --max-time 2 "http://$m/stats"; }
+stats_flat() { # name : /stats?flat=1 (3.3.6), one key=value line per top-level value, for readers of aggregates only;
+  # an older binary answers it with the JSON, and an empty answer falls back to one plain /stats: jget reads both forms
+  local m v; m=$(cfg "$1" metrics); [ -n "$m" ] || return 1
+  v=$(curl -fs --noproxy '*' --max-time 2 "http://$m/stats?flat=1") && [ -n "$v" ] || v=$(stats "$1") || return 1
+  printf '%s' "$v"
+}
 ms()      { printf "%.1f" "${1:-0}"; }
-jget()    { grep -o "\"$2\": *[^,}]*" <<<"$1" | head -1 | sed 's/.*: *//; s/"//g'; }
+jget()    { # text key : a top-level value of a JSON object, or of stats_flat's key=value lines (text not starting with '{')
+  case $1 in
+    '{'*) grep -o "\"$2\": *[^,}]*" <<<"$1" | head -1 | sed 's/.*: *//; s/"//g' ;;
+    *) sed -n "s/^$2=//p" <<<"$1" | head -1 ;;
+  esac
+}
 jget_flat() { # json flat-key legacy-key: the flat aggregate first, fall back for older binaries
   local v; v=$(jget "$1" "$2"); [ -n "$v" ] || v=$(jget "$1" "$3"); printf '%s' "$v"
 }
@@ -696,11 +707,11 @@ unset_value() { # same tmp+mv pattern as set_value: the 3 s hot-reloader must ne
   grep -v "^$2:" "$f" >"$tmp"
   chmod 600 "$tmp"; mv -f "$tmp" "$f"
 }
-set_port_limit() { # name port rate quota
-  local f="$CONF/$1.yml" lp=$2 lr=$3 lq=$4 tmp
+set_port_limit() { # name port rate quota [period: day|week|month, 3.3.6; written only with a quota]
+  local f="$CONF/$1.yml" lp=$2 lr=$3 lq=$4 lpd=${5:-} tmp
   [ -f "$f" ] || return 1
   tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
-  awk -v lp="$lp" -v lr="$lr" -v lq="$lq" '
+  awk -v lp="$lp" -v lr="$lr" -v lq="$lq" -v lpd="$lpd" '
     BEGIN { in_lim=0; wrote=0 }
     /^limits:/ { in_lim=1; print; next }
     in_lim && /^[a-zA-Z0-9_-]+:/ {
@@ -708,6 +719,7 @@ set_port_limit() { # name port rate quota
         s = "  - " lp
         if (lr != "" && lr != "0") s = s " rate=" lr
         if (lq != "" && lq != "0") s = s " quota=" lq
+        if (lpd != "" && lq != "" && lq != "0") s = s " period=" lpd
         print s
         wrote = 1
       }
@@ -720,6 +732,7 @@ set_port_limit() { # name port rate quota
         s = "  - " lp
         if (lr != "" && lr != "0") s = s " rate=" lr
         if (lq != "" && lq != "0") s = s " quota=" lq
+        if (lpd != "" && lq != "" && lq != "0") s = s " period=" lpd
         print s
         wrote = 1
       }
@@ -732,6 +745,7 @@ set_port_limit() { # name port rate quota
         s = "  - " lp
         if (lr != "" && lr != "0") s = s " rate=" lr
         if (lq != "" && lq != "0") s = s " quota=" lq
+        if (lpd != "" && lq != "" && lq != "0") s = s " period=" lpd
         print s
       }
     }
@@ -881,7 +895,7 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   header: extra request headers for the ws/wss/h2/h2c/grpc carriers (repeatable; flag.Func, no UI row)
 #   keep-slow/tls-small-ch/hdr-mask/tcp-mimic/tls-pin/fake-ip/fake-split: anti-censor/diagnostic file-only keys
 #   max-sessions/max-conns: denial-of-service caps (server sessions, public connections); the defaults fit (3.3.5)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns'
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'
@@ -1341,6 +1355,7 @@ rev_sum_refused() { # name mode -> 0 (and an error) when the pair is refused
 }
 v_fake_ttl() { [ -z "$1" ] && return 0; [[ "$1" =~ ^[0-9]{1,3}$ ]] && [ "$1" -le 255 ] && return 0; err "Enter a hop count 1-255 (or leave empty for auto)."; return 1; }
 v_pool_rotate() { [ -z "$1" ] && return 0; case "$1" in 0|off) return 0 ;; esac; [[ "$1" =~ ^[0-9]+(ms|s|m|h)$ ]] && return 0; err "Enter a lifetime such as 90s, 30m or 4h (or 0 to turn it off)."; return 1; }
+v_quota_period() { case "${1,,}" in ''|-|none|day|week|month) return 0 ;; esac; err "Enter day, week or month (or - for a quota that never resets)."; return 1; }
 v_pool_bytes() { local s=${1,,}; [ -z "$s" ] && return 0; case "$s" in 0|0b|off) return 0 ;; esac; [[ "$s" =~ ^[0-9]+(\.[0-9]+)?(k|m|g|t)b?$ ]] && return 0; err "Enter a byte count such as 500MB, 4G or 300k (or 0 to turn it off)."; return 1; }
 v_sni_name() {
   local part parts
@@ -1836,7 +1851,7 @@ start_unit() { # name : with feedback
   if step "Starting ${WAT_PREFIX}@$1" unit_up "$1"; then return 0; fi
   err "Tunnel '$1' failed to start. Last log lines:"; journalctl -u "${WAT_PREFIX}@$1" -n 15 --no-pager -o cat 2>/dev/null; return 1
 }
-link_alive() { [ "$(jget "$(stats "$1")" alive)" = true ]; }
+link_alive() { [ "$(jget "$(stats_flat "$1")" alive)" = true ]; }
 wait_link() { # name seconds : spinner + progress bar while waiting for the link
   local n=$1 max=${2:-25} t0=$SECONDS el i=0 f
   if is_reverse "$n" && [ "$max" -lt 45 ]; then max=45; fi # Kharej reverse dialer backoff is up to 30 s
@@ -1844,7 +1859,7 @@ wait_link() { # name seconds : spinner + progress bar while waiting for the link
   while :; do
     if link_alive "$n"; then
       [ "$ANIM" = 1 ] && { printf '\r\e[K'; cur_show; }
-      LINK_RTT=$(ms "$(jget_flat "$(stats "$n")" rtt_ms srtt_ms)"); return 0
+      LINK_RTT=$(ms "$(jget_flat "$(stats_flat "$n")" rtt_ms srtt_ms)"); return 0
     fi
     el=$((SECONDS-t0))
     if [ "$el" -ge "$max" ] || ! systemctl is-active -q "${WAT_PREFIX}@$n" 2>/dev/null; then break; fi
@@ -2306,6 +2321,7 @@ wizard_kharej() {
   say "  Token ${GRY}(copy the whole line)${RST}"
   echo
   printf '%s%s%s\n\n' "$BOLD$YEL" "$(cat "$CONF/$name.token")" "$RST"
+  token_qr "$(cat "$CONF/$name.token")"
   step_diagram 2
   echo
   say "  Next, on the Iran server: run ${CYN}${SELF}${RST}, press $(key_label n), choose Iran, paste the token."
@@ -3588,6 +3604,7 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   say "  Token for the Iran server ${GRY}(copy the whole line)${RST}"
   echo
   printf '%s%s%s\n\n' "$BOLD$YEL" "$(cat "$CONF/$name.token")" "$RST"
+  token_qr "$(cat "$CONF/$name.token")"
   say "  On Iran: run ${CYN}${SELF}${RST}, press $(key_label n), paste it. Iran tests each type and picks one."
   hint "Show it again: $SELF token $name. It contains the key: share it only privately."
   [ "$NONINTERACTIVE" = 1 ] && printf 'TUNNEL=%s\nTOKEN=%s\n' "$name" "$(cat "$CONF/$name.token")"
@@ -3980,7 +3997,7 @@ other_kharej_live() { # auto name -> rc 0 when another (non-test) Kharej tunnel 
   for t in $(tunnels); do
     [ "$t" = "$1" ] || [ "$t" = "$1-r" ] || [ "$(role "$t")" != Kharej ] && continue
     systemctl is-active -q "${WAT_PREFIX}@$t" 2>/dev/null || continue
-    s=$(stats "$t") || continue
+    s=$(stats_flat "$t") || continue
     [ "$(jget "$s" sessions)" -gt 0 ] 2>/dev/null && return 0
   done
   return 1
@@ -5818,7 +5835,7 @@ icmp_path_report() { # name host
     if [ "$loss" -le 25 ]; then ok_sizes="$ok_sizes $sz"; maxok=$sz; ok "$sz bytes: answered (loss ${loss}%)"
     else bad_sizes="$bad_sizes $sz"; err "$sz bytes: no answer (loss ${loss}%)"; fi
   done
-  s=$(stats "$n"); pin=$(jget "$s" pkts_in); pout=$(jget "$s" pkts_out); pin=${pin:-0}; pout=${pout:-0}
+  s=$(stats_flat "$n"); pin=$(jget "$s" pkts_in); pout=$(jget "$s" pkts_out); pin=${pin:-0}; pout=${pout:-0}
   local_icmp_check - "$(cfg "$n" icmp-type)"
   echo
   say "  ${BOLD}What this means${RST}"
@@ -6047,7 +6064,7 @@ speed_test() { # name [mb]
     r=$(curl -fs --noproxy '*' --max-time 200 "http://$m/speedtest?dir=$d&mb=$mb")
     spin_stop
     if [ -z "$r" ]; then
-      s=$(stats "$n")
+      s=$(stats_flat "$n")
       if [ -z "$s" ]; then err "$label: tunnel '$n' is not running."
       else
         v=$(jget "$s" version)
@@ -6258,8 +6275,12 @@ tunnel_card() {
   fi
   box_bot
 }
+token_qr() { # token : the token as a terminal QR code too, on a tty when qrencode is installed (nothing otherwise)
+  if [ "$IS_TTY" = 1 ] && command -v qrencode >/dev/null 2>&1; then qrencode -t ANSIUTF8 -- "$1"; fi
+  return 0
+}
 show_token() {
-  if [ -f "$CONF/$1.token" ]; then refresh_token "$1"; printf '%s%s%s\n' "$BOLD$YEL" "$(cat "$CONF/$1.token")" "$RST"
+  if [ -f "$CONF/$1.token" ]; then refresh_token "$1"; printf '%s%s%s\n' "$BOLD$YEL" "$(cat "$CONF/$1.token")" "$RST"; token_qr "$(cat "$CONF/$1.token")"
   else err "No token stored for '$1' (tokens exist only on Kharej tunnels)."; return 1; fi
   warn "The token contains the key. Share it only over a private channel."
 }
@@ -6841,7 +6862,7 @@ anticensor_test() {
   spin_start "Waiting for the link"
   local wait_sec=${ANTICENSOR_TEST_WAIT:-6}
   for ((i=0; i<wait_sec; i++)); do
-    s=$(stats "$n" 2>/dev/null)
+    s=$(stats "$n" 2>/dev/null) # JSON: filter_profile below is an object, which the flat form leaves out
     if [ "$(jget "$s" alive)" = true ]; then
       alive=true; break
     fi
@@ -8268,13 +8289,14 @@ limits_menu() { # name
         local pobj
         while read -r pobj; do
           [ -n "$pobj" ] || continue
-          local lp qu ql qe
+          local lp qu ql qe qp qr
           lp=$(jget "$pobj" port)
+          qp=$(jget "$pobj" quota_period); qr=$(jget "$pobj" quota_resets_at)
           qu=$(jget "$pobj" quota_used)
           ql=$(jget "$pobj" quota_limit)
           qe=$(jget "$pobj" quota_exceeded)
           if [ "${ql:-0}" -gt 0 ]; then
-            say "    $lp  $(human "$qu") of $(human "$ql")$([ "$qe" = true ] && printf '  %s✘ used up%s' "$RED" "$RST")"
+            say "    $lp  $(human "$qu") of $(human "$ql")$([ "$qe" = true ] && printf '  %s✘ used up%s' "$RED" "$RST")$([ -n "$qp" ] && [ "${qr:-0}" -gt 0 ] 2>/dev/null && printf '  %sper %s, resets %s%s' "$GRY" "$qp" "$(date -d "@$qr" '+%Y-%m-%d %H:%M' 2>/dev/null)" "$RST")"
           fi
         done < <(grep -o '{[^{}]*}' <<<"$prt_json")
       fi
@@ -8297,8 +8319,12 @@ limits_menu() { # name
         ask_ok "Rate limit (e.g. 5MB, 300k, 0 = none)" "0" v_pool_bytes || continue
         local lrate=$REPLY_V
         ask_ok "Quota limit (e.g. 100GB, 500MB, 0 = none)" "0" v_pool_bytes || continue
-        local lquota=$REPLY_V
-        set_port_limit "$n" "$lport" "$lrate" "$lquota"
+        local lquota=$REPLY_V lper=''
+        if [ -n "$lquota" ] && [ "$lquota" != 0 ] && [ "$(bin_ver_ok 3.3.6)" = 1 ]; then # an older wattun refuses period=
+          ask_ok "Reset the quota every day, week or month (- = never)" "-" v_quota_period || continue
+          case "${REPLY_V,,}" in day|week|month) lper=${REPLY_V,,} ;; esac
+        fi
+        set_port_limit "$n" "$lport" "$lrate" "$lquota" "$lper"
         ok "Saved limit for port $lport. Hot-reloaded automatically by engine."
         pause ;;
       r)
@@ -8709,7 +8735,7 @@ heal() { # restart Iran tunnels whose link is down or breaches SLA 3 checks in a
     if [ -z "$(cfg "$n" metrics)" ]; then rm -f "$f" "$RUN/$n.cycles" "$b_f" "$RUN/$n.sla_bytes"; continue; fi
     st=$(systemctl is-active "${WAT_PREFIX}@$n" 2>/dev/null)
     if [ "$st" = inactive ]; then rm -f "$f" "$RUN/$n.cycles" "$b_f" "$RUN/$n.sla_bytes"; continue; fi # stopped on purpose: leave it alone
-    local s_raw; s_raw=$(stats "$n")
+    local s_raw; s_raw=$(stats_flat "$n")
     local rx_age; rx_age=$(jget "$s_raw" last_rx_age_ms 2>/dev/null || echo -1)
     if [ "$(jget "$s_raw" alive)" = true ] && [ "$rx_age" -ge 0 ] && [ "$rx_age" -lt 35000 ]; then
       rm -f "$f" "$RUN/$n.cycles"

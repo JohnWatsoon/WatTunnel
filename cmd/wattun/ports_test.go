@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -221,7 +222,7 @@ func TestQuotaPersistsAcrossRestart(t *testing.T) {
 
 func TestLimitsConfigAndHotReload(t *testing.T) {
 	c, err := parseConfig("mode: client\nports:\n  - 7001\nlimits:\n  - 7001 rate=5MB quota=100GB\n  - 7002 rate=300k\n", knownKeys)
-	if err != nil || len(c.Limits) != 2 || c.Limits[0] != (limitSpec{7001, 5_000_000, 100_000_000_000}) || c.Limits[1].Rate != 300_000 {
+	if err != nil || len(c.Limits) != 2 || c.Limits[0] != (limitSpec{Port: 7001, Rate: 5_000_000, Quota: 100_000_000_000}) || c.Limits[1].Rate != 300_000 {
 		t.Fatalf("parse: %+v %v", c, err)
 	}
 	for _, bad := range []string{"limits:\n  - 7001 rate=abc\n", "limits:\n  - 7001 speed=1\n", "limits:\n  - x\n"} {
@@ -297,5 +298,74 @@ func TestTotalsResetOnAnotherMachine(t *testing.T) {
 	m := b.snapshot("c")["20001"].(map[string]any)
 	if m["bytes_up_total"] != int64(0) || m["bytes_down_total"] != int64(0) {
 		t.Fatalf("per-port totals from another machine: %v", m)
+	}
+}
+
+// TestQuotaPeriod covers period=: parsing, the calendar starts, rollover on an injected clock and the state file,
+// including an old numbers-only file and an old loader reading the new one (3.3.6).
+func TestQuotaPeriod(t *testing.T) {
+	if ls, err := parseLimitItem("7001 quota=1GB period=month"); err != nil || ls.Period != "month" || ls.Quota != 1e9 {
+		t.Fatalf("parse: %+v %v", ls, err)
+	}
+	for _, bad := range []string{"7001 quota=1GB period=year", "7001 rate=1MB period=day"} {
+		if _, err := parseLimitItem(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	loc := time.FixedZone("x", 3*3600+1800)
+	wed := time.Date(2026, 11, 11, 15, 4, 0, 0, loc) // a Wednesday
+	for _, c := range []struct {
+		per         string
+		start, next time.Time
+	}{
+		{"day", time.Date(2026, 11, 11, 0, 0, 0, 0, loc), time.Date(2026, 11, 12, 0, 0, 0, 0, loc)},
+		{"week", time.Date(2026, 11, 9, 0, 0, 0, 0, loc), time.Date(2026, 11, 16, 0, 0, 0, 0, loc)},
+		{"month", time.Date(2026, 11, 1, 0, 0, 0, 0, loc), time.Date(2026, 12, 1, 0, 0, 0, 0, loc)},
+	} {
+		if s, n := periodStart(wed, c.per), periodNext(wed, c.per); !s.Equal(c.start) || !n.Equal(c.next) {
+			t.Errorf("%s: start %v next %v", c.per, s, n)
+		}
+	}
+
+	// an old state file (numbers only) still loads; the used-up port reopens when the month rolls over
+	path := filepath.Join(t.TempDir(), "q.json")
+	if err := os.WriteFile(path, []byte(`{"7001":2000000000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := newRegistry()
+	r.loadQuota(path)
+	r.applyLimits([]limitSpec{{Port: 7001, Quota: 1e9, Period: "month"}})
+	p := r.get("s", 7001)
+	if r.rollPeriods(wed) || !p.exceeded() {
+		t.Fatal("first sight of a period must only record its start")
+	}
+	if r.rollPeriods(wed.AddDate(0, 0, 10)) || !p.exceeded() {
+		t.Fatal("same month: no reset")
+	}
+	if !r.rollPeriods(time.Date(2026, 12, 1, 0, 0, 1, 0, loc)) || p.exceeded() || p.qused.Load() != 0 {
+		t.Fatal("new month: usage must reset")
+	}
+	p.qused.Store(5)
+	r.save()
+
+	// the new file round-trips, and an old loader (map[string]int64, numeric keys only) still reads it
+	b, _ := os.ReadFile(path)
+	var old map[string]int64
+	if err := json.Unmarshal(b, &old); err != nil || old["7001"] != 5 {
+		t.Fatalf("old loader: %v %s", err, b)
+	}
+	r2 := newRegistry()
+	r2.loadQuota(path)
+	if r2.pstart[7001] != time.Date(2026, 12, 1, 0, 0, 0, 0, loc).Unix() || r2.loaded[7001] != 5 {
+		t.Fatalf("round trip: %v %v", r2.pstart, r2.loaded)
+	}
+	// a restart after the period ended resets on the first tick, even with no connection on the port yet
+	r2.applyLimits([]limitSpec{{Port: 7001, Quota: 1e9, Period: "month"}})
+	if !r2.rollPeriods(time.Date(2027, 1, 2, 0, 0, 0, 0, loc)) || r2.loaded[7001] != 0 || r2.get("c", 7001).qused.Load() != 0 {
+		t.Fatal("rollover while stopped not applied")
+	}
+	snap := r2.snapshot("c")["7001"].(map[string]any)
+	if snap["quota_period"] != "month" || snap["quota_resets_at"].(int64) <= time.Now().Unix() {
+		t.Fatalf("snapshot: %v", snap)
 	}
 }

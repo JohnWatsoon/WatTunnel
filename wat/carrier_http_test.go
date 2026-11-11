@@ -2,8 +2,11 @@ package wat
 
 import (
 	"crypto/x509"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -315,6 +318,38 @@ func TestHTTPCamouflageNginx(t *testing.T) {
 	defer res404.Body.Close()
 	if res404.StatusCode != 404 || res404.Header.Get("Server") != "nginx" {
 		t.Fatalf("scanner path should return 404 with Server: nginx, got status %d", res404.StatusCode)
+	}
+}
+
+// TestHTTPDecoy: with -decoy every request that is not a tunnel request, the tunnel path without the upgrade
+// headers included, is proxied to the decoy origin with its Host and no X-Forwarded-For (3.3.6).
+func TestHTTPDecoy(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Forwarded-For") != "" {
+			t.Errorf("X-Forwarded-For leaked: %q", r.Header.Get("X-Forwarded-For"))
+		}
+		io.WriteString(w, "decoy "+r.Host+" "+r.URL.Path)
+	}))
+	defer origin.Close()
+	if _, err := NewWSPoolServer("127.0.0.1:0", HTTPServerOptions{Decoy: "ftp://x"}); err == nil {
+		t.Fatal("accepted a non-http decoy")
+	}
+	ps, err := NewWSPoolServer("127.0.0.1:0", HTTPServerOptions{Path: "/tunnel-secret", Decoy: origin.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ps.Close()
+	oh := strings.TrimPrefix(origin.URL, "http://")
+	for _, p := range []string{"/unknown-scanner-path", "/tunnel-secret"} {
+		res, err := http.Get("http://" + ps.Addr().String() + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if want := "decoy " + oh + " " + p; res.StatusCode != 200 || string(b) != want || res.Header.Get("Server") == "nginx" {
+			t.Fatalf("%s: status %d body %q, want %q", p, res.StatusCode, b, want)
+		}
 	}
 }
 

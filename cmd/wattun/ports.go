@@ -24,7 +24,33 @@ import (
 
 type limitSpec struct {
 	Port        int
-	Rate, Quota int64 // bytes/s per direction, bytes up+down; 0 = unlimited
+	Rate, Quota int64  // bytes/s per direction, bytes up+down; 0 = unlimited
+	Period      string // quota reset: "day", "week" or "month" (local clock, 3.3.6); "" = never
+}
+
+// periodStart is the start of the quota period holding t, in t's location: 00:00 of the day, Monday 00:00, or 00:00
+// of the 1st of the month.
+func periodStart(t time.Time, period string) time.Time {
+	d := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	switch period {
+	case "week":
+		return d.AddDate(0, 0, -((int(d.Weekday()) + 6) % 7))
+	case "month":
+		return d.AddDate(0, 0, 1-d.Day())
+	}
+	return d
+}
+
+// periodNext is the start of the quota period after the one holding t.
+func periodNext(t time.Time, period string) time.Time {
+	s := periodStart(t, period)
+	switch period {
+	case "week":
+		return s.AddDate(0, 0, 7)
+	case "month":
+		return s.AddDate(0, 1, 0)
+	}
+	return s.AddDate(0, 0, 1)
 }
 
 // parseSize parses "5MB", "1.5GB", "300k", "1000" (decimal units: 1 MB = 1e6 bytes).
@@ -68,7 +94,14 @@ func parseLimitItem(s string) (limitSpec, error) {
 	for _, kvs := range f[1:] {
 		k, v, ok := strings.Cut(kvs, "=")
 		if !ok {
-			return ls, fmt.Errorf("want rate=SIZE or quota=SIZE, got %q", kvs)
+			return ls, fmt.Errorf("want rate=SIZE, quota=SIZE or period=day|week|month, got %q", kvs)
+		}
+		if k == "period" {
+			if v != "day" && v != "week" && v != "month" {
+				return ls, fmt.Errorf("bad period %q (day, week or month)", v)
+			}
+			ls.Period = v
+			continue
 		}
 		n, err := parseSize(v)
 		if err != nil {
@@ -82,6 +115,9 @@ func parseLimitItem(s string) (limitSpec, error) {
 		default:
 			return ls, fmt.Errorf("unknown limit key %q", k)
 		}
+	}
+	if ls.Period != "" && ls.Quota == 0 {
+		return ls, fmt.Errorf("period=%s needs a quota=SIZE", ls.Period)
 	}
 	return ls, nil
 }
@@ -295,6 +331,7 @@ type registry struct {
 	stats  map[string]*portStat // "c:20001" / "s:20001"
 	limits map[int]limitSpec
 	loaded map[int]int64 // quota usage read from the state file
+	pstart map[int]int64 // unix start of the current quota period, per port with a period (state file "period:PORT")
 	path   string        // quota state file ("" = no persistence)
 
 	// Lifetime totals (2.5.0): bytes and connections per port and the session's wire bytes, kept across restarts in
@@ -310,7 +347,7 @@ type registry struct {
 var portReg = newRegistry()
 
 func newRegistry() *registry {
-	return &registry{stats: map[string]*portStat{}, limits: map[int]limitSpec{}, loaded: map[int]int64{}}
+	return &registry{stats: map[string]*portStat{}, limits: map[int]limitSpec{}, loaded: map[int]int64{}, pstart: map[int]int64{}}
 }
 
 func (r *registry) get(side string, port int) *portStat {
@@ -346,6 +383,39 @@ func (r *registry) applyLimits(ls []limitSpec) {
 	for _, p := range r.stats {
 		p.setLimit(r.limits[p.port])
 	}
+	for p := range r.pstart {
+		if r.limits[p].Period == "" {
+			delete(r.pstart, p)
+		}
+	}
+}
+
+// rollPeriods starts a new quota period on every port whose period rolled over by now: its used bytes go to zero and
+// a used-up port reopens. A port seen for the first time only records the current start. True when one rolled.
+func (r *registry) rollPeriods(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rolled := false
+	for port, ls := range r.limits {
+		if ls.Period == "" {
+			continue
+		}
+		cur := periodStart(now, ls.Period).Unix()
+		if old, ok := r.pstart[port]; ok && old < cur {
+			delete(r.loaded, port)
+			for _, p := range r.stats {
+				if p.port == port {
+					p.qused.Store(0)
+				}
+			}
+			log.Printf("port %d: new %s quota period, usage reset", port, ls.Period)
+			rolled = true
+		} else if ok {
+			continue
+		}
+		r.pstart[port] = cur
+	}
+	return rolled
 }
 
 func (r *registry) loadQuota(path string) {
@@ -354,6 +424,7 @@ func (r *registry) loadQuota(path string) {
 	if err != nil {
 		return
 	}
+	// period starts sit in the same map as "period:PORT" keys: a pre-3.3.6 loader skips keys that are not a number
 	var m map[string]int64
 	if json.Unmarshal(b, &m) != nil {
 		log.Printf("quota state %s: unreadable, starting from zero", path)
@@ -363,6 +434,8 @@ func (r *registry) loadQuota(path string) {
 	for k, v := range m {
 		if p, err := strconv.Atoi(k); err == nil {
 			r.loaded[p] = v
+		} else if p, err := strconv.Atoi(strings.TrimPrefix(k, "period:")); err == nil && strings.HasPrefix(k, "period:") {
+			r.pstart[p] = v
 		}
 	}
 	r.mu.Unlock()
@@ -463,6 +536,9 @@ func (r *registry) save() {
 			m[strconv.Itoa(p.port)] = p.qused.Load()
 		}
 	}
+	for p, v := range r.pstart {
+		m["period:"+strconv.Itoa(p)] = v
+	}
 	r.mu.Unlock()
 	b, _ := json.Marshal(m)
 	tmp := r.path + ".tmp"
@@ -503,6 +579,9 @@ func (r *registry) run(saveEvery time.Duration) {
 }
 
 func (r *registry) tick() {
+	if r.rollPeriods(time.Now()) {
+		r.save()
+	}
 	r.mu.Lock()
 	ps := make([]*portStat, 0, len(r.stats))
 	for _, p := range r.stats {
@@ -531,9 +610,14 @@ func (r *registry) snapshot(side string) map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := map[string]any{}
+	now := time.Now()
 	for k, p := range r.stats {
 		if !strings.HasPrefix(k, side+":") {
 			continue
+		}
+		per, resets := r.limits[p.port].Period, int64(0)
+		if per != "" {
+			resets = periodNext(now, per).Unix()
 		}
 		out[strconv.Itoa(p.port)] = map[string]any{
 			"bytes_up": p.bytesUp.Load(), "bytes_down": p.bytesDown.Load(),
@@ -546,6 +630,7 @@ func (r *registry) snapshot(side string) map[string]any {
 			"peak_bps_up": p.peakUp.Load(), "peak_bps_down": p.peakDown.Load(),
 			"rate_limit_bps": p.rateLim.Load(), "quota_limit": p.quota.Load(),
 			"quota_used": p.qused.Load(), "quota_exceeded": p.exceeded(),
+			"quota_period": per, "quota_resets_at": resets,
 		}
 	}
 	return out

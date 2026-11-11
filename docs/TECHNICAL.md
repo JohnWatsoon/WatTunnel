@@ -1624,7 +1624,7 @@ ports:
 - `key: value` per line. The keys are the flag names.
 - `#` starts a comment. Values may be in "double" or 'single' quotes.
 - Two lists, `ports:` and `limits:`, both hot-reloaded. `ports:` items are `- PORT`, `- PORT/udp`, `- LISTEN:TARGET`
-  or `- LISTEN:TARGET/udp`; `limits:` items are `- TARGET rate=MBPS quota=SIZE` (see "Per-port traffic and limits").
+  or `- LISTEN:TARGET/udp`; `limits:` items are `- TARGET rate=MBPS quota=SIZE [period=day|week|month]` (see "Per-port traffic and limits").
 - Unknown keys, duplicate keys and bad values stop the start with a line number. Only `header` may repeat.
 - Command-line flags win over the file.
 - The `ports:` list is **hot-reloaded** every 3 seconds. On the client it opens and closes listeners. On the server it
@@ -1678,7 +1678,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `pool-rotate-bytes` | 0 (off) | client, or the dialing server of a `reverse` tunnel since 3.0.2 (pool carriers: tcp, tls, ws, wss, h2, grpc) | With or instead of `pool-rotate`: also recycle each healthy pool connection after this many bytes handed to its socket (`500MB`, `4G`, `300k`; decimal units, 1 MB = 10^6). Jittered +/-25 % like the time axis; whichever limit hits first recycles, so the byte axis does not betray the time axis's jitter. 0 = off. Since 2.8.1. |
 | `mtu` | 0 (carrier default) | both | Datagram size cap, including header and tag. 256-1400 for icmp, udp, gre and ipip; up to 16384 for the pool carriers; a bond uses the smallest bound of its legs. |
 | `win-max` | 0 (auto) | both | Cap of the receive window per stream in MB, 4 to 64 (3.0.3). Windows are receiver-driven, so the value bounds what the peer's sender buffers per stream. 0 uses the host tier (4 MB lean, 16 standard, 32 high-performance); the fixed cap before 3.0.3 was 16 MB. |
-| `mem-budget` | 0 (eighth of RAM) | both | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0). See [3.2.0](#320-fast-by-default-bounded-memory-greipip). |
+| `mem-budget` | 0 (eighth of RAM) | both | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0). Since 3.3.6 the default (and the RAM/3 Go memory limit when `GOMEMLIMIT` is unset) is divided by the number of `*.yml` files in the config's directory, one per tunnel on the host, with floors of 64 MB (budget) and 256 MB (limit, never above RAM/3); a startup line says so when there are several. An explicit value or `GOMEMLIMIT` is used as given. See [3.2.0](#320-fast-by-default-bounded-memory-greipip). |
 | `max-mbps` | 0 (carrier default) | both | Pacing ceiling, MB/s per direction, per session. 0 = 16 when `icmp` is among the carriers, 1250 (10 Gbit, i.e. no practical cap) for udp, tcp, tls, ws, wss, h2, h2c and grpc since 2.4.18 (200 from 2.3.0; before that 16 for every carrier; the server's value caps the download). See "ICMP path limits and pacing". |
 | `tcp-cc` | `bbr` | both | Since 2.4.18, Linux. TCP congestion control set on every pool socket (tcp, tls, ws, wss, h2, h2c, grpc). BBR does not back off on random loss; the kernel default (cubic) halves its window on every lost segment. `system` keeps the kernel default. Each end sets it for what it sends. `tcp_cc` in `/stats` shows what the kernel accepted (falls back to the default if the `tcp_bbr` module is missing). |
 | `sessions` | 0 (auto) | client | Independent sessions to the server, 1 to 16 (2.3.0, client only; the server is unchanged). 0 picks 1 on a lean host and 2-4 on a host with 2+ CPUs and enough RAM (3.1.0), and always 1 for `icmp`, bonds and `reverse`; older versions used 1. See "Several sessions". |
@@ -1702,6 +1702,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `sni` | | client (server with `reverse`) | Server name in the TLS ClientHello, set on whichever side dials. |
 | `tls-pin` | | client (server with `reverse`) | Hex sha256 of the listener's certificate. Also makes the dialing side check it. Without it the dialer does not verify the certificate. |
 | `path` | `/wat` | both | URL path for ws, wss, h2, h2c, grpc (grpc: service name). Same on both ends, also with `reverse`. The manager picks a random `/api/...` path for each new tunnel (3.0.1); the program default stays `/wat`. |
+| `decoy` | | listener (server, client with `reverse`) | 3.3.6, one end only. `http://` or `https://` URL. Every request to a ws, wss, h2, h2c or grpc listener that is not a tunnel request (any other path, or the tunnel path without the upgrade/POST headers) is reverse-proxied to it instead of answered with the built-in nginx pages: Host set to the decoy's host, no `X-Forwarded-For`, 10 s to connect and to the response headers, the body streamed. A bad URL stops the start; on a side that does not listen with an HTTP carrier it is ignored with one warning. File-only in the manager. |
 | `host` | = `peer` | client (server with `reverse`) | Host header / authority, set on whichever side dials. |
 | `plain` | false | both (dialer with `reverse`) | grpc without TLS. |
 | `header` | | client (server with `reverse`) | Extra request header `Name: value` for the ws, wss, h2, h2c and grpc carriers. Repeatable; file-only (no manager row). |
@@ -1852,7 +1853,7 @@ Every flag can also be a config key. Flags win over the file.
 | `-pool-rotate-bytes N` | `0` (off) | With or instead of `-pool-rotate`: also recycle after this many bytes (`500MB`, `4GB`, `300k`), jittered ±25%; 0 = off (2.8.1; `reverse` server since 3.0.2). |
 | `-mtu N` | 0 | Datagram cap. |
 | `-win-max N` | 0 (auto) | Both ends: cap the per-stream receive window in MB, 4-64 (0 = host tier: 4, 16 or 32-64) (3.0.3). |
-| `-mem-budget N` | 0 (eighth of RAM) | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0; see "3.2.0: fast by default, bounded memory, gre/ipip"). |
+| `-mem-budget N` | 0 (eighth of RAM) | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0; the default is split over the `*.yml` configs in the `-config` directory since 3.3.6, see `mem-budget`; see "3.2.0: fast by default, bounded memory, gre/ipip"). |
 | `-max-mbps F` | 0 | Pace ceiling per direction and session; 0 = 16 with icmp, 1250 otherwise (2.4.18; 200 from 2.3.0). |
 | `-tcp-cc NAME` | `bbr` | Pool sockets' TCP congestion control, Linux (2.4.18). `system` keeps the kernel default. |
 | `-batch on\|off` | empty | sendmmsg batching for icmp and udp; empty keeps the default (on for icmp, off for udp). Same switch as `WAT_BATCH`, but kept in the config (3.0.0). |
@@ -1887,6 +1888,7 @@ Every flag can also be a config key. Flags win over the file.
 | `-tls-cert`, `-tls-key` | | Server: certificate files. |
 | `-sni`, `-tls-pin` | | Client: TLS name, certificate fingerprint. |
 | `-path`, `-host`, `-header`, `-plain` | `/wat` | HTTP carrier options. |
+| `-decoy URL` | empty | Listening side, HTTP carriers: reverse-proxy every non-tunnel request to this http(s) URL (3.3.6; see `decoy`). |
 | `-fp NAME` | `go` | Dialer: TLS fingerprint `go`, `chrome`, `firefox`, `safari`, `edge`, `random` (2.2.0). |
 | `-ech MODE` | `off` | Dialer: `off`, `auto`, `ladder` or a base64 ECHConfigList (2.2.0; `ladder` 2.9.0, see ECH bootstrap ladder). |
 | `-ech-cache FILE` | empty | Dialer, with `-ech auto`/`ladder`: ECH config cache file (2.2.3). |
@@ -1981,11 +1983,13 @@ tunnel, deletes the file, starts it again).
   "conns_total": 0, "conns_all_time": 0, "conns_active": 0, "udp_flows_active": 0,
   "dgram_up": 0, "dgram_down": 0, "errors": 0, "refused": 0,
   "rate_bps_up": 0, "rate_bps_down": 0, "peak_bps_up": 0, "peak_bps_down": 0,
-  "rate_limit_bps": 0, "quota_limit": 0, "quota_used": 0, "quota_exceeded": false}}
+  "rate_limit_bps": 0, "quota_limit": 0, "quota_used": 0, "quota_exceeded": false,
+  "quota_period": "", "quota_resets_at": 0}}
 ```
 
 `up` is client to server payload. Rates are bytes/s over the last 1 s, peaks the best 1 s window. A UDP flow counts as
-a connection. `refused` counts connections or datagrams turned away by a quota or rate limit.
+a connection. `refused` counts connections or datagrams turned away by a quota or rate limit. `quota_period` and
+`quota_resets_at` (3.3.6) are the port's `period=` and the unix time of the next reset (`""` and 0 without one).
 
 Limits go in the config file (hot-reloaded every 3 s, like `ports:`), one item per port, sizes in decimal units
 (`300k`, `5MB`, `1.5GB`):
@@ -1994,6 +1998,7 @@ Limits go in the config file (hot-reloaded every 3 s, like `ports:`), one item p
 limits:
   - 20001 rate=5MB quota=100GB
   - 20002 rate=500k
+  - 20003 quota=50GB period=month
 ```
 
 - `rate`: bytes/s, applied to each direction separately and shared by all connections of the port (TCP is paced, UDP
@@ -2001,6 +2006,11 @@ limits:
 - `quota`: total up+down bytes. Once used up, new connections are closed at once and existing ones are cut. Usage is
   saved to `<config>.quota.json` every 30 s and on shutdown, so a restart does not reset it. Removing the `quota=`
   item lifts the cut-off.
+- `period` (3.3.6): `day`, `week` or `month`, only with a `quota=`. At the start of each period on the host's local
+  clock (00:00, Monday 00:00, 00:00 on the 1st) the used bytes go back to zero and a used-up port opens again. The
+  period start is kept in `<config>.quota.json` as a `"period:PORT"` entry, so a period that ended while the tunnel
+  was stopped resets on start. Older binaries skip those entries when they read the file, but refuse `period=` in
+  the config (unknown limit key): update the binary first. The manager asks for the period only from 3.3.6.
 - Put limits in the file of the side that should enforce them (normally the client in Iran).
 - Reset: `curl -X POST 'http://127.0.0.1:19700/quota/reset?port=20001'` (loopback callers only).
 
@@ -2038,6 +2048,11 @@ keeps on disk. Both are written atomically (tmp file + rename) so a reader never
 
 With `metrics: 127.0.0.1:PORT`, `GET /stats` returns JSON. `/debug/pprof/` is on the same address. Keep it on
 localhost.
+
+`GET /stats?flat=1` (3.3.6) returns the same top-level values as plain text, one `key=value` per line, keys sorted:
+numbers, booleans and strings only (nested objects and lists such as `cc`, `ports`, `carriers`, `clients` are left
+out), so `rtt_ms` and `streams_total` can be read with an exact line match. It has the same cross-site guard as
+`/stats`. An older binary ignores the parameter and answers JSON; the manager reads both.
 
 Since 2.0.2 the metrics address is always loopback: a non-loopback value (`0.0.0.0:19700`, a public IP, a bare
 `:19700`) is rewritten to `127.0.0.1` with the same port, and a log line says so, because `/stats`, pprof and
@@ -2834,7 +2849,7 @@ A restart cuts every connection. WatTunnel avoids restarts on a live system.
 | Works some days only | The route is filtered on the bad days. Keep auto-heal on and a second tunnel with another carrier as a backup. |
 | CDN tunnel works from some Iran servers or networks but not others | The Kharej address on Iran is a plain IP, so traffic is not going through Cloudflare. Use your Cloudflare domain (orange cloud) or run `wattun cdn-tune NAME`, and check the SNI is spelled exactly like the domain. |
 | A CDN tunnel connects and then stalls | Run `wattun cdn-tune NAME full`. |
-| Connected, but users can't open sites | Nothing listens on Kharej's `127.0.0.1:PORT`. |
+| Connected, but users can't open sites | Nothing listens on Kharej's `127.0.0.1:PORT`. Since 3.3.6 a TCP service bound to `[::1]` only is reached too (the server tries `[::1]:PORT` once when `127.0.0.1` refuses); UDP targets must still listen on `127.0.0.1`, because a connected UDP socket cannot tell that nothing listens. |
 | `alive: false` on both ends, no errors | Wrong key, or the carrier is filtered. Compare the key files (`sha256sum`). Try `ping` between the servers: ICMP must pass. |
 | Iran cannot ping Kharej, Kharej can ping Iran (often one day on, one day off) | A one-way block on Iran's own pings. Use `reverse: true` on both ends with `icmp` (see Reverse ICMP). |
 | ICMP works with small pings but the tunnel stalls | MTU. Go back to the default 640 on both ends, then test larger sizes with `ping -M do -s SIZE <peer>` before raising `mtu` again. |
@@ -2885,7 +2900,8 @@ A restart cuts every connection. WatTunnel avoids restarts on a live system.
 - **Authenticate first.** The server creates a session only if a packet authenticates. Garbage, scans and replays of
   another key are dropped without a response, and packet numbers are tracked, so a captured packet replayed later is
   dropped too.
-- **Server checks.** Clients can only reach the target ports on the server's allowlist, and only on `127.0.0.1`.
+- **Server checks.** Clients can only reach the target ports on the server's allowlist, and only on `127.0.0.1`
+  (TCP: also `[::1]` when `127.0.0.1` refuses, 3.3.6).
 - **What TLS, wss, h2 and grpc add.** They hide the traffic's shape from a middlebox: it looks like HTTPS, a
   WebSocket or gRPC. They do not add secrecy; the session is already encrypted. With the default self-signed
   certificate the client does not verify the server. The PSK still stops an impostor, because it cannot read or forge

@@ -6,10 +6,13 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -42,6 +45,7 @@ type HTTPServerOptions struct {
 	Secure   bool   // serve TLS
 	CertFile string // empty with KeyFile empty = self-signed in memory
 	KeyFile  string
+	Decoy    string // http(s) URL every non-tunnel request is reverse-proxied to (3.3.6); empty = the nginx pages
 }
 
 func normPath(p string) string {
@@ -122,11 +126,11 @@ func NewWSPoolClient(peer string, conns int, o HTTPClientOptions) (*TCPPoolClien
 	return c, err
 }
 
-// NewWSPoolServer serves the pool over WebSocket on o.Path; any other request gets a plain 404.
+// NewWSPoolServer serves the pool over WebSocket on o.Path; any other request gets the nginx pages (or o.Decoy).
 func NewWSPoolServer(addr string, o HTTPServerOptions) (*TCPPoolServer, error) {
 	path := normPath(o.Path)
 	return newHTTPPoolServer(addr, o, func(l *httpListener) http.Handler {
-		return pathMux(path, func(w http.ResponseWriter, r *http.Request) bool {
+		return pathMux(path, l.decoy, func(w http.ResponseWriter, r *http.Request) bool {
 			c, ok := wsServerUpgrade(w, r)
 			if c != nil {
 				l.push(c)
@@ -145,7 +149,9 @@ type httpListener struct {
 	addr net.Addr
 	srv  *http.Server
 	wg   sync.WaitGroup
-	once sync.Once
+
+	decoy http.Handler // non-nil with HTTPServerOptions.Decoy: answers every request that is not ours
+	once  sync.Once
 }
 
 func (l *httpListener) push(c net.Conn) {
@@ -217,9 +223,14 @@ Commercial support is available at
 
 // pathMux answers path with h (which returns false when the request is not ours) and everything else, and anything
 // h refuses, with the default pages of an nginx with server_tokens off (the same 200 at / and 404 elsewhere), so a prober that asks for a web page finds a web server.
-func pathMux(path string, h func(http.ResponseWriter, *http.Request) bool) http.Handler {
+// A non-nil decoy answers all of those instead (3.3.6).
+func pathMux(path string, decoy http.Handler, h func(http.ResponseWriter, *http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == path && h(w, r) {
+			return
+		}
+		if decoy != nil {
+			decoy.ServeHTTP(w, r)
 			return
 		}
 		w.Header().Set("Server", "nginx")
@@ -234,9 +245,30 @@ func pathMux(path string, h func(http.ResponseWriter, *http.Request) bool) http.
 	})
 }
 
+// decoyProxy reverse-proxies to raw: Host rewritten to the decoy's, no X-Forwarded-* added, 10 s to connect and to
+// the response headers, the body streamed as it arrives.
+func decoyProxy(raw string) (http.Handler, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("decoy must be an http:// or https:// URL with a host, got %q", raw)
+	}
+	return &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) { pr.SetURL(u) },
+		Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 10 * time.Second, IdleConnTimeout: 90 * time.Second},
+		ErrorLog: log.New(io.Discard, "", 0),
+	}, nil
+}
+
 func newHTTPPoolServer(addr string, o HTTPServerOptions, mk func(*httpListener) http.Handler) (*TCPPoolServer, error) {
 	var cert tls.Certificate
 	var err error
+	var decoy http.Handler
+	if o.Decoy != "" {
+		if decoy, err = decoyProxy(o.Decoy); err != nil {
+			return nil, err
+		}
+	}
 	if o.Secure {
 		if o.CertFile != "" || o.KeyFile != "" {
 			cert, err = tls.LoadX509KeyPair(o.CertFile, o.KeyFile)
@@ -251,7 +283,7 @@ func newHTTPPoolServer(addr string, o HTTPServerOptions, mk func(*httpListener) 
 	if err != nil {
 		return nil, err
 	}
-	l := &httpListener{ch: make(chan net.Conn, 64), done: make(chan struct{}), addr: ln.Addr()}
+	l := &httpListener{ch: make(chan net.Conn, 64), done: make(chan struct{}), addr: ln.Addr(), decoy: decoy}
 	var protos http.Protocols
 	protos.SetHTTP1(true)
 	protos.SetHTTP2(o.Secure)
@@ -498,7 +530,7 @@ func h2Server(addr string, o HTTPServerOptions, grpc bool) (*TCPPoolServer, erro
 		path += "/Tun"
 	}
 	return newHTTPPoolServer(addr, o, func(l *httpListener) http.Handler {
-		return pathMux(path, func(w http.ResponseWriter, r *http.Request) bool {
+		return pathMux(path, l.decoy, func(w http.ResponseWriter, r *http.Request) bool {
 			fl, ok := w.(http.Flusher)
 			if !ok || r.Method != "POST" || r.ProtoMajor < 2 {
 				return false

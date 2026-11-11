@@ -25,7 +25,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	rdebug "runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +72,9 @@ var validCarrier = func() map[string]bool {
 }()
 
 var poolCarriers = map[string]bool{"tcp": true, "tls": true, "ws": true, "wss": true, "h2": true, "h2c": true, "grpc": true}
+
+// httpCarrier: the pool carriers served by an HTTP server (the ones -decoy applies to).
+var httpCarrier = nameSet([]string{"ws", "wss", "h2", "h2c", "grpc"})
 
 // carrierNoListen: carriers with no -listen / -listen-NAME (raw sockets bind the whole protocol; icmp is a raw socket
 // that only answers). The raw set is exactly rawIPCarrier.
@@ -135,9 +140,10 @@ func main() {
 	sni := flag.String("sni", "", "client, tls carrier: server name sent in the ClientHello")
 	tlsPin := flag.String("tls-pin", "", "client, tls carrier: hex sha256 of the server certificate to require")
 	mtu := flag.Int("mtu", 0, "datagram size cap incl. header/tag, 256-1400 (tcp|tls|ws|wss|h2|h2c|grpc: up to 16384) (0 = the carrier default: 640 icmp, 1400 udp, 4096 tcp-based)")
-	memBudget := flag.Int("mem-budget", 0, "MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (0 = an eighth of the RAM) (3.2.0: one fast client took a server to 2 GB)")
+	memBudget := flag.Int("mem-budget", 0, "MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (0 = an eighth of the RAM, divided by the number of *.yml configs in the -config directory since 3.3.6, at least 64 MB) (3.2.0: one fast client took a server to 2 GB)")
 	winMax := flag.Int("win-max", 0, "both ends: cap the per-stream receive window in MB, clamped to 4-64 (0 = auto-tuned from host RAM: 4 on lean VPS, 16 on 2-4GB, 32-64 on high-perf VPS) (3.0.3). Windows are receiver-driven, so this bounds what the PEER's sender buffers per stream. Set it explicitly to override auto-tuning")
 	path := flag.String("path", "/wat", "client/server, ws|wss|h2|h2c|grpc carrier: URL path (grpc: service name, requests go to <path>/Tun)")
+	decoy := flag.String("decoy", "", "listening side, ws|wss|h2|h2c|grpc carrier: reverse-proxy every request that is not a tunnel request to this http(s) URL instead of the built-in nginx pages (3.3.6; empty = off)")
 	tlsFP := flag.String("fp", "go", "client (also a -reverse server), tls|wss|h2|grpc carriers: TLS ClientHello fingerprint go|chrome|firefox|safari|edge|random; go is the standard library's (client only, 2.2.0; server unchanged)")
 	echMode := flag.String("ech", "off", "client, tls|wss|h2|grpc carriers: Encrypted Client Hello: off|auto|ladder|<base64 ECHConfigList>; auto reads the HTTPS DNS record of the SNI/host name over DNS-over-HTTPS (1.1.1.1, 1.0.0.1, 8.8.8.8, 9.9.9.9 raced in parallel; the last good config is kept if they all fail); ladder = auto plus a second rung for hijacked networks (2.9.0): when every direct DoH server fails, the query goes through the tunnel's built-in DNS relay (server target port 53, the speed-test pattern), so a wss+ECH tunnel bootstraps on an ICMP-only route; both ends need 2.9.0 (old server: the relay port is just a failed local dial, the ladder falls back to no ECH)")
 	echCache := flag.String("ech-cache", "", "client, with -ech auto: file keeping the last good ECH config across restarts, used at once on start while DoH refreshes in the background (2.2.3; empty = off)")
@@ -316,10 +322,38 @@ func main() {
 	if *pingEvery < 0 || *pingEvery > 60 { // Alive and the server IdleTimeout are 3x this value
 		log.Fatalf("-ping-every must be 0..60 seconds, got %d", *pingEvery)
 	}
+	if *decoy != "" {
+		if u, err := url.Parse(*decoy); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			log.Fatalf("-decoy must be an http:// or https:// URL with a host, got %q", *decoy)
+		} else if loopbackHost(u.Hostname()) {
+			// the proxy rewrites Host to the decoy's, so a loopback service sees a local request from anyone who
+			// reaches the tunnel port: the metrics server (stats, pprof, /quota/reset) must never be the decoy
+			if _, mp, _ := net.SplitHostPort(*metrics); mp != "" && mp == u.Port() {
+				log.Fatalf("-decoy %s is this tunnel's own metrics address; point it at a public web server", *decoy)
+			}
+			log.Printf("warning: -decoy %s is a loopback service: everyone who reaches the tunnel port can reach it; never point it at a wattun metrics port", *decoy)
+		}
+		httpLis := false
+		for _, n := range names {
+			httpLis = httpLis || httpCarrier[n] && server != *reverse
+		}
+		if !httpLis {
+			log.Printf("warning: -decoy is ignored: this side does not listen with a ws|wss|h2|h2c|grpc carrier")
+		}
+	}
 	hp := wat.HostProfile()
-	wat.SetMemBudget(int64(*memBudget) << 20)
+	nTun := tunnelCount(*cfgPath)
+	memLim, memBud := memDefaults(hp.TotalRAMMB, nTun)
+	bud := int64(*memBudget) << 20
+	if bud <= 0 && hp.TotalRAMMB > 0 {
+		bud = memBud
+	}
+	wat.SetMemBudget(bud)
 	if os.Getenv("GOMEMLIMIT") == "" && hp.TotalRAMMB > 0 { // the GC works harder near a third of the RAM instead of letting garbage double the heap (1024 streams: 1.8 GB peak at RAM/2)
-		rdebug.SetMemoryLimit(int64(hp.TotalRAMMB) << 20 / 3)
+		rdebug.SetMemoryLimit(memLim)
+	}
+	if nTun > 1 && hp.TotalRAMMB > 0 && (*memBudget <= 0 || os.Getenv("GOMEMLIMIT") == "") {
+		log.Printf("%d tunnel configs in %s: memory defaults split %d ways (limit %d MB, mem-budget %d MB unless set)", nTun, filepath.Dir(*cfgPath), nTun, memLim>>20, memBud>>20)
 	}
 	if *conns <= 0 {
 		*conns = hp.DefaultPoolConns
@@ -661,7 +695,7 @@ func main() {
 		case "ws", "wss", "h2", "h2c", "grpc":
 			secure := carrier == "wss" || carrier == "h2" || carrier == "grpc" && !*plain
 			if lis {
-				so := wat.HTTPServerOptions{Path: *path, Secure: secure, CertFile: *tlsCert, KeyFile: *tlsKey}
+				so := wat.HTTPServerOptions{Path: *path, Secure: secure, CertFile: *tlsCert, KeyFile: *tlsKey, Decoy: *decoy}
 				switch carrier {
 				case "ws", "wss":
 					ps, err = wat.NewWSPoolServer(listen, so)
@@ -1048,6 +1082,11 @@ func main() {
 						out["session_list"] = tun.sessionList()
 					}
 				}
+				if r.URL.Query().Get("flat") == "1" { // 3.3.6: key=value lines of the top-level scalars, for the manager
+					w.Header().Set("Content-Type", "text/plain")
+					writeFlatStats(w, out)
+					return
+				}
 				json.NewEncoder(w).Encode(out)
 			}))
 			log.Println(http.ListenAndServe(*metrics, mux))
@@ -1405,6 +1444,50 @@ func statsAliases(st wat.Stats) map[string]any {
 	return map[string]any{"rtt_ms": float64(st.SRTT) / 1e6, "streams_total": st.Streams}
 }
 
+// tunnelCount is the number of *.yml configs next to cfg (each one is a wattun process on this host), at least 1.
+func tunnelCount(cfg string) int {
+	if cfg == "" {
+		return 1
+	}
+	m, _ := filepath.Glob(filepath.Join(filepath.Dir(cfg), "*.yml"))
+	return max(len(m), 1)
+}
+
+// memDefaults is the default GC memory limit (RAM/3) and stream-buffer budget (RAM/8), both in bytes, split over n
+// tunnels on one host (3.3.6). The floors (256 MB, 64 MB) never exceed the undivided value, so n=1 is unchanged.
+func memDefaults(ramMB, n int) (limit, budget int64) {
+	ram := int64(ramMB) << 20
+	n64 := int64(max(n, 1))
+	limit = max(ram/3/n64, min(ram/3, 256<<20))
+	budget = max(ram/8/n64, 64<<20)
+	return
+}
+
+// writeFlatStats writes /stats?flat=1: one key=value line per top-level scalar of out, keys sorted; nested maps and
+// lists are skipped. Values are in their JSON form, strings unquoted with newlines replaced by spaces.
+func writeFlatStats(w io.Writer, out map[string]any) {
+	keys := make([]string, 0, len(out))
+	for k := range out {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		b, err := json.Marshal(out[k])
+		if err != nil || len(b) == 0 || b[0] == '{' || b[0] == '[' || string(b) == "null" {
+			continue
+		}
+		v := string(b)
+		if b[0] == '"' {
+			var s string
+			if json.Unmarshal(b, &s) != nil {
+				continue
+			}
+			v = strings.NewReplacer("\n", " ", "\r", " ").Replace(s)
+		}
+		fmt.Fprintf(w, "%s=%s\n", k, v)
+	}
+}
+
 // crossSiteRequest reports whether r was started by a web page on another origin. The metrics server is
 // loopback-bound, but a browser page can still issue a plain GET at 127.0.0.1:port with no preflight.
 // Browsers send Sec-Fetch-Site (and an Origin header for CORS-relevant requests); curl/the manager send
@@ -1434,6 +1517,21 @@ func crossSiteRequest(r *http.Request) bool {
 		return true // an unparseable Origin cannot be proven to be this host
 	}
 	return !loopbackHost(u.Hostname())
+}
+
+// dialLocal connects to the local service on port: 127.0.0.1, and [::1] once when that is refused, for a service
+// bound to the IPv6 loopback only (3.3.6).
+func dialLocal(port int) (net.Conn, error) {
+	p := strconv.Itoa(port)
+	c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", p), 5*time.Second)
+	var en syscall.Errno
+	// 10061 is WSAECONNREFUSED: Windows reports refusal with its own errno, not syscall.ECONNREFUSED
+	if err != nil && errors.As(err, &en) && (en == syscall.ECONNREFUSED || en == 10061) {
+		if c6, err6 := net.DialTimeout("tcp", net.JoinHostPort("::1", p), 5*time.Second); err6 == nil {
+			return c6, nil
+		}
+	}
+	return c, err
 }
 
 func serve(sess *wat.Session, lo, hi int, al *allow) {
@@ -1467,7 +1565,7 @@ func serve(sess *wat.Session, lo, hi int, al *allow) {
 			}
 			st.SetGroup(uint32(port))
 			ps := portReg.get("s", port)
-			c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 5*time.Second)
+			c, err := dialLocal(port)
 			if err != nil {
 				ps.errs.Add(1)
 				st.Reset()

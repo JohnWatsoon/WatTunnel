@@ -20,7 +20,7 @@ import (
 //
 // A plain N means listen N -> target N. The server's allowlist is the TARGET ports; the client opens the LISTEN ports.
 //
-// A second list `limits:` holds `- PORT rate=5MB quota=100GB` items (see ports.go). The lists are hot-reloaded (see cfgWatcher); every other key needs a restart.
+// A second list `limits:` holds `- PORT rate=5MB quota=100GB [period=month]` items (see ports.go). The lists are hot-reloaded (see cfgWatcher); every other key needs a restart.
 
 type portSpec struct {
 	Port   int // public (client listen) port
@@ -158,7 +158,7 @@ func parseConfig(txt string, known func(string) bool) (*fileConfig, error) {
 		}
 		if k == "limits" {
 			if v != "" {
-				return nil, fmt.Errorf("line %d: limits: takes a list of '- PORT rate=... quota=...' lines", ln)
+				return nil, fmt.Errorf("line %d: limits: takes a list of '- PORT rate=... quota=... [period=day|week|month]' lines", ln)
 			}
 			if limitsSeen {
 				return nil, fmt.Errorf("line %d: duplicate key limits", ln)
