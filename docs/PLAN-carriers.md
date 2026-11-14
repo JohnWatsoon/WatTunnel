@@ -46,6 +46,24 @@ Also on the same pair (no new code), for Phase 1:
   direct carriers no longer cut on delay, so the cause of the drop needs a fresh measurement before a shared pacer
   is built.
 
+### Results, 2026-11-14 (iran2 85.133.233.178 <-> kharej 88.218.196.198, 3.3.7 probe)
+
+Iran -> Kharej (the filtered direction), v4:
+- One flow is cut after ~29-34 packets, at 300 B and at 1400 B alike: the filter counts packets per 5-tuple, not
+  bytes. Same for udp and fake TCP (`udp` 33/50, `ptcp` 34/50 with `synack=true`; `udp-bulk` 33, `ptcp-bulk` 25).
+- Spray passes: `spray` 149/150, `ptcp-spray` 100/100 (50/50 SYN-ACKs), `spray-bulk` 99.7 % of 39k datagrams over
+  19.5k flows at 9.3 MB/s, steady per second. 20k flows in 5 s caused no block. The probe's sender topped out at
+  ~4k new sockets/s (~10 MB/s at 30 and 80 MB/s targets): a carrier that writes source ports on a raw socket has no
+  such limit, and that rate is still unmeasured.
+- So: **Spray lives** (hop every <= 20 packets keeps a margin under the ~30 cut), and **Phantom works only with
+  hopping** in this direction.
+
+Kharej -> Iran, v4: nothing is cut. udp, spray, ptcp and their bulk runs all 10.00 MB/s steady. The Iran NIC merges
+fake-TCP segments on receive (GRO: 9834 reads carried all 50 MB), which is good for Phantom's receive cost.
+
+IPv6: dead on this pair. iran2 has a v6 address but no route out (ping6 to Google fails with errors); nothing
+arrived over v6 either way.
+
 ## Phase 1: engine fixes
 
 1. **Done (3.3.7): seal outside `s.mu`.** `build()` frames the packet (`Session.frame`); the send loop seals the
