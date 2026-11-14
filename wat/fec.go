@@ -176,7 +176,7 @@ func (s *Session) fecDue(now time.Time) (outPkt, bool) {
 	s.stats.PktsOut++
 	s.stats.BytesOut += uint64(len(out))
 	s.stats.FecSent++
-	return outPkt{out, lane, -1}, true
+	return outPkt{p: out, lane: lane, dupLane: -1}, true
 }
 
 func xorInto(dst, src []byte) {

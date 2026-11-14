@@ -216,7 +216,7 @@ func (s *Session) noiseDue(now time.Time) (outPkt, bool) {
 	s.stats.BytesOut += uint64(len(out))
 	s.stats.NoiseSent++
 	s.stats.NoiseBytes += uint64(len(out))
-	return outPkt{out, lane, -1}, true
+	return outPkt{p: out, lane: lane, dupLane: -1}, true
 }
 
 // noiseWake is the pump's next-wake hint while idle noise is on (M14). The pump used to fall back to a fixed 100 ms

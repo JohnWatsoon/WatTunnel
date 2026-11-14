@@ -15,41 +15,48 @@ where a kill test said yes.
 | Bond might already do Split | `wat/bond.go` `Send` picks a path per packet on each end on its own; paths are keyed by carrier name (`-peer-<carrier>`) | Partly. Each end already chooses its own send path, but liveness/ACK feedback assumes every path is two-way, and one carrier name cannot appear twice (no icmp+icmp to 2 IPs) |
 | Sessions share no pacer | each `Session` owns its `cc` | True (old 2 Gbit/s plan Step 4, plan file no longer in the repo) |
 
-## Phase 0: field kill tests (no new binary)
+## Order (owner, 2026-11-14)
 
-Run on the filtered Iran/Kharej pair. Each one kills or keeps an idea.
+ICMP is not a priority: no ICMP-wide test. Order: fast field test (Spray, Phantom, IPv6) -> engine/speed fixes ->
+Phantom and Spray carriers -> manager + auto test.
 
-1. **ICMP-wide.** Two ICMP tunnels to two Kharej IPs, 20 MB/s each (`-max-mbps 20`). Then one tunnel `-icmp-type
-   echo` plus one `-icmp-type timestamp` to one IP, 20 each. Reroute still fires at ~30 MB/s total: idea dead.
-   Holds in one case: note which (per IP pair, per destination IP, per type).
-2. **IPv6.** Only if both servers have v6. `ping -6` flood at ~40 MB/s and a plain UDP6 stream Iran to Kharej.
-   Note if the 30 MB/s line and the 3-datagram cut exist on v6.
-3. **Spray probe.** Needs a ~20-line tool (`bench/` or a `wattun` hidden subcommand): 3 datagrams on each of 50
-   source ports, receiver counts arrivals. ~150 arrive: cut is per 5-tuple, keep Spray. ~3 arrive: cut is per IP
-   pair, drop Spray.
-4. **udp batch/GSO.** Same pair, plain `udp` carrier: default, `WAT_BATCH=1`, `WAT_BATCH=1 WAT_GSO=1`. MB/s and
-   CPU per MB. Baseline: tunnel 578 Mbit/s, raw UDP ~1280, tcp 1057.
+## Phase 0: fast field test (`bench/fieldprobe`)
 
-## Phase 1: engine fixes (help every datagram carrier, ICMP included)
+One static tool, both roles, about 40 s per direction and family. Build: `GOOS=linux CGO_ENABLED=0 go build -o
+fieldprobe ./bench/fieldprobe`. Needs root; it adds iptables/ip6tables rules for its port and deletes them on exit.
 
-Do these before any new carrier: Phantom and Spray sit on this same path and would inherit the limits.
-ICMP sim tests in `wat/` must stay green with unchanged bounds.
+    Kharej: ./fieldprobe -role recv -port 40400
+    Iran:   ./fieldprobe -role send -peer KHAREJ_IP -port 40400          # Iran -> Kharej, v4
+    Iran:   ./fieldprobe -role send -peer KHAREJ_V6 -port 40400          # same, v6 (if both have v6)
+    then swap roles (recv on Iran, send on Kharej) for the reverse direction.
 
-1. **Seal outside `s.mu`.** `build()` only frames under the lock; the AEAD seal runs after `Unlock` on the batch.
-   Packet number and nonce stay assigned under the lock. Test: existing suite plus a benchmark of receive-side lock
-   wait under bulk send.
-2. **Server receive fan-out.** `Server.run()` keeps the read; the session lookup by id and the copy move to N
-   workers sharded by session id (keeps per-session order). Only helps when CPU-bound (field: ~1.8 of 2 cores).
-3. **udp batching on by default** if Phase 0.4 shows a gain; GSO default only if it was measured on the field.
-   Change is the `batchDisabled()` default plus the docs.
-4. **Direct-pool window.** Replace the flat 1 s `relDirectWin` with a cap from measured srtt (e.g.
-   `maxBW x min(2 x srtt, minRTT + 200 ms)`), and check the 2026-10-16 case (Kharej to Iran, 6-14 % retransmits,
-   78 MB/s bare TCP) still fills. `loss_test.go:443` pins the current window and will need its bound re-derived,
-   not loosened. Field test: RTT and MB/s during a 16-stream upload, before and after.
-5. **Shared pacer across sessions** (old Step 4). One rate estimate per process for all sessions to one peer,
-   split by queue length. Field target: 1/2/4/8 sessions no longer 176/261/147/68 MB/s, more sessions never slower.
+Read the receiver's `RESULT` lines against the sender's `SENT` lines:
 
-No frame change in this phase; one end can update alone.
+- `udp` ~3/50 and `spray` ~150/150: the cut counts per 5-tuple, Spray lives. `spray` ~3-9/150: per IP pair, Spray dies.
+- `ptcp` 50/50 with `synack=true`: fake TCP passes a full flow, Phantom lives. `ptcp` cut but `ptcp-spray` 100/100:
+  Phantom only works with port hopping. Both cut: Phantom forward is dead; test it reverse.
+- `*-bulk` `persec`: steady = no rate trigger; falling to 0 mid-run = blocked after a volume or a flow count.
+- v6 lines vs v4 lines: whether IPv6 has the same filter.
+
+Also on the same pair (no new code), for Phase 1:
+
+- `udp` carrier with default, `WAT_BATCH=1`, `WAT_BATCH=1 WAT_GSO=1` (MB/s, CPU per MB).
+- direct tcp: RTT and MB/s during a 16-stream upload with default and `WAT_DIRECT_WIN_MS=300`/`500` (3.3.7).
+- tcp with `sessions` 1/2/4/8 on 3.3.7: the 176/261/147/68 figures are from 3.1.2, before bounded memory, and
+  direct carriers no longer cut on delay, so the cause of the drop needs a fresh measurement before a shared pacer
+  is built.
+
+## Phase 1: engine fixes
+
+1. **Done (3.3.7): seal outside `s.mu`.** `build()` frames the packet (`Session.frame`); the send loop seals the
+   batch after it drops the lock (`sealOut`), in place in the out buffer.
+2. **Server receive fan-out: not now.** `Server.run()` only looks up the session, copies and queues; the AEAD open
+   and parse already run in each session's own goroutine. Profile the server (pprof on the metrics address) before
+   touching it.
+3. **udp batching on by default** if the Phase 0 A/B shows a gain; GSO default only if it was measured.
+4. **Direct-pool window: field-tunable in 3.3.7** (`WAT_DIRECT_WIN_MS`). Pick the default from the A/B above; the
+   1 s value was tuned on the lossy Kharej -> Iran leg (2026-10-16) and must still fill there.
+5. **Shared pacer across sessions:** only if the sessions 1/2/4/8 re-measure still shows the drop.
 
 ## Phase 2: carriers, gated by Phase 0
 

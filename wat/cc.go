@@ -113,7 +113,16 @@ const (
 // Direct reliable carriers (Config.Direct): window in seconds of delivery, and the loss timer / PTO floors. A datagram
 // there is lost only when its connection dies; anything sooner is TCP recovering, and resending it only duplicates
 // (field 2026-10-16: 6-70k resends per 200 MB, most never proven spurious).
-const relDirectWin = time.Second
+// WAT_DIRECT_WIN_MS overrides it for field A/Bs (3.4.0): a second of delivery also means up to a second of queue,
+// measured as 383-414 ms round trips under a 669-730 Mbit/s upload on an 81 ms route.
+var relDirectWin = directWin()
+
+func directWin() time.Duration {
+	if n, err := strconv.Atoi(os.Getenv("WAT_DIRECT_WIN_MS")); err == nil && n > 0 {
+		return time.Duration(n) * time.Millisecond
+	}
+	return time.Second
+}
 
 // WAT_DIRECT_LOSS_MS sets a loss timer floor for direct carriers (the PTO floor 500 ms above it), for field A/Bs. Off
 // by default: a 2 s floor was measured slower than the normal timer (field 2026-10-16, Kharej -> Iran: 2 s ~12 MB/s,

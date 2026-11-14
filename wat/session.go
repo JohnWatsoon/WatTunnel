@@ -159,7 +159,8 @@ type sentPkt struct {
 type outPkt struct {
 	p       []byte
 	lane    int
-	dupLane int // >=0: send the identical datagram again on this lane (hedge against random loss)
+	dupLane int         // >=0: send the identical datagram again on this lane (hedge against random loss)
+	aead    cipher.AEAD // non-nil: p holds header + plaintext, sealed by the send loop after it drops s.mu (sealOut)
 }
 
 type Session struct {
@@ -245,6 +246,7 @@ type Session struct {
 	maxPlain      int      // plaintext bytes per datagram: cfg.MaxPayload - header - tag
 	plainBuf      []byte   // reused packet assembly buffer (nextPacket runs under s.mu)
 	txNonce       [12]byte // seal runs under s.mu; kept here because an array passed to the AEAD interface escapes to the heap
+	loopNonce     [12]byte // sealOut's nonce: used only by the send loop, outside s.mu
 	rxNonce       [12]byte // handle runs on the receive goroutine only
 	copier        bool     // the carrier copies a datagram inside Send, so the buffer may be reused as soon as Send returns
 	outFree       chan []byte
@@ -801,6 +803,9 @@ func (s *Session) pump() {
 			}
 		}
 		s.mu.Unlock()
+		for i := range batch { // AEAD outside the lock, so the receive side is not held up behind up to 160 seals
+			s.sealOut(&batch[i])
+		}
 		if s.masked.Load() {
 			for _, o := range batch {
 				maskHdr(s.hk, o.p)
@@ -1106,8 +1111,8 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		}
 		p = s.shapeData(n, p)
 	}
-	out, pn := s.seal(p)
-	size := len(out) + ipIcmpHdr
+	out, pn := s.frame(p)
+	size := len(out) + tagLen + ipIcmpHdr
 	if len(sp.frames) > 0 || len(sp.ctrl) > 0 || sp.dgram {
 		if s.fec != nil && (len(sp.frames) > 0 || sp.dgram) {
 			s.fecNoteSent(pn, p)
@@ -1122,22 +1127,23 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 	}
 	s.lastSend = now
 	s.stats.PktsOut++
-	s.stats.BytesOut += uint64(len(out))
+	n := len(out) + tagLen // the sealed size
+	s.stats.BytesOut += uint64(n)
 	dup := none
-	s.hedgeTok += 0.08 * float64(len(out))
+	s.hedgeTok += 0.08 * float64(n)
 	if s.hedgeTok > 20000 {
 		s.hedgeTok = 20000
 	}
-	if s.cfg.Hedge && len(sp.frames) > 0 && s.hedgeTok >= float64(len(out)) && s.young(sp) && len(s.lanes) > 1 && s.chooser == nil {
+	if s.cfg.Hedge && len(sp.frames) > 0 && s.hedgeTok >= float64(n) && s.young(sp) && len(s.lanes) > 1 && s.chooser == nil {
 		if l := s.nextLane(); l != lane {
 			dup = l
-			s.hedgeTok -= float64(len(out))
+			s.hedgeTok -= float64(n)
 			s.cc.tokens -= float64(size)
 			s.stats.PktsOut++
-			s.stats.BytesOut += uint64(len(out))
+			s.stats.BytesOut += uint64(n)
 		}
 	}
-	return outPkt{out, lane, dup}, true
+	return outPkt{p: out, lane: lane, dupLane: dup, aead: s.aead}, true
 }
 
 // noteLimit records what held the sender back this tick (diagnostics).
@@ -1163,6 +1169,27 @@ func (s *Session) sealWith(a cipher.AEAD, p []byte) ([]byte, uint64) {
 	return a.Seal(out, s.txNonce[:], p, out[:8]), pn
 }
 
+// frame takes the next packet number and returns header + plaintext in an out buffer with room for the tag; the
+// send loop seals it with sealOut once s.mu is released.
+func (s *Session) frame(p []byte) ([]byte, uint64) {
+	pn := s.nextPN
+	s.nextPN++
+	out := s.getOut(hdrLen + len(p) + tagLen)
+	binary.BigEndian.PutUint64(out, s.sid)
+	binary.BigEndian.PutUint64(out[8:], pn)
+	return append(out, p...), pn
+}
+
+// sealOut encrypts a framed packet in place (the AEAD output exactly overlaps the plaintext, which Seal allows).
+func (s *Session) sealOut(o *outPkt) {
+	if o.aead == nil {
+		return
+	}
+	copy(s.loopNonce[4:], o.p[8:16])
+	o.p = o.aead.Seal(o.p[:hdrLen], s.loopNonce[:], o.p[hdrLen:], o.p[:8])
+	o.aead = nil
+}
+
 // buildKexProbe sends the restart probe (client, while probeUntil is set): a lone frKex offer sealed with the PSK
 // key, at most once a second. Only a restarted peer opens it; a live one drops it and keeps opening the data, which
 // stays on the fresh key. Untracked: a live peer never acks it, and that must not count as loss.
@@ -1177,7 +1204,7 @@ func (s *Session) buildKexProbe(now time.Time) (outPkt, bool) {
 	out, _ := s.sealWith(s.pskAead, append(append(s.plainBuf[:0], frKex), s.kexPub...))
 	s.stats.PktsOut++
 	s.stats.BytesOut += uint64(len(out))
-	return outPkt{out, lane, -1}, true
+	return outPkt{p: out, lane: lane, dupLane: -1}, true
 }
 
 // probePath asks for a tiny ack-eliciting packet on one path (how the bond finds a dead carrier alive again).
@@ -1202,7 +1229,7 @@ func (s *Session) buildProbe(now time.Time) outPkt {
 	s.lastSend = now
 	s.stats.PktsOut++
 	s.stats.BytesOut += uint64(len(out))
-	return outPkt{out, lane, -1}
+	return outPkt{p: out, lane: lane, dupLane: -1}
 }
 
 // pathPTO: a tail packet on a slow path is not lost just because the fast path's timeout passed.
