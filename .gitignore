@@ -24,4 +24,6 @@ FIELD*.md
 .claude/
 .dsh/
 /before-after-ui.txt
+plans/
+*PLAN*.md
 
