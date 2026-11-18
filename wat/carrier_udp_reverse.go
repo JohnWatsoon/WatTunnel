@@ -52,15 +52,16 @@ const punchSeenMax = 1024
 
 // UDPReverseListener is the client PacketIO of a reverse udp tunnel.
 type UDPReverseListener struct {
-	c      *net.UDPConn
-	key    []byte
-	peer   atomic.Pointer[net.UDPAddr] // where the last valid punch came from (nil: none yet, so Send drops)
-	authAt atomic.Int64                // unix ns of the newest authenticated session packet from peer
-	rbuf   []byte
-	bx     *udpBatch
-	dns    bool // DNS-shaped datagrams (dnsshape.go)
-	seen   map[[8]byte]struct{}
-	seenQ  [][8]byte
+	c       *net.UDPConn
+	key     []byte
+	peer    atomic.Pointer[net.UDPAddr] // where the last valid punch came from (nil: none yet, so Send drops)
+	authAt  atomic.Int64                // unix ns of the newest authenticated session packet from peer
+	rbuf    []byte
+	bx      *udpBatch
+	dns     bool // DNS-shaped datagrams (dnsshape.go)
+	dnsEdns bool // 3.3.8 opt-in: structurally complete DNS (EDNS0 OPT on the queries)
+	seen    map[[8]byte]struct{}
+	seenQ   [][8]byte
 }
 
 // PeerAuthenticated records that a session packet authenticated from the current peer, locking out punch-replay
@@ -99,6 +100,9 @@ func (u *UDPReverseListener) seenPunch(nonce []byte) bool {
 // SetDNS turns the DNS framing on or off; call it before the first Recv. Both ends must agree.
 func (u *UDPReverseListener) SetDNS(on bool) { u.dns = on }
 
+// SetDNSEdns turns the 3.3.8 EDNS0 framing on or off; call it before the first Recv. Both ends must agree.
+func (u *UDPReverseListener) SetDNSEdns(on bool) { u.dnsEdns = on }
+
 // NewUDPReverseListener binds addr (":4443") and waits for the server's punches.
 func NewUDPReverseListener(addr string, psk []byte) (*UDPReverseListener, error) {
 	la, err := net.ResolveUDPAddr("udp", addr)
@@ -120,7 +124,7 @@ func (u *UDPReverseListener) Send(p []byte, path int) error {
 		return nil // nobody has punched yet: loss the session repairs once the server shows up
 	}
 	if u.dns {
-		fs, done := dnsFrames([][]byte{p}, false)
+		fs, done := dnsFramesOpt([][]byte{p}, false, nil, u.dnsEdns)
 		defer done()
 		p = fs[0]
 	}
@@ -137,7 +141,7 @@ func (u *UDPReverseListener) SendBatch(ps [][]byte, lanes []int) error {
 		return nil // nobody has punched yet, as in Send
 	}
 	if u.dns {
-		fs, done := dnsFrames(ps, false)
+		fs, done := dnsFramesOpt(ps, false, nil, u.dnsEdns)
 		defer done()
 		ps = fs
 	}

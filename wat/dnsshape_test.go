@@ -207,3 +207,118 @@ func TestUDPDNSMismatch(t *testing.T) {
 	default:
 	}
 }
+
+// udp-dns-edns (3.3.8): queries carry an EDNS0 OPT, and the server replies are real answers that echo the query's
+// id and question with the payload as TXT character-strings. A legacy reply still parses on the new strip side
+// (audit 2026-11-18: the legacy server reply had ANCOUNT=0 and a fresh id/question, which a strict DNS parser rejects).
+func TestDNSFrameEdns(t *testing.T) {
+	for _, n := range []int{1, 200, 255, 256, 1400} {
+		pay := make([]byte, n)
+		rand.Read(pay)
+		q := dnsFrameOpt(nil, pay, false, nil, true)
+		if uint16(q[2])<<8|uint16(q[3]) != dnsQuery || q[4] != 0 || q[5] != 1 || q[10] != 0 || q[11] != 1 {
+			t.Fatalf("query header %x", q[:12])
+		}
+		got, echo := dnsParse(q)
+		if !bytes.Equal(got, pay) {
+			t.Fatalf("query payload %d bytes, want %d", len(got), n)
+		}
+		if echo == nil {
+			t.Fatal("query echo missing")
+		}
+		resp := dnsFrameOpt(nil, pay, true, echo, true)
+		if uint16(resp[0])<<8|uint16(resp[1]) != echo.txid {
+			t.Fatal("reply did not echo the txid")
+		}
+		if uint16(resp[6])<<8|uint16(resp[7]) != 1 || uint16(resp[10])<<8|uint16(resp[11]) != 1 {
+			t.Fatalf("answer counts %x", resp[6:12])
+		}
+		if !bytes.Equal(resp[12:12+len(echo.quest)], echo.quest) {
+			t.Fatal("reply did not echo the question")
+		}
+		if got := dnsStrip(resp); !bytes.Equal(got, pay) {
+			t.Fatalf("answer strip %d bytes, want %d", len(got), n)
+		}
+		// mixed versions: a legacy reply parses on the new receiver, and a legacy query gets the legacy reply form
+		if got := dnsStrip(dnsFrame(nil, pay, true)); !bytes.Equal(got, pay) {
+			t.Fatal("legacy reply no longer parses")
+		}
+		_, legEcho := dnsParse(dnsFrame(nil, pay, false)) // legacy query (no OPT)
+		respLeg := dnsFrameOpt(nil, pay, true, legEcho, true)
+		if uint16(respLeg[6])<<8|uint16(respLeg[7]) != 0 || uint16(respLeg[10])<<8|uint16(respLeg[11]) != 0 {
+			t.Fatal("a legacy query must get the legacy reply form")
+		}
+	}
+}
+
+// End to end with the flag on: the server's answers echo a query the client actually sent (id + question).
+func TestUDPDNSEdnsEcho(t *testing.T) {
+	key := []byte("dns-edns")
+	us, err := NewUDPServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	us.SetDNS(true)
+	us.SetDNSEdns(true)
+	srv := NewServer(Config{Key: key}, us)
+	t.Cleanup(srv.Close)
+	go func() {
+		for s := range srv.New {
+			go func(s *Session) {
+				for {
+					st, err := s.Accept()
+					if err != nil {
+						return
+					}
+					go serveUDPStream(st)
+				}
+			}(s)
+		}
+	}()
+	spy := newUDPSpy(t, us.Addr().String())
+	uc, err := NewUDPClient(spy.c.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	uc.SetDNS(true)
+	uc.SetDNSEdns(true)
+	cli, err := NewSession(Config{Key: key}, uc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cli.Close)
+	udpEcho(t, cli, 1<<20, 11)
+	spy.mu.Lock()
+	up, down := spy.up, spy.down
+	spy.mu.Unlock()
+	if len(up) < 10 || len(down) < 10 {
+		t.Fatalf("only %d up / %d down datagrams", len(up), len(down))
+	}
+	type qk struct {
+		txid  uint16
+		quest string
+	}
+	sent := map[qk]bool{}
+	for _, p := range up {
+		if p[10] != 0 || p[11] != 1 {
+			t.Fatalf("client query without ARCOUNT=1: %x", p[:12])
+		}
+		_, q := dnsParse(p)
+		if q == nil {
+			t.Fatal("client query did not parse")
+		}
+		sent[qk{q.txid, string(q.quest)}] = true
+	}
+	for _, p := range down {
+		if uint16(p[6])<<8|uint16(p[7]) != 1 {
+			t.Fatalf("server answer without ANCOUNT=1: %x", p[:12])
+		}
+		_, q := dnsParse(p)
+		if q == nil {
+			t.Fatal("server answer did not parse")
+		}
+		if !sent[qk{q.txid, string(q.quest)}] {
+			t.Fatal("server answer echoed a query the client never sent")
+		}
+	}
+}

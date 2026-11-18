@@ -2,6 +2,7 @@ package wat
 
 import (
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -17,14 +18,19 @@ var udpProfile = Profile{MTU: 1400, InitBps: 8e6}
 
 // UDPClient is the client PacketIO over a connected UDP socket. The lane is ignored.
 type UDPClient struct {
-	c    *net.UDPConn
-	rbuf []byte
-	bx   *udpBatch // recvmmsg / sendmmsg (Linux), nil elsewhere
-	dns  bool      // DNS-shaped datagrams (dnsshape.go)
+	c       *net.UDPConn
+	rbuf    []byte
+	bx      *udpBatch // recvmmsg / sendmmsg (Linux), nil elsewhere
+	dns     bool      // DNS-shaped datagrams (dnsshape.go)
+	dnsEdns bool      // 3.3.8 opt-in: structurally complete DNS (EDNS0 OPT on the queries)
 }
 
 // SetDNS turns the DNS framing on or off; call it before the first Send. Both ends must agree.
 func (u *UDPClient) SetDNS(on bool) { u.dns = on }
+
+// SetDNSEdns turns the 3.3.8 EDNS0 framing on or off; call it before the first Send. Both ends must agree; a
+// legacy server cannot parse the OPT (dnsParse skips it only on ends that know the upgrade).
+func (u *UDPClient) SetDNSEdns(on bool) { u.dnsEdns = on }
 
 // NewUDPClient dials host:port. Dialing UDP sends nothing, so it succeeds before the server is reachable.
 func NewUDPClient(peer string) (*UDPClient, error) {
@@ -48,7 +54,7 @@ func NewUDPClientAddr(peer string, laddr *net.UDPAddr) (*UDPClient, error) {
 
 func (u *UDPClient) Send(p []byte, path int) error {
 	if u.dns {
-		fs, done := dnsFrames([][]byte{p}, false)
+		fs, done := dnsFramesOpt([][]byte{p}, false, nil, u.dnsEdns)
 		defer done()
 		p = fs[0]
 	}
@@ -85,7 +91,7 @@ func (u *UDPClient) CopiesOnSend() bool { return true }
 // SendBatch sends a burst in one system call where the platform has sendmmsg, else one write each.
 func (u *UDPClient) SendBatch(ps [][]byte, lanes []int) error {
 	if u.dns {
-		fs, done := dnsFrames(ps, false)
+		fs, done := dnsFramesOpt(ps, false, nil, u.dnsEdns)
 		defer done()
 		ps = fs
 	}
@@ -112,12 +118,40 @@ type UDPServer struct {
 	bx   *udpBatch
 	dns  atomic.Bool // DNS-shaped datagrams (dnsshape.go); atomic because the reverse server's punch goroutine reads it
 
+	dnsEdns bool // 3.3.8 opt-in: structurally complete DNS (EDNS0 OPT echoed, TXT answer RDATA)
+	dnsQmu  sync.Mutex
+	dnsQ    map[string]*dnsQueryEcho // last query per client address: the echo source for the 3.3.8 replies
+
 	watch atomic.Pointer[net.UDPAddr] // reverse server: the punched client, whose datagrams (by IP) set rxAt
 	rxAt  atomic.Int64                // unix ns of the last datagram from watch
 }
 
 // SetDNS turns the DNS framing on or off; call it before the first Recv. Both ends must agree.
 func (u *UDPServer) SetDNS(on bool) { u.dns.Store(on) }
+
+// SetDNSEdns turns the 3.3.8 EDNS0 framing on or off; call it before the first Recv. A legacy query still gets
+// the legacy reply, so the server can enable this while clients upgrade.
+func (u *UDPServer) SetDNSEdns(on bool) { u.dnsEdns = on }
+
+// dnsQRemember/lookup keep the last query per client address for the 3.3.8 reply echo (bounded; a full map is
+// simply dropped - the next query from any client repopulates it).
+func (u *UDPServer) dnsQRemember(ua *net.UDPAddr, q *dnsQueryEcho) {
+	u.dnsQmu.Lock()
+	if u.dnsQ == nil {
+		u.dnsQ = make(map[string]*dnsQueryEcho)
+	}
+	if len(u.dnsQ) >= dnsQMax {
+		u.dnsQ = make(map[string]*dnsQueryEcho)
+	}
+	u.dnsQ[ua.String()] = q
+	u.dnsQmu.Unlock()
+}
+
+func (u *UDPServer) dnsQLookup(ua *net.UDPAddr) *dnsQueryEcho {
+	u.dnsQmu.Lock()
+	defer u.dnsQmu.Unlock()
+	return u.dnsQ[ua.String()]
+}
 
 // NewUDPServer listens on addr (":4443", "0.0.0.0:4443").
 func NewUDPServer(addr string) (*UDPServer, error) {
@@ -158,8 +192,14 @@ func (u *UDPServer) Recv() ([]byte, int, net.Addr, error) {
 			p, src = u.rbuf[:n], net.UDPAddrFromAddrPort(a)
 		}
 		if u.dns.Load() {
-			if p = dnsStrip(p); p == nil {
+			var q *dnsQueryEcho
+			if p, q = dnsParse(p); p == nil {
 				continue
+			}
+			if u.dnsEdns && q != nil {
+				if ua, ok := src.(*net.UDPAddr); ok {
+					u.dnsQRemember(ua, q) // echo source for the 3.3.8 reply
+				}
 			}
 		}
 		if w := u.watch.Load(); w != nil {
@@ -177,7 +217,11 @@ func (u *UDPServer) SendTo(p []byte, lane int, dst net.Addr) error {
 		return net.ErrClosed
 	}
 	if u.dns.Load() {
-		fs, done := dnsFrames([][]byte{p}, true)
+		var q *dnsQueryEcho
+		if u.dnsEdns {
+			q = u.dnsQLookup(ua) // nil (or a legacy query): the legacy reply, so mixed versions interoperate
+		}
+		fs, done := dnsFramesOpt([][]byte{p}, true, q, u.dnsEdns)
 		defer done()
 		p = fs[0]
 	}
@@ -192,7 +236,11 @@ func (u *UDPServer) SendBatchTo(ps [][]byte, lanes []int, dst net.Addr) error {
 		return net.ErrClosed
 	}
 	if u.dns.Load() {
-		fs, done := dnsFrames(ps, true)
+		var q *dnsQueryEcho
+		if u.dnsEdns {
+			q = u.dnsQLookup(ua)
+		}
+		fs, done := dnsFramesOpt(ps, true, q, u.dnsEdns)
 		defer done()
 		ps = fs
 	}
