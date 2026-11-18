@@ -596,7 +596,7 @@ func (srv *Server) admit(hdr [hdrLen]byte, p []byte, src net.Addr) *srvSess {
 		pio = m
 	}
 	// Direct TCP auto-promotion: if admitted on TCP/TLS pool and reliable, activate directMTU (16384)
-	if prof := profileOf(pio); prof.Reliable && prof.MaxMTU >= directMTU {
+	if prof := profileOf(pio); prof.Reliable && !prof.NoDirect && prof.MaxMTU >= directMTU {
 		cfg.Direct = true
 	}
 	s, err := NewSession(cfg, pio)

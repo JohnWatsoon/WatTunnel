@@ -120,8 +120,11 @@ func NewWSPoolClient(peer string, conns int, o HTTPClientOptions) (*TCPPoolClien
 		}
 		return w, nil
 	})
-	if c != nil && eng != nil {
-		c.tlsFn = eng.info
+	if c != nil {
+		c.noDirect = true
+		if eng != nil {
+			c.tlsFn = eng.info
+		}
 	}
 	return c, err
 }
@@ -311,7 +314,9 @@ func newHTTPPoolServer(addr string, o HTTPServerOptions, mk func(*httpListener) 
 			l.Close()
 		}
 	}()
-	return newPoolServer(l), nil
+	ps := newPoolServer(l)
+	ps.noDirect = true
+	return ps, nil
 }
 
 // ---------------------------------------------------------------- h2 / grpc stream
@@ -508,8 +513,11 @@ func newH2Client(peer string, conns int, o HTTPClientOptions, grpc bool) (*TCPPo
 		}
 		return c, nil
 	})
-	if c != nil && eng != nil {
-		c.tlsFn = eng.info
+	if c != nil {
+		c.noDirect = true
+		if eng != nil {
+			c.tlsFn = eng.info
+		}
 	}
 	return c, err
 }

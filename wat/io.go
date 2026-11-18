@@ -20,6 +20,7 @@ type PacketIO interface {
 // not, so it always gets the zero Profile, i.e. the original behaviour (the sim tests pin that).
 type Profile struct {
 	Reliable bool    // delivers every datagram in order per connection (TCP based): no packet-count loss detection, delay judged by its floor
+	NoDirect bool    // HTTP/CDN-capable pool (ws/wss/h2/h2c/grpc unless reverse): keep the 4 KB MTU instead of auto-promoting to 16 KB directMTU (3.3.8)
 	MTU      int     // default datagram size when Config.MaxPayload == 0 (0 = MaxPayload, the ICMP-safe 640)
 	MaxMTU   int     // largest datagram the carrier frames (0 = MaxPayloadHi)
 	InitBps  float64 // default starting pace when Config.InitBps == 0 (0 = 1.5 MB/s)

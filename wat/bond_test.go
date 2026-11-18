@@ -795,3 +795,118 @@ func TestRetxFrameReslicing(t *testing.T) {
 		t.Errorf("remainder frame should preserve fin=true")
 	}
 }
+
+type mockBacklogKid struct {
+	*mockKidPacketIO
+	full   atomic.Bool
+	deaths atomic.Uint64
+}
+
+func (m *mockBacklogKid) Backlogged() bool   { return m.full.Load() }
+func (m *mockBacklogKid) ConnDeaths() uint64 { return m.deaths.Load() }
+
+// 3.3.8: NextPath(false) must peek the next burst winner at burst boundaries instead of returning the previous 16 KB
+// path, or Session.build sizes packet 25 to 16 KB and ChoosePath can never switch to a 1400 B / 4 KB path.
+func TestBondNextPathBurstBoundary(t *testing.T) {
+	ps := newPathSet([]string{"tcp", "udp"}, true, PathTimings{})
+	ps.setProfiles([]Profile{
+		{Reliable: true, MTU: 4096, MaxMTU: 16384},
+		{Reliable: false, MTU: 1400, MaxMTU: 1400},
+	})
+	var counts [2]int
+	for range 200 {
+		next := ps.nextPath(false)
+		lim := ps.pathLimit(next)
+		got := ps.choose(lim, false)
+		if got != next {
+			t.Fatalf("nextPath=%d (lim %d) disagreed with choose=%d", next, lim, got)
+		}
+		counts[got]++
+	}
+	if counts[0] == 0 || counts[1] == 0 {
+		t.Fatalf("expected both mixed-MTU paths to carry bursts, got tcp=%d udp=%d", counts[0], counts[1])
+	}
+}
+
+// 3.3.8: BondIO propagates child Backlogger/DeathReporter, skips a backlogged leg while another has room, and holds
+// the session only once every live leg is blocked.
+func TestBondBackloggerAndMixedPacer(t *testing.T) {
+	kICMP := newMockKid(Profile{})
+	kTCP := &mockBacklogKid{mockKidPacketIO: newMockKid(Profile{Reliable: true, MTU: 4096, MaxMTU: 16384})}
+	kWSS := &mockBacklogKid{mockKidPacketIO: newMockKid(Profile{Reliable: true, NoDirect: true, MTU: 4096, MaxMTU: 16384})}
+	defer kICMP.Close()
+	defer kTCP.Close()
+	defer kWSS.Close()
+
+	bond, err := NewBondIO([]PacketIO{kICMP, kTCP, kWSS}, BondOptions{Names: []string{"icmp", "tcp", "wss"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bond.Close()
+
+	s, err := NewSession(Config{Key: []byte("bond-338-key")}, bond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.mu.Lock()
+	rel, late, slack := s.cc.reliable, s.lateAck, s.winSlack
+	s.mu.Unlock()
+	if !rel {
+		t.Fatalf("icmp+tcp+wss bond should run the reliable delivery-rate pacer while pool legs are live")
+	}
+	if !late {
+		t.Fatalf("bonded session must enable lateAck to cover multipath reordering")
+	}
+	if slack < uint64(16384-overhead) {
+		t.Fatalf("winSlack=%d, want >= %d for 16 KB pool leg", slack, 16384-overhead)
+	}
+
+	// Mark tcp backlogged: wss and icmp still have room, so BondIO is not backlogged and ChoosePath avoids tcp.
+	kTCP.full.Store(true)
+	if bond.Backlogged() {
+		t.Fatalf("BondIO reported Backlogged while wss and icmp still have room")
+	}
+	for range 60 {
+		if p := bond.ChoosePath(1000, false); p == 1 {
+			t.Fatalf("ChoosePath picked backlogged tcp path 1 while wss/icmp had room")
+		}
+	}
+
+	// Mark wss backlogged and mute icmp: no live path has room, so BondIO must hold the session.
+	kWSS.full.Store(true)
+	bond.ToggleMute(0)
+	if !bond.Backlogged() {
+		t.Fatalf("BondIO should report Backlogged when all unmuted paths are full")
+	}
+
+	kTCP.deaths.Store(3)
+	kWSS.deaths.Store(2)
+	if got := bond.ConnDeaths(); got != 5 {
+		t.Fatalf("ConnDeaths=%d, want 5", got)
+	}
+}
+
+// 3.3.8: relV2 cwnd covers pathRTT on multi-RTT bonds and suppresses false PROBE_RTT drains.
+func TestBondMultiRTTCwnd(t *testing.T) {
+	c := newCC(8e6, 8e6, 1e9, 8*time.Millisecond)
+	c.reliable = true
+	c.maxPlain = 4000
+	c.maxBW = 20e6
+	c.minRTT = 40 * time.Millisecond
+	c.srtt = 110 * time.Millisecond
+	c.pathRTT = 160 * time.Millisecond
+	c.inflight = 1 << 20
+	now := time.Now()
+	c.probeAt = now.Add(-time.Second)
+
+	wantMin := int(20e6 * 0.160 * relCwndBDP)
+	if got := c.cwnd(); got < wantMin {
+		t.Fatalf("multi-RTT bond cwnd=%d, want >= %d (covering 160 ms pathRTT)", got, wantMin)
+	}
+	c.probeRTT(now)
+	if c.draining {
+		t.Fatalf("probeRTT should not drain when srtt spread is explained by pathRTT")
+	}
+}

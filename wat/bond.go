@@ -202,6 +202,34 @@ func (b *BondIO) OnAck(path int, rtt time.Duration, _ int) { b.ps.onAck(path, rt
 func (b *BondIO) OnLoss(path int)                          { b.ps.onLoss(path) }
 func (b *BondIO) SetProber(f func(int))                    { b.prober.Store(f) }
 func (b *BondIO) PathStats() []CarrierStat                 { return b.ps.stats() }
+func (b *BondIO) PacerMode() (bool, bool, bool)            { return b.ps.pacerMode() }
+
+// Backlogged updates the per-path full mask and holds the session when no live path has room (3.3.8).
+func (b *BondIO) Backlogged() bool {
+	var mask uint64
+	has := false
+	for i, k := range b.kids {
+		if bl, ok := k.(Backlogger); ok {
+			has = true
+			if i < 64 && bl.Backlogged() {
+				mask |= uint64(1) << uint(i)
+			}
+		}
+	}
+	return b.ps.allBulkBlocked(mask, has)
+}
+
+func (b *BondIO) ConnDeaths() uint64 {
+	var sum uint64
+	for _, k := range b.kids {
+		if dr, ok := k.(DeathReporter); ok {
+			sum += dr.ConnDeaths()
+		} else if _, ok := k.(*ReverseListenIO); ok {
+			sum += poolConnDeaths.Load()
+		}
+	}
+	return sum
+}
 
 // ---- server side
 
@@ -471,6 +499,47 @@ func (m *multiSubIO) OnAck(path int, rtt time.Duration, _ int) { m.ps.onAck(path
 func (m *multiSubIO) OnLoss(path int)                          { m.ps.onLoss(path) }
 func (m *multiSubIO) SetProber(f func(int))                    { m.prober.Store(f) }
 func (m *multiSubIO) PathStats() []CarrierStat                 { return m.ps.stats() }
+func (m *multiSubIO) PacerMode() (bool, bool, bool)            { return m.ps.pacerMode() }
+
+// Backlogged overrides subIO.Backlogged (srv.raw is MultiRaw, not RawBacklogger) so per-carrier pool backpressure
+// works on bonded servers and un-narrowed Auto Kharej listeners (3.3.8).
+func (m *multiSubIO) Backlogged() bool {
+	var addrs [64]net.Addr
+	n := min(len(m.slots), len(addrs))
+	m.mu.Lock()
+	for i := 0; i < n; i++ {
+		if m.slots[i].dst != nil {
+			addrs[i] = m.slots[i].dst.Addr
+		}
+	}
+	m.mu.Unlock()
+	var mask uint64
+	has := false
+	for i := 0; i < n; i++ {
+		if addrs[i] == nil {
+			continue
+		}
+		if rb, ok := m.mr.raws[i].(RawBacklogger); ok {
+			has = true
+			if rb.BackloggedTo(addrs[i]) {
+				mask |= uint64(1) << uint(i)
+			}
+		}
+	}
+	return m.ps.allBulkBlocked(mask, has)
+}
+
+func (m *multiSubIO) ConnDeaths() uint64 {
+	var sum uint64
+	for _, r := range m.mr.raws {
+		if dr, ok := r.(DeathReporter); ok {
+			sum += dr.ConnDeaths()
+		} else if _, ok := r.(*TCPPoolServer); ok {
+			sum += poolConnDeaths.Load()
+		}
+	}
+	return sum
+}
 
 // Profile reports the active carrier's native profile if the client connects on one carrier
 // (e.g. TCP pool), or the conservative merged profile if multiple carriers are active.

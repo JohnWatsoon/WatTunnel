@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026110802   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026111801   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -802,7 +802,7 @@ kreply_restore() {
   ok "Restored the kernel's normal ping replies (no ICMP tunnel that needs it is left)."
 }
 kreply_wanted() { # name : this tunnel receives ICMP requests that the kernel would answer too
-  [ "$(cfg "$1" carrier)" = icmp ] || return 1
+  case "+$(cfg "$1" carrier)+" in *+icmp+*) ;; *) return 1 ;; esac
   case "$(cfg "$1" icmp-type)" in ''|echo|timestamp) ;; *) return 1 ;; esac # info/mask: Linux does not answer
   if [ "$(role "$1")" = Iran ]; then is_reverse "$1"; else ! is_reverse "$1"; fi
 }
@@ -921,7 +921,35 @@ v_name() {
   [[ "$1" =~ ^[a-zA-Z0-9_-]{1,32}$ ]] || { err "Use 1-32 letters, digits, - or _."; return 1; }
   [ ! -e "$CONF/$1.yml" ] || { err "A tunnel named '$1' already exists."; return 1; }
 }
-v_host() { [[ "$1" =~ ^[A-Za-z0-9._:-]{1,253}$ ]] && return 0; err "Enter an IP address or a domain name."; return 1; }
+HP_HOST=''; HP_PORT=''
+split_hp() { # addr -> HP_HOST (unbracketed) and HP_PORT (empty when bare host / bare IPv6 / [ipv6])
+  local a=${1:-}
+  HP_HOST=''; HP_PORT=''
+  if [[ "$a" =~ ^\[([^\]]+)\]:([0-9]+)$ ]]; then HP_HOST=${BASH_REMATCH[1]}; HP_PORT=${BASH_REMATCH[2]}
+  elif [[ "$a" =~ ^\[([^\]]+)\]$ ]]; then HP_HOST=${BASH_REMATCH[1]}
+  elif ipv6_ok "$a"; then HP_HOST=$a
+  elif [[ "$a" == *:* ]]; then HP_HOST=${a%:*}; HP_PORT=${a##*:}
+  else HP_HOST=$a; fi
+}
+join_hp() { # host [port] -> host:port or [ipv6]:port (bare host when port is empty)
+  local h=${1:-} p=${2:-}
+  h=${h#[}; h=${h%]}
+  [ -n "$p" ] || { printf '%s' "$h"; return 0; }
+  if [[ "$h" == *:* ]]; then printf '[%s]:%s' "$h" "$p"; else printf '%s:%s' "$h" "$p"; fi
+}
+v_ip() {
+  local h=${1:-}; h=${h#[}; h=${h%]}
+  if ipv4_ok "$h" || ipv6_ok "$h"; then return 0; fi
+  err "Enter a valid IPv4 or IPv6 address."; return 1
+}
+v_host() {
+  local a=${1:-}
+  [ -n "$a" ] && [ "${#a}" -le 253 ] || { err "Enter an IP address or a domain name."; return 1; }
+  split_hp "$a"
+  if [ -n "$HP_PORT" ]; then v_port "$HP_PORT" >/dev/null 2>&1 || { err "Enter an IP address or a domain name."; return 1; }; fi
+  if ipv4_ok "$HP_HOST" || ipv6_ok "$HP_HOST" || [[ "$HP_HOST" =~ ^[A-Za-z0-9._-]{1,253}$ ]]; then return 0; fi
+  err "Enter an IP address or a domain name."; return 1
+}
 v_ipv4() { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && return 0; err "Enter the server's IPv4 address, such as 198.51.100.20."; return 1; }
 is_pool() { case "$1" in tcp|tls|ws|wss|h2|h2c|grpc) return 0 ;; esac; return 1; }
 is_pool_list() { local c; for c in ${1//+/ }; do is_pool "$c" && return 0; done; return 1; }
@@ -1113,7 +1141,11 @@ v_mtu() { # [mtu] [carrier] : engine bound 256..1400, up to 16384 with a pool ca
   return 1
 }
 v_num() { [[ "$1" =~ ^[0-9]+$ ]] && return 0; err "Enter a valid positive number."; return 1; }
-v_bind() { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && return 0; err "Enter an IPv4 address such as 0.0.0.0 or 10.0.0.5."; return 1; }
+v_bind() {
+  local h=${1:-}; h=${h#[}; h=${h%]}
+  if [ "$h" = "::" ] || ipv4_ok "$h" || ipv6_ok "$h"; then return 0; fi
+  err "Enter an IPv4 or IPv6 address such as 0.0.0.0, :: (dual-stack) or 10.0.0.5."; return 1
+}
 v_fec() { case "$1" in off|auto) return 0 ;; esac; err "Use off or auto."; return 1; }
 # A3: stable engine knobs as first-class rows. -win-max is an Int clamped by the engine to 4..64 MB (0 = auto-tuned
 # from host RAM, 3.0.3); -loss-ceiling is a bool opt-in (3.0.0). A value the engine would clamp must not be written.
@@ -1409,10 +1441,11 @@ v_dns_listen() {
   return 1
 }
 v_src_ip() {
-  local ip=${1,,}
+  local ip=${1,,} h=${1:-}
   [ -z "$ip" ] && return 0
   case "$ip" in 0|off) return 0 ;; esac
-  ipv4_ok "$1" || { err "--src-ip: enter a valid IPv4 address (or off)."; return 1; }
+  h=${h#[}; h=${h%]}
+  ipv4_ok "$h" || ipv6_ok "$h" || { err "--src-ip: enter a valid IPv4/IPv6 address (or off)."; return 1; }
   return 0
 }
 v_path() { [[ "$1" =~ ^/[A-Za-z0-9._/-]*$ ]] && return 0; err "The path must start with / (example: /wat)."; return 1; }
@@ -1600,12 +1633,17 @@ dash_row() { # idx name
     printf '     %scarriers%s %s%s%s %s%s%s\n' "$GRY" "$RST" "$([ "${cs%%|*}" = open ] && echo "$GRN" || echo "$CYN")" "${cs%%|*}" "$RST" "$GRY" "${cs#*|}" "$RST"
   fi
 }
-dash_auto_names() { # the auto Kharej tunnels on the dashboard
+dash_auto_names() { # the auto Kharej tunnels on the dashboard (including 3.3.3-3.3.7 finalized tunnels whose token is recovered)
   local n
-  for n in ${DASH_N[@]+"${DASH_N[@]}"}; do is_auto_kharej "$n" && [ -z "$(companion_of "$n")" ] && echo "$n"; done
+  for n in ${DASH_N[@]+"${DASH_N[@]}"}; do
+    if [ ! -f "$CONF/$n.token" ] && head -1 "$CONF/$n.yml" 2>/dev/null | grep -q 'Kept by wattun-manager from auto tunnel'; then
+      rebuild_kharej_token "$n" >/dev/null 2>&1 || true
+    fi
+    is_auto_kharej "$n" && [ -z "$(companion_of "$n")" ] && echo "$n"
+  done
   return 0
 }
-main_carriers() { # main menu c: open or close the carriers of an auto Kharej tunnel
+main_carriers() { # main menu o (or c): open or close the carriers of an auto Kharej tunnel
   local names n
   names=$(dash_auto_names)
   [ -n "$names" ] || { flash "No auto tunnel on this server, so there are no carriers to open or close."; return 0; }
@@ -1641,7 +1679,7 @@ dash_actions() {
   [ "$cnt" -gt 1 ] && open=("1-$cnt" open)
   echo; hr
   menu_line ${open[@]+"${open[@]}"} n new a batch m monitor
-  if [ -n "$(dash_auto_names)" ]; then menu_line c 'open/close carriers' u update s settings q quit
+  if [ -n "$(dash_auto_names)" ]; then menu_line o 'open/close carriers' u update s settings q quit
   else menu_line u update s settings q quit; fi
 }
 
@@ -1938,7 +1976,9 @@ pe_draw() {
   fi
   echo
   if [ -n "$PE_MSG" ]; then printf '%b' "${PE_MSG}" | sed 's/^/  /'; echo; PE_MSG=''; fi
-  if [ "$PE_ROLE" = Iran ]; then hint "Type ports to add: 443  8443:443  53/udp  (users:service)"
+  if [ "$PE_ROLE" = Iran ]; then
+    hint "Type ports to add: 443  8443:443  53/udp  (users:service)"
+    hint "WatTunnel encrypts Iran <-> Kharej only: use TLS, Reality or Shadowsocks on your panel inbound (not plain VLESS+TCP)."
   else hint "Type ports to add: 443  8443  53/udp"; fi
   menu_line Enter save a add 'e #' edit 'r #' remove c clear 'f NAME' 'copy from' q cancel
 }
@@ -2246,7 +2286,7 @@ wizard_kharej() {
       if is_rpool "$cr" && [[ "$cr" != *+* ]]; then
         echo; reverse_hint "$cr"
         if confirm "Reverse direction (this server connects out to Iran on port $listen)?" n; then
-          ask_ok "Iran server IPv4 address" "" v_ipv4 || return 1; iranip=$REPLY_V; rev=1
+          ask_ok "Iran server IP address" "" v_ip || return 1; iranip=${REPLY_V#[}; iranip=${iranip%]}; rev=1
         fi
       fi
     fi
@@ -2256,7 +2296,8 @@ wizard_kharej() {
     ask_fec off || return 1; fec=$REPLY_V; fecb=$REPLY_FEC_BAND
   fi
   valid_name "$name" || { err "The name '$name' is not available."; return 1; }
-  case "$cr" in wss|grpc|h2|tls) [ -z "$sni" ] && ! [[ "$addr" =~ ^[0-9.]+$ ]] && sni=$addr ;; esac
+  split_hp "$addr"; addr=$HP_HOST
+  case "$cr" in wss|grpc|h2|tls) [ -z "$sni" ] && ! ipv4_ok "$addr" && ! ipv6_ok "$addr" && sni=$addr ;; esac
 
   # summary
   page "New tunnel" "review"
@@ -2266,7 +2307,7 @@ wizard_kharej() {
   summary_line "Address" "$addr"
   if [ "$rev" = 1 ]; then
     if [ "$cr" = icmp ]; then summary_line "Direction" "reverse: this server pings Iran at $iranip"
-    else summary_line "Direction" "reverse: this server connects to Iran at $iranip:$listen"; fi
+    else summary_line "Direction" "reverse: this server connects to Iran at $(join_hp "$iranip" "$listen")"; fi
   fi
   summary_line "Allowed ports" "${allow:-any (no allow list: everything on 127.0.0.1 of this server is reachable through the tunnel)}"
   [ -n "$mbps" ] && summary_line "Speed limit" "$mbps MB/s"
@@ -2276,7 +2317,7 @@ wizard_kharej() {
   echo
 
   key=$(new_key); m=$(free_metrics_port)
-  peer=$addr; [ -n "$listen" ] && peer="$addr:$listen"
+  peer=$(join_hp "$addr" "$listen")
   write_server() {
     local old; old=$(umask); umask 077
     printf '%s\n' "$key" >"$CONF/$name.key" || return 1
@@ -2285,14 +2326,14 @@ wizard_kharej() {
       echo "mode: server"
       echo "key-file: $CONF/$name.key"
       echo "carrier: $cr"
-      [ -n "$listen" ] && { [ "$rev" != 1 ] || [ "$cr" = udp ]; } && echo "listen: \"$lisip:$listen\"" # reverse udp binds it as the source port
+      [ -n "$listen" ] && { [ "$rev" != 1 ] || [ "$cr" = udp ]; } && echo "listen: \"$(join_hp "$lisip" "$listen")\"" # reverse udp binds it as the source port
       [ "$udpdns" = 1 ] && echo "udp-dns: true"
       [ -n "$path" ] && echo "path: $path"
       [ -n "$itype" ] && [ "$itype" != echo ] && echo "icmp-type: $itype"
       if [ "$rev" = 1 ]; then
         echo "reverse: true"
         if is_rpool "$cr"; then
-          echo "peer: $iranip:$listen"
+          echo "peer: $(join_hp "$iranip" "$listen")"
           [ -n "$sni" ] && { echo "sni: $sni"; echo "host: $sni"; }
           echo "pool-rotate: 30m"
         else echo "peer: $iranip"; fi
@@ -3226,8 +3267,8 @@ AUTO_VAR_REVERSE='icmp tcp tls ws wss h2 h2c grpc'
 AUTO_VAR_ANTI='tcp tls wss h2 grpc ws h2c'
 # The reverse listen ports of a new auto token: one above the other for every reverse carrier except icmp. Built from
 # AUTO_VAR_REVERSE, so adding a carrier to that list extends the token plan too (the plan format itself is unchanged).
-auto_rplan_build() { # -> "tcp:24431,tls:24432,..." for the reverse carriers in AUTO_VAR_REVERSE (icmp has no port)
-  local out='' c p=24431
+auto_rplan_build() { # [base=24431] -> "tcp:24431,tls:24432,..." for the reverse carriers in AUTO_VAR_REVERSE (icmp has no port)
+  local out='' c p=${1:-24431}
   for c in $AUTO_VAR_REVERSE; do
     [ "$c" = icmp ] && continue
     out="${out:+$out,}$c:$p"; p=$((p+1))
@@ -3235,6 +3276,25 @@ auto_rplan_build() { # -> "tcp:24431,tls:24432,..." for the reverse carriers in 
   printf '%s' "$out"
 }
 AUTO_RPLAN=$(auto_rplan_build)
+# 3.3.8: pick a unique 10-port reverse slice in 30000..39990 per new Kharej auto tunnel so an Iran server connected to
+# several Kharej servers does not hit port 24431/24432 collisions across tokens.
+auto_pick_rplan() {
+  local tries base p ok tf raw
+  for tries in $(seq 1 40); do
+    base=$(( 30000 + ( (RANDOM * 31 + $$ + tries * 137) % 1000 ) * 10 + 1 ))
+    ok=1
+    for p in $(seq "$base" $((base + 8))); do
+      if listen_blocked tcp "$p" || listen_blocked udp "$p"; then ok=0; break; fi
+      for tf in "$CONF"/*.token; do
+        [ -e "$tf" ] || continue
+        raw=$(sed 's/^wat1://' "$tf" | base64 -d 2>/dev/null || true)
+        case "$raw" in *":$p,"*|*":$p;"*|*":$p") ok=0; break 2 ;; esac
+      done
+    done
+    [ "$ok" = 1 ] && { auto_rplan_build "$base"; return 0; }
+  done
+  printf '%s' "$AUTO_RPLAN"
+}
 plan_part() { # plan d|r -> "udp:4443,tcp:4443,..."
   local x
   for x in ${1//;/ }; do [ "${x%%=*}" = "$2" ] && { echo "${x#*=}"; return 0; }; done
@@ -3543,7 +3603,8 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
     AUTO_EXT_D=$(auto_ext_plan_entries)
     [ -n "$AUTO_EXT_D" ] || { warn "No extended carrier could be planned; continuing with the standard set."; AUTO_EXT=0; }
   fi
-  plan="d=$AUTO_D${AUTO_EXT_D:+,$AUTO_EXT_D};r=$AUTO_RPLAN"
+  local rplan; rplan=$(auto_pick_rplan)
+  plan="d=$AUTO_D${AUTO_EXT_D:+,$AUTO_EXT_D};r=$rplan"
   [ "$AUTO_EXT" = 1 ] && plan="$plan;e=1"
 
   [ -n "$AUTO_NOTE" ] && printf '%s' "$AUTO_NOTE" | sed "s/^/  $GRY/; s/\$/$RST/"
@@ -3598,8 +3659,8 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
     hint "Both ends need wattun 3.3.0 for the extended carriers; raw tier needs root/CAP_NET_RAW and IP protocols 41/50/97/115 open in the cloud firewall."
     warn "An older Iran never uses the extended carriers: those hidden ports stay open until: $SELF auto-prune $name --direct (or stop the ${WAT_PREFIX}@$name-e-* units by hand)."
   fi
-  hint "Automatic cleanup: once Iran's pick is stable the unused reverse side is closed by itself (direct carriers stay open)."
-  hint "Keep every carrier open: $SELF auto-prune $name --keep-open. Opt into full narrowing: auto-prune $name --direct"
+  hint "Automatic cleanup: unused carriers close $(autoprune_grace) min after Iran connects. Reopen anytime: press [o] on the main menu."
+  hint "Keep every carrier open: $SELF auto-prune $name --keep-open (or $SELF auto-prune $name --direct)"
   echo
   say "  Token for the Iran server ${GRY}(copy the whole line)${RST}"
   echo
@@ -3614,14 +3675,17 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
 # Reverse companion: written once Iran's IP is known. Only the first Iran client matters; with a CDN domain the
 # client list shows Cloudflare's IP for ws/wss/h2/h2c/grpc, so only icmp/udp/tcp/tls clients are trusted then.
 companion_create() { # name ip
-  local n=$1 ip=$2 r="$1-r" f="$CONF/$1-r.yml" m rp c p cars=icmp old tmp
-  if [ -f "$f" ] && [ "$(cfg "$r" peer-icmp)" = "$ip" ]; then return 0; fi
+  local n=$1 ip=$2 r="$1-r" f="$CONF/$1-r.yml" m rp c p cars='' old tmp
+  ip=${ip#[}; ip=${ip%]}
+  ( umask 077; printf '%s\n' "$ip" >"$CONF/$n.iranip" ) 2>/dev/null || true
+  if [ -f "$f" ] && { [ "$(cfg "$r" peer-icmp)" = "$ip" ] || grep -qF "Iran $ip)" "$f" 2>/dev/null; }; then return 0; fi
   if ! { [ -f "$CONF/$n.token" ] && read_token "$(cat "$CONF/$n.token")" && [ -n "$T_AUTO" ]; }; then
     err "No auto token for '$n'."; return 1
   fi
   rp=$(plan_part "$T_AUTO" r)
   m=$(cfg "$r" metrics); m=${m##*:}; [ -n "$m" ] || m=$(free_metrics_port)
-  for c in ${rp//,/ }; do cars="$cars+${c%%:*}"; done
+  ipv4_ok "$ip" && cars=icmp
+  for c in ${rp//,/ }; do cars="${cars:+$cars+}${c%%:*}"; done
   load_maps "$n"
   old=$(umask); umask 077
   tmp=$(mktemp "$CONF/.tmp.XXXXXX") || { umask "$old"; return 1; }
@@ -3631,8 +3695,8 @@ companion_create() { # name ip
     echo "key-file: $CONF/$n.key"
     echo "carrier: $cars"
     echo "reverse: true"
-    echo "peer-icmp: $ip"
-    for c in ${rp//,/ }; do echo "peer-${c%%:*}: $ip:${c##*:}"; done
+    ipv4_ok "$ip" && echo "peer-icmp: $ip"
+    for c in ${rp//,/ }; do echo "peer-${c%%:*}: $(join_hp "$ip" "${c##*:}")"; done
     echo "path: ${T_PATH:-/wat}"
     echo "pool-rotate: 30m"
     [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: write no invalid metrics: line when the range is exhausted
@@ -3658,7 +3722,7 @@ auto_watch() { # name : run by systemd-run; poll /stats clients, write the compa
       car=$(grep -o '"carrier": *"[^"]*"' <<<"$obj" | head -1 | cut -d'"' -f4)
       if [ -n "$cdn" ]; then case "$car" in icmp|udp|tcp|tls) ;; *) continue ;; esac; fi
       ip=$(grep -o '"ip": *"[^"]*"' <<<"$obj" | head -1 | cut -d'"' -f4)
-      ipv4_ok "$ip" && break
+      if ipv4_ok "$ip" || ipv6_ok "$ip"; then break; fi
       ip=''
     done < <(sed 's/},[[:space:]]*{/}\n{/g' <<<"$cl")
     if [ -n "$ip" ]; then companion_create "$n" "$ip"; return $?; fi
@@ -3668,8 +3732,9 @@ auto_watch() { # name : run by systemd-run; poll /stats clients, write the compa
 }
 auto_ip() { # name ip : the manual fallback of auto_watch
   local n=$1 ip=${2:-}
+  ip=${ip#[}; ip=${ip%]}
   is_auto_kharej "$n" || { err "'$n' is not an auto Kharej tunnel."; return 1; }
-  ipv4_ok "$ip" || { err "Usage: $SELF auto-ip $n IRAN_IPV4"; return 1; }
+  if ! ipv4_ok "$ip" && ! ipv6_ok "$ip"; then err "Usage: $SELF auto-ip $n IRAN_IP"; return 1; fi
   companion_create "$n" "$ip" || return 1
   systemctl stop "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
   ensure_prune_timer # R3: the automatic cleanup pass is driven by the heal timer (also on a Kharej-only server)
@@ -3678,20 +3743,25 @@ auto_ip() { # name ip : the manual fallback of auto_watch
 
 # Narrow an auto Kharej tunnel to what Iran really uses. The auto tunnel opens every carrier so Iran's test (and later
 # auto-heal) can reach any of them; once Iran has picked, the rest are only open ports. Needs Iran to be connected.
-auto_live() { # name -> AN_D (direct carriers with a live client on NAME) and AN_R (reverse carriers alive on NAME-r), space separated
-  local n=$1 s
+auto_live() { # name -> AN_D (direct carriers with a live client on NAME) and AN_R (reverse carriers alive on NAME-r or finalized NAME), space separated
+  local n=$1 s live one
   AN_D=''; AN_R=''
   if s=$(stats "$n"); then
     # clients[] names one carrier per session (the last one heard); carriers[] has every leg of a bonded client
-    AN_D=$({ grep -o '"clients": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep -o '"carrier": *"[^"]*"' | cut -d'"' -f4
+    live=$({ grep -o '"clients": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep -o '"carrier": *"[^"]*"' | cut -d'"' -f4
       grep -o '"carriers": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep '"alive": *true' | grep -o '"name": *"[^"]*"' | cut -d'"' -f4
     } | sed '/^$/d' | sort -u | tr '\n' ' ')
+    # 3.3.8: a finalized single-carrier tunnel has empty carriers[] (and on reverse, empty clients[].carrier too)
+    if [ -z "$live" ] && { [ "$(jget "$s" alive)" = true ] || [ "${s#*\"sessions\":}" != "$s" ] && [ "$(jget "$s" sessions)" -gt 0 ] 2>/dev/null; }; then
+      one=$(cfg "$n" carrier); case "$one" in *+*|'') ;; *) live="$one " ;; esac
+    fi
+    if is_reverse "$n"; then AN_R=$live; else AN_D=$live; fi
   fi
   if [ -f "$CONF/$n-r.yml" ] && s=$(stats "$n-r"); then
     AN_R=$(grep -o '"carriers": *\[[^]]*\]' <<<"$s" | sed 's/},[[:space:]]*{/}\n{/g' | grep '"alive": *true' | grep -o '"name": *"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')
     # a narrowed side has one carrier and /stats lists no carriers[] for it: alive means that carrier is in use
     if [ -z "$AN_R" ] && [ "$(jget "$s" alive)" = true ]; then
-      local one; one=$(cfg "$n-r" carrier); case "$one" in *+*|'') ;; *) AN_R="$one " ;; esac
+      one=$(cfg "$n-r" carrier); case "$one" in *+*|'') ;; *) AN_R="$one " ;; esac
     fi
   fi
 }
@@ -3753,7 +3823,7 @@ auto_narrow() { # name : close every carrier port Iran does not use
   [ -n "$gone_d" ] && say "  Closing direct:             $gone_d"
   [ -n "$gone_r" ] && say "  Closing reverse:            $gone_r"
   hint "The tunnel restarts for a moment. Auto-heal on Iran can then only use the carriers that stay open."
-  hint "To open them all again: press c on the main menu, or run $SELF auto-widen $n"
+  hint "To open them all again: press o on the main menu, or run $SELF auto-widen $n"
   confirm "Close the unused carriers?" y || { warn "Nothing changed."; return 1; }
   fwa=$(fw_port_list "$gone_d" "$d"); fwb=$(fw_port_list "$keep_d" "$d")
   if [ -n "$gone_d" ]; then
@@ -3787,11 +3857,22 @@ auto_plan_lists() { # plan -> AP_D, AP_R: the carriers of the token's plan; shap
   done
   for c in $(plan_part "$1" r | tr ',' ' '); do case "${c%%:*}" in icmp) ;; *) AP_R="$AP_R ${c%%:*}" ;; esac; done
 }
-auto_widen() { # name : open every carrier of the token's plan again
-  local n=$1 d dl rl
+auto_widen() { # name : open every carrier of the token's plan again (including after finalize)
+  local n=$1 d dl rl pip c ext_d=''
+  if [ ! -f "$CONF/$n.token" ] && head -1 "$CONF/$n.yml" 2>/dev/null | grep -q 'Kept by wattun-manager from auto tunnel'; then
+    rebuild_kharej_token "$n" >/dev/null 2>&1 || true
+  fi
   is_auto_kharej "$n" || { err "'$n' is not an auto Kharej tunnel."; return 1; }
   read_token "$(cat "$CONF/$n.token")" && [ -n "$T_AUTO" ] || { err "No auto token for '$n'."; return 1; }
-  rm -f "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" # a widen starts a fresh stable-selection window
+  if is_reverse "$n" && [ ! -s "$CONF/$n.iranip" ]; then
+    pip=$(cfg "$n" peer-icmp); [ -n "$pip" ] || { split_hp "$(cfg "$n" peer)"; pip=$HP_HOST; }
+    [ -n "$pip" ] && ( umask 077; printf '%s\n' "$pip" >"$CONF/$n.iranip" ) 2>/dev/null || true
+  fi
+  if [ -f "$CONF/$n.finalized" ] || is_reverse "$n" || is_shaped_carrier "$(cfg "$n" carrier)" || [ -n "$(cfg "$n" listen)" ]; then
+    sed -i -E '/^(reverse|peer|peer-[a-z0-9-]+|listen|sni|host|pool-rotate(-bytes)?):/d' "$CONF/$n.yml"
+    [ -n "$(cfg "$n" path)" ] || set_value "$n" path "${T_PATH:-/wat}"
+  fi
+  rm -f "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" "$CONF/$n.finalized" # a widen starts a fresh stable-selection window
   d=$(plan_part "$T_AUTO" d); auto_plan_lists "$T_AUTO"; dl=$AP_D; rl=$AP_R
   auto_set_carriers "$n" "$dl" "$rl" || return 1
   fw_open "$(fw_port_list "$dl" "$d")"
@@ -3800,15 +3881,23 @@ auto_widen() { # name : open every carrier of the token's plan again
   if [ -f "$CONF/$n-r.yml" ]; then
     systemctl enable "${WAT_PREFIX}@$n-r" >/dev/null 2>&1
     step "Restarting ${WAT_PREFIX}@$n-r" systemctl restart "${WAT_PREFIX}@$n-r"
+  elif [ -s "$CONF/$n.iranip" ]; then
+    companion_create "$n" "$(head -1 "$CONF/$n.iranip")" || true
+  else
+    start_watcher "$n" >/dev/null 2>&1 || true
+  fi
+  if [ "$(plan_part "$T_AUTO" e)" = 1 ] && [ -z "$(auto_ext_names "$n")" ]; then
+    for c in ${d//,/ }; do is_shaped_carrier "${c%%:*}" && ext_d="${ext_d:+$ext_d,}$c"; done
+    [ -n "$ext_d" ] && auto_ext_write_units "$n" "$ext_d" >/dev/null 2>&1 || true
   fi
   [ -n "$(auto_ext_names "$n")" ] && auto_ext_start "$n" # B3: reopen the extended listeners for a retest
   ok "Every carrier of '$n' is open again."
 }
 unit_on() { systemctl is-active -q "${WAT_PREFIX}@$1" 2>/dev/null || systemctl is-enabled -q "${WAT_PREFIX}@$1" 2>/dev/null; }
 auto_carrier_status() { # name -> "open|detail" or "closed|detail": how many carriers are open and what happens next
-  local n=$1 u total open=0 cur st sig since left mins AP_D AP_R plan
-  plan=$(read_token "$(cat "$CONF/$n.token")" >/dev/null 2>&1 && [ -n "$T_AUTO" ] && auto_plan_lists "$T_AUTO" && echo "$AP_D|$AP_R")
-  IFS='|' read -r AP_D AP_R <<<"$plan"
+  local n=$1 u total open=0 cur st sig since left mins AP_D AP_R plan c
+  plan=$(read_token "$(cat "$CONF/$n.token")" >/dev/null 2>&1 && [ -n "$T_AUTO" ] && auto_plan_lists "$T_AUTO" && echo "$AP_D|$AP_R|$T_AUTO")
+  IFS='|' read -r AP_D AP_R T_AUTO <<<"$plan"
   [ -n "$AP_D" ] || { echo "open|plan unknown"; return 0; }
   set -- $AP_D; total=$#
   cur=$(cfg "$n" carrier); set -- ${cur//+/ }
@@ -3817,11 +3906,17 @@ auto_carrier_status() { # name -> "open|detail" or "closed|detail": how many car
     set -- $AP_R; total=$((total + $#))
     cur=$(cfg "$n-r" carrier); set -- ${cur//+/ }
     unit_on "$n-r" && open=$((open + $#))
+  elif [ -f "$CONF/$n.finalized" ]; then
+    set -- $AP_R; total=$((total + $#))
   fi
-  for u in $(auto_ext_names "$n"); do
-    total=$((total + 1))
-    unit_on "$u" && open=$((open + 1))
-  done
+  if [ -n "$(auto_ext_names "$n")" ]; then
+    for u in $(auto_ext_names "$n"); do
+      total=$((total + 1))
+      unit_on "$u" && open=$((open + 1))
+    done
+  elif [ -f "$CONF/$n.finalized" ] && [ "$(plan_part "$T_AUTO" e)" = 1 ]; then
+    for c in $(plan_part "$T_AUTO" d | tr ',' ' '); do is_shaped_carrier "${c%%:*}" && total=$((total + 1)); done
+  fi
   [ "$open" -lt "$total" ] && { echo "closed|$open of $total open"; return 0; }
   st="all $total open"
   mins=$(autoprune_grace)
@@ -3859,7 +3954,7 @@ auto_carriers_toggle() { # name : open every carrier and hold them open, or clos
 # grace window the manager closes everything Iran does not use, on both sides (auto_narrow). All configs are kept so
 # auto-widen works, nothing is ever deleted. The window is .manager.conf key autoprune (minutes, default 5; 0 turns the
 # automatic pass off), per tunnel $CONF/NAME.keepopen turns it off, and autoprune-direct=0 limits it to the reverse side.
-AUTOPRUNE_DEFAULT_MIN=5
+AUTOPRUNE_DEFAULT_MIN=15
 autoprune_direct_setting() { # .manager.conf autoprune-direct (0 = reverse-side cleanup only; anything else = both sides)
   local v; v=$(conf_get autoprune-direct 1)
   [ "$v" = 0 ] && { echo 0; return 0; }
@@ -3958,14 +4053,18 @@ auto_plain_keys() { # name : a single-carrier kept config gets the plain peer:/l
     { print } /^carrier:/ { if (pv != "") print "peer: " pv; if (lv != "") print "listen: \"" lv "\"" }' "$f" >"$tmp" \
     && chmod 600 "$tmp" && mv -f "$tmp" "$f" || rm -f "$tmp"
 }
-auto_finalize() { # name : keep the unit Iran uses as plain tunnel NAME and delete every test part of the auto tunnel
-  # Owner rule (2026-11-07): once Iran has picked, the test tunnel must not linger and must never own the real one.
-  # The pick moves into NAME.yml (same key file), NAME.token goes, so NAME is an ordinary tunnel from then on.
-  local n=$1 w d u x tmp a b
+auto_finalize() { # name : keep the unit Iran uses as tunnel NAME, stop/remove unused test units, keep NAME.token for reopen
+  # 3.3.8: NAME.token and NAME.iranip stay on disk so pressing o (or auto-widen / automatic outage widen) can reopen
+  # every carrier at any time without deleting and recreating the tunnel.
+  local n=$1 w d u x tmp a b rip
   { is_auto_kharej "$n" && read_token "$(cat "$CONF/$n.token")" && [ -n "$T_AUTO" ]; } || return 1
   d=$(plan_part "$T_AUTO" d)
   auto_winner "$n" || return 1
   w=$AF_W
+  if [ -f "$CONF/$n-r.yml" ]; then
+    rip=$(cfg "$n-r" peer-icmp)
+    [ -n "$rip" ] && ( umask 077; printf '%s\n' "$rip" >"$CONF/$n.iranip" ) 2>/dev/null || true
+  fi
   if [ "$w" = "$n" ]; then ( NONINTERACTIVE=1; auto_narrow "$n" ) >/dev/null 2>&1 || return 1; fi
   systemctl stop "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
   systemctl reset-failed "${WAT_PREFIX}-autowatch-$n.service" >/dev/null 2>&1
@@ -3988,9 +4087,10 @@ auto_finalize() { # name : keep the unit Iran uses as plain tunnel NAME and dele
     systemctl enable --now "${WAT_PREFIX}@$n" >/dev/null 2>&1
   fi
   auto_plain_keys "$n"
-  rm -f "$CONF/$n".token "$CONF/$n".keepopen "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" "$RUN/$n.autowiden" "$RUN/$n.autowiden.down"
+  ( umask 077; : >"$CONF/$n.finalized" )
+  rm -f "$CONF/$n".keepopen "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" "$RUN/$n.autowiden" "$RUN/$n.autowiden.down"
   [ "$w" = "$n" ] && systemctl restart "${WAT_PREFIX}@$n" >/dev/null 2>&1 # the plain keys take effect
-  ok "'$n' now runs only the carrier Iran uses; the test listeners are deleted."
+  ok "'$n' now runs only the carrier Iran uses; press o on the main menu anytime to reopen all carriers."
 }
 other_kharej_live() { # auto name -> rc 0 when another (non-test) Kharej tunnel on this host has a connected client
   local t s
@@ -4022,6 +4122,7 @@ auto_prune_tick() { # name : one heal pass for an auto Kharej tunnel; reverse-si
   local n=$1 mins grace in_use_d in_use_r sig targets direct_on comp act seen now psig psince rc ext
   is_auto_kharej "$n" || return 0
   [ -f "$CONF/$n.keepopen" ] && return 0
+  [ -f "$CONF/$n.finalized" ] && [ ! -f "$RUN/$n.autoprune.done" ] && return 0
   mins=$(autoprune_grace); [ "$mins" -gt 0 ] || return 0
   auto_abandon_tick "$n" "$mins" && return 0
   if [ -f "$RUN/$n.autoprune.done" ]; then
@@ -4173,10 +4274,10 @@ autowiden_decision() { # up downs-before age-seconds min-checks min-minutes -> "
   [ "$downs" -ge "$minchecks" ] && { echo "widen"; return 0; }
   echo "wait $downs"
 }
-auto_widen_tick() { # name : reopen the plan when a pruned auto tunnel lost every open carrier
+auto_widen_tick() { # name : reopen the plan when a pruned/finalized auto tunnel lost every open carrier
   local n=$1 up=0 downs=0 age=999999 mins act cnt stamp
   is_auto_kharej "$n" || return 0
-  [ -f "$RUN/$n.autoprune.done" ] || return 0 # everything is still open unless the tunnel was narrowed
+  { [ -f "$RUN/$n.autoprune.done" ] || [ -f "$CONF/$n.finalized" ]; } || return 0 # everything is still open unless narrowed/finalized
   [ -f "$CONF/$n.keepopen" ] && return 0
   read_token "$(cat "$CONF/$n.token")" && [ -n "$T_AUTO" ] || return 0 # only when the plan is known
   mins=$(autowiden_grace); [ "$mins" -gt 0 ] || return 0
@@ -4264,7 +4365,10 @@ av_add() { # label carrier kind(d|c|r) peer port sni [fp ech tls-frag [fake-sni 
   AV_FP+=("${7:-}"); AV_ECH+=("${8:-}"); AV_FRAG+=("${9:-}")
   AV_FS+=("${10:-}"); AV_FM+=("${11:-}"); AV_X+=("${12:-}")
 }
-av_key() { local k="${AV_CAR[$1]}/${AV_KIND[$1]}"; av_anti "$1" && k+="/${AV_FS[$1]}-${AV_FM[$1]}-${AV_FP[$1]}-${AV_ECH[$1]}-${AV_FRAG[$1]}"; echo "$k"; }
+av_key() {
+  case "${AV_CAR[$1]}" in *+*) [ "${AV_KIND[$1]}" = r ] && echo bond/r || echo bond; return ;; esac
+  local k="${AV_CAR[$1]}/${AV_KIND[$1]}"; av_anti "$1" && k+="/${AV_FS[$1]}-${AV_FM[$1]}-${AV_FP[$1]}-${AV_ECH[$1]}-${AV_FRAG[$1]}"; echo "$k"
+}
 av_anti() { [ "${AV_KIND[$1]}" = d ] && [ -n "${AV_FS[$1]}${AV_FP[$1]}${AV_ECH[$1]}${AV_FRAG[$1]}" ]; } # a direct variant that carries desync / fingerprint / fragmentation (anti-censor preset)
 # Anti-censor preset: every direct pool carrier of the plan with every desync mode (first curated SNI), the three modes that
 # cleared a filter in the field (rst, synrst, paws) against the other curated SNIs and the Cloudflare edge name, the TLS
@@ -4272,21 +4376,22 @@ av_anti() { [ "${AV_KIND[$1]}" = d ] && [ -n "${AV_FS[$1]}${AV_FP[$1]}${AV_ECH[$
 # which for a reverse tunnel is Kharej, and this test only controls this server. The mode list itself is AC_ALLMODES
 # (defined once, near v_fake_mode, H6): the matrix and the validator cannot drift apart.
 auto_variants_anti() { # direct plan part
-  local d=$1 c p fs fm first=${AC_SNIS%%,*} others tls
+  local d=$1 c p fs fm first=${AC_SNIS%%,*} others tls hp
   others="${AC_SNIS#*,},www.cloudflare.com"
   for c in $AUTO_VAR_ANTI; do
     p=$(plan_port "$d" "$c"); [ -n "$p" ] || continue
+    hp=$(join_hp "$AT_ADDR" "$p")
     for fm in $AC_ALLMODES; do
-      av_add "$c $fm $first" "$c" d "$AT_ADDR:$p" '' '' '' '' '' "$first" "$fm"
+      av_add "$c $fm $first" "$c" d "$hp" '' '' '' '' '' "$first" "$fm"
     done
     for fs in ${others//,/ }; do
-      for fm in rst synrst paws; do av_add "$c $fm ${fs#www.}" "$c" d "$AT_ADDR:$p" '' '' '' '' '' "$fs" "$fm"; done
+      for fm in rst synrst paws; do av_add "$c $fm ${fs#www.}" "$c" d "$hp" '' '' '' '' '' "$fs" "$fm"; done
     done
     case "$c" in tls|wss|h2|grpc)
-      av_add "$c tls-frag mid-SNI" "$c" d "$AT_ADDR:$p" '' '' '' '' -1
-      av_add "$c tls-frag 40" "$c" d "$AT_ADDR:$p" '' '' '' '' 40
-      for fm in chrome firefox safari; do av_add "$c fp $fm" "$c" d "$AT_ADDR:$p" '' '' "$fm"; done
-      [ -n "$T_SNI" ] && av_add "$c chrome+ech" "$c" d "$AT_ADDR:$p" '' "$T_SNI" chrome auto ;;
+      av_add "$c tls-frag mid-SNI" "$c" d "$hp" '' '' '' '' -1
+      av_add "$c tls-frag 40" "$c" d "$hp" '' '' '' '' 40
+      for fm in chrome firefox safari; do av_add "$c fp $fm" "$c" d "$hp" '' '' "$fm"; done
+      [ -n "$T_SNI" ] && av_add "$c chrome+ech" "$c" d "$hp" '' "$T_SNI" chrome auto ;;
     esac
   done
   return 0
@@ -4295,16 +4400,17 @@ auto_variants() { # T_* from the auto token -> AV_* (the token's plan is the sou
   local d r c p name
   AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=()
   AV_FS=(); AV_FM=(); AV_X=()
-  AT_ADDR=$T_PEER; AT_PATH=${T_PATH:-/wat}; AT_SKIPPED=''
+  split_hp "$T_PEER"; AT_ADDR=$HP_HOST; AT_PATH=${T_PATH:-/wat}; AT_SKIPPED=''
   d=$(plan_part "$T_AUTO" d); r=$(plan_part "$T_AUTO" r)
-  av_add icmp icmp d "$AT_ADDR" '' ''
+  ipv4_ok "$AT_ADDR" && av_add icmp icmp d "$AT_ADDR" '' ''
   for c in ${d//,/ }; do # plan order = test order; a bare entry is a port-less raw carrier (gre/ipip/shaped raw)
     name=${c%%:*}; p=$(plan_entry_port "$c")
     [ "$name" = icmp ] && continue # the bare-IP icmp variant is the first row, added above
+    is_raw_carrier "$name" && ! ipv4_ok "$AT_ADDR" && continue
     if ! carrier_ok_here "$name"; then AT_SKIPPED+="${AT_SKIPPED:+, }$name"; continue; fi # B2: Iran skips what it cannot run
     if is_shaped_raw "$name"; then av_add "$name (shape only)" "$name" d "$AT_ADDR" '' ''
-    elif is_shaped_udp "$name"; then av_add "$name (shape only)" "$name" d "$AT_ADDR:$p" '' ''
-    elif [ -n "$p" ]; then av_add "$name" "$name" d "$AT_ADDR:$p" '' ''
+    elif is_shaped_udp "$name"; then av_add "$name (shape only)" "$name" d "$(join_hp "$AT_ADDR" "$p")" '' ''
+    elif [ -n "$p" ]; then av_add "$name" "$name" d "$(join_hp "$AT_ADDR" "$p")" '' ''
     else av_add "$name" "$name" d "$AT_ADDR" '' ''; fi
   done
   [ "$AT_PRESET" = anti ] && auto_variants_anti "$d"
@@ -4317,13 +4423,13 @@ auto_variants() { # T_* from the auto token -> AV_* (the token's plan is the sou
       else av_add "$c via CDN" "$c" c "$T_SNI:$p" '' "$T_SNI"; fi
     done
   fi
-  av_add "icmp reverse" icmp r "$AT_ADDR" '' ''
+  ipv4_ok "$AT_ADDR" && av_add "icmp reverse" icmp r "$AT_ADDR" '' ''
   for c in ${r//,/ }; do # reverse plan: icmp first, then pool legs (raw carriers have no reverse mode)
     name=${c%%:*}; p=$(plan_entry_port "$c")
     [ "$name" = icmp ] && continue # added above, like the direct icmp row
     [ -n "$p" ] || continue
     carrier_ok_here "$name" || { AT_SKIPPED+="${AT_SKIPPED:+, }$name"; continue; }
-    av_add "$name reverse" "$name" r "$AT_ADDR:$p" "$p" ''
+    av_add "$name reverse" "$name" r "$(join_hp "$AT_ADDR" "$p")" "$p" ''
   done
   return 0
 }
@@ -4429,9 +4535,12 @@ at_probe() { # i wait-seconds : fills AR_*[i]
   AT_ACT=''
   [ "$AT_STOP" = 1 ] && { AR_WHY[$i]=skipped; return 0; }
   case " $AT_SKIP " in *" $(av_key "$i") "*) AR_WHY[$i]='in use by this tunnel'; return 0 ;; esac
-  if [ "${AV_KIND[$i]}" = r ] && is_pool "${AV_CAR[$i]}"; then
-    if listen_blocked tcp "${AV_PORT[$i]}"; then AR_WHY[$i]="port ${AV_PORT[$i]}/tcp is busy here"; return 0; fi
-    at_fw_open "${AV_PORT[$i]}/tcp"
+  if [ "${AV_KIND[$i]}" = r ] && is_rpool "${AV_CAR[$i]}"; then
+    local rp; rp=$(rproto "${AV_CAR[$i]}")
+    if listen_blocked "$rp" "${AV_PORT[$i]}"; then
+      AR_WHY[$i]="port ${AV_PORT[$i]}/$rp busy ($(listen_conflict_desc "$rp" "${AV_PORT[$i]}"))"; return 0
+    fi
+    at_fw_open "${AV_PORT[$i]}/$rp"
   fi
   mp=$(at_free_port)
   AT_LIM=$((w + 55 + AT_MB * 4))
@@ -4471,7 +4580,7 @@ at_pool_batch() { # indices... : probe every reverse pool variant given
   for i in "$@"; do
     AR_OK[$i]=0; AR_DOWN[$i]=0; AR_UP[$i]=0; AR_RTT[$i]=0; AR_WHY[$i]=''
     case " $AT_SKIP " in *" $(av_key "$i") "*) AR_WHY[$i]='in use by this tunnel'; continue ;; esac
-    if listen_blocked tcp "${AV_PORT[$i]}"; then AR_WHY[$i]="port ${AV_PORT[$i]}/tcp is busy here"; continue; fi
+    if listen_blocked tcp "${AV_PORT[$i]}"; then AR_WHY[$i]="port ${AV_PORT[$i]}/tcp busy ($(listen_conflict_desc tcp "${AV_PORT[$i]}"))"; continue; fi
     at_fw_open "${AV_PORT[$i]}/tcp"
   done
   AT_LIM=$((45 + $# * (50 + AT_MB * 4) + 30))
@@ -4543,6 +4652,16 @@ auto_refine() { # AT_RANK from the screening -> re-measure the top 3 with 16 str
     rate=$(awk -v a="${d:-0}" -v b="${u:-0}" 'BEGIN{print (a>b)?a:b}')
     mb=$(at_probe_mb "$rate" 1.5 "$AT_FINAL_MB_MAX")
     [ "$mb" -lt "$AT_FINAL_MB_MIN" ] && mb=$AT_FINAL_MB_MIN
+    if [ -n "${AT_TUNNEL:-}" ] && { [ "$(av_key "$i")" = bond/r ] || [[ " $AT_SKIP " == *" $(av_key "$i") "* ]]; }; then
+      local lmp; lmp=$(cfg "$AT_TUNNEL" metrics); lmp=${lmp##*:}
+      if [[ "$lmp" =~ ^[0-9]+$ ]]; then
+        AT_MB=$mb; refined=$((refined + 2 * mb))
+        [ "$AT_QUIET" = 1 ] || at_busy "${AV_LABEL[$i]} (live tunnel)"
+        at_measure "$i" "$lmp"
+        [ "$AT_QUIET" = 1 ] || { at_idle; at_print "$i"; }
+        continue
+      fi
+    fi
     [ "${AV_KIND[$i]}" = r ] && is_pool "${AV_CAR[$i]}" && { pool+=("$i"); [ "$mb" -gt "$mb_pool" ] && mb_pool=$mb; continue; }
     w=8; [ "${AV_KIND[$i]}" = r ] && [ "${AV_CAR[$i]}" = icmp ] && w=30
     AT_MB=$mb; refined=$((refined + 2 * mb))
@@ -4593,10 +4712,17 @@ at_tune_knobs() { # carrier|bond|reverse -> "key:value,value ..." in test order 
 AT_TUNE_PROBES_MAX=$(at_tune_probe_count "$AUTO_TUNE_POOL") # the widest reduced grid, used by at_budget (H2)
 at_tune_knobs_avail() { printf '%s' "$(at_tune_knobs "$1")"; } # every remaining knob (sessions/conns) exists on every supported engine
 AT_TUNE=''; AT_TUNE_KEYS=''
-at_tune_bond_variant() { # AT_SEL (2+ direct variants) -> one AV entry that probes the whole selected bond; sets AT_TUNE_BASE
-  # A CDN row may be one of the joined rows (at_rows allows it): fp/ech/tls-frag are global flags, so the bond probe
-  # reuses them from the first CDN row and the global T_SNI, exactly as at_to_t writes them into the real config.
+at_tune_bond_variant() { # AT_SEL (2+ direct or 2+ reverse variants) -> one AV entry that probes the whole selected bond; sets AT_TUNE_BASE
   local i c peers='' first='' sni='' fp='' ech='' frag=''
+  if [ "${AV_KIND[${AT_SEL[0]}]}" = r ]; then
+    for i in "${AT_SEL[@]}"; do
+      c=${AV_CAR[$i]}
+      [ -n "${AV_PORT[$i]}" ] && peers="${peers:+$peers }-listen-$c :${AV_PORT[$i]}"
+    done
+    av_add "reverse bond ${T_CARRIER:-}" "${T_CARRIER:-}" r "$AT_ADDR" '' '' '' '' '' '' '' "$peers"
+    AT_TUNE_BASE=$((${#AV_LABEL[@]} - 1))
+    return 0
+  fi
   for i in "${AT_SEL[@]}"; do
     c=${AV_CAR[$i]}
     if [ "$c" = icmp ]; then peers="${peers:+$peers }-peer-icmp ${AV_PEER[$i]}"
@@ -4611,23 +4737,38 @@ at_tune_bond_variant() { # AT_SEL (2+ direct variants) -> one AV entry that prob
   av_add "bond ${T_CARRIER:-}" "${T_CARRIER:-}" d "$first" '' "$sni" "$fp" "$ech" "$frag" '' '' "$peers"
   AT_TUNE_BASE=$((${#AV_LABEL[@]} - 1))
 }
-at_tune() { # AT_SEL -> AT_TUNE (config lines) and AT_TUNE_KEYS (the settings it tested). One direct/CDN variant, one
-  # reverse variant, or a bond of direct variants (at_choose only ever joins direct, non-anti-censor rows).
-  local target kind knobs kv k v best bs s i x='' save=$AT_MB w=8
+at_tune() { # AT_SEL -> AT_TUNE (config lines) and AT_TUNE_KEYS (the settings it tested).
+  local target kind knobs kv k v best bs s i x='' save=$AT_MB w=8 rfw=''
   AT_TUNE=''; AT_TUNE_KEYS=''; AT_TUNE_MB=0
   [ "${#AT_SEL[@]}" -ge 1 ] || return 0
   if [ "${#AT_SEL[@]}" -eq 1 ]; then
     target=${AT_SEL[0]}
     if [ "${AV_KIND[$target]}" = r ]; then kind=reverse; else kind=${AV_CAR[$target]}; fi
+  elif [ "${AV_KIND[${AT_SEL[0]}]}" = r ]; then
+    kind=reverse; target=''
   else
     kind=bond; target=''
   fi
   knobs=$(at_tune_knobs_avail "$kind"); [ -n "$knobs" ] || return 0
+  if [ "$kind" = reverse ] && [ -n "${AT_TUNNEL:-}" ]; then
+    for i in "${AT_SEL[@]}"; do
+      if { [ -n "${AV_PORT[$i]}" ] && [ "$(tunnel_using_listen "${AV_PORT[$i]}")" = "$AT_TUNNEL" ]; } \
+         || { [ "${AV_CAR[$i]}" = icmp ] && is_reverse "$AT_TUNNEL" && [[ "+$(cfg "$AT_TUNNEL" carrier)+" == *+icmp+* ]]; }; then
+        [ "$AT_QUIET" = 1 ] || hint "Keeping engine auto values (reverse port is held by '$AT_TUNNEL' until switch)."
+        return 0
+      fi
+    done
+  fi
   at_prep || return 0
   # AT_SKIP only skips the live variant during the screening; tuning must measure that very variant as its baseline
   AT_SKIP=''
-  [ "$kind" = bond ] && at_tune_bond_variant
-  [ -z "$target" ] && target=$AT_TUNE_BASE
+  if [ -z "$target" ]; then
+    at_tune_bond_variant; target=$AT_TUNE_BASE
+    if [ "$kind" = reverse ]; then
+      for i in "${AT_SEL[@]}"; do [ -n "${AV_PORT[$i]}" ] && at_fw_open "${AV_PORT[$i]}/$(rproto "${AV_CAR[$i]}")"; done
+      rfw=$AT_FW; AT_FW='' # hold reverse bond ports open across all tuning probes; closed at cleanup below
+    fi
+  fi
   # D8: a fixed 20 MB each way per probe (the budget's number), not a size derived from the screening rate: the tuning
   # grid is short and its values are compared against each other, so every probe must cost the same.
   AT_MB=$AT_TUNE_PROBE_MB
@@ -4649,7 +4790,7 @@ at_tune() { # AT_SEL -> AT_TUNE (config lines) and AT_TUNE_KEYS (the settings it
   bs=0; [ "${AR_OK[$i]}" = 1 ] && bs=$(at_score "$i")
   if [ "$bs" = 0 ]; then # no baseline, no comparison: do not apply a value that was never measured against it
     [ "$AT_QUIET" = 1 ] || warn "The chosen setting did not come up during tuning; keeping the engine's auto values."
-    at_cleanup; AT_MB=$save; return 0
+    AT_FW="$AT_FW $rfw"; at_cleanup; AT_MB=$save; return 0
   fi
   for kv in $knobs; do
     k=${kv%%:*}
@@ -4667,7 +4808,7 @@ at_tune() { # AT_SEL -> AT_TUNE (config lines) and AT_TUNE_KEYS (the settings it
     done
     if [ -n "$best" ]; then x="${x:+$x }-$k=$best"; AT_TUNE+="$k: $best"$'\n'; fi
   done
-  at_cleanup
+  AT_FW="$AT_FW $rfw"; at_cleanup
   AT_MB=$save
   AT_TUNE=${AT_TUNE%$'\n'}
   if [ "$AT_QUIET" != 1 ]; then
@@ -4799,6 +4940,17 @@ at_to_t() { # AT_SEL (one index, or several = bond) -> T_CARRIER T_PEER T_PATH T
   local i c cars='' cdn='' l
   AT_EXTRA=''; T_SNI=''; T_REV=''; T_PATH=''
   if [ "${#AT_SEL[@]}" -gt 1 ]; then
+    if [ "${AV_KIND[${AT_SEL[0]}]}" = r ]; then
+      for i in "${AT_SEL[@]}"; do
+        c=${AV_CAR[$i]}; cars="${cars:+$cars+}$c"
+        [ -n "${AV_PORT[$i]}" ] && AT_EXTRA+="listen-$c: \":${AV_PORT[$i]}\""$'\n'
+      done
+      v_carrier_list "$cars" || { err "Cannot join $cars: shaped carriers are single-carrier only."; return 1; }
+      AT_EXTRA=${AT_EXTRA%$'\n'}
+      T_CARRIER=$cars; T_PEER=$AT_ADDR; T_PATH=$AT_PATH; T_REV=1
+      AT_SEL_LABEL="reverse bond $cars"; AT_SEL_KEY=bond/r
+      return 0
+    fi
     for i in "${AT_SEL[@]}"; do
       c=${AV_CAR[$i]}; cars="${cars:+$cars+}$c"; AT_EXTRA+="peer-$c: ${AV_PEER[$i]}"$'\n'
       # fp / ech / tls-frag are global flags, not per carrier: a bond uses the settings of its first (best) CDN variant
@@ -4814,7 +4966,7 @@ at_to_t() { # AT_SEL (one index, or several = bond) -> T_CARRIER T_PEER T_PATH T
   fi
   i=${AT_SEL[0]}; c=${AV_CAR[$i]}
   T_CARRIER=$c; T_PEER=${AV_PEER[$i]}
-  case "$c" in ws|wss|h2|h2c|grpc) T_PATH=$AT_PATH ;; esac
+  case "$c" in ws|wss|h2|h2c|grpc|*+*) T_PATH=$AT_PATH ;; esac
   if [ "${AV_KIND[$i]}" = c ]; then T_SNI=${AV_SNI[$i]}; AT_EXTRA=$(at_cdn_lines "$i"); fi
   if av_anti "$i"; then
     T_SNI=${AV_SNI[$i]}; AT_EXTRA=$(at_cdn_lines "$i")
@@ -4823,24 +4975,45 @@ at_to_t() { # AT_SEL (one index, or several = bond) -> T_CARRIER T_PEER T_PATH T
   [ "${AV_KIND[$i]}" = r ] && T_REV=1
   AT_SEL_LABEL=${AV_LABEL[$i]}; AT_SEL_KEY=$(av_key "$i")
 }
-at_choose() { # rc 0 = chosen (T_* ready), 1 = cancelled
-  local n=${#AT_RANK[@]} best=${AT_RANK[0]} bond=() i t num rest bd bu
+AT_JD=''; AT_JR=''
+at_joinable_summary() { # fills AT_JD (joinable direct/CDN row numbers) and AT_JR (joinable reverse row numbers)
+  local k=0 i
+  AT_JD=''; AT_JR=''
   for i in "${AT_RANK[@]}"; do
-    [ "${AV_KIND[$i]}" = d ] || continue
+    k=$((k+1))
+    case "${AV_CAR[$i]}" in *+*) continue ;; esac
+    is_shaped_carrier "${AV_CAR[$i]}" && continue
     av_anti "$i" && continue
-    is_shaped_carrier "${AV_CAR[$i]}" && continue # B4: shaped carriers are single-carrier only
-    bond+=("$i")
+    if [ "${AV_KIND[$i]}" = r ]; then AT_JR+="${AT_JR:+ }$k"; else AT_JD+="${AT_JD:+ }$k"; fi
   done
-  if [ "$NONINTERACTIVE" = 1 ]; then # --pick best (default) | bond | N (row number of the table)
+}
+at_choose() { # rc 0 = chosen (T_* ready), 1 = cancelled
+  local n=${#AT_RANK[@]} best=${AT_RANK[0]} bond=() rbond=() i num rest bd bu can_join=0 jd_n=0 jr_n=0
+  for i in "${AT_RANK[@]}"; do
+    case "${AV_CAR[$i]}" in *+*) continue ;; esac
+    is_shaped_carrier "${AV_CAR[$i]}" && continue # B4: shaped carriers are single-carrier only
+    if [ "${AV_KIND[$i]}" = d ] && ! av_anti "$i"; then bond+=("$i")
+    elif [ "${AV_KIND[$i]}" = r ]; then rbond+=("$i"); fi
+  done
+  at_joinable_summary
+  jd_n=$(wc -w <<<"$AT_JD"); jr_n=$(wc -w <<<"$AT_JR")
+  { [ "$jd_n" -ge 2 ] || [ "$jr_n" -ge 2 ]; } && can_join=1
+  if [ "$NONINTERACTIVE" = 1 ]; then # --pick best (default) | bond | rbond | N | N,N...
     local def_pick="best"
     local cur_pol=${NI_POLICY:-}
     [ -z "$cur_pol" ] && [ -n "${AT_TUNNEL:-}" ] && cur_pol=$(cat "$CONF/$AT_TUNNEL.policy" 2>/dev/null || echo speed)
     [ "$cur_pol" = bond ] && def_pick="bond"
     case "${NI_PICK:-$def_pick}" in
       best) AT_SEL=("$best") ;;
-      bond) if [ "${#bond[@]}" -ge 2 ]; then AT_SEL=("${bond[@]}"); else AT_SEL=("$best"); fi ;;
-      *,*) at_rows "$NI_PICK" || return 1 ;;
-      ''|*[!0-9]*) err "--pick must be best, bond, a row number of the table, or several joined with commas (1,3)"; return 1 ;;
+      bond)
+        if [ "${#bond[@]}" -ge 2 ]; then AT_SEL=("${bond[@]}")
+        elif [ "${#rbond[@]}" -ge 2 ]; then AT_SEL=("${rbond[@]}")
+        else AT_SEL=("$best"); fi ;;
+      rbond)
+        if [ "${#rbond[@]}" -ge 2 ]; then AT_SEL=("${rbond[@]}")
+        else AT_SEL=("$best"); fi ;;
+      *,*|*+*) at_rows "$NI_PICK" || return 1 ;;
+      ''|*[!0-9]*) err "--pick must be best, bond, a row number of the table, or several joined with commas or + (1,3)"; return 1 ;;
       *) if [ "$NI_PICK" -ge 1 ] && [ "$NI_PICK" -le "$n" ]; then AT_SEL=("${AT_RANK[$((NI_PICK-1))]}")
          else err "--pick $NI_PICK: the table has $n working row(s)"; return 1; fi ;;
     esac
@@ -4850,18 +5023,32 @@ at_choose() { # rc 0 = chosen (T_* ready), 1 = cancelled
   printf -v bu '%.1f' "${AR_UP[$best]:-0}"
   echo
   printf '  %s %s%s%s  %s%s / %s MB/s%s\n' "$(key_label Enter)" "$BOLD" "${AV_LABEL[$best]}" "$RST" "$GRY" "$bd" "$bu" "$RST"
-  [ "${#bond[@]}" -ge 2 ] && printf '  %s bond all %d direct types  %s(keeps working while one passes)%s\n' "$(key_label b)" "${#bond[@]}" "$GRY" "$RST"
-  [ "$n" -gt 1 ] && printf '  %s that row   %s join rows you pick\n' "$(key_label "1-$n")" "$(key_label c)"
+  if [ "${#bond[@]}" -ge 2 ]; then
+    printf '  %s bond all %d direct types  %s(keeps working while one passes)%s\n' "$(key_label b)" "${#bond[@]}" "$GRY" "$RST"
+  elif [ "${#rbond[@]}" -ge 2 ]; then
+    printf '  %s bond all %d reverse types  %s(keeps working while one passes)%s\n' "$(key_label b)" "${#rbond[@]}" "$GRY" "$RST"
+  fi
+  if [ "$n" -gt 1 ] && [ "$can_join" = 1 ]; then
+    printf '  %s that row   %s join rows you pick\n' "$(key_label "1-$n")" "$(key_label c)"
+  elif [ "$n" -gt 1 ]; then
+    printf '  %s that row\n' "$(key_label "1-$n")"
+  fi
   at_failed >/dev/null && printf '  %s use a type that failed\n' "$(key_label f)"
   printf '  %s cancel\n' "$(key_label q)"
-  for t in 1 2 3 4 5; do
+  while :; do
     printf '  %s?%s %s[Enter]%s ' "$CYN" "$RST" "$GRY" "$RST"
     key_read
     case "$KEY" in
       enter) AT_SEL=("$best") ;;
-      b|B) if [ "${#bond[@]}" -ge 2 ]; then AT_SEL=("${bond[@]}"); else echo; warn "Bonding needs two or more working direct carriers."; continue; fi ;;
-      c|C) [ "$n" -gt 1 ] || { echo; warn "Only one type works, so there is nothing to join."; continue; }
-         echo; at_custom || continue ;;
+      b|B)
+        if [ "${#bond[@]}" -ge 2 ]; then AT_SEL=("${bond[@]}")
+        elif [ "${#rbond[@]}" -ge 2 ]; then AT_SEL=("${rbond[@]}")
+        else echo; warn "Bonding needs two or more working direct or reverse carriers."; continue; fi ;;
+      c|C)
+        if [ "$can_join" != 1 ]; then
+          echo; warn "Joining needs at least two compatible direct rows or two reverse rows."; continue
+        fi
+        echo; at_custom || continue ;;
       f|F) echo; at_force || continue ;;
       [1-9]) num=$KEY
          if [ "$n" -gt 9 ]; then printf '%s' "$KEY"; IFS= read -r -t 5 rest || true; num="$KEY$rest"; fi
@@ -4871,14 +5058,14 @@ at_choose() { # rc 0 = chosen (T_* ready), 1 = cancelled
       *) echo; warn "Press Enter, b, c, f, a row number or q."; continue ;;
     esac
     case "$KEY" in c|C|f|F) ;; *) echo ;; esac
-    at_to_t; return 0
+    at_to_t || continue
+    return 0
   done
-  return 1
 }
-at_rows() { # "1 3 4" or "1,3,4" (rows of the table) -> AT_SEL ; rc 1 with a message when a row is unusable
-  local r i c seen=' ' cars=' '
+at_rows() { # "1 3 4", "1,3,4" or "1+3+4" (rows of the table) -> AT_SEL ; rc 1 with a message when a row is unusable
+  local norm=${1//[,+;]/ } r i c seen=' ' cars=' ' has_r=0 has_d=0
   AT_SEL=()
-  for r in ${1//,/ }; do
+  for r in $norm; do
     if ! [[ "$r" =~ ^[0-9]+$ ]] || [ "$r" -lt 1 ] || [ "$r" -gt "${#AT_RANK[@]}" ]; then err "No row $r in the table."; return 1; fi
     i=${AT_RANK[$((r-1))]}
     case "$seen" in *" $i "*) continue ;; esac
@@ -4888,16 +5075,25 @@ at_rows() { # "1 3 4" or "1,3,4" (rows of the table) -> AT_SEL ; rc 1 with a mes
   [ "${#AT_SEL[@]}" -ge 1 ] || { err "Enter at least one row number."; return 1; }
   [ "${#AT_SEL[@]}" -eq 1 ] && return 0
   for i in "${AT_SEL[@]}"; do
-    if [ "${AV_KIND[$i]}" = r ]; then err "${AV_LABEL[$i]} is a reverse connection; it cannot be joined with others. Pick it alone."; return 1; fi
+    case "${AV_CAR[$i]}" in *+*) err "${AV_LABEL[$i]} is already a joined bond; pick individual rows to join."; return 1 ;; esac
     if av_anti "$i"; then err "${AV_LABEL[$i]} is an anti-censor variant; it cannot be joined with others. Pick it alone."; return 1; fi
+    if [ "${AV_KIND[$i]}" = r ]; then has_r=1; else has_d=1; fi
     c=${AV_CAR[$i]}
     case "$cars" in *" $c "*) err "Two rows use $c; a joined tunnel can use each type once."; return 1 ;; esac
     cars+="$c "
   done
+  if [ "$has_r" = 1 ] && [ "$has_d" = 1 ]; then
+    at_joinable_summary
+    err "Cannot mix direct and reverse rows in one tunnel.${AT_JD:+ Direct rows: $AT_JD.}${AT_JR:+ Reverse rows: $AT_JR.}"
+    return 1
+  fi
   v_carrier_list "$(printf '%s' "${cars# }" | tr ' ' '+')" || return 1 # B4: a shaped row cannot be joined
 }
 at_custom() { # interactive: choose rows to join -> AT_SEL
-  ask "Rows to join, e.g. 1 3 4 (Enter = cancel)" ""
+  at_joinable_summary
+  [ "$(wc -w <<<"$AT_JD")" -ge 2 ] && hint "Joinable direct/CDN rows: $AT_JD"
+  [ "$(wc -w <<<"$AT_JR")" -ge 2 ] && hint "Joinable reverse rows: $AT_JR (direct and reverse cannot be mixed)"
+  ask "Rows to join, e.g. 1 3 or 1+3 (Enter = cancel)" ""
   [ -n "$REPLY_V" ] || return 1
   at_rows "$REPLY_V"
 }
@@ -4973,13 +5169,14 @@ auto_iran_front() { # token : test everything, ranked table, choose. Leaves T_* 
   sleep 0.4
   return 0
 }
-auto_current_key() { # name -> carrier/kind of the running config (d direct, c CDN, r reverse) or bond
+auto_current_key() { # name -> carrier/kind of the running config (d direct, c CDN, r reverse) or bond / bond/r
   local c; c=$(cfg "$1" carrier)
-  case "$c" in *+*) echo bond; return ;; esac
+  case "$c" in *+*) is_reverse "$1" && echo bond/r || echo bond; return ;; esac
   if is_reverse "$1"; then echo "$c/r"; elif [ -n "$(cfg "$1" sni)" ]; then echo "$c/c"; else echo "$c/d"; fi
 }
 auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, restart, wait for the link
-  local n=$1 f="$CONF/$1.yml" ol oldrev=0 oldpool=0 l k v rport='' curkey c bak tokbak=''
+  local n=$1 f="$CONF/$1.yml" ol l k v rport='' curkey c bak tokbak='' lc lv p
+  local -a old_rfw=() new_rfw=()
   # B2: the guard that makes "applying a skipped carrier" impossible even if a caller bypasses the variant builder
   for c in ${T_CARRIER//+/ }; do
     carrier_ok_here "$c" || { err "Carrier '$c' needs wattun $(carrier_min_ver "$c") on this server; not writing it into '$n'."; return 1; }
@@ -4990,10 +5187,16 @@ auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, 
   [ -f "$CONF/$n.token" ] && cp -p "$CONF/$n.token" "$tokbak" # the token is rewritten below; restore it too when the link fails
   AT_APPLIED=1
   curkey=$(auto_current_key "$n")
-  ol=$(cfg "$n" listen); ol=${ol##*:}
-  is_reverse "$n" && oldrev=1
-  [ "$oldrev" = 1 ] && is_rpool "$(cfg "$n" carrier)" && oldpool=1
-  oldproto=$(rproto "$(cfg "$n" carrier)")
+  if is_reverse "$n"; then
+    ol=$(cfg "$n" listen); split_hp "$ol"
+    [ -n "$HP_PORT" ] && is_rpool "$(cfg "$n" carrier)" && old_rfw+=("$HP_PORT/$(rproto "$(cfg "$n" carrier)")")
+    while IFS= read -r l; do
+      [ -n "$l" ] || continue
+      lc=${l%%:*}; lc=${lc#listen-}; lv=${l#*:}; lv=${lv//\"/}; lv=${lv//[[:space:]]/}
+      split_hp "$lv"
+      [ -n "$HP_PORT" ] && old_rfw+=("$HP_PORT/$(rproto "$lc")")
+    done < <(grep -E '^listen-[a-z0-9-]+:' "$f" 2>/dev/null)
+  fi
   sed -i -E '/^(carrier|peer|path|sni|host|reverse|listen|fp|ech|ech-cache|tls-frag|peer-[a-z0-9]+|listen-[a-z0-9]+):/d' "$f"
   # settings the tuning tested: its result replaces them. On a switch to another type all of them go: a value tuned for one
   # type can break another (the engine refuses sessions with icmp, bonds and reverse)
@@ -5017,7 +5220,7 @@ auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, 
   [ -n "$T_PATH" ] && set_value "$n" path "$T_PATH"
   if is_shaped_carrier "$T_CARRIER"; then # B4: shaped carriers are single-carrier only; raw tier has no listen port
     if [ "$(role "$n")" = Kharej ] && is_shaped_udp "$T_CARRIER"; then
-      local sp; sp=$(shaped_udp_port "$T_CARRIER"); case "$T_PEER" in *:*) sp=${T_PEER##*:} ;; esac
+      local sp; sp=$(shaped_udp_port "$T_CARRIER"); split_hp "$T_PEER"; [ -n "$HP_PORT" ] && sp=$HP_PORT
       set_value "$n" listen "\":$sp\""; fw_open "$sp/udp"
     fi
     if [ "$(role "$n")" = Iran ] && [ -n "${T_KEY:-}" ]; then # a reusable token describing the chosen shape
@@ -5026,16 +5229,26 @@ auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, 
   fi
   if [ -n "$T_SNI" ]; then set_value "$n" sni "$T_SNI"; set_value "$n" host "$T_SNI"; fi
   [ "$T_REV" = 1 ] && set_value "$n" reverse true
-  if [ "$T_REV" = 1 ] && is_rpool "$T_CARRIER"; then rport=${T_PEER##*:}; set_value "$n" listen "\":$rport\""; fi
+  if [ "$T_REV" = 1 ] && [[ "$T_CARRIER" != *+* ]] && is_rpool "$T_CARRIER"; then
+    split_hp "$T_PEER"; rport=$HP_PORT
+    [ -n "$rport" ] && { set_value "$n" listen "\":$rport\""; new_rfw+=("$rport/$(rproto "$T_CARRIER")"); }
+  fi
   while IFS= read -r l; do
     [ -n "$l" ] || continue
     k=${l%%: *}; v=${l#*: }; set_value "$n" "$k" "$v"
+    if [ "$T_REV" = 1 ] && [[ "$k" == listen-* ]]; then
+      lc=${k#listen-}; lv=${v//\"/}; lv=${lv//[[:space:]]/}
+      split_hp "$lv"
+      [ -n "$HP_PORT" ] && new_rfw+=("$HP_PORT/$(rproto "$lc")")
+    fi
   done <<<"$AT_EXTRA"
   l=$(ech_cache_line "$n"); if [ -n "$l" ]; then set_value "$n" ech-cache "${l#*: }"; fi
   step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n"
-  [ -n "$rport" ] && fw_open "$rport/$(rproto "$T_CARRIER")"
-  [ "$oldpool" = 1 ] && [ -n "$ol" ] && [ "$ol" != "$rport" ] && fw_close "$ol/$oldproto"
-  if [ "$T_CARRIER" = icmp ] && [ "$T_REV" = 1 ]; then
+  for p in ${new_rfw[@]+"${new_rfw[@]}"}; do fw_open "$p"; done
+  for p in ${old_rfw[@]+"${old_rfw[@]}"}; do
+    case " ${new_rfw[*]:-} " in *" $p "*) ;; *) fw_close "$p" ;; esac
+  done
+  if [ "$T_REV" = 1 ] && [[ "+$T_CARRIER+" == *+icmp+* ]]; then
     [ "$AT_QUIET" = 1 ] || kreply_offer
   else kreply_users_left || kreply_restore; fi
   # AT_QUIET=1 (heal/auto-retest) applies and restarts without waiting for the link; the next heal pass verifies it.
@@ -5048,8 +5261,10 @@ auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, 
       [ -f "$tokbak" ] && cp -p "$tokbak" "$CONF/$n.token"
       rm -f "$bak" "$tokbak"
       AT_APPLIED=0 # the variant was rolled back; change_key must not treat its key as applied
-      [ -n "$rport" ] && fw_close "$rport/$(rproto "$T_CARRIER")"
-      [ "$oldpool" = 1 ] && [ -n "$ol" ] && fw_open "$ol/$oldproto"
+      for p in ${new_rfw[@]+"${new_rfw[@]}"}; do
+        case " ${old_rfw[*]:-} " in *" $p "*) ;; *) fw_close "$p" ;; esac
+      done
+      for p in ${old_rfw[@]+"${old_rfw[@]}"}; do fw_open "$p"; done
     else
       warn "Could not restore $f; the backup is kept at $bak (and $tokbak)."
       [ "$NONINTERACTIVE" = 1 ] && return 1
@@ -5060,34 +5275,75 @@ auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, 
   fi
   return 0
 }
+at_skip_reverse_keys() { # tunnel -> space-padded AT_SKIP of active reverse leg keys (" tls/r wss/r ")
+  is_reverse "$1" || return 0
+  local c out=' '
+  for c in $(tr '+' ' ' <<<"$(cfg "$1" carrier)"); do [ -n "$c" ] && out+="$c/r "; done
+  printf '%s' "$out"
+}
+at_probe_live_tunnel() { # tunnel : measure the running reverse tunnel via its own /speedtest when its port was skipped
+  local n=$1 cur m mp s i idx='' save_mb=$AT_MB
+  is_reverse "$n" || return 0
+  m=$(cfg "$n" metrics); mp=${m##*:}
+  [[ "$mp" =~ ^[0-9]+$ ]] || return 0
+  s=$(stats "$n" 2>/dev/null) || return 0
+  [ "$(jget "$s" alive)" = true ] || return 0
+  cur=$(auto_current_key "$n")
+  if [ "$cur" = bond/r ]; then
+    av_add "reverse bond $(cfg "$n" carrier) (current)" "$(cfg "$n" carrier)" r "$AT_ADDR" '' ''
+    idx=$((${#AV_LABEL[@]} - 1))
+  else
+    for ((i=0; i<${#AV_LABEL[@]}; i++)); do
+      [ "$(av_key "$i")" = "$cur" ] && { idx=$i; break; }
+    done
+  fi
+  [ -n "$idx" ] || return 0
+  AR_OK[$idx]=0; AR_DOWN[$idx]=0; AR_UP[$idx]=0; AR_RTT[$idx]=0; AR_WHY[$idx]=''
+  AT_MB=${AT_LIVE_MB:-8}
+  [ "$AT_QUIET" = 1 ] || at_busy "${AV_LABEL[$idx]} (live tunnel)"
+  at_measure "$idx" "$mp"
+  [ "$AT_QUIET" = 1 ] || { at_idle; at_print "$idx"; }
+  AT_MB=$save_mb
+  return 0
+}
 auto_test_cmd() { # name : re-run the test for an existing auto Iran tunnel and offer to switch
-  local n=$1 cur
+  local n=$1 cur i nolink=0
   if [ "$(role "$n")" != Iran ] || [ ! -f "$CONF/$n.auto" ]; then
     err "'$n' is not an auto Iran tunnel (it has no $n.auto). Create it with the token from an auto Kharej tunnel."; return 1
   fi
   if ! { read_token "$(cat "$CONF/$n.auto")" && [ -n "$T_AUTO" ]; }; then err "$CONF/$n.auto is not a valid auto token."; return 1; fi
   AT_TUNNEL=$n
   cur=$(auto_current_key "$n")
-  AT_QUIET=0; AT_MB=8; AT_NOTE=""; AT_SKIP=''; AT_AGAIN="$SELF auto-test $n"
-  case "$cur" in */r) AT_SKIP=" $cur " ;; esac # its own port / ICMP are in use by the running tunnel
+  AT_QUIET=0; AT_MB=8; AT_NOTE=""; AT_SKIP=$(at_skip_reverse_keys "$n"); AT_AGAIN="$SELF auto-test $n"
   page "Auto test" "$n"
-  hint "Current: $cur. The running tunnel is not touched until you choose."
+  hint "Current: $cur ($(cfg "$n" carrier)). The running tunnel is not touched until you choose."
   at_preset_ask || { warn "Cancelled."; return 0; }
   echo
   auto_test || { err "Could not prepare the test (is $AUTO_RUN writable?)."; return 1; }
+  AT_LIVE_MB=8 at_probe_live_tunnel "$n"
   at_rank; auto_refine
+  for ((i=0; i<${#AV_LABEL[@]}; i++)); do
+    [ "${AR_OK[$i]:-0}" = 1 ] && continue
+    [[ "${AR_WHY[$i]:-}" == "no link"* ]] && nolink=$((nolink+1))
+  done
   if [ "${#AT_RANK[@]}" -eq 0 ]; then
     echo; at_none
+    [ "$nolink" -ge 3 ] && hint "If Kharej closed unused test ports after Iran connected, press [o] on Kharej's main menu to reopen all carriers."
     { [ "$NONINTERACTIVE" != 1 ] && echo && confirm "Use one of the types that failed anyway?" n && at_force; } || return 1
     at_to_t
   else
     at_table
+    [ "${#AT_RANK[@]}" -le 1 ] && [ "$nolink" -ge 3 ] && hint "Other carriers did not answer — if Kharej closed unused ports, press [o] on Kharej's main menu to reopen them before switching."
     at_choose || { warn "No change."; [ "$NONINTERACTIVE" = 1 ] && return 1; return 0; }
+    if [ "$AT_SEL_KEY" = "$cur" ] && [ "$T_CARRIER" = "$(cfg "$n" carrier)" ] && is_reverse "$n"; then
+      ok "'$n' already uses $AT_SEL_LABEL."
+      return 0
+    fi
     at_tune; at_tune_extra
   fi
   local k v curt=''
   for k in $AT_TUNE_KEYS; do v=$(cfg "$n" "$k"); [ -n "$v" ] && curt+="$k: $v"$'\n'; done
-  if [ "$AT_SEL_KEY" = "$cur" ] && [ "${curt%$'\n'}" = "$AT_TUNE" ]; then ok "'$n' already uses $AT_SEL_LABEL${AT_TUNE:+ with these settings}."; return 0; fi
+  if [ "$AT_SEL_KEY" = "$cur" ] && [ "$T_CARRIER" = "$(cfg "$n" carrier)" ] && [ "${curt%$'\n'}" = "$AT_TUNE" ]; then ok "'$n' already uses $AT_SEL_LABEL${AT_TUNE:+ with these settings}."; return 0; fi
   confirm "Switch '$n' to $AT_SEL_LABEL? (open connections drop)" y || { warn "No change."; return 0; }
   auto_apply "$n"
 }
@@ -5099,11 +5355,11 @@ auto_retest() { # name : unattended (auto-heal or auto-optimize): same duration-
     return 1
   fi
   AT_TUNNEL=$n
-  AT_QUIET=1; AT_MB=1; AT_NOTE=''; AT_SKIP=''; AT_AGAIN=''
+  AT_QUIET=1; AT_MB=1; AT_NOTE=''; AT_SKIP=$(at_skip_reverse_keys "$n"); AT_AGAIN=''
   cur=$(auto_current_key "$n")
-  case "$cur" in */r) AT_SKIP=" $cur " ;; esac
   AT_PRESET=normal
   auto_test || return 1
+  AT_LIVE_MB=2 at_probe_live_tunnel "$n"
   at_rank
   if [ "${#AT_RANK[@]}" -eq 0 ]; then logger -t wattun-heal "retest of $n: no connection type works right now"; return 0; fi
   winner=${AT_RANK[0]}
@@ -5126,14 +5382,17 @@ auto_retest() { # name : unattended (auto-heal or auto-optimize): same duration-
   fi
   pol=$(cat "$CONF/$n.policy" 2>/dev/null || echo speed)
   if [ "$pol" = bond ]; then
-    local -a bond_cars=()
+    local -a bond_cars=() rbond_cars=()
     for i in "${AT_RANK[@]}"; do
-      [ "${AV_KIND[$i]}" = d ] || continue
+      case "${AV_CAR[$i]}" in *+*) continue ;; esac
       is_shaped_carrier "${AV_CAR[$i]}" && continue # B4: shaped carriers never join a bond
-      bond_cars+=("$i")
+      if [ "${AV_KIND[$i]}" = d ] && ! av_anti "$i"; then bond_cars+=("$i")
+      elif [ "${AV_KIND[$i]}" = r ]; then rbond_cars+=("$i"); fi
     done
     if [ "${#bond_cars[@]}" -ge 2 ]; then
       AT_SEL=("${bond_cars[@]}")
+    elif [ "${#rbond_cars[@]}" -ge 2 ]; then
+      AT_SEL=("${rbond_cars[@]}")
     else
       AT_SEL=("$winner")
     fi
@@ -6279,9 +6538,68 @@ token_qr() { # token : the token as a terminal QR code too, on a tty when qrenco
   if [ "$IS_TTY" = 1 ] && command -v qrencode >/dev/null 2>&1; then qrencode -t ANSIUTF8 -- "$1"; fi
   return 0
 }
+# 3.3.8: recover NAME.token when an older 3.3.3-3.3.7 finalize (or manual rm) removed it, so show_token, change_key
+# and main-menu o work on existing Kharej tunnels without deleting and recreating them.
+rebuild_kharej_token() { # name -> rc 0 when NAME.token exists or was rebuilt
+  local n=$1 key allow apath sni itype addr='' tf cr rev='' lis lp='' pip rplan dplan
+  [ "$(role "$n")" = Kharej ] || return 1
+  [ -f "$CONF/$n.token" ] && return 0
+  key=$(head -1 "$CONF/$n.key" 2>/dev/null || true); [ -n "$key" ] || return 1
+  load_maps "$n"; allow=$(maps_allow_str)
+  apath=$(cfg "$n" path); sni=$(cfg "$n" sni); itype=$(cfg "$n" icmp-type)
+  for tf in "$CONF"/*.token; do
+    [ -e "$tf" ] || continue
+    if read_token "$(cat "$tf")" && [ -n "$T_PEER" ]; then split_hp "$T_PEER"; addr=$HP_HOST; break; fi
+  done
+  [ -n "$addr" ] || addr=$(public_ip)
+  [ -n "$addr" ] || addr=$(out_ip 8.8.8.8)
+  if [ -z "$addr" ] && [ "$NONINTERACTIVE" != 1 ] && [ -t 0 ]; then
+    ask_ok "Public IP or domain of this server" "" v_host && { split_hp "$REPLY_V"; addr=$HP_HOST; }
+  fi
+  [ -n "$addr" ] || return 1
+  cr=$(cfg "$n" carrier); is_reverse "$n" && rev=1
+  if head -1 "$CONF/$n.yml" 2>/dev/null | grep -q 'Kept by wattun-manager from auto tunnel'; then
+    if [ "$rev" = 1 ]; then
+      pip=$(cfg "$n" peer-icmp); [ -n "$pip" ] || { split_hp "$(cfg "$n" peer)"; pip=$HP_HOST; lp=$HP_PORT; }
+      [ -n "$pip" ] && ( umask 077; printf '%s\n' "$pip" >"$CONF/$n.iranip" ) 2>/dev/null || true
+    else
+      lis=$(cfg "$n" listen); split_hp "$lis"; lp=$HP_PORT
+    fi
+    auto_pick_ports || return 1
+    dplan=$AUTO_D; rplan=$(auto_pick_rplan)
+    if [ -n "$lp" ] && [[ "$cr" != *+* ]]; then
+      if [ "$rev" = 1 ]; then rplan=$(sed -E "s/(^|,)$cr:[0-9]+/\1$cr:$lp/" <<<"$rplan")
+      elif ! is_shaped_carrier "$cr"; then dplan=$(sed -E "s/(^|,)$cr:[0-9]+/\1$cr:$lp/" <<<"$dplan"); fi
+    fi
+    ( umask 077
+      make_token auto "$addr" "$key" "${apath:-/wat}" "$sni" "" "$allow" "" "d=$dplan;r=$rplan" >"$CONF/$n.token"
+      : >"$CONF/$n.finalized" )
+    return 0
+  fi
+  lis=$(cfg "$n" listen); split_hp "$lis"; lp=$HP_PORT
+  if [ -z "$lp" ] && [ "$rev" = 1 ]; then split_hp "$(cfg "$n" peer)"; lp=$HP_PORT; fi
+  [ "$(cfg "$n" udp-dns)" = true ] && apath=dns
+  ( umask 077; make_token "$cr" "$(join_hp "$addr" "$lp")" "$key" "$apath" "$sni" "$itype" "$allow" "$rev" >"$CONF/$n.token" )
+}
 show_token() {
-  if [ -f "$CONF/$1.token" ]; then refresh_token "$1"; printf '%s%s%s\n' "$BOLD$YEL" "$(cat "$CONF/$1.token")" "$RST"; token_qr "$(cat "$CONF/$1.token")"
-  else err "No token stored for '$1' (tokens exist only on Kharej tunnels)."; return 1; fi
+  local n=$1
+  [ "$(role "$n")" = Kharej ] && [ ! -f "$CONF/$n.token" ] && { rebuild_kharej_token "$n" || true; }
+  if [ ! -f "$CONF/$n.token" ]; then
+    err "No token stored for '$n' (tokens exist only on Kharej tunnels)."; return 1
+  fi
+  refresh_token "$n"
+  if is_auto_kharej "$n" && [ "$(auto_carrier_status "$n" | cut -d'|' -f1)" = closed ]; then
+    warn "Test carriers on '$n' are currently closed (only Iran's active carrier is open)."
+    if [ "$NONINTERACTIVE" != 1 ] && [ -t 0 ]; then
+      if confirm "Open all carriers now so an Iran server can test this token?" y; then
+        auto_widen "$n" && ( umask 077; : >"$CONF/$n.keepopen" )
+        echo
+      fi
+    else
+      hint "Before testing from Iran, press [o] on the main menu or run: $SELF auto-widen $n"
+    fi
+  fi
+  printf '%s%s%s\n' "$BOLD$YEL" "$(cat "$CONF/$n.token")" "$RST"; token_qr "$(cat "$CONF/$n.token")"
   warn "The token contains the key. Share it only over a private channel."
 }
 edit_ports() { # name
@@ -6311,16 +6629,17 @@ edit_ports() { # name
   fi
 }
 change_peer() {
-  local n=$1 r cr old v op np
+  local n=$1 r cr old v op np oh
   r=$(role "$n"); cr=$(cfg "$n" carrier); old=$(cfg "$n" peer)
+  split_hp "$old"; oh=$HP_HOST; op=$HP_PORT
   if is_reverse "$n"; then
     if [ "$r" = Kharej ]; then
       # reverse: this server dials Iran, so its peer is the address that must be repointed here
-      if [ "$cr" = icmp ]; then ask_ok "New Iran address (IPv4)" "${old%%:*}" v_ipv4 || return 1
-      else ask_ok "New Iran address (host or host:port)" "$old" v_host || return 1; fi
-      v=$REPLY_V
-      if [ "$cr" != icmp ] && [[ "$v" != *:* ]] && [ "${old##*:}" != "$old" ]; then
-        v="$v:${old##*:}"
+      if [ "$cr" = icmp ]; then ask_ok "New Iran address (IPv4)" "$oh" v_ipv4 || return 1; v=$REPLY_V
+      else
+        ask_ok "New Iran address (host or host:port)" "$old" v_host || return 1
+        split_hp "$REPLY_V"
+        v=$(join_hp "$HP_HOST" "${HP_PORT:-$op}")
       fi
       set_value "$n" peer "$v"
       step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n" || return 1
@@ -6330,13 +6649,13 @@ change_peer() {
     fi
     # reverse on Iran: this server is the listener, so only its own port is local
     [ "$cr" = icmp ] && { hint "Reverse ICMP has no port to change: this server only answers ping."; return 0; }
-    ask_ok "New carrier listen port on this server (the same port on Kharej)" "${old##*:}" v_port || return 1
+    ask_ok "New carrier listen port on this server (the same port on Kharej)" "$op" v_port || return 1
     np=$((10#$REPLY_V))
-    if listen_blocked "$(rproto "$cr")" "$np" && [ "$np" != "${old##*:}" ]; then
+    if listen_blocked "$(rproto "$cr")" "$np" && [ "$np" != "$op" ]; then
       err "Port $np/$(rproto "$cr") is already in use here by $(listen_conflict_desc "$(rproto "$cr")" "$np")."; return 1
     fi
     set_value "$n" listen "\":$np\""
-    case "$old" in *:*) set_value "$n" peer "${old%:*}:$np" ;; esac
+    [ -n "$op" ] && set_value "$n" peer "$(join_hp "$oh" "$np")"
     fw_open "$np/$(rproto "$cr")"
     step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n" || return 1
     wait_link "$n" 20 && ok "CONNECTED (RTT ${LINK_RTT} ms)" || warn "Not connected yet."
@@ -6345,18 +6664,18 @@ change_peer() {
   fi
   # normal: Iran dials Kharej
   ask_ok "New Kharej address (host or host:port)" "$old" v_host || return 1
-  v=$REPLY_V
+  split_hp "$REPLY_V"
   if is_raw_carrier "$cr"; then # raw-IP carriers take a bare host; a typed port would break the raw socket
-    case "$v" in *:*) op=${v##*:}; v_port "$op" >/dev/null 2>&1 && { v=${v%:*}; hint "Raw-IP carrier: dropped the port, the peer is a bare address."; } ;; esac
+    [ -n "$HP_PORT" ] && hint "Raw-IP carrier: dropped the port, the peer is a bare address."
+    v=$HP_HOST
   else
-    op=${old##*:}; [ "$op" = "$old" ] && op=''
-    if [[ "$v" != *:* ]]; then
+    if [ -z "$HP_PORT" ]; then
       [ -n "$op" ] || { err "This carrier needs host:port (for example example.com:443)."; return 1; }
-      v="$v:$op"; hint "No port given: keeping port $op."
+      HP_PORT=$op; hint "No port given: keeping port $op."
     fi
-    v_port "${v##*:}" >/dev/null 2>&1 || { err "The Kharej address needs a valid port, like host:443."; return 1; }
-    np=$((10#${v##*:}))
-    v="${v%:*}:$np"
+    v_port "$HP_PORT" >/dev/null 2>&1 || { err "The Kharej address needs a valid port, like host:443."; return 1; }
+    np=$((10#$HP_PORT))
+    v=$(join_hp "$HP_HOST" "$np")
   fi
   set_value "$n" peer "$v"
   step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n" || return 1
@@ -6367,6 +6686,7 @@ change_key() {
   if [ "$(role "$n")" = Kharej ]; then
     warn "Every Iran server on this tunnel disconnects until it gets the new token."
     confirm "Make a new key and token?" n || return 0
+    [ -f "$CONF/$n.token" ] || rebuild_kharej_token "$n" || true
     k=$(new_key); ( umask 077; printf '%s\n' "$k" >"$CONF/$n.key" )
     if [ -f "$CONF/$n.token" ] && read_token "$(cat "$CONF/$n.token")"; then
       make_token "$T_CARRIER" "$T_PEER" "$k" "$T_PATH" "$T_SNI" "$T_ICMP" "$T_PORTS" "$T_REV" "$T_AUTO" >"$CONF/$n.token"
@@ -6414,14 +6734,15 @@ change_key() {
       shaped_supported_here "$T_CARRIER" || return 1
       if is_shaped_carrier "$T_CARRIER"; then
         T_PEER=$(shaped_peer_for_client "$T_CARRIER" "$T_PEER")
-        case "$T_PEER" in *:*) v_port "${T_PEER##*:}" || return 1 ;; esac
+        split_hp "$T_PEER"
+        [ -n "$HP_PORT" ] && { v_port "$HP_PORT" || return 1; }
       fi
       shaped_warn "$T_CARRIER"
     fi
-    [ "$T_REV" = 1 ] && is_rpool "$T_CARRIER" && { v_port "${T_PEER##*:}" || return 1; }
+    [ "$T_REV" = 1 ] && is_rpool "$T_CARRIER" && { split_hp "$T_PEER"; v_port "$HP_PORT" || return 1; }
     is_reverse "$n" && oldrev=1
     if [ "$oldrev" = 1 ]; then
-      oldlisten=$(cfg "$n" listen); oldlisten=${oldlisten##*:}
+      oldlisten=$(cfg "$n" listen); split_hp "$oldlisten"; oldlisten=$HP_PORT
       is_rpool "$(cfg "$n" carrier)" && oldproto=$(rproto "$(cfg "$n" carrier)")
     fi
     if is_pool_list "$T_CARRIER" && [ "$T_REV" != 1 ]; then keepres=1; fi
@@ -6438,7 +6759,7 @@ change_key() {
     [ -n "$T_ICMP" ] && [ "$T_ICMP" != echo ] && set_value "$n" icmp-type "$T_ICMP"
     if [ "$T_REV" = 1 ]; then
       set_value "$n" reverse true
-      is_rpool "$T_CARRIER" && { rport=${T_PEER##*:}; set_value "$n" listen "\":$((10#${rport}))\""; }
+      is_rpool "$T_CARRIER" && { split_hp "$T_PEER"; rport=$HP_PORT; set_value "$n" listen "\":$((10#${rport}))\""; }
     fi
     step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n" || return 1
     [ -n "$rport" ] && fw_open "$rport/$(rproto "$T_CARRIER")"
@@ -6457,12 +6778,13 @@ change_key() {
   fi
 }
 delete_tunnel() {
-  local n=$1 f s p extra='' cnt u run=''
-  if is_auto_kharej "$n" && ! { auto_winner "$n" || { sleep 2; auto_winner "$n"; }; }; then
+  local n=$1 f s p extra='' cnt u run='' has_kids=0
+  { [ -f "$CONF/$n-r.yml" ] || [ -n "$(auto_ext_names "$n")" ]; } && has_kids=1
+  if is_auto_kharej "$n" && [ "$has_kids" = 1 ] && ! { auto_winner "$n" || { sleep 2; auto_winner "$n"; }; }; then
     # a busy host can miss the stats limit: never let an unreadable pick turn into a silent delete of Iran's link
     for u in "$n-r" $(auto_ext_names "$n"); do systemctl is-active -q "${WAT_PREFIX}@$u" 2>/dev/null && run="$run $u"; done
     [ -n "$run" ] && warn "Could not read which side Iran uses. Still running:$run. Iran may be connected through one of them, and deleting removes them too."
-  elif is_auto_kharej "$n" && [ "$AF_W" != "$n" ]; then
+  elif is_auto_kharej "$n" && [ "$has_kids" = 1 ] && [ "$AF_W" != "$n" ]; then
     # Iran's link runs on a test unit of this tunnel: deleting the test tunnel must keep it (owner rule 2026-11-07)
     warn "Iran is connected through '$AF_W'. This keeps that connection as tunnel '$n' and deletes only the test listeners."
     hint "To remove the tunnel completely, delete '$n' again afterwards."
@@ -6495,6 +6817,7 @@ delete_tunnel() {
   bond_retest_disable "$n" # the bond-retest timer belongs to this tunnel
   rm -f "$CONF/$n".yml "$CONF/$n".ech "$CONF/$n".key "$CONF/$n".token "$CONF/$n".auto "$RUN/$n.down" "$RUN/$n.cycles" "$RUN/$n.retest" \
         "$CONF/$n".bondretest "$CONF/$n".bondretest.tmp "$CONF/$n".bondfail "$CONF/$n".bondfail.tmp "$CONF/$n".keepopen \
+        "$CONF/$n".finalized "$CONF/$n".iranip \
         "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" "$RUN/$n.autowiden" "$RUN/$n.autowiden.down" "$RUN/$n.abandoned"
   ok "Tunnel '$n' deleted."
   kreply_users_left || kreply_restore
@@ -6519,7 +6842,7 @@ set_direction() { # name
     if is_reverse "$n"; then
       confirm "Switch '$n' back to the normal direction (Iran connects to Kharej)?" n || return 1
       if [ "$r" = Kharej ]; then
-        pp=$(cfg "$n" peer); pp=${pp##*:}
+        split_hp "$(cfg "$n" peer)"; pp=$HP_PORT
         v_port "$pp" >/dev/null 2>&1 || { err "Cannot read the carrier port from peer."; return 1; }
         set_value "$n" listen "\":$pp\""
         unset_value "$n" peer; unset_value "$n" sni; unset_value "$n" host
@@ -6531,17 +6854,17 @@ set_direction() { # name
     else
       confirm "Switch '$n' to reverse (Kharej connects out to Iran)?" n || return 1
       if [ "$r" = Kharej ]; then
-        pp=$(cfg "$n" listen); pp=${pp##*:}
+        split_hp "$(cfg "$n" listen)"; pp=$HP_PORT
         v_port "$pp" >/dev/null 2>&1 || { err "Cannot read the carrier port from listen."; return 1; }
-        ask_ok "Iran server IPv4 address" "" v_ipv4 || return 1; ip=$REPLY_V
-        set_value "$n" peer "$ip:$pp"
+        ask_ok "Iran server IP address (IPv4 or IPv6)" "" v_ip || return 1; ip=$REPLY_V
+        set_value "$n" peer "$(join_hp "$ip" "$pp")"
         [ "$cr" = udp ] || unset_value "$n" listen # reverse udp keeps it: the source port of the punches
         if [ -f "$CONF/$n.token" ] && read_token "$(cat "$CONF/$n.token")" && [ -n "$T_SNI" ]; then
           set_value "$n" sni "$T_SNI"; set_value "$n" host "$T_SNI"
         fi
       else
-        pp=$(cfg "$n" peer); pp=${pp##*:}
-        v_port "$pp" >/dev/null 2>&1 && [ "$pp" != "$(cfg "$n" peer)" ] || { err "The peer has no carrier port, so reverse cannot be set up."; return 1; }
+        split_hp "$(cfg "$n" peer)"; pp=$HP_PORT
+        v_port "$pp" >/dev/null 2>&1 || { err "The peer has no carrier port, so reverse cannot be set up."; return 1; }
         pp=$((10#$pp))
         if listen_blocked "$pr" "$pp"; then err "Port $pp/$pr is already in use here by $(listen_conflict_desc "$pr" "$pp")."; return 1; fi
         set_value "$n" listen "\":$pp\""
@@ -8839,64 +9162,221 @@ restart_all() {
   done
   [ "$c" -gt 0 ] || warn "No tunnels to restart."
 }
-update() { # [installer args...]
+U_URL_PREFIX=''; U_CURL_PROXY=''
+apply_update_proxy() { # url -> U_URL_PREFIX (mirror prefix) or U_CURL_PROXY (curl -x proxy)
+  local v=${1:-}
+  U_URL_PREFIX=''; U_CURL_PROXY=''
+  [ -n "$v" ] || return 0
+  case "$v" in
+    socks4://*|socks4a://*|socks5://*|socks5h://*) U_CURL_PROXY=$v ;;
+    http://*|https://*)
+      if [[ "$v" =~ ^https?://[^/]+:[0-9]{1,5}/?$ ]]; then U_CURL_PROXY=${v%/}
+      else U_URL_PREFIX="${v%/}/"; fi ;;
+    *) U_URL_PREFIX="${v%/}/" ;;
+  esac
+}
+update_proxy_env() { # env WAT_PROXY / WAT_CURL_PROXY win; else .manager.conf update-proxy
+  U_URL_PREFIX=${WAT_PROXY:-}; U_CURL_PROXY=${WAT_CURL_PROXY:-}
+  [ -n "$U_URL_PREFIX" ] && U_URL_PREFIX="${U_URL_PREFIX%/}/"
+  if [ -z "$U_URL_PREFIX" ] && [ -z "$U_CURL_PROXY" ]; then
+    local saved; saved=$(conf_get update-proxy '')
+    [ -n "$saved" ] && apply_update_proxy "$saved"
+  fi
+  return 0
+}
+u_curl() { # [curl args...] : curl with update proxy + retry-all-errors fallback for curl < 7.71
+  local -a px=()
+  [ -n "${U_CURL_PROXY:-}" ] && px=(-x "$U_CURL_PROXY")
+  if curl --help all 2>&1 | grep -q -- '--retry-all-errors'; then
+    curl -fsSL ${px[@]+"${px[@]}"} --connect-timeout 10 --max-time 90 --retry 4 --retry-all-errors "$@"
+  else
+    curl -fsSL ${px[@]+"${px[@]}"} --connect-timeout 10 --max-time 90 --retry 4 "$@"
+  fi
+}
+OFFLINE_DIR=''
+resolve_offline_bundle() { # path extract_dir -> OFFLINE_DIR (directory containing install.sh)
+  local src=$1 dst=$2 d
+  OFFLINE_DIR=''
+  if [ -d "$src" ] && [ -f "$src/install.sh" ]; then
+    OFFLINE_DIR=$(cd "$src" 2>/dev/null && pwd) || OFFLINE_DIR=$src
+    return 0
+  fi
+  if [ -f "$src" ]; then
+    mkdir -p "$dst" || return 1
+    if tar -xzf "$src" -C "$dst" 2>/dev/null || tar -xf "$src" -C "$dst" 2>/dev/null; then
+      if [ -f "$dst/install.sh" ]; then OFFLINE_DIR=$dst; return 0; fi
+      for d in "$dst"/*; do
+        [ -d "$d" ] && [ -f "$d/install.sh" ] && { OFFLINE_DIR=$d; return 0; }
+      done
+    fi
+  fi
+  err "No install.sh found in '$src' (pass a wattun-offline-<arch>.tar.gz archive or its extracted directory)."
+  return 1
+}
+bundle_cmd() { # [amd64|arm64] [dest.tar.gz] : build a signed offline install/update bundle (e.g. on Kharej for Iran)
+  local arch=${1:-} out=${2:-} bdir sub base f got
+  if [ -z "$arch" ]; then
+    case "$(uname -m)" in
+      x86_64|amd64) arch=amd64 ;;
+      aarch64|arm64) arch=arm64 ;;
+      *) err "Specify architecture: $SELF bundle amd64  or  $SELF bundle arm64"; return 1 ;;
+    esac
+  fi
+  case "$arch" in amd64|arm64) ;; *) err "Unsupported bundle architecture '$arch' (use amd64 or arm64)."; return 1 ;; esac
+  [ -n "$out" ] || out="$PWD/wattun-offline-$arch.tar.gz"
+  for f in curl tar sha256sum openssl; do
+    command -v "$f" >/dev/null 2>&1 || { err "'$f' is required to build and verify an offline bundle."; return 1; }
+  done
+  update_proxy_env
+  base="${U_URL_PREFIX}https://github.com/$REPO/releases/latest/download"
+  bdir=$(mktemp -d /tmp/wattun-bundle.XXXXXX) || { err "Cannot create a temporary directory."; return 1; }
+  sub="$bdir/wattun-offline-$arch"
+  mkdir -p "$sub" || { rm -rf "$bdir"; return 1; }
+  spin_start "Downloading release files for linux/$arch"
+  u_curl -o "$sub/install.sh" "$base/install.sh" \
+    && u_curl -o "$sub/wattun-linux-$arch" "$base/wattun-linux-$arch" \
+    && u_curl -o "$sub/wattun-manager" "$base/wattun-manager" \
+    && u_curl -o "$sub/SHA256SUMS" "$base/SHA256SUMS" \
+    && u_curl -o "$sub/SHA256SUMS.sig" "$base/SHA256SUMS.sig"
+  local rc=$?
+  spin_stop
+  if [ "$rc" -ne 0 ]; then
+    rm -rf "$bdir"
+    err "Download failed from $base."
+    return 1
+  fi
+  if ! sums_verify "$sub/SHA256SUMS" "$sub/SHA256SUMS.sig"; then
+    rm -rf "$bdir"
+    err "Signature check on SHA256SUMS failed; refusing to create an unverified bundle."
+    return 1
+  fi
+  for f in install.sh "wattun-linux-$arch" wattun-manager; do
+    got=$(sha256sum "$sub/$f" 2>/dev/null | awk '{print $1}')
+    if [ -z "$got" ] || ! sums_has "$sub/SHA256SUMS" "$f" "$got"; then
+      rm -rf "$bdir"
+      err "Checksum mismatch for $f in SHA256SUMS; aborting."
+      return 1
+    fi
+  done
+  chmod 755 "$sub/install.sh" "$sub/wattun-linux-$arch" "$sub/wattun-manager"
+  if ! tar -czf "$out" -C "$bdir" "wattun-offline-$arch"; then
+    rm -rf "$bdir"
+    err "Failed to write archive '$out'."
+    return 1
+  fi
+  rm -rf "$bdir"
+  ok "Verified offline bundle written: ${BOLD}$out${RST}"
+  hint "1. Copy to Iran:   scp \"$out\" root@IRAN_IP:/root/"
+  hint "2. Fresh install:  tar xzf /root/${out##*/} -C /root && bash /root/wattun-offline-$arch/install.sh"
+  hint "3. Offline update: wattun update --from /root/${out##*/}"
+  return 0
+}
+update() { # [--from <dir|tar.gz>] [installer args...]
   local url="https://raw.githubusercontent.com/$REPO/main/install.sh" tmp before after mbefore imgr a
-  local ienv=()
+  local from_src='' pass_args=() ienv=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from) [ $# -ge 2 ] || { err "--from needs a path to a .tar.gz bundle or directory"; return 1; }; from_src=$2; shift 2 ;;
+      --from=*) from_src=${1#--from=}; shift ;;
+      *)
+        if [ -z "$from_src" ] && [ "${#pass_args[@]}" -eq 0 ] && { [ -d "$1" ] && [ -f "$1/install.sh" ] || [[ "$1" == *.tar.gz || "$1" == *.tgz ]]; }; then
+          from_src=$1; shift
+        else
+          pass_args+=("$1"); shift
+        fi ;;
+    esac
+  done
   if [ "$SANDBOX" = 1 ]; then
-    for a in "$@"; do [ "$a" = --uninstall ] && { err "Sandbox: use the manager's uninstall (Settings), not the installer's --uninstall (it removes the production units)."; return 1; }; done
+    for a in ${pass_args[@]+"${pass_args[@]}"}; do [ "$a" = --uninstall ] && { err "Sandbox: use the manager's uninstall (Settings), not the installer's --uninstall (it removes the production units)."; return 1; }; done
     imgr=$MGR; [ "$MGR" = /usr/local/bin/wattun-manager ] && imgr=${BIN%/*}/wattun-manager
     mkdir -p "${BIN%/*}" || { err "Cannot create ${BIN%/*}"; return 1; }
     say "  Sandbox $WAT_PREFIX: the update writes only $BIN, $imgr and $CONF (not /usr/local/bin, not wattun@.service)."
   fi
+  update_proxy_env
   before=$(bin_ver); mbefore=$(cksum <"${imgr:-$MGR}" 2>/dev/null)
   local udir; udir=$(mktemp -d /tmp/wattun-update.XXXXXX) || { err "Cannot create a temporary directory"; return 1; }
   tmp=$udir/install.sh # every temp file lives in one private (0700) directory: no guessable names in /tmp
-  local sums=$udir/SHA256SUMS sig=$udir/SHA256SUMS.sig mkeep=$udir/manager.keep
+  local sums=$udir/SHA256SUMS sig=$udir/SHA256SUMS.sig mkeep=$udir/manager.keep rc
   trap 'rm -rf ${udir:+"$udir"}' EXIT # a kill mid-update must not leave root-owned temp files
   [ "$SANDBOX" = 1 ] && ienv=(WAT_BIN="$BIN" WAT_MGR="$imgr" WAT_CONF="$CONF" WAT_UNIT="$tmp.unit" WAT_REQUIRE_SANDBOX=1) # the installer's unit file goes to a throwaway path
+  [ -n "$U_URL_PREFIX" ] && ienv+=(WAT_PROXY="$U_URL_PREFIX")
+  [ -n "$U_CURL_PROXY" ] && ienv+=(WAT_CURL_PROXY="$U_CURL_PROXY")
   # keep the current manager so a bad replacement can be undone
   cp -f "${imgr:-$MGR}" "$mkeep" 2>/dev/null || { rm -f "$mkeep"; mkeep=""; }
-  if [ "${WAT_ALLOW_UNSIGNED_UPDATE:-0}" = 1 ]; then
+  if [ -n "$from_src" ]; then
+    resolve_offline_bundle "$from_src" "$udir/bundle" || { trap - EXIT; rm -rf "$udir"; return 1; }
+    tmp="$OFFLINE_DIR/install.sh"
+    if [ "${WAT_ALLOW_UNSIGNED_UPDATE:-0}" != 1 ]; then
+      local got bsums="$OFFLINE_DIR/SHA256SUMS" bsig="$OFFLINE_DIR/SHA256SUMS.sig"
+      [ -f "$bsums" ] && [ -f "$bsig" ] || { trap - EXIT; rm -rf "$udir"; err "Offline bundle '$from_src' is missing SHA256SUMS or SHA256SUMS.sig."; return 1; }
+      sums_verify "$bsums" "$bsig" || { trap - EXIT; rm -rf "$udir"; err "Signature verification failed on '$bsums'."; return 1; }
+      got=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
+      [ -n "$got" ] && sums_has "$bsums" install.sh "$got" || { trap - EXIT; rm -rf "$udir"; err "install.sh checksum does not match signed SHA256SUMS."; return 1; }
+      ok "Offline bundle verified against the pinned release key"
+    else
+      warn "WAT_ALLOW_UNSIGNED_UPDATE=1: running offline installer without checking SHA256SUMS.sig."
+    fi
+    ienv+=(WAT_OFFLINE_DIR="$OFFLINE_DIR")
+  elif [ "${WAT_ALLOW_UNSIGNED_UPDATE:-0}" = 1 ]; then
     warn "WAT_ALLOW_UNSIGNED_UPDATE=1: fetching the installer without a signature check (only if you trust the source)."
     # raw.githubusercontent.com caches main for minutes: resolve main to a commit sha and fetch everything by it
-    local sha mref="" rc
-    sha=$(curl -fsSL --max-time 10 "${WAT_PROXY:-}https://api.github.com/repos/$REPO/commits/main" 2>/dev/null | grep -m1 '"sha"' | sed -n 's/.*"sha"[^"]*"\([0-9a-f]\{40\}\)".*/\1/p')
+    local sha mref=""
+    sha=$(u_curl "${U_URL_PREFIX}https://api.github.com/repos/$REPO/commits/main" 2>/dev/null | grep -m1 '"sha"' | sed -n 's/.*"sha"[^"]*"\([0-9a-f]\{40\}\)".*/\1/p')
     if [ -n "$sha" ]; then url="https://raw.githubusercontent.com/$REPO/$sha/install.sh"; mref=$sha; ienv+=(WAT_MGR_REF="$sha")
     else warn "Could not resolve the latest commit; using the main branch (GitHub's cache may be a few minutes old)."; fi
     spin_start "Downloading the installer"
-    curl -fsSL --max-time 60 --retry 2 -o "$tmp" "${WAT_PROXY:-}$url"; rc=$?
+    u_curl -o "$tmp" "${U_URL_PREFIX}$url"; rc=$?
     spin_stop
     if [ "$rc" -ne 0 ] || ! head -c 2 "$tmp" | grep -q '#!'; then
-      rm -rf "$udir"; err "Update failed (could not download the installer). If GitHub is blocked: WAT_PROXY=https://ghproxy.net/ $SELF update"; return 1
+      trap - EXIT; rm -rf "$udir"; err "Update failed (could not download the installer). If GitHub is blocked: $SELF update --from <bundle.tar.gz> or set update proxy in Settings [p]."; return 1
     fi
     ok "Installer downloaded UNSIGNED${mref:+ (${mref:0:7})}"
   else
     # Release assets are immutable: verify the installer against the release's RSA-signed SHA256SUMS, then run it.
-    local base="${WAT_PROXY:-}https://github.com/$REPO/releases/latest/download" rc got verified=0
-    local refusal="Cannot verify the installer against the signed release; refusing to run it unverified. Install manually from https://github.com/$REPO/releases or set WAT_ALLOW_UNSIGNED_UPDATE=1 to override."
+    local base="${U_URL_PREFIX}https://github.com/$REPO/releases/latest/download" got verified=0 dl_ok=0
+    local refusal="Cannot verify the installer against the signed release; refusing to run it unverified. On filtered Iran hosts, build a signed bundle on Kharej ($SELF bundle) and run: $SELF update --from wattun-offline-amd64.tar.gz"
     if command -v openssl >/dev/null 2>&1; then
       spin_start "Downloading the installer and its signature"
-      curl -fsSL --max-time 60 --retry 2 -o "$tmp" "$base/install.sh" \
-        && curl -fsSL --max-time 60 --retry 2 -o "$sums" "$base/SHA256SUMS" \
-        && curl -fsSL --max-time 60 --retry 2 -o "$sig" "$base/SHA256SUMS.sig"
+      u_curl -o "$tmp" "$base/install.sh" \
+        && u_curl -o "$sums" "$base/SHA256SUMS" \
+        && u_curl -o "$sig" "$base/SHA256SUMS.sig"
       rc=$?
       spin_stop
-      if [ "$rc" -eq 0 ] && sums_verify "$sums" "$sig"; then
-        got=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
-        if [ -n "$got" ] && sums_has "$sums" install.sh "$got"; then verified=1; fi
+      if [ "$rc" -eq 0 ]; then
+        dl_ok=1
+        if sums_verify "$sums" "$sig"; then
+          got=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
+          if [ -n "$got" ] && sums_has "$sums" install.sh "$got"; then verified=1; fi
+        fi
       fi
     else
       warn "openssl is required to check the release signature."
     fi
     if [ "$verified" != 1 ]; then
-      rm -rf "$udir"
+      if [ "$dl_ok" = 0 ] && [ "$IS_TTY" = 1 ] && [ "$NONINTERACTIVE" != 1 ] && [ "${U_RETRIED:-0}" = 0 ]; then
+        warn "Could not reach GitHub from this server."
+        hint "Tip: on Kharej run '$SELF bundle', scp wattun-offline-<arch>.tar.gz here, or enter an HTTP/SOCKS5 proxy / mirror."
+        ask "Proxy/mirror URL or path to offline .tar.gz (Enter = cancel)" ""
+        if [ -n "$REPLY_V" ]; then
+          trap - EXIT; rm -rf "$udir"
+          if [ -e "$REPLY_V" ]; then
+            U_RETRIED=1 update --from "$REPLY_V" ${pass_args[@]+"${pass_args[@]}"}
+            return $?
+          fi
+          confirm "Save '$REPLY_V' in Settings for future updates?" y && conf_set update-proxy "$REPLY_V"
+          apply_update_proxy "$REPLY_V"
+          U_RETRIED=1 WAT_PROXY="$U_URL_PREFIX" WAT_CURL_PROXY="$U_CURL_PROXY" update ${pass_args[@]+"${pass_args[@]}"}
+          return $?
+        fi
+      fi
+      trap - EXIT; rm -rf "$udir"
       hint "The latest release must ship install.sh with SHA256SUMS and SHA256SUMS.sig signed by the pinned key."
       err "$refusal"; return 1
     fi
     ok "Installer verified against the signed release"
   fi
-  env ${ienv[@]+"${ienv[@]}"} WAT_FROM_MANAGER=1 bash "$tmp" "$@"; rc=$?
-  rm -f "$tmp" "$tmp.unit" "$sums" "$sig"
+  env ${ienv[@]+"${ienv[@]}"} WAT_FROM_MANAGER=1 bash "$tmp" ${pass_args[@]+"${pass_args[@]}"}; rc=$?
+  rm -f "$udir/install.sh" "$tmp.unit" "$sums" "$sig"
   trap - EXIT
   [ "$rc" -eq 0 ] || { rm -rf "$udir"; err "The installer reported an error. Nothing was changed: still wattun ${before:-?}."; return 1; }
   # self-check: in a sandbox the new manager must understand WAT_PREFIX, or it would drive the production paths
@@ -8977,14 +9457,17 @@ uninstall_all() {
   return 0
 }
 settings_menu() {
-  local heal_on anim_on
+  local heal_on anim_on up_px
   while :; do
     systemctl is-enabled -q "$HEAL_UNIT.timer" 2>/dev/null && heal_on="${GRN}on${RST} " || heal_on="${GRY}off${RST}"
     [ "$(conf_get anim 1)" = 1 ] && anim_on="${GRN}on${RST} " || anim_on="${GRY}off${RST}"
+    up_px=$(conf_get update-proxy '')
     page "Settings"
     printf '  %s auto-heal   %s  %srestarts a down Iran tunnel; cleans up auto tunnels%s\n' "$(key_label h)" "$heal_on" "$GRY" "$RST"
     printf '  %s animations  %s  %sspinners and the intro%s\n' "$(key_label a)" "$anim_on" "$GRY" "$RST"
     printf '  %s kernel speed boost\n' "$(key_label b)"
+    printf '  %s update proxy %s%s%s  %sGitHub mirror or SOCKS5/HTTP proxy for Iran updates%s\n' "$(key_label p)" \
+      "${up_px:+$BOLD}" "${up_px:-${GRY}direct${RST}}" "${up_px:+$RST}" "$GRY" "$RST"
     local sd; sd=$(server_side)
     printf '  %s this server %s%s%s\n' "$(key_label w)" "$BOLD" "${sd:-not set}" "$RST"
     echo
@@ -8999,6 +9482,13 @@ settings_menu() {
       r|R) echo; if confirm "Restart all tunnels? Open connections drop." n; then restart_all; sleep 1; fi ;;
       a|A) if [ "$(conf_get anim 1)" = 1 ]; then conf_set anim 0; ANIM=0; else conf_set anim 1; [ "$IS_TTY" = 1 ] && [ "${WAT_NO_ANIM:-0}" != 1 ] && ANIM=1; fi ;;
       b|B) boost_menu ;;
+      p|P)
+        echo
+        hint "Examples: https://ghproxy.net/  or  socks5h://127.0.0.1:1080  or  http://127.0.0.1:8080  (type '-' to clear)"
+        ask "Update proxy / mirror URL" "$up_px"
+        if [ "$REPLY_V" = "-" ]; then sed -i '/^update-proxy=/d' "$MCONF" 2>/dev/null || true; ok "Cleared update proxy."
+        elif [ -n "$REPLY_V" ]; then conf_set update-proxy "$REPLY_V"; ok "Saved update proxy: $REPLY_V"; fi
+        sleep 1 ;;
       w|W) ask_side || true ;;
       0|q|enter|esc) return 0 ;;
       *) : ;;
@@ -9032,13 +9522,15 @@ main_menu() {
           else flash "No tunnel number $num."; fi ;;
         n|N) new_tunnel; break ;;
         a|A) batch_actions_menu; break ;;
-        c|C) main_carriers; break ;;
+        o|O|c|C) main_carriers; break ;;
         m|M) if [ "${#DASH_N[@]}" -gt 0 ]; then run_flow live_monitor; fi; break ;;
         s|S) settings_menu; break ;;
         u|U) page "Update"; echo; if update; then echo; hint "The manager reloads itself to show the new version."; pause; exec "$MGR"; fi; pause; break ;;
         q|Q) cur_show; echo; exit 0 ;;
         enter) break ;;
-        *) if [ "${#DASH_N[@]}" -gt 0 ]; then flash "Unknown key '$KEY'. Press a tunnel's number to manage it, or n, m, u, s, q."
+        *) if [ "${#DASH_N[@]}" -gt 0 ]; then
+             if [ -n "$(dash_auto_names)" ]; then flash "Unknown key '$KEY'. Press a tunnel's number, or n, o, m, u, s, q."
+             else flash "Unknown key '$KEY'. Press a tunnel's number to manage it, or n, m, u, s, q."; fi
            else flash "Unknown key '$KEY'. Press n to create your first tunnel."; fi ;;
       esac
     done
@@ -9100,7 +9592,7 @@ ni_parse() {
       --test) case "$v" in normal|anti) NI_TEST=$v ;; *) err "--test: use normal or anti (got '$v')"; return 1 ;; esac ;;
       --token) v_token "$v" || return 1; NI_TOKEN=$v ;;
       --map) [ -n "$v" ] || { err "--map needs a list such as 39901:18999,8443:443"; return 1; }; NI_MAP=$v ;;
-      --pick) case "$v" in best|bond) NI_PICK=$v ;; *,*) [[ "$v" =~ ^[0-9]+(,[0-9]+)+$ ]] || { err "--pick: rows joined with commas, such as 1,3 (got '$v')"; return 1; }; NI_PICK=$v ;; *) [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] || { err "--pick: use best, bond, a row number or rows such as 1,3 (got '$v')"; return 1; }; NI_PICK=$((10#$v)) ;; esac ;;
+      --pick) case "$v" in best|bond|rbond) NI_PICK=$v ;; *,*|*+*) [[ "$v" =~ ^[0-9]+([,+][0-9]+)+$ ]] || { err "--pick: rows joined with commas or +, such as 1,3 or 1+3 (got '$v')"; return 1; }; NI_PICK=$v ;; *) [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] || { err "--pick: use best, bond, a row number or rows such as 1,3 (got '$v')"; return 1; }; NI_PICK=$((10#$v)) ;; esac ;;
       --sessions) v_sessions "$v" || return 1; NI_SESSIONS=$((10#$v)) ;;
       --conns) v_conns "$v" || return 1; NI_CONNS=$((10#$v)) ;;
       --mtu) v_mtu "$v" || return 1; NI_MTU=$((10#$v)) ;;
@@ -9164,18 +9656,18 @@ Usage: $SELF [command]
   auto-narrow NAME      auto Kharej tunnel: after Iran has picked, close the carrier ports it does not use
   auto-widen NAME       auto Kharej tunnel: open every carrier again
   auto-prune NAME [--keep-open|--auto|--direct|--reverse-only]
-                        auto Kharej tunnel: automatic cleanup state. Default (autoprune-direct=0): heal() closes only
-                        the unused reverse companion/watchers once Iran's pick has been stable for autoprune minutes
-                        (.manager.conf, default 12, 0 = off); direct carriers stay open, so a bonded Iran client can
-                        never be narrowed. --direct opts into the full old narrowing (both sides; untested for bonds),
-                        --reverse-only goes back to the safe default, --keep-open keeps everything open, --auto turns
-                        the automatic pass back on. A pruned tunnel is reopened when it loses every open carrier
-                        (autowiden minutes, default 10, 0 = off). Manual auto-narrow/auto-widen stay available. The
-                        heal timer is installed with an auto Kharej tunnel, so no operator action is needed.
+                        auto Kharej tunnel: automatic cleanup state. Default (autoprune-direct=1): heal() closes unused
+                        test ports once Iran's pick has been stable for autoprune minutes (.manager.conf, default 15,
+                        0 = off), keeping NAME.token and NAME.iranip so [o] on the main menu or automatic reopen after
+                        3 failed checks (autowiden minutes, default 10, 0 = off) can reopen every carrier anytime.
+                        --reverse-only keeps direct carriers open, --keep-open keeps everything open, --auto turns the
+                        automatic pass back on. Manual auto-narrow/auto-widen stay available.
   bond-retest NAME      bonded Iran tunnel: re-test every leg plus the last failures and add one that works again
   cdn-tune NAME [full]  Iran CDN tunnel (ws/wss/h2/h2c/grpc): find the Cloudflare edges that serve the domain over ECH + TLS settings, apply (needs wattun 2.2.0)
   heal                  restart Iran tunnels whose link is down (used by the timer)
-  update | rollback     install the latest release / go back one version
+  bundle [amd64|arm64] [OUT.tar.gz]  build a signed offline install/update bundle (e.g. on Kharej for Iran)
+  update [--from PATH]  install the latest release (or offline from a verified bundle .tar.gz / directory)
+  rollback              go back one version
   delete NAME           stop a tunnel and delete its config, key and token (asks you to type the name)
   uninstall             remove WatTun from this server (asks first)
   help                  this text
@@ -9218,7 +9710,8 @@ or NONINTERACTIVE=1). Plain output, errors on stderr, exit code 0 = done, 1 = fa
   uninstall --yes                 uninstall without asking; also deletes the config directory
   Flags also accept --flag=value.
 
-Environment: WAT_NO_ANIM=1 (no animations)  NO_COLOR=1 (no colours)  WAT_PROXY=https://ghproxy.net/
+Environment: WAT_NO_ANIM=1 (no animations)  NO_COLOR=1 (no colours)
+  WAT_PROXY=https://ghproxy.net/  WAT_CURL_PROXY=socks5h://127.0.0.1:1080  WAT_OFFLINE_DIR=/path/to/bundle
   WAT_ALLOW_UNSIGNED_UPDATE=1 runs install.sh from main without checking the release signature (not recommended)
 
 Sandbox: WAT_PREFIX=wattest wattun-manager ... keeps everything under /etc/wattest, /opt/wattest and wattest@ units.
@@ -9228,7 +9721,7 @@ EOF
 
 main() {
   [ -x "$BIN" ] && VER=$("$BIN" -version 2>/dev/null | awk '{print $2; exit}')
-  case "${1:-}" in help|-h|--help) usage; return 0 ;; esac
+  case "${1:-}" in help|-h|--help) usage; return 0 ;; bundle) shift; bundle_cmd "$@"; return $? ;; esac
   case "${1:-}" in kharej|iran|cdn-tune|auto-test|delete|uninstall|preset|blackout|test-bypass|test-anticensor|matrix|arm-blackout|audit-blackout|boost) ni_parse "${@:2}" || exit 1 ;; esac
   case "${1:-}" in auto-retest) [ "${2:-}" = --yes ] && NONINTERACTIVE=1 ;; esac
   if [ "$NONINTERACTIVE" = 1 ]; then

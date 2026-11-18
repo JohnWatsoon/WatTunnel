@@ -6,7 +6,7 @@
 
 **Encrypted Iran ↔ Kharej port forwarding that keeps working when the network is filtered, even when only ping gets through.**
 
-[![Release](https://img.shields.io/badge/release-v3.3.7-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
+[![Release](https://img.shields.io/badge/release-v3.3.8-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go)](go.mod)
 ![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20windows-lightgrey?style=flat-square)
@@ -31,18 +31,36 @@ bash <(curl -fsSL https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/i
 ```
 
 <details>
-<summary>GitHub is blocked on the server?</summary>
+<summary>GitHub is blocked on the Iran server? (Offline install &amp; update)</summary>
+
+**Recommended — signed offline bundle (no GitHub needed on Iran):**
+
+1. On **Kharej** (after installing WatTunnel there), build a verified archive:
+
+```bash
+wattun bundle amd64          # writes wattun-offline-amd64.tar.gz (or arm64)
+scp wattun-offline-amd64.tar.gz root@IRAN_IP:/root/
+```
+
+2. On **Iran**, install or update from that file (checked against the pinned RSA release signature):
+
+```bash
+# Fresh install:
+tar xzf /root/wattun-offline-amd64.tar.gz -C /root && bash /root/wattun-offline-amd64/install.sh
+
+# Update an existing install later:
+wattun update --from /root/wattun-offline-amd64.tar.gz
+```
+
+**Alternative — mirror or SOCKS5/HTTP proxy:**
 
 ```bash
 WAT_PROXY=https://ghproxy.net/ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/install.sh)
+# or with a local SOCKS5/HTTP proxy:
+WAT_CURL_PROXY=socks5h://127.0.0.1:1080 bash install.sh
 ```
 
-The proxy is a third-party mirror. The binary and manager are still checked against the signed release, but the
-`install.sh` you fetch through it is not, so prefer the release files or a `git clone` when you can.
-
-Or download `wattun-linux-amd64`, `install.sh` and `wattun-manager` from the
-[releases](https://github.com/JohnWatsoon/WatTunnel/releases) page, put the binary in `dist/` next to `install.sh`,
-and run `bash install.sh`.
+In `wattun` → `s` (Settings) → `p`, you can save a mirror or proxy URL once so future `wattun update` runs use it automatically. You can also download `wattun-linux-amd64`, `install.sh`, `wattun-manager`, `SHA256SUMS` and `SHA256SUMS.sig` from [releases](https://github.com/JohnWatsoon/WatTunnel/releases) into one folder and run `bash install.sh`.
 </details>
 
 **2. Kharej.** Run `wattun`, press `n` (new tunnel), choose **Kharej**, and pick **Auto** as the connection type. You
@@ -66,6 +84,8 @@ offers the fastest that works: press **Enter** to take it. Then enter your ports
 
 Done. Users connect to the Iran server's IP, and Kharej forwards only to its own `127.0.0.1`.
 
+> **Important (avoid Iran IP filtering):** WatTunnel encrypts only **Iran ↔ Kharej**. Your panel inbound on Kharej (the config you give end users) **must also be encrypted** — use **VLESS+Reality**, **VLESS+WS+TLS**, **VLESS Encryption (PQ)**, or **Shadowsocks 2022**. Plain `VLESS + TCP header` is unencrypted between the user and your Iran server, so Iranian ISP DPI detects and blocks the Iran IP.
+
 **Auto uses data.** The manager prints the worst case before it starts: up to 1184 MB for a normal test, about 416 MB
 more if the token was made with `--extended`, and far less on a filtered route. On a traffic-billed server, pick a type
 yourself:
@@ -88,7 +108,8 @@ been down for 3 minutes.
 wattun status          # one line per tunnel
 wattun test NAME       # connection doctor + speed test
 wattun ports NAME      # edit port mappings (applied live)
-wattun update          # update the binary and the menu
+wattun bundle          # build a signed offline archive on Kharej for Iran
+wattun update          # update the binary and the menu (or: wattun update --from FILE.tar.gz)
 ```
 
 | Status | Meaning |
@@ -100,14 +121,16 @@ wattun update          # update the binary and the menu
 | `unknown` | The tunnel's stats did not answer, so the state is not known |
 | `stopped` | The service is not running |
 
-**After Iran picks a type,** an auto Kharej tunnel closes everything unused about 5 minutes later and restarts the side
-that stays open, so its connections drop once. The Kharej main menu shows `carriers open` or `closed` under each auto
-tunnel, with the count and the time left. Press `c` there to switch it: what you open stays open until you close it.
-On the next check after that close, the type Iran uses becomes the tunnel under the same name, and the test listeners
-are deleted. Deleting the auto tunnel before that never deletes the side Iran is connected through.
+**After Iran picks a type,** an auto Kharej tunnel closes unused test ports about 15 minutes later and keeps the carrier
+Iran uses under the same tunnel name (its connections drop once during that switch). The Kharej main menu shows
+`carriers open` or `closed` under each auto tunnel, with the open count and the time left. Press `o` there to reopen all
+carriers (held open until you press `o` again) or to close unused ones right away; `wattun token NAME` keeps working at
+any time. Each Kharej auto tunnel gets its own reverse port range, so several Iran or Kharej tunnels can use reverse
+mode side by side without port collisions.
 
-To change the type or re-test later, open the carriers on Kharej first. If you skip that, the manager reopens by itself
-after 3 failed checks (at most once per 10 minutes).
+To change the type or re-test on Iran later, press `o` on Kharej's main menu first so every test port is open. If you
+skip that, the active connection is still measured live, and if the link ever goes down the manager reopens every
+carrier on Kharej automatically after 3 failed checks (at most once per 10 minutes).
 
 ## What it does
 

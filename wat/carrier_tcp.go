@@ -704,21 +704,22 @@ type PoolDialFunc func(ctx context.Context) (net.Conn, error)
 
 // TCPPoolClient is the client PacketIO over a pool of framed connections. The lane is ignored.
 type TCPPoolClient struct {
-	dial   func(ctx context.Context, slot int) (net.Conn, error)
-	hook   atomic.Pointer[func(ctx context.Context, slot int, inner func(context.Context, int) (net.Conn, error)) (net.Conn, error)] // SetDialHook, wraps dial (fake-SNI)
-	tlsFn  func() (string, string, bool)                                                                                             // TLS fingerprint, mode and ECH state, nil for non-TLS carriers
-	ps     *peerSet
-	peer   poolAddr
-	remIP  atomic.Value // string: remote IP of the newest connection
-	id     [8]byte
-	slots  []atomic.Pointer[poolConn]
-	rx     chan []byte
-	done   chan struct{}
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	rr     atomic.Uint32
-	once   sync.Once
+	dial     func(ctx context.Context, slot int) (net.Conn, error)
+	hook     atomic.Pointer[func(ctx context.Context, slot int, inner func(context.Context, int) (net.Conn, error)) (net.Conn, error)] // SetDialHook, wraps dial (fake-SNI)
+	tlsFn    func() (string, string, bool)                                                                                             // TLS fingerprint, mode and ECH state, nil for non-TLS carriers
+	noDirect bool                                                                                                                      // HTTP carrier: keep 4 KB MTU unless wrapped in ReverseDialRaw (3.3.8)
+	ps       *peerSet
+	peer     poolAddr
+	remIP    atomic.Value // string: remote IP of the newest connection
+	id       [8]byte
+	slots    []atomic.Pointer[poolConn]
+	rx       chan []byte
+	done     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	rr       atomic.Uint32
+	once     sync.Once
 
 	keepSlow   atomic.Bool                // never close a connection for delivering below its share (SetKeepSlow)
 	maxBackoff atomic.Int64               // cap of the redial backoff in ns (0: poolBackoffMax)
@@ -1371,7 +1372,11 @@ func (c *TCPPoolClient) Conns() int {
 
 func (c *TCPPoolClient) SetPeer(net.Addr) {}
 
-func (c *TCPPoolClient) Profile() Profile { return poolProfile }
+func (c *TCPPoolClient) Profile() Profile {
+	p := poolProfile
+	p.NoDirect = c.noDirect
+	return p
+}
 
 func (c *TCPPoolClient) Close() error {
 	c.once.Do(func() {
@@ -1391,20 +1396,21 @@ func (c *TCPPoolClient) Close() error {
 
 // TCPPoolServer is the server RawIO: one listener, many pools. Recv's src and SendTo's dst are poolAddr values.
 type TCPPoolServer struct {
-	ln      net.Listener
-	rx      chan rxPkt
-	done    chan struct{}
-	wg      sync.WaitGroup
-	rr      atomic.Uint32
-	once    sync.Once
-	mu      sync.RWMutex
-	pools   map[string]map[*poolConn]struct{}
-	ordered map[string][]*poolConn // the same pools in born order, kept under mu by add/remove for the hot SendTo
-	all     map[net.Conn]struct{}  // every accepted conn, so Close also reaches ones still in their hello
-	perIP   map[string]int         // accepted conns per remote IP (anti-DoS cap; owned by mu)
-	merge   atomic.Bool            // reverse mode: every conn joins one pool whatever its hello id says
-	keep    atomic.Bool            // never close a connection for delivering below its share (SetKeepSlow)
-	obfKey  atomic.Pointer[[]byte] // SetObfs: PSK that lets the listener recognise hello v2 (nil: only the plain pool id)
+	ln       net.Listener
+	rx       chan rxPkt
+	done     chan struct{}
+	wg       sync.WaitGroup
+	rr       atomic.Uint32
+	once     sync.Once
+	mu       sync.RWMutex
+	pools    map[string]map[*poolConn]struct{}
+	ordered  map[string][]*poolConn // the same pools in born order, kept under mu by add/remove for the hot SendTo
+	all      map[net.Conn]struct{}  // every accepted conn, so Close also reaches ones still in their hello
+	perIP    map[string]int         // accepted conns per remote IP (anti-DoS cap; owned by mu)
+	merge    atomic.Bool            // reverse mode: every conn joins one pool whatever its hello id says
+	keep     atomic.Bool            // never close a connection for delivering below its share (SetKeepSlow)
+	obfKey   atomic.Pointer[[]byte] // SetObfs: PSK that lets the listener recognise hello v2 (nil: only the plain pool id)
+	noDirect bool                   // HTTP carrier: keep 4 KB MTU unless wrapped in ReverseListenIO (3.3.8)
 
 	// Reverse merge mode: source IPs whose connections delivered a packet the session authenticated. SendTo only
 	// writes to those, so an unauthenticated dialer can neither receive the tunnel's packets nor hold it hostage.
@@ -1776,7 +1782,11 @@ func (s *TCPPoolServer) BackloggedTo(dst net.Addr) bool {
 // PoolDrops counts packets dropped because every pool queue was full (process-wide).
 func PoolDrops() int64 { return poolDrops.Load() }
 
-func (s *TCPPoolServer) Profile() Profile { return poolProfile }
+func (s *TCPPoolServer) Profile() Profile {
+	p := poolProfile
+	p.NoDirect = s.noDirect
+	return p
+}
 
 // Pools and Conns report the live pool and connection counts.
 func (s *TCPPoolServer) Pools() int {

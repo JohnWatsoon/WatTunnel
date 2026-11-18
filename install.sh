@@ -30,10 +30,10 @@ VERSION=latest
 FORCE=0
 MODE=install
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo /nonexistent)
-# Local files (dist/ build, wattun-manager) are used only when this script sits in a real checkout or unpacked
-# release. The manager's update runs a downloaded copy from a temp dir: there a stale /tmp/dist/ must not be
-# picked up and "installed" again, so it always downloads.
-if [ "${WAT_FROM_MANAGER:-0}" = 1 ] || [ ! -f "$HERE/install.sh" ]; then HERE=/nonexistent; fi
+# Local files (dist/ build, offline bundle, wattun-manager) are used only when this script sits in a real checkout or
+# unpacked release, or when wattun-manager update --from points WAT_OFFLINE_DIR at a verified local directory.
+if [ -n "${WAT_OFFLINE_DIR:-}" ] && [ -d "$WAT_OFFLINE_DIR" ]; then HERE=$WAT_OFFLINE_DIR
+elif [ "${WAT_FROM_MANAGER:-0}" = 1 ] || [ ! -f "$HERE/install.sh" ]; then HERE=/nonexistent; fi
 
 case "$(locale charmap 2>/dev/null)" in UTF-8) ;; *) export LC_ALL=C.UTF-8 ;; esac
 
@@ -304,8 +304,12 @@ command -v systemctl >/dev/null || die "systemd is required to manage WatTun tun
 
 NEW=''; OLD=''
 fetch() { # url dest
-  if command -v curl >/dev/null; then curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o "$2" "$PROXY$1"
-  elif command -v wget >/dev/null; then wget -q -T 20 -t 3 -O "$2" "$PROXY$1"
+  local px=()
+  [ -n "${WAT_CURL_PROXY:-}" ] && px=(-x "$WAT_CURL_PROXY")
+  if command -v curl >/dev/null; then
+    curl -fsSL ${px[@]+"${px[@]}"} --retry 4 --retry-all-errors --connect-timeout 10 --max-time 300 -o "$2" "$PROXY$1" 2>/dev/null \
+      || curl -fsSL ${px[@]+"${px[@]}"} --retry 4 --connect-timeout 10 --max-time 300 -o "$2" "$PROXY$1"
+  elif command -v wget >/dev/null; then wget -q -T 20 -t 4 -O "$2" "$PROXY$1"
   else return 127; fi
 }
 
@@ -318,7 +322,7 @@ resolve_tag() {
   [[ "$u" =~ ^v[0-9]+\.[0-9]+ ]] || return 1
   TAG=$u
 }
-TAG=''; PREV_WARN=0; MGR_FROM_REL=0; FROM_DIST=0; DL_BASE=''
+TAG=''; PREV_WARN=0; MGR_FROM_REL=0; FROM_DIST=0; LOCAL_SIG=0; DL_BASE=''
 human_size() { awk -v b="$1" 'BEGIN{printf "%.1f MB", b/1048576}'; }
 
 SIG_PUB=$(cat <<'PEM'
@@ -343,19 +347,29 @@ PEM
 
 # Stage 1: Environment & Capability Verification
 step_stage1_verify_env() {
-  command -v curl >/dev/null || command -v wget >/dev/null || [ -f "$HERE/dist/$NAME" ] || { ERRMSG="curl or wget is required to retrieve WatTun"; return 1; }
+  command -v curl >/dev/null || command -v wget >/dev/null || [ -f "$HERE/dist/$NAME" ] || [ -f "$HERE/$NAME" ] || { ERRMSG="curl or wget is required to retrieve WatTun"; return 1; }
   mkdir -p "$TMP" || { ERRMSG="cannot create temporary working directory"; return 1; }
   DETAIL="$OS_DISTRO, $RAM_TOTAL RAM, $SYSTEMD_VER"
 }
 
 # Stage 2: Engine & Manager Retrieval
 step_stage2_retrieve_payload() {
-  local base
-  if [ -f "$HERE/dist/$NAME" ]; then
-    cp "$HERE/dist/$NAME" "$TMP/wattun" || { ERRMSG="cannot read $HERE/dist/$NAME"; return 1; }
-    [ -f "$HERE/dist/$NAME.sha256" ] && cp "$HERE/dist/$NAME.sha256" "$TMP/sum"
-    FROM_DIST=1
-    DETAIL="local build (dist/)"
+  local base ldir=''
+  if [ -f "$HERE/dist/$NAME" ]; then ldir="$HERE/dist"
+  elif [ -f "$HERE/$NAME" ]; then ldir="$HERE"; fi
+  if [ -n "$ldir" ]; then
+    cp "$ldir/$NAME" "$TMP/wattun" || { ERRMSG="cannot read $ldir/$NAME"; return 1; }
+    if [ -f "$ldir/SHA256SUMS" ] && [ -f "$ldir/SHA256SUMS.sig" ]; then
+      cp "$ldir/SHA256SUMS" "$TMP/SHA256SUMS" && cp "$ldir/SHA256SUMS.sig" "$TMP/SHA256SUMS.sig"
+      LOCAL_SIG=1
+      awk -v n="$NAME" '$2 == n { print $1; exit }' "$ldir/SHA256SUMS" >"$TMP/sum"
+      [ -s "$TMP/sum" ] || rm -f "$TMP/sum"
+      DETAIL="offline signed bundle (${ldir##*/})"
+    else
+      [ -f "$ldir/$NAME.sha256" ] && cp "$ldir/$NAME.sha256" "$TMP/sum"
+      FROM_DIST=1
+      DETAIL="local build (${ldir##*/})"
+    fi
   elif [ -f "$HERE/go.mod" ] && command -v go >/dev/null; then
     (cd "$HERE" && timeout 900 sh build.sh "$ARCH") >"$TMP/build.log" 2>&1 || { ERRMSG="source build failed (see: sh build.sh)"; return 1; }
     cp "$HERE/dist/$NAME" "$TMP/wattun"; cp "$HERE/dist/$NAME.sha256" "$TMP/sum"
@@ -370,7 +384,7 @@ step_stage2_retrieve_payload() {
       fetch "$base/$NAME.sha256" "$TMP/sum" || { ERRMSG="could not download checksum file"; return 1; }
       DETAIL="release ${TAG:-latest}, $(human_size "$(stat -c %s "$TMP/wattun")")"
     else
-      ERRMSG="download failed. If GitHub is blocked, try: WAT_PROXY=https://ghproxy.net/ bash install.sh"; return 1
+      ERRMSG="download failed. If GitHub is blocked, use an offline bundle (wattun bundle on Kharej) or WAT_PROXY=https://ghproxy.net/ bash install.sh"; return 1
     fi
   fi
 
@@ -379,6 +393,10 @@ step_stage2_retrieve_payload() {
   # never through a proxy.
   if [ -f "$HERE/wattun-manager" ]; then
     cp "$HERE/wattun-manager" "$TMP/mgr"
+    [ "$LOCAL_SIG" = 1 ] && MGR_FROM_REL=1
+  elif [ -f "$HERE/dist/wattun-manager" ]; then
+    cp "$HERE/dist/wattun-manager" "$TMP/mgr"
+    [ "$LOCAL_SIG" = 1 ] && MGR_FROM_REL=1
   elif [ -n "$DL_BASE" ] && fetch "$DL_BASE/wattun-manager" "$TMP/mgr"; then
     MGR_FROM_REL=1
   elif [ "${WAT_ALLOW_UNSIGNED_MANAGER:-0}" != 1 ]; then
@@ -415,8 +433,10 @@ step_verify_sig() {
   if ! command -v openssl >/dev/null 2>&1; then
     ERRMSG="openssl is required to verify the release signature (install openssl and retry)"; return 1
   fi
-  if ! fetch "$DL_BASE/SHA256SUMS" "$sums" || ! fetch "$DL_BASE/SHA256SUMS.sig" "$sig"; then
-    ERRMSG="release signature not available; refusing to install unverified (use a local dist/ build)"; return 1
+  if [ "$LOCAL_SIG" != 1 ]; then
+    if ! fetch "$DL_BASE/SHA256SUMS" "$sums" || ! fetch "$DL_BASE/SHA256SUMS.sig" "$sig"; then
+      ERRMSG="release signature not available; refusing to install unverified (use a local dist/ build)"; return 1
+    fi
   fi
   printf '%s\n' "$SIG_PUB" > "$pub"
   if ! openssl dgst -sha256 -verify "$pub" -signature "$sig" "$sums" >/dev/null 2>&1; then
@@ -432,13 +452,14 @@ step_verify_sig() {
 
 step_stage3_verify_crypto() {
   local want got
+  got=$(sha256sum "$TMP/wattun" | awk '{print $1}')
   if [ -f "$TMP/sum" ]; then
-    want=$(awk '{print $1}' "$TMP/sum"); got=$(sha256sum "$TMP/wattun" | awk '{print $1}')
+    want=$(awk '{print $1}' "$TMP/sum")
     [ "$want" = "$got" ] || { ERRMSG="checksum mismatch (want $want, got $got)"; return 1; }
     DETAIL="sha256 ${got:0:10}... ok"
   else
     if [ "${WAT_SKIP_CHECKSUM:-0}" != 1 ]; then
-      ERRMSG="no checksum file found (WAT_SKIP_CHECKSUM=1 permits unverified local binaries)"; return 1
+      ERRMSG="no checksum file found (include SHA256SUMS + SHA256SUMS.sig or .sha256 next to $NAME, or set WAT_SKIP_CHECKSUM=1)"; return 1
     fi
     DETAIL="checksum skipped (WAT_SKIP_CHECKSUM=1)"
   fi

@@ -62,6 +62,8 @@ func (r *ReverseDialRaw) Conns() int { return r.c.Conns() }
 // Both reverse wrappers report the pool's backlog and carry its profile.
 func (r *ReverseListenIO) Backlogged() bool            { return r.ps.BackloggedTo(poolAddr{key: reverseKey}) }
 func (r *ReverseDialRaw) BackloggedTo(_ net.Addr) bool { return r.c.Backlogged() }
+func (r *ReverseDialRaw) ConnDeaths() uint64           { return r.c.ConnDeaths() }
 
-func (r *ReverseListenIO) Profile() Profile { return r.ps.Profile() }
-func (r *ReverseDialRaw) Profile() Profile  { return r.c.Profile() }
+// Reverse pools always dial directly between Kharej and Iran (no CDN), so directMTU applies even on ws/wss/h2/grpc.
+func (r *ReverseListenIO) Profile() Profile { p := r.ps.Profile(); p.NoDirect = false; return p }
+func (r *ReverseDialRaw) Profile() Profile  { p := r.c.Profile(); p.NoDirect = false; return p }

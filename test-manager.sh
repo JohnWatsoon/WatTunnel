@@ -1357,7 +1357,7 @@ chk "autoprune: a custom window" "$(autoprune_grace)" "7"
 printf 'autoprune=soon\n' >"$WAT_CONF/.manager.conf"
 chk "autoprune: junk falls back to the default" "$(autoprune_grace)" "$AUTOPRUNE_DEFAULT_MIN"
 rm -f "$WAT_CONF/.manager.conf"
-chk "autoprune: default is 5 minutes" "$(autoprune_grace)" "5"
+chk "autoprune: default is 15 minutes" "$(autoprune_grace)" "15"
 
 # R3 scheduling + widen safety net: the automatic prune pass runs from heal(), so a Kharej-only server must get that
 # timer installed; and a narrowed tunnel that loses every open carrier reopens the plan, bounded by autowiden minutes.
@@ -1413,9 +1413,9 @@ chk "widen pass: widening resets the failed-check counter" "$([ -e "$WAT_RUN/t_a
 # main menu carriers switch: the status word follows the units and configs, the switch flips it and holds it open
 rm -f "$WAT_CONF/.manager.conf" "$WAT_RUN/t_auto.autowiden"
 systemctl() { return 0; }
-chk "carriers: all open before Iran connects" "$(auto_carrier_status t_auto)" "open|all 3 open · closes 5 min after Iran connects"
+chk "carriers: all open before Iran connects" "$(auto_carrier_status t_auto)" "open|all 3 open · closes 15 min after Iran connects"
 printf 'tcp %s\n' "$(( $(date +%s) - 120 ))" >"$WAT_RUN/t_auto.autoprune"
-chk "carriers: a stable pick shows the time left" "$(auto_carrier_status t_auto)" "open|all 3 open · closes in about 3 min"
+chk "carriers: a stable pick shows the time left" "$(auto_carrier_status t_auto)" "open|all 3 open · closes in about 13 min"
 rm -f "$WAT_RUN/t_auto.autoprune"
 _cs_narrow() { NONINTERACTIVE=1; auto_live() { AN_D='tcp'; AN_R=''; }; auto_carriers_toggle t_auto; }
 ( _cs_narrow ) >/dev/null 2>&1
@@ -1437,6 +1437,7 @@ chk "carriers: no auto tunnel, no switch" "$(dash_actions 2>/dev/null | grep -c 
 rm -f "$WAT_RUN/t_auto.autoprune.done"
 # finalize (owner rule 2026-11-07): Iran's pick becomes the tunnel, the test parts are deleted, never the real link
 _fin_setup() {
+  rm -f "$WAT_CONF/t_fin.finalized" "$WAT_CONF/t_fin.iranip"
   printf 'mode: server
 key-file: %s/t_fin.key
 carrier: icmp+udp+tcp
@@ -1461,7 +1462,7 @@ _fin_setup; rm -f "$WAT_RUN/fin.fw"
 ( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R='tcp'; }; auto_prune_tick t_fin ) >/dev/null 2>&1
 chk "finalize: a reverse pick moves into the tunnel's own name" "$(grep -c '^reverse: true$' "$WAT_CONF/t_fin.yml")" "1"
 chk "finalize: the reverse side's own config is gone" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
-chk "finalize: the auto token is gone, so it is a plain tunnel" "$([ -e "$WAT_CONF/t_fin.token" ] && echo y || echo n)" "n"
+chk "finalize: the auto token and finalized marker are kept for reopen" "$([ -f "$WAT_CONF/t_fin.token" ] && [ -f "$WAT_CONF/t_fin.finalized" ] && echo y || echo n)" "y"
 chk "finalize: the direct test ports are closed" "$(sort "$WAT_RUN/fin.fw" 2>/dev/null | tr '
 ' ' ')" "4443/tcp 4443/udp "
 chk "finalize: a single reverse carrier gets the plain peer key" "$(grep -c '^peer: 198.51.100.7:24431$' "$WAT_CONF/t_fin.yml")" "1"
@@ -2017,6 +2018,148 @@ sla_max_loss_pct=0
   chk "heal: a tunnel without metrics is never counted down" "$(cat "$RUN/t_nom.down" 2>/dev/null)" ""
   rm -f "$WAT_CONF"/t_sla.* "$WAT_CONF"/t_nom.yml "$RUN"/t_sla.* "$RUN"/t_nom.*
   exit "$fail" ) || fail=1
+
+# ======================================================================================
+# 3.3.8 field fixes: reversible finalize + legacy token recovery + o menu key,
+# reverse-bond custom join, unique per-tunnel reverse port blocks, IPv6 helpers,
+# Iran inbound encryption hint, and offline bundle / update-proxy helpers.
+# ======================================================================================
+(
+  role() { [ "$(cfg "$1" mode)" = server ] && echo Kharej || echo Iran; }
+  systemctl() { return 0; }
+  fw_open() { echo "open:$1" >>"$WAT_RUN/fw338"; }
+  fw_close() { echo "close:$1" >>"$WAT_RUN/fw338"; }
+  auto_ext_live() { AE_LIVE=''; return 2; }
+  free_metrics_port() { echo 19799; }
+  start_watcher() { :; }
+
+  # WS1: finalize keeps .token + .iranip, reports closed|1 of N open, and auto_widen reopens both sides
+  printf 'k338\n' >"$WAT_CONF/t_revfin.key"
+  printf '198.51.100.44\n' >"$WAT_CONF/t_revfin.iranip"
+  cat >"$WAT_CONF/t_revfin.yml" <<EOF
+mode: server
+key-file: $WAT_CONF/t_revfin.key
+carrier: icmp+udp+tcp
+listen-udp: ":4443"
+listen-tcp: ":4443"
+path: /api/aa11
+metrics: 127.0.0.1:19781
+ports:
+  - 443
+EOF
+  cat >"$WAT_CONF/t_revfin-r.yml" <<EOF
+# companion
+mode: server
+key-file: $WAT_CONF/t_revfin.key
+carrier: icmp+tcp
+reverse: true
+peer-icmp: 198.51.100.44
+peer-tcp: 198.51.100.44:24431
+path: /api/aa11
+metrics: 127.0.0.1:19782
+ports:
+  - 443
+EOF
+  make_token auto '203.0.113.20' 'k338' '/api/aa11' '' '' '443' '' 'd=udp:4443,tcp:4443;r=tcp:24431' >"$WAT_CONF/t_revfin.token"
+  : >"$WAT_RUN/t_revfin.autoprune.done"
+  auto_live() { AN_D=''; AN_R='tcp'; }
+  auto_prune_tick t_revfin >/dev/null 2>&1
+  chk "3.3.8 WS1: finalized auto tunnel stays is_auto_kharej" "$(is_auto_kharej t_revfin && echo y || echo n)" "y"
+  chk "3.3.8 WS1: finalized auto tunnel status is closed|1 of 5 open" "$(auto_carrier_status t_revfin)" "closed|1 of 5 open"
+  NONINTERACTIVE=1 auto_widen t_revfin >/dev/null 2>&1
+  chk "3.3.8 WS1: auto_widen clears .finalized" "$([ -e "$WAT_CONF/t_revfin.finalized" ] && echo y || echo n)" "n"
+  chk "3.3.8 WS1: auto_widen restores direct carrier plan" "$(cfg t_revfin carrier)" "icmp+udp+tcp"
+  chk "3.3.8 WS1: auto_widen drops reverse: true from parent" "$(cfg t_revfin reverse)" ""
+  chk "3.3.8 WS1: auto_widen recreates NAME-r from .iranip" "$([ -f "$WAT_CONF/t_revfin-r.yml" ] && grep -c '198.51.100.44:24431' "$WAT_CONF/t_revfin-r.yml" || echo 0)" "1"
+
+  # WS1: legacy 3.3.3-3.3.7 finalized tunnel without .token recovers auto token + [o] main menu action
+  printf 'kleg\n' >"$WAT_CONF/t_leg.key"
+  cat >"$WAT_CONF/t_leg.yml" <<EOF
+# WatTunnel - Kharej (server). Kept by wattun-manager from auto tunnel 't_leg': the carrier Iran picked.
+mode: server
+key-file: $WAT_CONF/t_leg.key
+carrier: tls
+reverse: true
+peer: 198.51.100.77:24432
+path: /api/bb22
+metrics: 127.0.0.1:19783
+ports:
+  - 8443
+EOF
+  public_ip() { echo 203.0.113.88; }
+  listen_blocked() { return 1; }
+  DASH_N=(t_leg)
+  chk "3.3.8 WS1: dash_auto_names recovers 3.3.3-3.3.7 finalized tunnel" "$(dash_auto_names)" "t_leg"
+  chk "3.3.8 WS1: recovered tunnel gets .token and .finalized" "$([ -f "$WAT_CONF/t_leg.token" ] && [ -f "$WAT_CONF/t_leg.finalized" ] && echo y || echo n)" "y"
+  chk "3.3.8 WS1: recovered tunnel records .iranip from reverse peer" "$(cat "$WAT_CONF/t_leg.iranip" 2>/dev/null)" "198.51.100.77"
+  chk "3.3.8 WS1: main menu offers key [o] open/close carriers" "$(strip_ansi "$(dash_actions 2>/dev/null)" | grep -c '\[o\] open/close carriers')" "1"
+  rm -f "$WAT_CONF"/t_revfin* "$WAT_CONF"/t_leg* "$WAT_RUN"/t_revfin* "$WAT_RUN"/fw338
+
+  # WS3: mode c custom bond supports joining 2+ reverse rows and forbids mixing direct + reverse
+  AV_LABEL=('reverse tls' 'reverse wss' 'direct tcp')
+  AV_CAR=(tls wss tcp)
+  AV_KIND=(r r d)
+  AV_PEER=('203.0.113.20:24432' '203.0.113.20:24434' '203.0.113.20:4443')
+  AV_PORT=(24432 24434 4443)
+  AV_SNI=('' '' ''); AV_FP=('' '' ''); AV_ECH=('' '' ''); AV_FRAG=('' '' ''); AV_FS=('' '' ''); AV_FM=('' '' ''); AV_X=('' '' '')
+  AT_RANK=(0 1 2); AT_ADDR='203.0.113.20'; AT_PATH='/api/cc33'
+  at_rows '1+2' >/dev/null 2>&1
+  chk "3.3.8 WS3: at_rows joins 2 reverse rows with +" "${#AT_SEL[@]}" "2"
+  at_to_t
+  chk "3.3.8 WS3: at_to_t builds reverse bond carrier + key" "$T_CARRIER|$T_REV|$AT_SEL_KEY" "tls+wss|1|bond/r"
+  chk "3.3.8 WS3: at_to_t writes per-leg listen-<c> lines" "$(grep -c '^listen-' <<<"$AT_EXTRA")" "2"
+  expect_fail at_rows '1 3'
+  printf 'mode: client\ncarrier: tcp\npeer: 203.0.113.20:4443\nkey-file: %s/t_rb.key\n' "$WAT_CONF" >"$WAT_CONF/t_rb.yml"
+  : >"$WAT_RUN/fw338"
+  AT_QUIET=1 auto_apply t_rb >/dev/null 2>&1
+  chk "3.3.8 WS3: auto_apply writes reverse bond config" "$(cfg t_rb carrier)|$(cfg t_rb reverse)|$(cfg t_rb listen-tls)|$(cfg t_rb listen-wss)" "tls+wss|true|:24432|:24434"
+  chk "3.3.8 WS3: auto_apply opens reverse bond firewall ports" "$(sort "$WAT_RUN/fw338" | tr '\n' ' ')" "open:24432/tcp open:24434/tcp "
+  chk "3.3.8 WS3: auto_current_key reports bond/r" "$(auto_current_key t_rb)" "bond/r"
+  chk "3.3.8 WS1: at_skip_reverse_keys lists every reverse bond leg" "$(at_skip_reverse_keys t_rb)" " tls/r wss/r "
+  rm -f "$WAT_CONF"/t_rb* "$WAT_RUN"/fw338
+
+  # WS4: auto_pick_rplan picks distinct non-colliding blocks in 30000..39990
+  rp1=$(auto_pick_rplan)
+  b1=${rp1#tcp:}; b1=${b1%%,*}
+  chk "3.3.8 WS4: auto_pick_rplan picks in 30000..39990" "$([ "$b1" -ge 30000 ] && [ "$b1" -le 39990 ] && echo y || echo n)" "y"
+  printf 'mode: server\nlisten-tcp: ":%s"\n' "$b1" >"$WAT_CONF/t_rp1.yml"
+  chk "3.3.8 WS4: busy reverse block is avoided" "$(for _i in 1 2 3 4 5; do rp2=$(auto_pick_rplan); [ "$rp2" = "$rp1" ] && echo dup; done)" ""
+  rm -f "$WAT_CONF/t_rp1.yml"
+
+  # WS5: update proxy classification & offline bundle resolution
+  apply_update_proxy 'https://ghproxy.net'
+  chk "3.3.8 WS5: mirror URL gets trailing slash" "$U_URL_PREFIX|$U_CURL_PROXY" "https://ghproxy.net/|"
+  apply_update_proxy 'socks5h://127.0.0.1:1080'
+  chk "3.3.8 WS5: socks5h URL maps to curl -x proxy" "$U_URL_PREFIX|$U_CURL_PROXY" "|socks5h://127.0.0.1:1080"
+  apply_update_proxy 'http://127.0.0.1:8080'
+  chk "3.3.8 WS5: local HTTP proxy with port maps to curl -x" "$U_URL_PREFIX|$U_CURL_PROXY" "|http://127.0.0.1:8080"
+  mkdir -p "$SMOKE/bsrc/wattun-offline-amd64" "$SMOKE/bdst"
+  printf '#!/bin/sh\necho ok\n' >"$SMOKE/bsrc/wattun-offline-amd64/install.sh"
+  tar -czf "$SMOKE/bundle.tar.gz" -C "$SMOKE/bsrc" wattun-offline-amd64
+  resolve_offline_bundle "$SMOKE/bundle.tar.gz" "$SMOKE/bdst"
+  chk "3.3.8 WS5: resolve_offline_bundle finds nested install.sh" "$([ -f "$OFFLINE_DIR/install.sh" ] && echo y || echo n)" "y"
+
+  # WS6: Iran port editor warns when panel inbound is unencrypted
+  MAPS=("8443:443/tcp"); PE_ROLE=Iran; PE_TUNNEL=t_pe; PE_ALLOW=(); PE_OWNED=(); PE_MSG=''
+  chk "3.3.8 WS6: Iran port editor shows inbound encryption reminder" "$(strip_ansi "$(pe_draw)" | grep -c 'encrypts Iran <-> Kharej only')" "1"
+
+  # WS7: IPv6 helpers, validators, and companion_create
+  split_hp '[2001:db8::1]:8443'; chk "3.3.8 WS7: split_hp bracketed IPv6:port" "$HP_HOST|$HP_PORT" "2001:db8::1|8443"
+  split_hp '2001:db8::1'; chk "3.3.8 WS7: split_hp bare IPv6" "$HP_HOST|$HP_PORT" "2001:db8::1|"
+  chk "3.3.8 WS7: join_hp IPv6 + port brackets host" "$(join_hp '2001:db8::1' 443)" "[2001:db8::1]:443"
+  chk "3.3.8 WS7: join_hp IPv4 + port stays plain" "$(join_hp '203.0.113.1' 443)" "203.0.113.1:443"
+  v_host '[2001:db8::1]:443' && v_host '2001:db8::1' && v_ip '2001:db8::1' && v_bind '::' && v_src_ip '2001:db8::1'
+  chk "3.3.8 WS7: IPv6 validators accept valid forms" "$?" "0"
+  printf 'k6\n' >"$WAT_CONF/t_v6.key"
+  printf 'mode: server\nkey-file: %s/t_v6.key\ncarrier: icmp+tcp\nlisten-tcp: ":4443"\npath: /wat\n' "$WAT_CONF" >"$WAT_CONF/t_v6.yml"
+  make_token auto '[2001:db8::2]' 'k6' '/wat' '' '' '' '' 'd=tcp:4443;r=tcp:31001' >"$WAT_CONF/t_v6.token"
+  companion_create t_v6 '2001:db8::9' >/dev/null 2>&1
+  chk "3.3.8 WS7: companion_create brackets IPv6 peer-tcp and omits IPv4-only icmp" \
+    "$(cfg t_v6-r carrier)|$(cfg t_v6-r peer-icmp)|$(cfg t_v6-r peer-tcp)" "tcp||[2001:db8::9]:31001"
+  rm -f "$WAT_CONF"/t_v6*
+
+  exit "$fail"
+) || fail=1
 
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

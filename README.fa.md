@@ -6,7 +6,7 @@
 
 **تونل رمزنگاری‌شده‌ی ایران ⇄ خارج که وقتی شبکه فیلتر است هم کار می‌کند، حتی وقتی فقط پینگ رد می‌شود.**
 
-[![Release](https://img.shields.io/badge/release-v3.3.7-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
+[![Release](https://img.shields.io/badge/release-v3.3.8-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go)](go.mod)
 ![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20windows-lightgrey?style=flat-square)
@@ -34,17 +34,50 @@ bash <(curl -fsSL https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/i
 ```
 
 <details>
-<summary>گیت‌هاب روی سرورتان باز نمی‌شود؟</summary>
+<summary>گیت‌هاب روی سرور ایران بسته است؟ (نصب و آپدیت آفلاین)</summary>
+
+<div dir="rtl">
+
+**روش پیشنهادی — بسته‌ی آفلاین امضاشده (بدون نیاز به دسترسی به گیت‌هاب روی ایران):**
+
+۱. روی **سرور خارج** (بعد از نصب WatTunnel)، یک بسته‌ی آفلاین بسازید و به سرور ایران بفرستید:
+
+</div>
 
 ```bash
-WAT_PROXY=https://ghproxy.net/ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/install.sh)
+wattun bundle amd64          # writes wattun-offline-amd64.tar.gz (or arm64)
+scp wattun-offline-amd64.tar.gz root@IRAN_IP:/root/
 ```
 
 <div dir="rtl">
 
-این پروکسی یک آینه‌ی ثالث است. فایل اجرایی و منیجر همچنان با ریلیز امضاشده سنجیده می‌شوند، ولی `install.sh` که از آینه می‌گیرید نه؛ پس اگر می‌توانید، فایل‌های ریلیز یا `git clone` را ترجیح دهید.
+۲. روی **سرور ایران**، بدون نیاز به اینترنت خارجی نصب یا آپدیت کنید (با بررسی امضای دیجیتال RSA):
 
-راه دیگر: فایل‌های `wattun-linux-amd64`، `install.sh` و `wattun-manager` را از صفحه‌ی [Releases](https://github.com/JohnWatsoon/WatTunnel/releases) بگیرید، فایل اجرایی را داخل پوشه‌ی `dist/` کنار `install.sh` بگذارید و `bash install.sh` را بزنید.
+</div>
+
+```bash
+# Fresh install:
+tar xzf /root/wattun-offline-amd64.tar.gz -C /root && bash /root/wattun-offline-amd64/install.sh
+
+# Update an existing install later:
+wattun update --from /root/wattun-offline-amd64.tar.gz
+```
+
+<div dir="rtl">
+
+**روش جایگزین — آینه یا پروکسی SOCKS5/HTTP:**
+
+</div>
+
+```bash
+WAT_PROXY=https://ghproxy.net/ bash <(curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/JohnWatsoon/WatTunnel/main/install.sh)
+# or with a local SOCKS5/HTTP proxy:
+WAT_CURL_PROXY=socks5h://127.0.0.1:1080 bash install.sh
+```
+
+<div dir="rtl">
+
+در منوی `wattun` ← `s` (تنظیمات) ← `p` هم می‌توانید آدرس آینه یا پروکسی را یک بار ذخیره کنید تا آپدیت‌های بعدی با `wattun update` خودکار از همان مسیر انجام شوند. همچنین می‌توانید فایل‌های `wattun-linux-amd64`، `install.sh`، `wattun-manager`، `SHA256SUMS` و `SHA256SUMS.sig` را از صفحه‌ی [Releases](https://github.com/JohnWatsoon/WatTunnel/releases) در یک پوشه بگذارید و `bash install.sh` را اجرا کنید.
 
 </div>
 </details>
@@ -77,6 +110,8 @@ wat1:aWNtcHwyMDMuMC4xMTMuMTB8a1E3...
 
 تمام! در کانفیگ کاربرها آی‌پی سرور ایران را بگذارید. سرور خارج فقط به `127.0.0.1` خودش وصل می‌شود.
 
+> **مهم (جلوگیری از فیلتر شدن آی‌پی ایران):** WatTunnel فقط مسیر **ایران ⇄ خارج** را رمزنگاری می‌کند. اینباند پنل شما روی خارج (کانفیگی که دست کاربر می‌دهید) **حتماً باید خودش هم رمزنگاری داشته باشد** — مثل **VLESS+Reality**، **VLESS+WS+TLS**، **VLESS Encryption (PQ)** یا **Shadowsocks 2022**. کانفیگ‌های بدون رمزنگاری مثل `VLESS + TCP header` بین کاربر و سرور ایران به شکل خام رد می‌شوند و فایروال مخابرات/اپراتور خیلی سریع سرور ایران را شناسایی و مسدود می‌کند.
+
 **حالت Auto ترافیک مصرف می‌کند.** منیجر بدترین حالت را پیش از شروع نشان می‌دهد: تا ۱۱۸۴ مگابایت برای تست معمولی، حدود ۴۱۶ مگابایت بیشتر اگر توکن با `--extended` ساخته شده باشد، و روی مسیر فیلترشده خیلی کمتر. اگر سرورتان حجمی حساب می‌شود، روش را خودتان انتخاب کنید:
 
 | مسیر شما | روش |
@@ -97,7 +132,8 @@ wat1:aWNtcHwyMDMuMC4xMTMuMTB8a1E3...
 wattun status          # one line per tunnel
 wattun test NAME       # connection doctor + speed test
 wattun ports NAME      # edit port mappings (applied live)
-wattun update          # update the binary and the menu
+wattun bundle          # build a signed offline archive on Kharej for Iran
+wattun update          # update the binary and the menu (or: wattun update --from FILE.tar.gz)
 ```
 
 <div dir="rtl">
@@ -111,9 +147,9 @@ wattun update          # update the binary and the menu
 | `unknown` | آمار تونل جواب نداد، پس وضعیت معلوم نیست |
 | `stopped` | سرویس اجرا نمی‌شود |
 
-**بعد از انتخاب ایران،** تونل خودکار خارج حدود ۵ دقیقه بعد هر چیز بی‌استفاده را می‌بندد و سمتی را که باز می‌ماند ری‌استارت می‌کند، پس اتصال‌هایش یک بار قطع می‌شوند. منوی اصلی خارج زیر هر تونل خودکار `carriers open` یا `closed` را با تعداد و زمان باقی‌مانده نشان می‌دهد. همان‌جا کلید `c` را بزنید تا وضعیت عوض شود: چیزی که باز می‌کنید تا وقتی خودتان نبندید باز می‌ماند. در بررسی بعدی بعد از بسته شدن، نوعی که ایران از آن استفاده می‌کند با همان نام تونل اصلی می‌شود و شنونده‌های آزمایشی حذف می‌شوند. اگر تونل خودکار را زودتر حذف کنید، سمتی که ایران از آن وصل است هرگز حذف نمی‌شود.
+**بعد از انتخاب ایران،** تونل خودکار خارج حدود ۱۵ دقیقه بعد پورت‌های آزمایشی بی‌استفاده را می‌بندد و کریر انتخابی ایران را با همان نام تونل نگه می‌دارد (هنگام این جابه‌جایی اتصال‌ها یک بار قطع می‌شوند). منوی اصلی خارج زیر هر تونل خودکار وضعیت `carriers open` یا `closed` را با تعداد و زمان باقی‌مانده نشان می‌دهد. همان‌جا کلید `o` را بزنید تا همه‌ی کریرها دوباره باز شوند (تا وقتی دوباره `o` را نزنید باز می‌مانند) یا پورت‌های اضافی بسته شوند؛ دستور `wattun token NAME` هم همیشه در دسترس می‌ماند. هر تونل خودکار خارج بازه‌ی پورت معکوس جداگانه‌ای می‌گیرد، پس چند تونل ریورس در کنار هم تداخل پورت پیدا نمی‌کنند.
 
-برای عوض کردن روش یا تست دوباره، اول کریرها را روی خارج باز کنید. اگر این کار را نکنید، منیجر بعد از ۳ بررسی ناموفق خودش همه را باز می‌کند (حداکثر یک بار در هر ۱۰ دقیقه).
+برای عوض کردن روش اتصال یا تست دوباره روی ایران، اول کلید `o` را در منوی اصلی خارج بزنید تا همه‌ی پورت‌های تست باز شوند. اگر این کار را هم نکنید، لینک فعال فعلی به شکل زنده تست می‌شود و در صورت قطع کامل لینک، منیجر بعد از ۳ بررسی ناموفق خودش همه‌ی کریرها را روی خارج باز می‌کند (حداکثر یک بار در هر ۱۰ دقیقه).
 
 ## این ابزار چه می‌کند
 

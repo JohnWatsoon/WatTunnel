@@ -3,6 +3,7 @@ package wat
 import (
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -143,11 +144,12 @@ func (p *pathState) overCap(now time.Time) bool {
 // pathSet is the scoring and health state of the paths of one session end. It is shared by BondIO (client) and
 // the per-session send side of a MultiRaw server.
 type pathSet struct {
-	mu    sync.Mutex
-	cfg   PathTimings
-	mode  string
-	p     []pathState
-	profs []Profile // per-path profile: a packet is never sent on a carrier that cannot frame it (set before traffic)
+	mu       sync.Mutex
+	cfg      PathTimings
+	mode     string
+	p        []pathState
+	profs    []Profile     // per-path profile: a packet is never sent on a carrier that cannot frame it (set before traffic)
+	fullMask atomic.Uint64 // 3.3.8: bit i set while path i's pool send queues are full (refreshed per pump round)
 
 	burstPath, burstLeft int
 }
@@ -226,23 +228,132 @@ func (ps *pathSet) isLiveOrSuspect(i int) bool {
 	return false
 }
 
+func (ps *pathSet) isFull(i int) bool {
+	return i >= 0 && i < 64 && ps.fullMask.Load()&(uint64(1)<<uint(i)) != 0
+}
+
+// allBulkBlocked records the per-path pool backlog mask and reports whether no present path can take bulk right now
+// without overflowing a full pool queue or exceeding a path byte cap (3.3.8).
+func (ps *pathSet) allBulkBlocked(fullMask uint64, hasBacklogger bool) bool {
+	ps.fullMask.Store(fullMask)
+	if !hasBacklogger || fullMask == 0 {
+		return false
+	}
+	now := time.Now()
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	anyPresent := false
+	for i := range ps.p {
+		p := &ps.p[i]
+		if !p.present || p.muted {
+			continue
+		}
+		anyPresent = true
+		full := i < 64 && fullMask&(uint64(1)<<uint(i)) != 0
+		if !full && p.state != pDead && !p.overCap(now) {
+			return false
+		}
+	}
+	return anyPresent
+}
+
+// pacerMode reports whether the currently live path set should run the reliable delivery-rate pacer (3.3.8): true when
+// at least one reliable pool path is live and no uncapped datagram path (udp) is live beside it (an icmp leg is
+// already bounded by its own 16 MB/s token bucket and per-path queue-delay weight).
+func (ps *pathSet) pacerMode() (reliable, direct, anyRel bool) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	direct = true
+	anyUncappedUnrel := false
+	for i := range ps.p {
+		p := &ps.p[i]
+		if !p.present || p.muted || p.state == pDead {
+			continue
+		}
+		var prof Profile
+		if i < len(ps.profs) {
+			prof = ps.profs[i]
+		}
+		if prof.Reliable {
+			anyRel = true
+			if prof.NoDirect {
+				direct = false
+			}
+		} else if p.capBps <= 0 {
+			anyUncappedUnrel = true
+		}
+	}
+	reliable = anyRel && !anyUncappedUnrel
+	return reliable, reliable && direct, anyRel
+}
+
 func (ps *pathSet) nextPath(interactive bool) int {
+	now := time.Now()
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	if ps.mode == "active-backup" {
-		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted {
+		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted && !ps.isFull(0) {
 			return 0
 		}
 		for i := 1; i < len(ps.p); i++ {
+			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted && !ps.isFull(i) {
+				return i
+			}
+		}
+		for i := range ps.p {
 			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted {
 				return i
 			}
 		}
 		return 0
 	}
+	if interactive {
+		bs := time.Duration(math.MaxInt64)
+		for i := range ps.p {
+			if p := &ps.p[i]; p.present && p.state == pLive && !p.muted && !ps.isFull(i) && p.ramped(now, ps.cfg.Ramp) {
+				if sc := p.score(); sc < bs {
+					bs = sc
+				}
+			}
+		}
+		best, bestCred := -1, -1e18
+		for i := range ps.p {
+			p := &ps.p[i]
+			if !p.present || p.state != pLive || p.muted || ps.isFull(i) || !p.ramped(now, ps.cfg.Ramp) || p.score() > bs+bs/4+5*time.Millisecond {
+				continue
+			}
+			if c := p.icredit + p.w; best < 0 || c > bestCred {
+				best, bestCred = i, c
+			}
+		}
+		if best >= 0 {
+			return best
+		}
+	}
+	// 3.3.8: peek the actual next bulk winner when burstLeft == 0 or the current burst path is full/capped/dead, so
+	// Session.build sizes packet 25 for the path ChoosePath will pick instead of locking smaller-MTU paths out.
 	if !interactive && ps.burstLeft > 0 {
-		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted {
+		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !ps.isFull(ps.burstPath) && !p.overCap(now) {
 			return ps.burstPath
+		}
+	}
+	for pass := 0; pass < 2; pass++ {
+		best, bestCred := -1, -1e18
+		for i := range ps.p {
+			p := &ps.p[i]
+			if !p.present || p.muted || pass == 0 && (p.state == pDead || ps.isFull(i) || p.overCap(now)) {
+				continue
+			}
+			w := 1.0
+			if pass == 0 {
+				w = p.weight(now, ps.cfg.Ramp)
+			}
+			if c := p.credit + w; best < 0 || c > bestCred {
+				best, bestCred = i, c
+			}
+		}
+		if best >= 0 {
+			return best
 		}
 	}
 	return ps.burstPath
@@ -456,7 +567,7 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 	// the slow path's packets out of the reported ranges (they were then retransmitted although they arrived: 23 %
 	// of all packets on a 40 ms + 150 ms bond, measured).
 	if ps.burstLeft > 0 {
-		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !p.overCap(now) && ps.fits(ps.burstPath, size) {
+		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !ps.isFull(ps.burstPath) && !p.overCap(now) && ps.fits(ps.burstPath, size) {
 			ps.burstLeft--
 			return ps.burstPath
 		}
@@ -468,23 +579,39 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 		best, sum := -1, 0.0
 		for i := range ps.p {
 			p := &ps.p[i]
-			if !p.present || p.muted || (p.state == pDead || p.overCap(now)) && pass == 0 || pass == 0 && !ps.fits(i, size) {
+			if !p.present || p.muted || (p.state == pDead || ps.isFull(i) || p.overCap(now)) && pass == 0 {
 				continue
 			}
 			w := 1.0
 			if pass == 0 {
 				w = p.weight(now, ps.cfg.Ramp)
 			}
+			// 3.3.8: every healthy path earns credit even when this packet was sized for a larger-MTU peer path, so
+			// nextPath switches to the smaller-MTU path at the next burst boundary instead of starving it forever.
 			p.credit += w
 			sum += w
-			if best < 0 || p.credit > ps.p[best].credit {
+			if (pass > 0 || ps.fits(i, size)) && (best < 0 || p.credit > ps.p[best].credit) {
 				best = i
 			}
 		}
 		if best >= 0 {
 			ps.p[best].credit -= sum
+			for i := range ps.p {
+				if ps.p[i].credit > 4*sum {
+					ps.p[i].credit = 4 * sum
+				} else if ps.p[i].credit < -4*sum {
+					ps.p[i].credit = -4 * sum
+				}
+			}
 			ps.burstPath, ps.burstLeft = best, bulkBurst-1
 			return best
+		}
+		// No healthy path could frame size (e.g. only capped/dead paths fit): undo pass-0 credit before pass 1.
+		for i := range ps.p {
+			p := &ps.p[i]
+			if p.present && !p.muted && p.state != pDead && !ps.isFull(i) && !p.overCap(now) {
+				p.credit -= p.weight(now, ps.cfg.Ramp)
+			}
 		}
 	}
 	return 0

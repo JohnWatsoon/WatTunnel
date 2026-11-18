@@ -53,6 +53,10 @@ type PathNextChooser interface {
 	NextPath(interactive bool) int
 }
 
+type pathPacerModer interface {
+	PacerMode() (reliable, direct, anyRel bool)
+}
+
 var ErrSessionDead = errors.New("wat: session closed")
 
 type Config struct {
@@ -419,14 +423,22 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 		s.chooser = ch
 		s.pcc = make([]pathCC, ch.NumPaths())
 		s.smpBuf = make([]*sentPkt, ch.NumPaths())
+		maxHi := hi
 		for i := range s.pcc {
-			s.pcc[i].reliable = ch.PathProfile(i).Reliable
+			pp := ch.PathProfile(i)
+			s.pcc[i].reliable = pp.Reliable
+			if pp.MaxMTU > maxHi {
+				maxHi = pp.MaxMTU
+			}
 		}
+		s.winSlack = uint64(maxHi - overhead)
 		s.ackMax, s.rxKeep = 64, 512 // two paths reorder and double the holes: report as many ranges as the wire allows
+		s.lateAck = !noLateAck       // 3.3.8: report older multipath holes too, even when a datagram leg is in the bond
 		s.fb, _ = pio.(PathFeedback)
 		if pr, ok := pio.(PathProber); ok {
 			pr.SetProber(s.probePath)
 		}
+		s.syncBondPacer()
 	}
 	s.cc.maxPlain = s.maxPlain
 	if cfg.FEC {
@@ -1022,12 +1034,14 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 				if prof.MTU > 0 && prof.MTU-overhead > pathMTU {
 					pathMTU = prof.MTU - overhead
 				}
-				if prof.Reliable && limit >= directMTU-overhead {
+				if prof.Reliable && !prof.NoDirect && limit >= directMTU-overhead {
 					pathMTU = directMTU - overhead
 				}
 				if pathMTU > limit {
 					pathMTU = limit
 				}
+			} else if pathMTU > MaxPayload-overhead {
+				pathMTU = MaxPayload - overhead
 			}
 		}
 		room := pathMTU - len(dbuf)
@@ -1360,11 +1374,39 @@ func (s *Session) pathAcked(acked []*sentPkt, largest uint64, delay time.Duratio
 	return norm
 }
 
+func (s *Session) syncBondPacer() {
+	pm, ok := s.io.(pathPacerModer)
+	if !ok {
+		return
+	}
+	rel, dir, anyRel := pm.PacerMode()
+	s.cc.anyRel = anyRel
+	if rel && !s.cc.reliable {
+		s.cc.reliable = true
+		if s.cfg.MinBps == 2e5 && s.cc.minRate < 8e6 {
+			s.cc.minRate = min(8e6, s.cfg.MaxBps)
+			if !s.cc.bwSeen && s.cc.rate < s.cc.minRate {
+				s.cc.rate = s.cc.minRate
+			}
+		}
+	} else if !rel && s.cc.reliable {
+		s.cc.reliable = false
+		s.cc.minRate = s.cc.hardMin
+		if s.cc.rate > ICMPPathBps {
+			s.cc.rate = min(ICMPPathBps, s.cfg.MaxBps)
+		}
+	}
+	s.cc.direct = rel && (s.cfg.Direct || dir) && !noDirect
+}
+
 // timers: loss on tail packets, keepalive, pacing adjustments, tombstone pruning.
 func (s *Session) timers(now time.Time) {
+	if s.chooser != nil {
+		s.syncBondPacer()
+	}
 	s.cc.inflight = s.inflight // PROBE_RTT drains until this reaches its floor
 	s.cc.tick(now)
-	if s.backlog != nil && s.cc.reliable { // a pool connection died: what it held is gone, resend old packets now
+	if s.backlog != nil && (s.cc.reliable || s.cc.anyRel) { // a pool connection died: what it held is gone, resend old packets now
 		var d uint64
 		if s.deathIO != nil {
 			d = s.deathIO.ConnDeaths() // only this carrier's churn wakes the repair

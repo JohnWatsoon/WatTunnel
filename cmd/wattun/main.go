@@ -758,7 +758,8 @@ func main() {
 				pc.SetObfs(k, *fakeSNI)
 			}
 		}
-		keep := len(names) == 1 && (*reverse || carrier == "tcp" || carrier == "tls") // direct path (Config.Direct)
+		// 3.3.8: bonded direct/reverse pool legs keep slow connections too; tearing them down mid-transfer stalls the bond.
+		keep := *reverse || carrier == "tcp" || carrier == "tls" // direct path (Config.Direct)
 		switch *keepSlow {
 		case "on", "true":
 			keep = true
