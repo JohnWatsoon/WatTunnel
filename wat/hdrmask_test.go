@@ -108,11 +108,12 @@ func TestHdrMaskedOnTheWire(t *testing.T) {
 	}
 }
 
-// A server that predates masking (NoMask stands in for it) must still be served by a new client, and a masking
-// server must still serve an old client.
+// A plain-only peer (NoMask stands in for one older than 3.0.0) is joined two ways: a masking server latches to
+// the peer's form on the first authenticated packet, and a masked client joins a plain-only server only with
+// -legacy-mask-flip (3.3.8: the automatic flip was a cleartext downgrade, so the guessing is opt-in now).
 func TestHdrMaskCompat(t *testing.T) {
-	t.Run("new client, old server", func(t *testing.T) {
-		cli, _ := maskRig(t, Config{NoMask: true}, Config{})
+	t.Run("masked client, plain-only server (-legacy-mask-flip)", func(t *testing.T) {
+		cli, _ := maskRig(t, Config{NoMask: true}, Config{LegacyMaskFlip: true})
 		t0 := time.Now()
 		udpEcho(t, cli, 50000, 2)
 		if el := time.Since(t0); el > 5*time.Second {
@@ -121,7 +122,7 @@ func TestHdrMaskCompat(t *testing.T) {
 			t.Fatalf("plain-header fallback took %v, want <= 5s", el)
 		}
 	})
-	t.Run("old client, new server", func(t *testing.T) {
+	t.Run("plain client, masking server", func(t *testing.T) {
 		cli, rec := maskRig(t, Config{}, Config{NoMask: true})
 		udpEcho(t, cli, 50000, 3)
 		sid := make([]byte, 8)
@@ -132,7 +133,7 @@ func TestHdrMaskCompat(t *testing.T) {
 			}
 		}
 	})
-	t.Run("new peers, mask off on one side", func(t *testing.T) {
+	t.Run("plain client, masking+unshaped server", func(t *testing.T) {
 		cli, _ := maskRig(t, Config{}, Config{NoMask: true, NoShape: true})
 		udpEcho(t, cli, 50000, 4)
 	})
@@ -222,5 +223,37 @@ func TestHdrMaskLateServer(t *testing.T) {
 		if bytes.Equal(p[:8], sid) {
 			t.Fatalf("packet %d of %d after the exchange still carries the session id in clear", i, len(tail))
 		}
+	}
+}
+
+// The masked/plain guessing is opt-in since 3.3.8 (audit 2026-11-18): a client that hears nothing must keep
+// sending masked headers, because the automatic 3 s flip was a cleartext downgrade - a filter only had to
+// drop packets at flow start. -legacy-mask-flip restores the pre-3.0 join behaviour explicitly.
+func TestMaskFlipOptIn(t *testing.T) {
+	tests := []struct {
+		name string
+		flip bool
+		want bool // masked after timers() runs past the 3 s guess point
+	}{
+		{"default: silence never unmasks", false, true},
+		{"legacy-mask-flip: guesses plain", true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cli, _ := memPair(t, Config{LegacyMaskFlip: tc.flip})
+			cli.mu.Lock()
+			if cli.hk == nil {
+				cli.mu.Unlock()
+				t.Fatal("test needs masking on")
+			}
+			cli.lastAuth = time.Time{} // nothing authenticated yet
+			cli.maskFlip = time.Now().Add(-4 * time.Second)
+			cli.timers(time.Now()) // pump calls timers under s.mu too, so this is the same critical section
+			got := cli.masked.Load()
+			cli.mu.Unlock()
+			if got != tc.want {
+				t.Fatalf("masked = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

@@ -512,7 +512,7 @@ leg), `state-dir`/`state-save`, the FEC loss band (`fec-on-loss`/`fec-off-loss`,
 is grouped into Performance / Shaping & DPI / Safety / State & data; `win-max` (4-64) and `loss-ceiling` are in
 Performance. The FEC choice itself stays a one-key `off`/`auto`; answering `a` at that prompt opens the loss-band rows
 (3.3.0+). Keys with no UI path (`debug`, `ping-every`, `udp-idle`, `tcp-cc`, `slack-ms`, `hedge`, `lanes`,
-`mem-budget`, `plain`, `header`, `keep-slow`, `tls-small-ch`, `hdr-mask`, `tcp-mimic`, `tls-pin`, `fake-ip`,
+`mem-budget`, `plain`, `header`, `keep-slow`, `tls-small-ch`, `hdr-mask`, `legacy-mask-flip`, `tcp-mimic`, `tls-pin`, `fake-ip`,
 `fake-split`, plus `port-offset` and the TLS cert/key paths) are documented as file-only expert
 keys in `/etc/wattun/NAME.yml`.
 
@@ -978,12 +978,14 @@ had the same sizes. None of that is encrypted content, so none of it needed to l
 5. **Reverse udp.** [Iran starts nothing](#reverse-udp-300).
 
 **Compatibility.** Padding and jitter are invisible to older peers. A masked header is not. A receiver first reads the
-header as plain (a session id it knows), then as masked, and answers in the form it was addressed in. A new client that
-hears nothing for 3 s switches between the two forms every 3 s until a packet authenticates (and again after 30 s of
-silence), so it joins an older server a few seconds late and then stays plain. `hdr-mask: false` skips the wait and
-sends the plain header; `shape: false` turns padding and jitter off. A client that went plain only because its server
-was not up yet (it flips after 3 s of silence) moves back to the masked form as soon as the server's first padding
-frame arrives: that frame's first byte is `1` ("I read masked headers"), which older peers skip. Both ends of a tunnel can be updated in any order.
+header as plain (a session id it knows), then as masked, and answers in the form it was addressed in. Since 3.3.8 the
+automatic form guessing is off: a masked client that hears nothing keeps sending masked headers. The old guessing was a
+cleartext downgrade — a filter that dropped packets for ~3 s at flow start made the client expose the session id and
+packet number in plain. `legacy-mask-flip: true` restores the pre-3.0 join behaviour explicitly: the client flips
+between the two forms every 3 s until a packet authenticates (and again after 30 s of silence), so it joins an older
+server a few seconds late and then stays plain. `hdr-mask: false` sends the plain header; `shape: false` turns padding
+and jitter off. A client locks to the masked form as soon as the server's first padding frame arrives: that frame's
+first byte is `1` ("I read masked headers"), which older peers skip. Both ends of a tunnel can be updated in any order.
 A new `tcp` client whose hello gets no answer within 6 s falls back to the plain pool id on that connection (and retries
 the hello after 30 s); `tcp-mimic: false` sends the plain id at once. A new listener accepts both forms.
 

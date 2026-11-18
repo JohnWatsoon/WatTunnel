@@ -119,7 +119,8 @@ func main() {
 	lossCeil := flag.Bool("loss-ceiling", false, "pacer: also cut the rate when loss jumps far above its learned baseline (opt-in; default: delay only)")
 	governor := flag.Bool("governor", false, "pacer, ICMP paths: learn the path's volume ceiling from the reroute signature (a sudden base-RTT jump after sustained bulk) and hold the rate under it (opt-in; replaces hand-tuned max-mbps on routes where ICMP above ~30 MB/s total triggers a reroute inside Iran; 2.9.0)")
 	tlsSmallCH := flag.Bool("tls-small-ch", false, "client, tls|wss|h2|grpc: keep the ClientHello small (skip the post-quantum hybrid key share; ~250 B instead of ~1.5 KB). Some DPIs drop large hellos outright (measured 2026-10-22 on a live Iranian path)")
-	hdrMask := flag.Bool("hdr-mask", true, "mask the session id and packet number at the start of every packet, so no byte of a packet is constant or counts up (3.0.0; an older peer is detected and answered in the plain form; false sends the plain header)")
+	hdrMask := flag.Bool("hdr-mask", true, "mask the session id and packet number at the start of every packet, so no byte of a packet is constant or counts up (3.0.0; false sends the plain header)")
+	legacyMaskFlip := flag.Bool("legacy-mask-flip", false, "client: restore the pre-3.0 masked/plain guessing - flip the header form after 3 s of silence (and again on a mid-session reset) so an old peer that only speaks plain can be joined. 3.3.8: default OFF; the automatic flip was a cleartext downgrade (a filter only had to drop packets for ~3 s at flow start), so joining a peer older than 3.0.0 is an explicit opt-in now")
 	tcpMimic := flag.Bool("tcp-mimic", true, "tcp carrier: open every connection with a TLS ClientHello-shaped hello (SNI -fake-sni, default www.cloudflare.com) that carries the authentication, and mask the 2-byte frame lengths, so the stream starts like TLS and has no plain structure (3.0.0; both ends; an older peer is detected and answered with the plain 8-byte pool id after a few seconds; false sends the plain id)")
 	udpDNS := flag.Bool("udp-dns", false, "udp carrier: start every datagram with a DNS message header and question, so a filter that lets only DNS-looking UDP through (measured: UDP to port 53 passes, everything else is cut after 3 datagrams) passes the tunnel; use with port 53 on the server. Both ends must set it; an older peer cannot read it (3.0.0)")
 	shape := flag.Bool("shape", true, "randomize idle traffic: pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval around -ping-every (3.0.0; wire-compatible with older peers)")
@@ -851,7 +852,8 @@ func main() {
 	cfg := wat.Config{
 		Server: server, Key: k, Paths: *lanes, MaxBps: *maxMB * 1e6, Slack: time.Duration(*slackMs) * time.Millisecond,
 		PingEvery: time.Duration(*pingEvery) * time.Second, NoMask: !*hdrMask, NoShape: !*shape,
-		Logf: log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", FECOnLoss: fecOn, FECOffLoss: fecOff,
+		LegacyMaskFlip: *legacyMaskFlip,
+		Logf:           log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", FECOnLoss: fecOn, FECOffLoss: fecOff,
 		MaxPayload: maxPayload, Bond: tm, AllowClients: allowClientPrefixes,
 		ShapeData: shapeFrac, NoiseBps: noiseBpsVal, NoiseFrom: noiseFrom, NoiseTo: noiseTo,
 		WinMax: uint64(*winMax) << 20,

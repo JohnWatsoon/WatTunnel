@@ -104,8 +104,14 @@ type Config struct {
 	// collapsed to 95% loss until a ~5 min cooldown). Both ends need it only if BOTH are idle-quiet;
 	// a single-sided raise already halves the rate.
 	PingEvery time.Duration
+	// LegacyMaskFlip restores the 2.x masked/plain guessing: a client flips its header form after 3 s of silence
+	// (and again on a 30 s mid-session reset) so an old peer that only speaks the other form can be joined.
+	// 3.3.8: default OFF. The automatic flip was a cleartext downgrade - a censor only had to drop packets for
+	// ~3 s at flow start and the client exposed the session id and packet number in plain, and the server then
+	// latched to the peer's form per authenticated packet. Joining a pre-3.0 peer is an explicit opt-in now.
+	LegacyMaskFlip bool
 	// NoMask sends and expects the plain packet header (session id and packet number in clear). The default masks
-	// both (hdrmask.go) and falls back to the plain form against a peer older than 3.0.0.
+	// both (hdrmask.go); with -legacy-mask-flip the client still guesses against a peer older than 3.0.0.
 	NoMask bool
 	// NoShape turns off the random padding of small packets and the jitter on the idle keepalive (hdrmask.go).
 	NoShape bool
@@ -240,7 +246,7 @@ type Session struct {
 	pingGap       time.Duration // idle time before the next keepalive: PingEvery, re-rolled after each ping (nextPingGap)
 	hk            []byte        // header-mask key (nil: NoMask)
 	masked        atomic.Bool   // seal outgoing packets with a masked header: the client's guess, the server's echo of what it received
-	maskFlip      time.Time     // client: when the masked/plain guess last changed while no packet had authenticated
+	maskFlip      time.Time     // client: when the masked/plain guess last changed while no packet had authenticated (-legacy-mask-flip only)
 	peerMaskOK    atomic.Bool   // the peer's padding carried the "I read masked headers" byte (hdrmask.go): a client that guessed plain then switches to masked for good
 	stats         Stats
 	openBuf       []byte
@@ -1474,16 +1480,16 @@ func (s *Session) timers(now time.Time) {
 	if now.Sub(s.lastSend) > s.pingGap {
 		s.wantPing = true
 	}
-	if s.hk != nil && !s.cfg.Server && s.lastAuth.IsZero() && now.Sub(s.maskFlip) > 3*time.Second {
-		s.masked.Store(!s.masked.Load()) // nothing answered yet: the peer may speak only the other header form
+	if s.hk != nil && s.cfg.LegacyMaskFlip && !s.cfg.Server && s.lastAuth.IsZero() && now.Sub(s.maskFlip) > 3*time.Second {
+		s.masked.Store(!s.masked.Load()) // -legacy-mask-flip: the peer may speak only the other header form
 		s.maskFlip = now
 	}
 	// Silence this long means the session is dead: reset it and let it rebuild. A raised -ping-every means longer
 	// legitimate silences (both ends ping on their own value), so scale with it like Server.IdleTimeout does -
 	// otherwise -ping-every 40/60 killed every open stream every 30 s (2026-10-29).
 	if !s.lastRecv.IsZero() && now.Sub(s.lastRecv) > max(30*time.Second, 3*s.cfg.PingEvery) {
-		if s.hk != nil && !s.cfg.Server {
-			s.masked.Store(!s.masked.Load()) // a peer downgraded or upgraded while we were silent
+		if s.hk != nil && s.cfg.LegacyMaskFlip && !s.cfg.Server {
+			s.masked.Store(!s.masked.Load()) // -legacy-mask-flip: a peer downgraded or upgraded while we were silent
 			s.peerMaskOK.Store(false)
 			s.maskFlip = now
 		}
