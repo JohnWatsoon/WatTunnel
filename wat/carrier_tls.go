@@ -35,8 +35,14 @@ type TLSClientOptions struct {
 	Logf        func(string, ...any)             // optional: one-time notes (ECH lookups, fallbacks)
 }
 
+// tlsClientCache: one TLS 1.3 resumption cache for every tls-carrier dial in this process. Without it every pool
+// reconnect paid a full ECDHE round trip (3.3.8). A resumed hello is smaller and faster, and real browsers resume
+// too, so the on-the-wire shape stays honest. The uTLS fingerprint path builds its own config and is untouched.
+var tlsClientCache = tls.NewLRUClientSessionCache(64)
+
 func (o TLSClientOptions) config() *tls.Config {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: o.ServerName, InsecureSkipVerify: !o.Verify}
+	cfg.ClientSessionCache = tlsClientCache
 	if o.NoPQ {
 		// Go 1.24+ offers X25519MLKEM768 by default, which makes the ClientHello ~1.5 KB. Some DPIs
 		// drop such large hellos outright (measured on a live Iranian path 2026-10-22: 1474 B and

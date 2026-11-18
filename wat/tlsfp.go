@@ -397,8 +397,17 @@ func (e *tlsEngine) handshakeUTLS(ctx context.Context, conn net.Conn, sni string
 // classical like the stdlib path of -tls-small-ch. The padding extension is left alone: it only fills a short hello up
 // to 512 bytes.
 func stripPQ(spec *utls.ClientHelloSpec) {
+	// 3.3.8: classic-curve ALLOWLIST, not a denylist. The old 3-ID list (X25519MLKEM768, X25519Kyber768Draft00,
+	// X25519Kyber768Draft00Old) could not know about future PQ groups — Go 1.26 already ships
+	// SecP256r1MLKEM768 (0x11eb) / SecP384r1MLKEM1024 (0x11ed) and utls has P256Kyber768Draft00 (0xfe32);
+	// any of those leaking into a -no-pq hello bloats it past 1 KB again, which is exactly what
+	// -no-pq exists to prevent (live test 2026-10-22: 1474 B hellos vanish, 250-512 B pass).
 	pq := func(c utls.CurveID) bool {
-		return c == utls.X25519MLKEM768 || c == utls.X25519Kyber768Draft00 || c == utls.X25519Kyber768Draft00Old
+		switch c {
+		case utls.X25519, utls.CurveP256, utls.CurveP384, utls.CurveP521:
+			return false
+		}
+		return true
 	}
 	for _, x := range spec.Extensions {
 		switch ext := x.(type) {
