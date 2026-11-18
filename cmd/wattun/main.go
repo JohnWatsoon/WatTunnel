@@ -123,6 +123,7 @@ func main() {
 	legacyMaskFlip := flag.Bool("legacy-mask-flip", false, "client: restore the pre-3.0 masked/plain guessing - flip the header form after 3 s of silence (and again on a mid-session reset) so an old peer that only speaks plain can be joined. 3.3.8: default OFF; the automatic flip was a cleartext downgrade (a filter only had to drop packets for ~3 s at flow start), so joining a peer older than 3.0.0 is an explicit opt-in now")
 	tcpMimic := flag.Bool("tcp-mimic", true, "tcp carrier: open every connection with a TLS ClientHello-shaped hello (SNI -fake-sni, default www.cloudflare.com) that carries the authentication, and mask the 2-byte frame lengths, so the stream starts like TLS and has no plain structure (3.0.0; both ends; an older peer is detected and answered with the plain 8-byte pool id after a few seconds; false sends the plain id)")
 	udpDNS := flag.Bool("udp-dns", false, "udp carrier: start every datagram with a DNS message header and question, so a filter that lets only DNS-looking UDP through (measured: UDP to port 53 passes, everything else is cut after 3 datagrams) passes the tunnel; use with port 53 on the server. Both ends must set it; an older peer cannot read it (3.0.0)")
+	probeGuard := flag.Bool("probe-guard", false, "ws|wss|h2|h2c|grpc carriers: the server answers a tunnel request only when it carries the key-derived X-Request-Id token, so an active prober gets the decoy/nginx pages instead of a real 101/200 (3.3.8; both ends; default off keeps older peers interoperable)")
 	shape := flag.Bool("shape", true, "randomize idle traffic: pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval around -ping-every (3.0.0; wire-compatible with older peers)")
 	pingEvery := flag.Int("ping-every", 2, "idle keepalive interval, seconds (raise on paths whose filter rate-limits steady periodic packets into a penalty box: live 2026-10-22 saw 30 echo req/min collapse to 95% loss until a ~5 min cooldown; both ends use their own value)")
 	dnsUpstream := flag.String("dns-relay-upstream", "8.8.8.8:53", "Kharej recursive resolver used by the internal DNS relay (port 53, -ech ladder); empty = 8.8.8.8:53")
@@ -285,6 +286,11 @@ func main() {
 		os.Exit(2)
 	}
 	server := *mode == "server"
+	// -probe-guard (3.3.8): one derived key shared by the client (stamps X-Request-Id) and the server (demands it).
+	var pgKey []byte
+	if *probeGuard {
+		pgKey = wat.ProbeGuardKey(k)
+	}
 	if *carrier == "fortress" {
 		*carrier = "icmp+tcp+tls+wss+udp"
 		if v := listenBy["tcp"]; v != nil && *v == "" {
@@ -712,7 +718,7 @@ func main() {
 		case "ws", "wss", "h2", "h2c", "grpc":
 			secure := carrier == "wss" || carrier == "h2" || carrier == "grpc" && !*plain
 			if lis {
-				so := wat.HTTPServerOptions{Path: *path, Secure: secure, CertFile: *tlsCert, KeyFile: *tlsKey, Decoy: *decoy}
+				so := wat.HTTPServerOptions{Path: *path, Secure: secure, CertFile: *tlsCert, KeyFile: *tlsKey, Decoy: *decoy, ProbeGuard: pgKey}
 				switch carrier {
 				case "ws", "wss":
 					ps, err = wat.NewWSPoolServer(listen, so)
@@ -722,7 +728,7 @@ func main() {
 					ps, err = wat.NewH2PoolServer(listen, so)
 				}
 			} else {
-				co := wat.HTTPClientOptions{Path: *path, Host: *host, Secure: secure, Headers: map[string]string{}}
+				co := wat.HTTPClientOptions{Path: *path, Host: *host, Secure: secure, Headers: map[string]string{}, ProbeGuard: pgKey}
 				co.TLS.ServerName = *sni
 				co.TLS.NoPQ = smallCH
 				co.TLS.Fingerprint, co.TLS.ECH, co.TLS.Frag, co.TLS.Logf = *tlsFP, *echMode, *tlsFrag, log.Printf

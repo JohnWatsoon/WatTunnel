@@ -512,7 +512,7 @@ leg), `state-dir`/`state-save`, the FEC loss band (`fec-on-loss`/`fec-off-loss`,
 is grouped into Performance / Shaping & DPI / Safety / State & data; `win-max` (4-64) and `loss-ceiling` are in
 Performance. The FEC choice itself stays a one-key `off`/`auto`; answering `a` at that prompt opens the loss-band rows
 (3.3.0+). Keys with no UI path (`debug`, `ping-every`, `udp-idle`, `tcp-cc`, `slack-ms`, `hedge`, `lanes`,
-`mem-budget`, `plain`, `header`, `keep-slow`, `tls-small-ch`, `hdr-mask`, `legacy-mask-flip`, `tcp-mimic`, `tls-pin`, `fake-ip`,
+`mem-budget`, `plain`, `header`, `keep-slow`, `tls-small-ch`, `hdr-mask`, `legacy-mask-flip`, `probe-guard`, `tcp-mimic`, `tls-pin`, `fake-ip`,
 `fake-split`, plus `port-offset` and the TLS cert/key paths) are documented as file-only expert
 keys in `/etc/wattun/NAME.yml`.
 

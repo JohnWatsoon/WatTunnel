@@ -31,21 +31,23 @@ import (
 
 // HTTPClientOptions configures the ws/h2/grpc client carriers.
 type HTTPClientOptions struct {
-	Path     string                           // request path (grpc: the service name, the request goes to <Path>/Tun)
-	Host     string                           // Host header / :authority (default: the peer address)
-	Headers  map[string]string                // extra request headers
-	Secure   bool                             // TLS (wss, h2, grpc over TLS); false = ws, h2c
-	DialHook func(net.Conn) (net.Conn, error) // dial hook on raw TCP socket before TLS/framing (fake-SNI)
-	TLS      TLSClientOptions
+	Path       string                           // request path (grpc: the service name, the request goes to <Path>/Tun)
+	Host       string                           // Host header / :authority (default: the peer address)
+	Headers    map[string]string                // extra request headers
+	Secure     bool                             // TLS (wss, h2, grpc over TLS); false = ws, h2c
+	DialHook   func(net.Conn) (net.Conn, error) // dial hook on raw TCP socket before TLS/framing (fake-SNI)
+	ProbeGuard []byte                           // 3.3.8, opt-in (both ends): stamp every tunnel request with the key-derived X-Request-Id token the guarded server demands
+	TLS        TLSClientOptions
 }
 
 // HTTPServerOptions configures the ws/h2/grpc server carriers.
 type HTTPServerOptions struct {
-	Path     string
-	Secure   bool   // serve TLS
-	CertFile string // empty with KeyFile empty = self-signed in memory
-	KeyFile  string
-	Decoy    string // http(s) URL every non-tunnel request is reverse-proxied to (3.3.6); empty = the nginx pages
+	Path       string
+	Secure     bool   // serve TLS
+	CertFile   string // empty with KeyFile empty = self-signed in memory
+	KeyFile    string
+	Decoy      string // http(s) URL every non-tunnel request is reverse-proxied to (3.3.6); empty = the nginx pages
+	ProbeGuard []byte // 3.3.8, opt-in (both ends): a tunnel request without a valid key-derived X-Request-Id token is answered by the decoy/nginx pages, never by the tunnel (probeguard.go)
 }
 
 func normPath(p string) string {
@@ -120,7 +122,16 @@ func NewWSPoolClient(peer string, conns int, o HTTPClientOptions) (*TCPPoolClien
 		if err != nil {
 			return nil, err
 		}
-		w, err := wsClientHandshake(ctx, c, o.host(addr), path, o.Secure, o.Headers)
+		hdrs := o.Headers
+		if o.ProbeGuard != nil {
+			// probe guard (3.3.8): fresh token per dial over GET + the exact path the server checks
+			hdrs = make(map[string]string, len(o.Headers)+1)
+			for k, v := range o.Headers {
+				hdrs[k] = v
+			}
+			hdrs[probeGuardHdr] = probeGuardToken(o.ProbeGuard, "GET", path, time.Now())
+		}
+		w, err := wsClientHandshake(ctx, c, o.host(addr), path, o.Secure, hdrs)
 		if err != nil {
 			c.Close()
 			return nil, err
@@ -141,6 +152,9 @@ func NewWSPoolServer(addr string, o HTTPServerOptions) (*TCPPoolServer, error) {
 	path := normPath(o.Path)
 	return newHTTPPoolServer(addr, o, func(l *httpListener) http.Handler {
 		return pathMux(path, l.decoy, func(w http.ResponseWriter, r *http.Request) bool {
+			if o.ProbeGuard != nil && !probeGuardOK(o.ProbeGuard, r, time.Now()) {
+				return false // probe guard (3.3.8): a 101 would be an active-probe oracle; fall through to the decoy
+			}
 			c, ok := wsServerUpgrade(w, r)
 			if c != nil {
 				l.push(c)
@@ -502,6 +516,10 @@ func newH2Client(peer string, conns int, o HTTPClientOptions, grpc bool) (*TCPPo
 		for k, v := range o.Headers {
 			req.Header.Set(k, v)
 		}
+		if o.ProbeGuard != nil {
+			// probe guard (3.3.8): fresh token per request over POST + the exact path the server checks (grpc: /Tun)
+			req.Header.Set(probeGuardHdr, probeGuardToken(o.ProbeGuard, "POST", req.URL.Path, time.Now()))
+		}
 		if grpc {
 			req.Header.Set("Content-Type", "application/grpc")
 			req.Header.Set("TE", "trailers")
@@ -562,6 +580,9 @@ func h2Server(addr string, o HTTPServerOptions, grpc bool) (*TCPPoolServer, erro
 	}
 	return newHTTPPoolServer(addr, o, func(l *httpListener) http.Handler {
 		return pathMux(path, l.decoy, func(w http.ResponseWriter, r *http.Request) bool {
+			if o.ProbeGuard != nil && !probeGuardOK(o.ProbeGuard, r, time.Now()) {
+				return false // probe guard (3.3.8): the 200 would be an active-probe oracle; fall through to the decoy
+			}
 			fl, ok := w.(http.Flusher)
 			if !ok || r.Method != "POST" || r.ProtoMajor < 2 {
 				return false
