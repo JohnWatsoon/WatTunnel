@@ -39,17 +39,18 @@ func NewShapedUDPClientAddr(name, peer string, laddr *net.UDPAddr, key []byte) (
 func (c *ShapedUDPClient) Send(p []byte, lane int) error {
 	bp := shapedUDPBufs.Get().(*[]byte)
 	defer shapedUDPBufs.Put(bp)
-	*bp = c.sh.frame((*bp)[:0], p)
+	*bp = c.sh.frame((*bp)[:0], p, c.sh.lastPeerTs())
 	return c.u.Send(*bp, lane)
 }
 
 func (c *ShapedUDPClient) SendBatch(ps [][]byte, lanes []int) error {
 	bufs := make([]*[]byte, len(ps))
 	framed := make([][]byte, len(ps))
+	orig := c.sh.lastPeerTs()
 	for i := range ps {
 		bp := shapedUDPBufs.Get().(*[]byte)
 		bufs[i] = bp
-		*bp = c.sh.frame((*bp)[:0], ps[i])
+		*bp = c.sh.frame((*bp)[:0], ps[i], orig)
 		framed[i] = *bp
 	}
 	err := c.u.SendBatch(framed, lanes)
@@ -66,6 +67,11 @@ func (c *ShapedUDPClient) Recv() ([]byte, int, net.Addr, error) {
 			return nil, 0, nil, err
 		}
 		if q := c.sh.strip(p); q != nil {
+			if c.sh.shape.name == "ntp-direct" && len(p) >= 48 {
+				var ts [8]byte
+				copy(ts[:], p[40:48]) // the peer's transmit timestamp, echoed back as originate
+				c.sh.notePeerTs(ts)
+			}
 			return q, lane, src, nil
 		}
 	}
@@ -83,8 +89,10 @@ func (c *ShapedUDPClient) Close() error { return c.u.Close() }
 // ShapedUDPServer is the server RawIO of one phase-2 UDP-shaped carrier: one listening socket for every client, the
 // same udp carrier with the shape header added/stripped per datagram.
 type ShapedUDPServer struct {
-	u  *UDPServer
-	sh *udpShaper
+	u     *UDPServer
+	sh    *udpShaper
+	ntpMu sync.Mutex
+	ntpTs map[string][8]byte // ntp-direct: the last client transmit timestamp per address, echoed as originate
 }
 
 // NewShapedUDPServer listens on addr (usually the shape's conventional port) as the given shaped carrier.
@@ -100,6 +108,17 @@ func NewShapedUDPServer(name, addr string, key []byte) (*ShapedUDPServer, error)
 	return &ShapedUDPServer{u: u, sh: sh}, nil
 }
 
+// ntpOriginate returns the timestamp to echo to dst (zeros until a datagram arrived from it).
+func (s *ShapedUDPServer) ntpOriginate(dst net.Addr) [8]byte {
+	ua, ok := dst.(*net.UDPAddr)
+	if !ok {
+		return [8]byte{}
+	}
+	s.ntpMu.Lock()
+	defer s.ntpMu.Unlock()
+	return s.ntpTs[ua.String()]
+}
+
 // Addr is the bound address (useful with port 0).
 func (s *ShapedUDPServer) Addr() net.Addr { return s.u.Addr() }
 
@@ -110,6 +129,18 @@ func (s *ShapedUDPServer) Recv() ([]byte, int, net.Addr, error) {
 			return nil, 0, nil, err
 		}
 		if q := s.sh.strip(p); q != nil {
+			if s.sh.shape.name == "ntp-direct" && len(p) >= 48 {
+				if ua, ok := src.(*net.UDPAddr); ok {
+					var ts [8]byte
+					copy(ts[:], p[40:48]) // the client's transmit timestamp, echoed back as originate
+					s.ntpMu.Lock()
+					if s.ntpTs == nil {
+						s.ntpTs = make(map[string][8]byte)
+					}
+					s.ntpTs[ua.String()] = ts
+					s.ntpMu.Unlock()
+				}
+			}
 			return q, lane, src, nil
 		}
 	}
@@ -118,17 +149,18 @@ func (s *ShapedUDPServer) Recv() ([]byte, int, net.Addr, error) {
 func (s *ShapedUDPServer) SendTo(p []byte, lane int, dst net.Addr) error {
 	bp := shapedUDPBufs.Get().(*[]byte)
 	defer shapedUDPBufs.Put(bp)
-	*bp = s.sh.frame((*bp)[:0], p)
+	*bp = s.sh.frame((*bp)[:0], p, s.ntpOriginate(dst))
 	return s.u.SendTo(*bp, lane, dst)
 }
 
 func (s *ShapedUDPServer) SendBatchTo(ps [][]byte, lanes []int, dst net.Addr) error {
 	bufs := make([]*[]byte, len(ps))
 	framed := make([][]byte, len(ps))
+	orig := s.ntpOriginate(dst)
 	for i := range ps {
 		bp := shapedUDPBufs.Get().(*[]byte)
 		bufs[i] = bp
-		*bp = s.sh.frame((*bp)[:0], ps[i])
+		*bp = s.sh.frame((*bp)[:0], ps[i], orig)
 		framed[i] = *bp
 	}
 	err := s.u.SendBatchTo(framed, lanes, dst)

@@ -1540,7 +1540,8 @@ printf 'mode: client\ncarrier: tcp\nstate-dir: /var/lib/wattun\n' >"$WAT_CONF/t_
 chk "state-dir: an absolute value is not flagged" "$(state_dir_is_relative t_m8 && echo y || echo n)" "n"
 rm -f "$WAT_CONF/t_m8.yml"
 # M1: raw-tier shaped MTU ceilings come from the engine profile (1400 minus the IP-protocol header)
-for p in 'sit 1360' '6to4 1360' 'xfrm-ipsec 1392' 'etherip 1384' 'l2tpv3 1396' 'dnscrypt-udp 1326' 'ntp-direct 1352' 'srtp-direct 1388' 'fou-gre 1392' 'gue-ipip 1392' 'vxlan 1392' 'geneve 1392' 'openvpn-dco 1396'; do
+# 3.3.8: ntp-direct is 1400-64 (48 B header + the 16 B minimum NTS-cookie extension field)
+for p in 'sit 1360' '6to4 1360' 'xfrm-ipsec 1392' 'etherip 1384' 'l2tpv3 1396' 'dnscrypt-udp 1326' 'ntp-direct 1336' 'srtp-direct 1388' 'fou-gre 1392' 'gue-ipip 1392' 'vxlan 1392' 'geneve 1392' 'openvpn-dco 1396'; do
   set -- $p
   chk "mtu ceiling: shaped $1" "$(mtu_max_for "$1")" "$2"
 done

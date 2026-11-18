@@ -15,9 +15,10 @@ func TestUDPShapeTable(t *testing.T) {
 		"dnscrypt-udp": 443, "ntp-direct": 123, "openvpn-dco": 1194, "srtp-direct": 5004,
 	}
 	// M1/M15: the payload ceiling the engine clamps an explicit -mtu to (1400 - header - padding allowance).
+	// 3.3.8: ntp-direct grew to 64 B of header (48 + the 16 B minimum NTS-cookie extension field).
 	wantMTU := map[string]int{
 		"fou-gre": 1392, "gue-ipip": 1392, "vxlan": 1392, "geneve": 1392,
-		"dnscrypt-udp": 1326, "ntp-direct": 1352, "openvpn-dco": 1396, "srtp-direct": 1388,
+		"dnscrypt-udp": 1326, "ntp-direct": 1336, "openvpn-dco": 1396, "srtp-direct": 1388,
 	}
 	if len(udpShapeTable) != len(want) {
 		t.Fatalf("%d shapes, want %d", len(udpShapeTable), len(want))
@@ -67,7 +68,7 @@ func TestUDPShapeCodec(t *testing.T) {
 			server, _ := newUDPShaper(sh.name, key, true)
 			for _, size := range []int{1, 200, sh.mtu()} {
 				payload := bytes.Repeat([]byte{0xA5}, size)
-				f := client.frame(nil, payload)
+				f := client.frame(nil, payload, [8]byte{})
 				if len(f) > udpShapeMTU {
 					t.Fatalf("%d B payload: frame %d B > %d MTU", size, len(f), udpShapeMTU)
 				}
@@ -75,12 +76,12 @@ func TestUDPShapeCodec(t *testing.T) {
 					t.Fatalf("%d B payload: server strip %d B", size, len(got))
 				}
 				// the other direction (server -> client) must parse too
-				g := server.frame(nil, payload)
+				g := server.frame(nil, payload, [8]byte{})
 				if got := client.strip(g); !bytes.Equal(got, payload) {
 					t.Fatalf("%d B payload: client strip %d B", size, len(got))
 				}
 			}
-			f := client.frame(nil, []byte("hello"))
+			f := client.frame(nil, []byte("hello"), [8]byte{})
 			// another PSK must not parse
 			if other, _ := newUDPShaper(sh.name, []byte("another-key"), false); other.strip(f) != nil {
 				t.Fatal("wrong key accepted")
@@ -112,7 +113,7 @@ func TestUDPShapeFields(t *testing.T) {
 		if !ok {
 			t.Fatal(name)
 		}
-		return sh.frame(nil, payload), sh
+		return sh.frame(nil, payload, [8]byte{}), sh
 	}
 	if f, sh := frame("fou-gre", false); f[0] != 0x20 || f[1] != 0 || f[2] != 0x08 || f[3] != 0x00 ||
 		binary.BigEndian.Uint32(f[4:8]) != sh.aux {
@@ -133,11 +134,20 @@ func TestUDPShapeFields(t *testing.T) {
 		!bytes.Equal(f[:8], newRawShaperMagic(t, "dnscrypt-udp", key)) {
 		t.Errorf("dnscrypt frame: %d bytes %x", len(f), f[:9])
 	}
-	if f, _ := frame("ntp-direct", false); f[0] != 0x23 {
-		t.Errorf("ntp client mode byte %#x", f[0])
+	if f, _ := frame("ntp-direct", false); f[0] != 0x23 || f[1] != 0 {
+		t.Errorf("ntp client mode/stratum %#x %#x", f[0], f[1])
 	}
-	if f, _ := frame("ntp-direct", true); f[0] != 0x24 {
-		t.Errorf("ntp server mode byte %#x", f[0])
+	if f, _ := frame("ntp-direct", true); f[0] != 0x24 || f[1] != 2 {
+		t.Errorf("ntp server mode/stratum %#x %#x", f[0], f[1])
+	}
+	// 3.3.8: a real NTP transmit timestamp (seconds since 1900: ~4.0e9 in 2026, not a wrap-adjacent sequence)
+	fntp, _ := frame("ntp-direct", false)
+	if s := binary.BigEndian.Uint32(fntp[40:44]); s < 3900000000 || s > 4150000000 {
+		t.Errorf("ntp transmit seconds %d, want the 1900 epoch (~4.0e9 in 2026)", s)
+	}
+	// 3.3.8: the payload rides an NTS-cookie extension field, not bare ciphertext after the header
+	if f, _ := frame("ntp-direct", false); binary.BigEndian.Uint16(f[48:50]) != 0x0104 {
+		t.Errorf("ntp extension type %#x", f[48:50])
 	}
 	if f, sh := frame("openvpn-dco", false); f[0] != 0x48 ||
 		(uint32(f[1])<<16|uint32(f[2])<<8|uint32(f[3])) != sh.aux&0xffffff {
