@@ -412,6 +412,60 @@ NONINTERACTIVE=1 audit_blackout_cmd t_kharej
 chk "audit-blackout exit code" "$?" "0"
 rm -f "$WAT_CONF/t_kharej.yml" "$WAT_CONF/t_kharej.key"
 
+# M1 (2026-11-18): the emergency-token round trip. arm-blackout finalizes a multi-carrier bond with random
+# per-leg listen ports; the token it then prints must carry that finalized state (the bond list, one endpoint
+# per leg, the allowed ports and the path), and the Iran wizard must rebuild every per-leg endpoint from it
+# into an empty config. The token is read from NAME.token and never printed. A single-carrier token is the
+# control: its import must stay exactly as it was.
+role() { { [ "$1" = t_kh_arm ] || [ "$1" = t_kh_single ]; } && echo Kharej || echo Iran; }
+printf '# WatTunnel - Kharej (server). Created by wattun-manager.\nmode: server\nkey-file: %s/t_kh_arm.key\ncarrier: icmp\nports:\n  - "26143"\n  - "26153/udp"\n' "$WAT_CONF" >"$WAT_CONF/t_kh_arm.yml"
+printf 'k_blackout' >"$WAT_CONF/t_kh_arm.key"
+( umask 077; make_token icmp '203.0.113.9' 'k_blackout' '' '' '' '' '' >"$WAT_CONF/t_kh_arm.token" )
+NONINTERACTIVE=1 arm_blackout_cmd t_kh_arm >/dev/null 2>&1
+chk "bond round trip: arming wrote the fortress bond" "$(grep '^carrier:' "$WAT_CONF/t_kh_arm.yml")" "carrier: icmp+tcp+tls+wss+udp"
+_m1_tp=''; read_token "$(cat "$WAT_CONF/t_kh_arm.token")" && _m1_tp=$T_PEER
+chk "bond token: carrier is the armed bond" "${T_CARRIER:-}" "icmp+tcp+tls+wss+udp"
+chk "bond token: key is the server key" "${T_KEY:-}" "k_blackout"
+chk "bond token: allowed ports follow the server" "${T_PORTS:-}" "26143,26153/udp"
+chk "bond token: the armed path came along" "${T_PATH:-}" "$(cfg t_kh_arm path)"
+chk "bond token: one endpoint per leg" "$(printf '%s' "$_m1_tp" | awk -F, '{print NF}')" "5"
+chk "bond token: the icmp leg stays a bare address" "${_m1_tp%%,*}" "203.0.113.9"
+_m1_srv=$(printf '%s,%s,%s,%s' "$(cfg t_kh_arm listen-tcp)" "$(cfg t_kh_arm listen-tls)" "$(cfg t_kh_arm listen-wss)" "$(cfg t_kh_arm listen-udp)" | sed 's/://g')
+chk "bond token: pool-leg ports match the armed listeners" "$(printf '%s' "$_m1_tp" | awk -F, '{out=""; for(i=2;i<=NF;i++){n=split($i,a,":"); out=out (i>2?",":"") a[n]} print out}')" "$_m1_srv"
+rm -f "$WAT_CONF"/t_iran_arm.yml "$WAT_CONF"/t_iran_arm.key "$WAT_CONF"/t_iran_arm.token "$WAT_CONF"/t_iran_arm.ech
+( free_metrics_port() { echo 19999; }; wait_link() { return 1; }; test_tunnel() { :; }
+  NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
+  NONINTERACTIVE=1 NI_TOKEN="$(cat "$WAT_CONF/t_kh_arm.token")" NI_NAME=t_iran_arm wizard_iran ) >/dev/null 2>&1
+chk "bond import: carrier list equals the finalized server's" "$(grep '^carrier:' "$WAT_CONF/t_iran_arm.yml")" "$(grep '^carrier:' "$WAT_CONF/t_kh_arm.yml")"
+chk "bond import: the icmp leg dials the bare peer" "$(grep '^peer:' "$WAT_CONF/t_iran_arm.yml")" "peer: 203.0.113.9"
+_m1_ok=1
+for _m1_leg in tcp tls wss udp; do
+  case $_m1_leg in tcp) _m1_lp=$(cfg t_kh_arm listen-tcp) ;; tls) _m1_lp=$(cfg t_kh_arm listen-tls) ;; wss) _m1_lp=$(cfg t_kh_arm listen-wss) ;; udp) _m1_lp=$(cfg t_kh_arm listen-udp) ;; esac
+  grep -qF "peer-$_m1_leg: 203.0.113.9${_m1_lp}" "$WAT_CONF/t_iran_arm.yml" || _m1_ok=0
+done
+chk "bond import: every pool leg dials its own armed listener" "$_m1_ok" "1"
+chk "bond import: allowed ports equal the server's" "$(yml_maps t_iran_arm)" "$(yml_maps t_kh_arm)"
+chk "bond import: the path survived the round trip" "$(grep '^path:' "$WAT_CONF/t_iran_arm.yml")" "path: $(cfg t_kh_arm path)"
+# control: a plain single-carrier token still round-trips unchanged
+printf '# WatTunnel - Kharej (server). Created by wattun-manager.\nmode: server\nkey-file: %s/t_kh_single.key\ncarrier: tcp\nlisten: ":26443"\nports:\n  - "26443"\n' "$WAT_CONF" >"$WAT_CONF/t_kh_single.yml"
+printf 'k_legacy' >"$WAT_CONF/t_kh_single.key"
+( umask 077; make_token tcp '203.0.113.10:26443' 'k_legacy' '/wat' '' '' '26443' '' >"$WAT_CONF/t_kh_single.token" )
+refresh_token t_kh_single
+read_token "$(cat "$WAT_CONF/t_kh_single.token")"
+chk "legacy token: refresh leaves a single-carrier token alone" "$T_CARRIER/$T_PEER/$T_KEY/$T_PATH" "tcp/203.0.113.10:26443/k_legacy//wat"
+rm -f "$WAT_CONF"/t_iran_legacy.yml "$WAT_CONF"/t_iran_legacy.key "$WAT_CONF"/t_iran_legacy.token "$WAT_CONF"/t_iran_legacy.ech
+( free_metrics_port() { echo 19999; }; wait_link() { return 1; }; test_tunnel() { :; }
+  NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
+  NONINTERACTIVE=1 NI_TOKEN="$(cat "$WAT_CONF/t_kh_single.token")" NI_NAME=t_iran_legacy wizard_iran ) >/dev/null 2>&1
+chk "legacy import: carrier and peer unchanged" "$(grep '^carrier:' "$WAT_CONF/t_iran_legacy.yml")/$(grep '^peer:' "$WAT_CONF/t_iran_legacy.yml")" "carrier: tcp/peer: 203.0.113.10:26443"
+chk "legacy import: no per-leg peer keys" "$(grep -c '^peer-[a-z0-9-]*:' "$WAT_CONF/t_iran_legacy.yml")" "0"
+chk "legacy import: path carried" "$(grep '^path:' "$WAT_CONF/t_iran_legacy.yml")" "path: /wat"
+chk "legacy import: allowed ports equal the server's" "$(yml_maps t_iran_legacy)" "$(yml_maps t_kh_single)"
+rm -f "$WAT_CONF"/t_kh_arm.yml "$WAT_CONF"/t_kh_arm.key "$WAT_CONF"/t_kh_arm.token \
+      "$WAT_CONF"/t_iran_arm.yml "$WAT_CONF"/t_iran_arm.key "$WAT_CONF"/t_iran_arm.token "$WAT_CONF"/t_iran_arm.ech \
+      "$WAT_CONF"/t_kh_single.yml "$WAT_CONF"/t_kh_single.key "$WAT_CONF"/t_kh_single.token \
+      "$WAT_CONF"/t_iran_legacy.yml "$WAT_CONF"/t_iran_legacy.key "$WAT_CONF"/t_iran_legacy.token "$WAT_CONF"/t_iran_legacy.ech
+
 NONINTERACTIVE=1 arm_blackout_cmd t1
 chk "arm-blackout iran probe max" "$(grep '^path-probe-max:' "$WAT_CONF/t1.yml")" "path-probe-max: 6s"
 chk "arm-blackout iran governor" "$(grep '^governor:' "$WAT_CONF/t1.yml")" "governor: true"

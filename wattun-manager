@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026111803   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026111804   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -928,6 +928,7 @@ make_token() {
   printf 'wat1:%s' "$(printf '%s' "$f" | base64 -w0)"
 }
 T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''
+T_LEG_C=(); T_LEG_P=() # a bond token's per-leg endpoints (parallel to the carrier list; see token_bond_legs)
 read_token() { # token -> T_CARRIER T_PEER T_KEY T_PATH T_SNI T_ICMP T_PORTS T_REV T_AUTO
   local raw
   T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''
@@ -983,13 +984,67 @@ kreply_offer() {
     && hint "Undo: remove $KREPLY_CONF and run: sysctl --system (it is also undone when the last reverse Iran tunnel is deleted)."
   return 0
 }
-refresh_token() { # name : keep NAME.token in step with the allowed ports in NAME.yml
-  local f="$CONF/$1.token" allow
+refresh_token() { # name : keep NAME.token in step with NAME.yml — the allowed ports always, and for a bonded
+  # Kharej config (arm-blackout Fortress mode, M1 2026-11-18) also the finalized carrier list, one endpoint per
+  # leg and the path, so the emergency token never carries the single-carrier tunnel that was armed over.
+  local f="$CONF/$1.token" allow cr bp changed=0 tmp
   [ -f "$f" ] && read_token "$(cat "$f")" || return 0
   load_maps "$1"; allow=$(maps_allow_str)
   [ -f "$CONF/$1-r.yml" ] && is_auto_kharej "$1" && write_ports "$1-r" # the auto reverse companion allows the same ports
-  [ "$allow" = "$T_PORTS" ] && return 0
-  make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "$T_PATH" "$T_SNI" "$T_ICMP" "$allow" "$T_REV" "$T_AUTO" >"$f"
+  cr=$T_CARRIER; bp=$T_PEER
+  [ "$allow" = "$T_PORTS" ] || changed=1
+  if [ "$(role "$1")" = Kharej ] && [ "$T_REV" != 1 ]; then
+    local cc; cc=$(cfg "$1" carrier)
+    if [[ "$cc" == *+* ]]; then
+      cr=$cc
+      split_hp "${T_PEER%%,*}" # the dial host is the old token's first endpoint, without its stale port
+      bp=$(bond_peer_field "$1" "$HP_HOST")
+      { [ "$cr" = "$T_CARRIER" ] && [ "$bp" = "$T_PEER" ]; } || changed=1
+      # the bond finalized path/sni/icmp-type too (arm-blackout writes a fresh path); carry them, not pre-arming values
+      [ "$(cfg "$1" path)" = "$T_PATH" ] || { T_PATH=$(cfg "$1" path); changed=1; }
+      [ "$(cfg "$1" sni)" = "$T_SNI" ] || { T_SNI=$(cfg "$1" sni); changed=1; }
+      [ "$(cfg "$1" icmp-type)" = "$T_ICMP" ] || { T_ICMP=$(cfg "$1" icmp-type); changed=1; }
+      [ -z "$T_AUTO" ] || { T_AUTO=''; changed=1; } # a fortress token is not an auto plan
+    fi
+  fi
+  [ "$changed" = 0 ] && return 0
+  tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
+  ( umask 077; make_token "$cr" "$bp" "$T_KEY" "$T_PATH" "$T_SNI" "$T_ICMP" "$allow" "$T_REV" "$T_AUTO" >"$tmp" )
+  mv -f "$tmp" "$f"
+}
+# M1 (2026-11-18): a bonded Kharej config listens on one port per leg (listen-<carrier>:), so its token carries
+# one endpoint per leg in field 2, comma separated in the carrier list's order; bare-carrier legs (icmp, gre,
+# ipip, raw shapes) dial a bare address and stay port-less. read_token needs no change (no '|' is introduced);
+# the Iran side splits the list back into per-leg peer-<carrier>: keys (token_bond_legs). A single-carrier
+# token keeps the plain host:port form, so old tokens and old managers still interoperate.
+bond_peer_field() { # name host -> comma-separated per-leg endpoints for a bonded config, in carrier order
+  local c port entry out='' base
+  base=$(cfg "$1" listen); base=${base##*:}; [[ "$base" =~ ^[0-9]+$ ]] || base='' # legs without their own key
+  for c in $(cfg "$1" carrier | tr '+' ' '); do
+    port=''; carrier_has_listen "$c" || { out="${out:+$out,}$(join_hp "$2" '')"; continue; }
+    port=$(cfg "$1" "listen-$c"); port=${port##*:}; [[ "$port" =~ ^[0-9]+$ ]] || port=$base
+    [[ "$port" =~ ^[0-9]+$ ]] || port=''
+    out="${out:+$out,}$(join_hp "$2" "$port")"
+  done
+  printf '%s' "$out"
+}
+token_bond_legs() { # T_CARRIER (a bond) + T_PEER -> T_LEG_C/T_LEG_P arrays; T_PEER becomes the first leg's entry
+  T_LEG_C=(); T_LEG_P=()
+  { [[ "$T_CARRIER" == *+* ]] && [[ "$T_PEER" == *,* ]]; } || return 0 # an older manager's bond token has one endpoint for every leg
+  local -a cs ps
+  IFS='+' read -ra cs <<<"$T_CARRIER"
+  IFS=',' read -ra ps <<<"$T_PEER"
+  if [ "${#ps[@]}" -ne "${#cs[@]}" ]; then
+    err "This token lists ${#ps[@]} endpoints for ${#cs[@]} carriers; it is damaged or hand-made."
+    return 1
+  fi
+  local i
+  for ((i=0; i<${#cs[@]}; i++)); do
+    [ -n "${ps[$i]}" ] || { err "This token has an empty endpoint for carrier '${cs[$i]}'."; return 1; }
+    T_LEG_C+=("${cs[$i]}"); T_LEG_P+=("${ps[$i]}")
+  done
+  T_PEER=${T_LEG_P[0]}
+  return 0
 }
 
 # ---- cross-tunnel conflict checks ----
@@ -3295,6 +3350,7 @@ wizard_iran() {
   name=$(suggest_name iran); [ -n "$NI_NAME" ] && name=$NI_NAME
   mbps=$NI_MBPS; [ -n "$mbps" ] && advdef=y
   T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''
+  T_LEG_C=(); T_LEG_P=()
   AUTO_TOKEN=''; AT_EXTRA=''; CT_DESC=''
   echo
   ask_ok "Token from Kharej (wat1:...)" "$NI_TOKEN" v_token || return 1
@@ -3304,6 +3360,7 @@ wizard_iran() {
     auto_iran_front "$tok" || return 1
   else
     v_carrier_list "$T_CARRIER" || return 1 # D7: also refuses a hand-made token that puts shaped carriers in a bond
+    token_bond_legs || return 1 # M1: split a bond token's per-leg endpoints; T_PEER becomes the first leg's entry
     if is_shaped_list "$T_CARRIER"; then # F19: same engine requirements on this end, and normalize the peer form
       shaped_supported_here "$T_CARRIER" || return 1
       if is_shaped_carrier "$T_CARRIER"; then
@@ -3568,6 +3625,8 @@ wizard_iran() {
       echo "key-file: $CONF/$name.key"
       echo "carrier: $T_CARRIER"
       echo "peer: $T_PEER"
+      local _bl # M1: a bond token's per-leg endpoints (empty for a single carrier); each leg dials its own
+      for ((_bl=0; _bl<${#T_LEG_C[@]}; _bl++)); do echo "peer-${T_LEG_C[$_bl]}: ${T_LEG_P[$_bl]}"; done
       if [ "$T_CARRIER" = udp ] && [ "$T_PATH" = dns ]; then echo "udp-dns: true" # DNS-shaped udp: the token's path field carries "dns"
       elif [ -n "$T_PATH" ]; then echo "path: $T_PATH"; fi
       [ -n "$T_SNI" ] && { echo "sni: $T_SNI"; echo "host: $T_SNI"; }
@@ -6817,7 +6876,7 @@ rebuild_kharej_token() { # name -> rc 0 when NAME.token exists or was rebuilt
   apath=$(cfg "$n" path); sni=$(cfg "$n" sni); itype=$(cfg "$n" icmp-type)
   for tf in "$CONF"/*.token; do
     [ -e "$tf" ] || continue
-    if read_token "$(cat "$tf")" && [ -n "$T_PEER" ]; then split_hp "$T_PEER"; addr=$HP_HOST; break; fi
+    if read_token "$(cat "$tf")" && [ -n "$T_PEER" ]; then split_hp "${T_PEER%%,*}"; addr=$HP_HOST; break; fi # M1: a bond token's first entry carries the host
   done
   [ -n "$addr" ] || addr=$(public_ip)
   [ -n "$addr" ] || addr=$(out_ip 8.8.8.8)
@@ -6986,6 +7045,7 @@ change_key() {
       return 0
     fi
     v_carrier_list "$T_CARRIER" || return 1 # D7: a shaped carrier cannot be a bond leg (engine refuses it)
+    token_bond_legs || return 1 # M1: same per-leg endpoint split as the wizard import
     if is_shaped_list "$T_CARRIER"; then # F19: the far end must run 3.3.0 too; fix the peer form before writing it
       [ "$T_REV" = 1 ] && { err "F19 shaped carriers do not support reverse."; return 1; }
       shaped_supported_here "$T_CARRIER" || return 1
@@ -7010,6 +7070,8 @@ change_key() {
     [ "$keepres" = 1 ] || sed -i -E '/^(fake-(sni|mode|ttl)|pool-rotate(-bytes)?|fp|ech|ech-cache|tls-frag):/d' "$f"
     set_value "$n" carrier "$T_CARRIER"
     set_value "$n" peer "$T_PEER"
+    local _bl # M1: a bond token keeps its per-leg endpoints (the sed above dropped the old ones)
+    for ((_bl=0; _bl<${#T_LEG_C[@]}; _bl++)); do set_value "$n" "peer-${T_LEG_C[$_bl]}" "${T_LEG_P[$_bl]}"; done
     if [ "$T_CARRIER" = udp ] && [ "$T_PATH" = dns ]; then set_value "$n" udp-dns true
     elif [ -n "$T_PATH" ]; then set_value "$n" path "$T_PATH"; fi
     if [ -n "$T_SNI" ]; then set_value "$n" sni "$T_SNI"; set_value "$n" host "$T_SNI"; fi
