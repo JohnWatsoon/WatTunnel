@@ -54,7 +54,7 @@ type PathNextChooser interface {
 }
 
 type pathPacerModer interface {
-	PacerMode() (reliable, direct, anyRel bool)
+	PacerMode() (reliable, direct, anyRel, icmpClamp bool)
 }
 
 var ErrSessionDead = errors.New("wat: session closed")
@@ -203,22 +203,24 @@ type Session struct {
 	lanes    []int
 
 	// receive state
-	rxAny     bool
-	rxLargest uint64
-	rxRing    []uint64 // replay window: 1024 packets, or reliableReplayWin for a Profile.Reliable carrier
-	replayWin uint64
-	ackMax    int // SACK ranges per ACK frame (the wire format allows 64)
-	rxKeep    int // received ranges remembered
-	ackEvery  int // ack after this many ack-eliciting packets (or 2 ms)
-	rxRanges  rangeSet
-	rxSince   []uint64 // reliable: packet numbers received since the last ACK (lateAck reports the ones it leaves out)
-	rxLate    rangeSet // reliable: received packets no ACK has reported yet, below the newest ackMax ranges
-	lateAck   bool
-	rxAt      time.Time
-	ackPend   int
-	ackSince  time.Time
-	lastRecv  time.Time // cleared after 30 s of silence (the session then counts as dead)
-	lastAuth  time.Time // same, never cleared: what LastRecv reports
+	rxAny      bool
+	rxLargest  uint64
+	rxRing     []uint64 // replay window: 1024 packets, or reliableReplayWin for a Profile.Reliable carrier
+	replayWin  uint64
+	ackMax     int // SACK ranges per ACK frame (the wire format allows 64)
+	rxKeep     int // received ranges remembered
+	ackEvery   int // ack after this many ack-eliciting packets (or 2 ms)
+	rxRanges   rangeSet
+	rxSince    []uint64 // reliable: packet numbers received since the last ACK (lateAck reports the ones it leaves out)
+	rxLate     rangeSet // reliable: received packets no ACK has reported yet, below the newest ackMax ranges
+	lateAck    bool
+	curRxPN    uint64    // packet number currently being handled (under s.mu)
+	dupCheckAt time.Time // recvLoop-owned throttle for duplicate-PN frBoot recovery checks
+	rxAt       time.Time
+	ackPend    int
+	ackSince   time.Time
+	lastRecv   time.Time // cleared after 30 s of silence (the session then counts as dead)
+	lastAuth   time.Time // same, never cleared: what LastRecv reports
 
 	streams       map[uint64]*Stream
 	tomb          map[uint64]time.Time
@@ -248,6 +250,7 @@ type Session struct {
 	winExtra      uint64   // sum over streams of (win - streamWindow): the auto-tuned growth in use
 	winSlack      uint64   // bytes a peer's largest datagram may overshoot the advertised stream window
 	maxPlain      int      // plaintext bytes per datagram: cfg.MaxPayload - header - tag
+	explicitMTU   bool     // caller provided Config.MaxPayload > 0
 	plainBuf      []byte   // reused packet assembly buffer (nextPacket runs under s.mu)
 	txNonce       [12]byte // seal runs under s.mu; kept here because an array passed to the AEAD interface escapes to the heap
 	loopNonce     [12]byte // sealOut's nonce: used only by the send loop, outside s.mu
@@ -277,12 +280,13 @@ type Session struct {
 	peerBoot uint64
 	wake     chan struct{}
 
-	dq      [][]byte // encoded frDgram frames waiting to go out (unreliable, bounded)
-	dqBytes int
-	dgIn    chan Datagram
-	fragID  uint64               // next id for a fragmented datagram
-	reasm   map[fragKey]*fragBuf // datagrams being rebuilt from pieces
-	dbuf    []byte               // scratch: datagram frames chosen for the packet being built
+	dq             [][]byte // encoded frDgram frames waiting to go out (unreliable, bounded)
+	dqBytes        int
+	dgIn           chan Datagram
+	fragID         uint64               // next id for a fragmented datagram
+	reasm          map[fragKey]*fragBuf // datagrams being rebuilt from pieces
+	lastReasmPrune time.Time
+	dbuf           []byte // scratch: datagram frames chosen for the packet being built
 
 	// multipath (nil/empty for every single-carrier PacketIO)
 	chooser  PathChooser
@@ -333,12 +337,13 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 	if prof.MaxMTU > hi {
 		hi = prof.MaxMTU
 	}
+	explicitMTU := cfg.MaxPayload > 0
 	if cfg.MaxPayload == 0 {
 		cfg.MaxPayload = MaxPayload
 		if prof.MTU > 0 {
 			cfg.MaxPayload = prof.MTU
 		}
-		if cfg.Direct && prof.Reliable && prof.MaxMTU >= directMTU {
+		if cfg.Direct && prof.Reliable && !prof.NoDirect && prof.MaxMTU >= directMTU {
 			// A direct pool has no CDN or middlebox to fit: 16 KB datagrams cut the packets, acks and seals per byte
 			// by 4 against the 4 KB default (2.5.0). Any peer version reads them (the pool frame takes up to 64 KB).
 			cfg.MaxPayload = directMTU
@@ -375,9 +380,10 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 		kexGrace: kexGrace, kexGiveUp: kexGiveUp, probeAfter: kexProbeAfter, probeFor: kexProbeFor,
 		laneSeen: map[int]time.Time{}, streams: map[uint64]*Stream{}, tomb: map[uint64]time.Time{},
 		nextSID: 1, now: time.Now(), wake: make(chan struct{}, 1),
-		cc:       newCC(cfg.InitBps, cfg.MinBps, cfg.MaxBps, cfg.Slack),
-		maxPlain: cfg.MaxPayload - overhead,
-		winSlack: uint64(hi - overhead),
+		cc:          newCC(cfg.InitBps, cfg.MinBps, cfg.MaxBps, cfg.Slack),
+		maxPlain:    cfg.MaxPayload - overhead,
+		explicitMTU: explicitMTU,
+		winSlack:    uint64(hi - overhead),
 	}
 	s.pingGap, s.maskFlip = cfg.PingEvery, time.Now()
 	hp := HostProfile()
@@ -1017,32 +1023,37 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		sp.ctrl = append(sp.ctrl, pingFrame)
 	}
 	if canData {
-		// Datagrams go before stream data (they are interactive), but as the LAST frames of the packet so an old
-		// peer that stops at the unknown type still sees everything before it. While streams have work, datagrams
-		// take at most half of what is left, so a datagram flood cannot starve a bulk transfer.
-		dbuf := s.dbuf[:0]
-		if len(s.dq) > 0 {
-			dbuf = s.takeDgrams(dbuf, s.maxPlain-len(p), s.hasStreamWork())
-			s.dbuf = dbuf[:0]
-		}
 		pathMTU := s.maxPlain
 		if nc, ok := s.chooser.(PathNextChooser); ok {
-			p := nc.NextPath(false)
-			prof := s.chooser.PathProfile(p)
+			np := nc.NextPath(false)
+			prof := s.chooser.PathProfile(np)
 			if prof.MaxMTU > 0 {
 				limit := prof.MaxMTU - overhead
-				if prof.MTU > 0 && prof.MTU-overhead > pathMTU {
-					pathMTU = prof.MTU - overhead
+				if prof.NoDirect && prof.MTU > 0 && prof.MTU-overhead < limit {
+					limit = prof.MTU - overhead
 				}
-				if prof.Reliable && !prof.NoDirect && limit >= directMTU-overhead {
-					pathMTU = directMTU - overhead
+				if !s.explicitMTU {
+					if prof.MTU > 0 && prof.MTU-overhead > pathMTU {
+						pathMTU = prof.MTU - overhead
+					}
+					if prof.Reliable && !prof.NoDirect && limit >= directMTU-overhead {
+						pathMTU = directMTU - overhead
+					}
 				}
 				if pathMTU > limit {
 					pathMTU = limit
 				}
-			} else if pathMTU > MaxPayload-overhead {
+			} else if !s.explicitMTU && pathMTU > MaxPayload-overhead {
 				pathMTU = MaxPayload - overhead
 			}
+		}
+		// Datagrams go before stream data (they are interactive), but as the LAST frames of the packet so an old
+		// peer that stops at the unknown type still sees everything before it. While streams have work, datagrams
+		// take at most half of what is left, so a datagram flood cannot starve a bulk transfer.
+		dbuf := s.dbuf[:0]
+		if len(s.dq) > 0 && pathMTU > len(p) {
+			dbuf = s.takeDgrams(dbuf, pathMTU-len(p), s.hasStreamWork())
+			s.dbuf = dbuf[:0]
 		}
 		room := pathMTU - len(dbuf)
 		for room-len(p) > 40 {
@@ -1126,6 +1137,9 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		p = s.shapeData(n, p)
 	}
 	out, pn := s.frame(p)
+	if cap(p) > cap(s.plainBuf) {
+		s.plainBuf = p[:0]
+	}
 	size := len(out) + tagLen + ipIcmpHdr
 	if len(sp.frames) > 0 || len(sp.ctrl) > 0 || sp.dgram {
 		if s.fec != nil && (len(sp.frames) > 0 || sp.dgram) {
@@ -1354,9 +1368,21 @@ func (s *Session) pathAcked(acked []*sentPkt, largest uint64, delay time.Duratio
 			}
 		}
 		for i := range s.pcc {
-			if m := s.pcc[i].minRTT; m > 0 && (ref == 0 || m < ref) {
+			pc := &s.pcc[i]
+			if m := pc.minRTT; m > 0 && now.Sub(pc.at) < 5*time.Second && (ref == 0 || m < ref) {
 				ref = m
 			}
+		}
+		if ref == 0 {
+			for i := range s.pcc {
+				if m := s.pcc[i].minRTT; m > 0 && (ref == 0 || m < ref) {
+					ref = m
+				}
+			}
+		}
+		if ref > 0 && s.cc.minRTT > 0 && ref > s.cc.minRTT && now.Sub(s.cc.minRTTAt) > 5*time.Second {
+			// A faster leg went silent/dead; raise the normalized baseline to the fastest active leg so PROBE_RTT does not deadlock.
+			s.cc.minRTT, s.cc.minRTTAt = ref, now
 		}
 		if floor > 0 && ref > 0 {
 			norm = max(rtt-floor+ref, time.Microsecond)
@@ -1364,13 +1390,19 @@ func (s *Session) pathAcked(acked []*sentPkt, largest uint64, delay time.Duratio
 			norm = rtt
 		}
 	}
-	var hi time.Duration
+	var hi, hiMin time.Duration
 	for i := range s.pcc {
-		if pc := &s.pcc[i]; pc.srtt > hi && now.Sub(pc.at) < 5*time.Second {
-			hi = pc.srtt
+		if pc := &s.pcc[i]; now.Sub(pc.at) < 5*time.Second {
+			if pc.srtt > hi {
+				hi = pc.srtt
+			}
+			if pc.minRTT > hiMin {
+				hiMin = pc.minRTT
+			}
 		}
 	}
 	s.cc.pathRTT = hi
+	s.cc.pathMinRTT = hiMin
 	return norm
 }
 
@@ -1379,24 +1411,27 @@ func (s *Session) syncBondPacer() {
 	if !ok {
 		return
 	}
-	rel, dir, anyRel := pm.PacerMode()
+	rel, dir, anyRel, icmpClamp := pm.PacerMode()
 	s.cc.anyRel = anyRel
 	if rel && !s.cc.reliable {
 		s.cc.reliable = true
+		s.cc.resetBW()
 		if s.cfg.MinBps == 2e5 && s.cc.minRate < 8e6 {
 			s.cc.minRate = min(8e6, s.cfg.MaxBps)
-			if !s.cc.bwSeen && s.cc.rate < s.cc.minRate {
+			if s.cc.rate < s.cc.minRate {
 				s.cc.rate = s.cc.minRate
 			}
 		}
 	} else if !rel && s.cc.reliable {
 		s.cc.reliable = false
+		s.cc.draining = false
+		s.cc.probeLowAt = time.Time{}
 		s.cc.minRate = s.cc.hardMin
-		if s.cc.rate > ICMPPathBps {
+		if icmpClamp && s.cc.rate > ICMPPathBps {
 			s.cc.rate = min(ICMPPathBps, s.cfg.MaxBps)
 		}
 	}
-	s.cc.direct = rel && (s.cfg.Direct || dir) && !noDirect
+	s.cc.direct = dir && !noDirect
 }
 
 // timers: loss on tail packets, keepalive, pacing adjustments, tombstone pruning.
@@ -1466,6 +1501,10 @@ func (s *Session) timers(now time.Time) {
 				delete(s.tomb, id)
 			}
 		}
+	}
+	if len(s.reasm) > 0 && now.Sub(s.lastReasmPrune) >= fragKeep {
+		s.lastReasmPrune = now
+		s.pruneReasm(now)
 	}
 	for l, t := range s.laneSeen {
 		if now.Sub(t) > 20*time.Second {
@@ -1550,7 +1589,8 @@ func (s *Session) lose(sp *sentPkt) {
 	sp.done, sp.lost = true, true
 	s.cc.lostN++
 	s.cc.diag.Lost++
-	if s.cc.reliable && s.chooser == nil && (len(sp.frames) > 0 || len(sp.ctrl) > 0) {
+	relLane := s.chooser == nil || (sp.lane >= 0 && sp.lane < len(s.pcc) && s.pcc[sp.lane].reliable)
+	if s.cc.reliable && relLane && (len(sp.frames) > 0 || len(sp.ctrl) > 0) {
 		// Remember it: the packet is the oldest in flight, so compact frees it at once, and a late ack (TCP delivered
 		// it after all) could otherwise never be matched (2.4.9 missed most of them).
 		if len(s.lostRing) >= lostRingMax {
@@ -1619,6 +1659,15 @@ func (s *Session) recvLoop() {
 	}
 }
 
+func hasNewBoot(plain []byte, cur uint64) bool {
+	if len(plain) < 2 || plain[0] != frBoot {
+		return false
+	}
+	r := &reader{b: plain[1:]}
+	boot := r.uv()
+	return r.err == nil && boot != cur
+}
+
 func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 	if len(raw) < hdrLen+tagLen+1 {
 		return
@@ -1639,8 +1688,11 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 		return
 	}
 	dup := s.rxDup(pn) // fast path: rxRing and rxLargest are owned by recvLoop; checked with 0 locks
+	now := time.Now()
 	if dup {
-		return // not counted: unauthenticated junk with a known sid/pn must not pollute the loss stats
+		if s.cfg.Server || s.peerBoot == 0 || now.Sub(s.dupCheckAt) < 50*time.Millisecond {
+			return // not counted: unauthenticated junk with a known sid/pn must not pollute the loss stats
+		}
 	}
 	var first, fall cipher.AEAD
 	var freshRx cipher.AEAD
@@ -1665,13 +1717,21 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 		freshRx = nil
 	}
 	if err != nil {
+		if dup {
+			s.dupCheckAt = now
+		}
 		return // not ours: stay silent
+	}
+	bootReset := dup && hasNewBoot(plain, s.peerBoot)
+	if dup && !bootReset {
+		s.dupCheckAt = now
+		return
 	}
 	if s.hk != nil && s.masked.Load() != peerMasked && (s.cfg.Server || !s.peerMaskOK.Load()) { // answer in the header form the peer spoke
 		s.masked.Store(peerMasked)
 	}
 	s.openBuf = plain[:0]
-	now := time.Now()
+	now = time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.now = now
@@ -1679,7 +1739,7 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 		s.oldAead, s.aead, s.kexAead, s.kexAt, s.kexDone = fall, first, nil, now, true
 		s.pubRxKeys()
 	}
-	if s.rxDup(pn) { // re-check under the lock: only authenticated duplicates count (audit 2026-10-22)
+	if !bootReset && s.rxDup(pn) { // re-check under the lock: only authenticated duplicates count (audit 2026-10-22)
 		if s.rxLargest-pn >= s.replayWin {
 			s.stats.RxTooOld++
 		} else {
@@ -1687,6 +1747,7 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 		}
 		return
 	}
+	s.curRxPN = pn
 	if !s.rxAny || pn > s.rxLargest {
 		s.rxLargest, s.rxAny, s.rxAt = pn, true, now
 	}
@@ -1807,8 +1868,18 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 				// until the client process restarted (audit 2026-11-03). The nonce-uniqueness caveat stays
 				// operator-side: keep NTP on (docs/TECHNICAL.md, security model).
 				s.rxAny, s.rxLargest = false, 0
-				for i := range s.rxRing {
-					s.rxRing[i] = 0
+				clear(s.rxRing)
+				s.rxRanges = s.rxRanges[:0]
+				s.rxLate = s.rxLate[:0]
+				s.rxSince = s.rxSince[:0]
+				s.ackPend = 0
+				s.ackSince = time.Time{}
+				// Re-record the current packet so the new server run's first packet stays ACKed and guarded against replay.
+				s.rxLargest, s.rxAny, s.rxAt = s.curRxPN, true, now
+				s.rxRing[s.curRxPN%s.replayWin] = s.curRxPN + 1
+				s.rxRanges.add(s.curRxPN, s.curRxPN+1)
+				if s.lateAck && len(s.rxSince) < lateSinceMax {
+					s.rxSince = append(s.rxSince, s.curRxPN)
 				}
 			}
 			s.peerBoot = boot

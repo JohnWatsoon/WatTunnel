@@ -202,16 +202,19 @@ func (b *BondIO) OnAck(path int, rtt time.Duration, _ int) { b.ps.onAck(path, rt
 func (b *BondIO) OnLoss(path int)                          { b.ps.onLoss(path) }
 func (b *BondIO) SetProber(f func(int))                    { b.prober.Store(f) }
 func (b *BondIO) PathStats() []CarrierStat                 { return b.ps.stats() }
-func (b *BondIO) PacerMode() (bool, bool, bool)            { return b.ps.pacerMode() }
+func (b *BondIO) PacerMode() (bool, bool, bool, bool)      { return b.ps.pacerMode() }
 
 // Backlogged updates the per-path full mask and holds the session when no live path has room (3.3.8).
 func (b *BondIO) Backlogged() bool {
 	var mask uint64
 	has := false
 	for i, k := range b.kids {
+		if i >= 64 {
+			break
+		}
 		if bl, ok := k.(Backlogger); ok {
 			has = true
-			if i < 64 && bl.Backlogged() {
+			if bl.Backlogged() {
 				mask |= uint64(1) << uint(i)
 			}
 		}
@@ -499,7 +502,7 @@ func (m *multiSubIO) OnAck(path int, rtt time.Duration, _ int) { m.ps.onAck(path
 func (m *multiSubIO) OnLoss(path int)                          { m.ps.onLoss(path) }
 func (m *multiSubIO) SetProber(f func(int))                    { m.prober.Store(f) }
 func (m *multiSubIO) PathStats() []CarrierStat                 { return m.ps.stats() }
-func (m *multiSubIO) PacerMode() (bool, bool, bool)            { return m.ps.pacerMode() }
+func (m *multiSubIO) PacerMode() (bool, bool, bool, bool)      { return m.ps.pacerMode() }
 
 // Backlogged overrides subIO.Backlogged (srv.raw is MultiRaw, not RawBacklogger) so per-carrier pool backpressure
 // works on bonded servers and un-narrowed Auto Kharej listeners (3.3.8).

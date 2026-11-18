@@ -128,7 +128,7 @@ cmd_server() {
 
 cmd_client() { # cmd_client MODE [SNI]
 	mode=${1:-seq}
-	[ $# -ge 2 ] && SNI=$2
+	[ $# -ge 2 ] && { SNI=$2; SNI_LIST=$2; }
 	write_client_cfg "$mode"
 	rsh "$IRAN" "mkdir -p $REMOTE_DIR"
 	rscp "$IRAN" "$OUT/wat-bench-client.yml" "$REMOTE_DIR/wat-bench-client.yml"
@@ -153,7 +153,7 @@ fetch() { # fetch HOST PORT PATH FILE
 
 cmd_collect() { # cmd_collect MODE [SNI]
 	mode=${1:-seq}
-	[ $# -ge 2 ] && SNI=$2
+	[ $# -ge 2 ] && { SNI=$2; SNI_LIST=$2; }
 	tag=live-$mode
 	if wait_alive; then
 		fetch "$IRAN" "$METRICS_PORT" "/speedtest?dir=down&mb=$LIVE_MB" "$OUT/$tag-down.json"

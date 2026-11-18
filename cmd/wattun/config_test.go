@@ -386,3 +386,38 @@ func TestPortRangeForwarding(t *testing.T) {
 		t.Errorf("expected inverted range to fail, got nil")
 	}
 }
+
+func TestAllowListUDPOnlyAndFileRecovery(t *testing.T) {
+	u := newAllow("53/udp", "")
+	if !u.udpOK(53, 1, 65535) || u.ok(80, 1, 65535) || u.ok(53, 1, 65535) || !u.relayFor(53, 1, 65535) {
+		t.Fatalf("53/udp allowlist misclassified tcp/udp/relay: udp53=%v tcp80=%v tcp53=%v relay53=%v",
+			u.udpOK(53, 1, 65535), u.ok(80, 1, 65535), u.ok(53, 1, 65535), u.relayFor(53, 1, 65535))
+	}
+	if tcp, udp, err := parseAllowList("80/tcp, 53/udp, 443"); err != nil || !tcp[80] || !tcp[443] || !udp[53] || tcp[53] {
+		t.Fatalf("parseAllowList valid failed: tcp=%v udp=%v err=%v", tcp, udp, err)
+	}
+	for _, bad := range []string{"443,foo", "70000", "0", "53/icmp"} {
+		if _, _, err := parseAllowList(bad); err == nil {
+			t.Errorf("parseAllowList(%q) unexpectedly succeeded", bad)
+		}
+	}
+
+	afile := filepath.Join(t.TempDir(), "allow.txt")
+	if err := os.WriteFile(afile, []byte("22,8443/udp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	al := newAllow("", afile)
+	al.setConfigPorts([]int{443}, []int{53})
+	if !al.ok(443, 1, 65535) || al.ok(22, 1, 65535) {
+		t.Fatal("config ports did not override allow-file")
+	}
+	// Removing ports: from config must immediately restore the unchanged allow-file.
+	al.reset("")
+	if !al.ok(22, 1, 65535) || al.ok(443, 1, 65535) || !al.udpOK(8443, 1, 65535) {
+		t.Fatalf("allow-file not restored on reset: tcp22=%v tcp443=%v udp8443=%v",
+			al.ok(22, 1, 65535), al.ok(443, 1, 65535), al.udpOK(8443, 1, 65535))
+	}
+	if got := withDefaultPort("2001:db8::1", 53); got != "[2001:db8::1]:53" {
+		t.Fatalf("withDefaultPort IPv6 = %q, want [2001:db8::1]:53", got)
+	}
+}

@@ -43,7 +43,8 @@ type cc struct {
 	anyRel   bool // bond: at least one live path is TCP-based, so judge delay by tickMin even alongside udp (3.3.8)
 	tickMin  time.Duration
 
-	pathRTT time.Duration // bond: the slowest recently used path's RTT, so the window covers every path
+	pathRTT    time.Duration // bond: the slowest recently used path's smoothed RTT
+	pathMinRTT time.Duration // bond: the slowest recently used path's base minRTT, so cwnd covers all paths without queue bloat
 
 	// Loss-aware soft ceiling (v1.8.0). Loss alone is not congestion here (~0.2 % random), but a loss rate far above
 	// the learned baseline means the path is dropping our packets at a bottleneck (measured 2026-10-10: past ~50k
@@ -160,6 +161,19 @@ const (
 	probeRTTMax   = 4 * time.Second        // give up a drain that never reaches the floor (e.g. a wedged connection)
 )
 
+func (c *cc) resetBW() {
+	c.bwAt = time.Time{}
+	c.delLast = c.delivered
+	c.bwPos, c.bwLen = 0, 0
+	c.bwBusy = false
+	c.maxBW = 0
+	c.bwSeen = false
+	c.grown = false
+	c.growBW = 0
+	c.growAt = time.Time{}
+	c.spuriousN = 0
+}
+
 // onDelivered adds newly acked bytes to the delivery-rate counter (always counted so a mixed bond that promotes to
 // reliable pacing mid-session already has an accurate byte baseline, 3.3.8).
 func (c *cc) onDelivered(n int) {
@@ -274,6 +288,7 @@ func (c *cc) lossStep() bool {
 	if c.reliable {
 		return c.reliableLoss(sent, lost)
 	}
+	c.spuriousN = 0
 	if sent < lossMinSent || !lossAwareOn.Load() {
 		return false
 	}
@@ -631,7 +646,12 @@ func (c *cc) probeRTT(now time.Time) {
 		// Requiring inflight above the floor also means the minRTT raise in sample() fires only after a genuine drain.
 		// A direct carrier's window does not hang on minRTT (cwnd), so it has nothing to re-measure; a multi-RTT bond
 		// whose slower leg explains the srtt spread has no standing queue to drain either (3.3.8).
-		if !c.direct && c.inflight > 2*c.drainFloor() && c.srtt > c.minRTT+c.minRTT/2 && c.pathRTT <= c.minRTT+c.minRTT/2 {
+		pr := c.pathMinRTT
+		if pr == 0 {
+			pr = c.pathRTT
+		}
+		multiExplained := pr > c.minRTT+c.minRTT/2 && c.srtt <= pr+pr/2
+		if !c.direct && c.inflight > 2*c.drainFloor() && c.srtt > c.minRTT+c.minRTT/2 && !multiExplained {
 			c.draining, c.probeStart, c.probeLowAt = true, now, time.Time{}
 		}
 	}
@@ -643,9 +663,13 @@ func (c *cc) drainFloor() int { return 4 * c.maxPlain }
 func (c *cc) cwnd() int {
 	if c.reliable && relV2 && c.maxBW > 0 && c.minRTT > 0 {
 		// bandwidth-delay product bound: keep a few BDP in flight to fill the pipe and survive one RTT of jitter,
-		// but no more, so our own queue (and the measured RTT) stays bounded. On a bond (pathRTT > minRTT), cover the
-		// slowest active path's RTT so the faster path's normalized minRTT does not window-starve it (3.3.8).
-		bdp := c.maxBW * max(c.minRTT, c.pathRTT).Seconds()
+		// but no more, so our own queue (and the measured RTT) stays bounded. On a bond (pathMinRTT > minRTT), cover the
+		// slowest active path's base RTT so the faster path's normalized minRTT does not window-starve it (3.3.8).
+		pr := c.pathMinRTT
+		if pr == 0 {
+			pr = c.pathRTT
+		}
+		bdp := c.maxBW * max(c.minRTT, pr).Seconds()
 		if c.draining { // PROBE_RTT: hold inflight to a few packets so the queue drains and the base RTT can be read
 			return c.drainFloor()
 		}

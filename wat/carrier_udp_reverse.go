@@ -1,11 +1,13 @@
 package wat
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	mrand "math/rand/v2"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,14 +48,52 @@ func isPunch(key, p []byte) bool {
 	return hmac.Equal(p[8:punchCore], m.Sum(nil)[:punchCore-8])
 }
 
+const punchSeenMax = 1024
+
 // UDPReverseListener is the client PacketIO of a reverse udp tunnel.
 type UDPReverseListener struct {
-	c    *net.UDPConn
-	key  []byte
-	peer atomic.Pointer[net.UDPAddr] // where the last valid punch came from (nil: none yet, so Send drops)
-	rbuf []byte
-	bx   *udpBatch
-	dns  bool // DNS-shaped datagrams (dnsshape.go)
+	c      *net.UDPConn
+	key    []byte
+	peer   atomic.Pointer[net.UDPAddr] // where the last valid punch came from (nil: none yet, so Send drops)
+	authAt atomic.Int64                // unix ns of the newest authenticated session packet from peer
+	rbuf   []byte
+	bx     *udpBatch
+	dns    bool // DNS-shaped datagrams (dnsshape.go)
+	seen   map[[8]byte]struct{}
+	seenQ  [][8]byte
+}
+
+// PeerAuthenticated records that a session packet authenticated from the current peer, locking out punch-replay
+// address hijacks while the peer remains active.
+func (u *UDPReverseListener) PeerAuthenticated(a net.Addr) {
+	ua, ok := a.(*net.UDPAddr)
+	if !ok {
+		return
+	}
+	if cur := u.peer.Load(); cur != nil && cur.IP.Equal(ua.IP) && cur.Port == ua.Port {
+		u.authAt.Store(time.Now().UnixNano())
+	}
+}
+
+func (u *UDPReverseListener) seenPunch(nonce []byte) bool {
+	if len(nonce) < 8 {
+		return true
+	}
+	var k [8]byte
+	copy(k[:], nonce[:8])
+	if u.seen == nil {
+		u.seen = make(map[[8]byte]struct{}, 64)
+	}
+	if _, dup := u.seen[k]; dup {
+		return true
+	}
+	if len(u.seenQ) >= punchSeenMax {
+		delete(u.seen, u.seenQ[0])
+		u.seenQ = u.seenQ[1:]
+	}
+	u.seen[k] = struct{}{}
+	u.seenQ = append(u.seenQ, k)
+	return false
 }
 
 // SetDNS turns the DNS framing on or off; call it before the first Recv. Both ends must agree.
@@ -139,7 +179,18 @@ func (u *UDPReverseListener) Recv() ([]byte, int, net.Addr, error) {
 			}
 		}
 		if isPunch(u.key, p) {
-			if cur := u.peer.Load(); cur == nil || !cur.IP.Equal(ua.IP) || cur.Port != ua.Port {
+			if u.seenPunch(p[:8]) {
+				continue
+			}
+			cur := u.peer.Load()
+			if cur == nil || !cur.IP.Equal(ua.IP) || cur.Port != ua.Port {
+				// While the pinned peer is actively delivering authenticated session packets, ignore punches from other
+				// addresses (blocks stale punch-replay hijacks while preserving re-homing once silent).
+				if cur != nil {
+					if at := u.authAt.Load(); at != 0 && time.Since(time.Unix(0, at)) < 10*time.Second {
+						continue
+					}
+				}
 				u.peer.Store(ua)
 			}
 			continue
@@ -163,13 +214,35 @@ func (u *UDPReverseListener) Addr() net.Addr { return u.c.LocalAddr() }
 // client's address until the tunnel is closed.
 type UDPReverseServer struct {
 	*UDPServer
-	stop chan struct{}
-	once sync.Once
+	stop   chan struct{}
+	cancel context.CancelFunc
+	once   sync.Once
 }
 
 // SetDNS frames the punches too, so call it right after NewUDPReverseServer (a punch sent before it is unframed and
 // the listener ignores it; the next one, about a second later, is framed).
 func (r *UDPReverseServer) SetDNS(on bool) { r.UDPServer.SetDNS(on) }
+
+func resolvePeerUDP(ctx context.Context, peer string) (*net.UDPAddr, bool) {
+	host, portStr, err := net.SplitHostPort(peer)
+	if err != nil {
+		return nil, false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return nil, false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return &net.UDPAddr{IP: ip, Port: port}, true
+	}
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(rctx, host)
+	if err != nil || len(ips) == 0 {
+		return nil, false
+	}
+	return &net.UDPAddr{IP: ips[0].IP, Port: port, Zone: ips[0].Zone}, false
+}
 
 // NewUDPReverseServer binds listen (the source port of the punches and of every reply) and punches to peer.
 func NewUDPReverseServer(listen, peer string, psk []byte) (*UDPReverseServer, error) {
@@ -177,18 +250,25 @@ func NewUDPReverseServer(listen, peer string, psk []byte) (*UDPReverseServer, er
 	if err != nil {
 		return nil, err
 	}
-	r := &UDPReverseServer{UDPServer: us, stop: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &UDPReverseServer{UDPServer: us, stop: make(chan struct{}), cancel: cancel}
 	key := punchKey(psk)
 	go func() {
+		var ra *net.UDPAddr
+		var staticIP bool
+		var resolvedAt time.Time
 		for {
-			ra, err := net.ResolveUDPAddr("udp", peer)
-			if err == nil {
-				us.watch.Store(ra)
+			if !staticIP && (ra == nil || time.Since(resolvedAt) >= 30*time.Second) {
+				if addr, isLiteral := resolvePeerUDP(ctx, peer); addr != nil {
+					ra, staticIP = addr, isLiteral
+					resolvedAt = time.Now()
+					us.watch.Store(ra)
+				}
 			}
 			// 3.0.0: no punch while the client is talking (it already knows us, and a datagram every second next
 			// to the traffic is a pattern); punching resumes 2 punch intervals after it goes quiet, so a restarted
 			// client, which waits for a punch before it sends anything, still finds us.
-			if quiet := time.Since(time.Unix(0, us.rxAt.Load())); err == nil && quiet > 2*punchEvery {
+			if quiet := time.Since(time.Unix(0, us.rxAt.Load())); ra != nil && quiet > 2*punchEvery {
 				pk := makePunch(key)
 				if us.dns.Load() {
 					pk = dnsFrame(nil, pk, true)
@@ -206,6 +286,9 @@ func NewUDPReverseServer(listen, peer string, psk []byte) (*UDPReverseServer, er
 }
 
 func (r *UDPReverseServer) Close() error {
-	r.once.Do(func() { close(r.stop) })
+	r.once.Do(func() {
+		r.cancel()
+		close(r.stop)
+	})
 	return r.UDPServer.Close()
 }

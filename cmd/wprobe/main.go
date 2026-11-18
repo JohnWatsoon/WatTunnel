@@ -18,9 +18,11 @@ import (
 )
 
 const (
-	magic    = "WPRB"
-	identMin = 0xC000
-	hdrLen   = 4 + 1 + 1 + 2 + 4 + 8 // magic, k, variant, size, seq, sent ns
+	magic        = "WPRB"
+	identMin     = 0xC000
+	hdrLen       = 4 + 1 + 1 + 2 + 4 + 8 // magic, k, variant, size, seq, sent ns
+	maxProbeK    = 8
+	maxProbeSize = 1472
 )
 
 func csum(b []byte) uint16 {
@@ -69,6 +71,19 @@ func listen() net.PacketConn {
 	return c
 }
 
+func clampEchoParams(k byte, size, recvLen int) (byte, int) {
+	if k == 0 {
+		k = 1
+	}
+	if k > maxProbeK {
+		k = maxProbeK
+	}
+	if maxSize := min(recvLen-8, maxProbeSize); size > maxSize {
+		size = maxSize
+	}
+	return k, size
+}
+
 func server(dur time.Duration) {
 	c := listen()
 	defer c.Close()
@@ -93,9 +108,7 @@ func server(dur time.Duration) {
 		if variant == 3 { // upload-only test: count it, send nothing back
 			continue
 		}
-		if k == 0 {
-			k = 1
-		}
+		k, size = clampEchoParams(k, size, n)
 		for j := byte(0); j < k; j++ {
 			rs := seq
 			switch variant {
@@ -124,7 +137,15 @@ type result struct {
 
 // run sends reqPps requests/s of payload size on nIdent idents for dur and counts the replies.
 func run(c net.PacketConn, dst net.Addr, reqPps, size, nIdent int, k, variant byte, dur time.Duration, tag string) {
+	if reqPps < 1 {
+		reqPps = 1
+	}
+	if nIdent < 1 {
+		nIdent = 1
+	}
 	r := &result{}
+	start := time.Now()
+	startNs := start.UnixNano()
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -147,6 +168,9 @@ func run(c net.PacketConn, dst net.Addr, reqPps, size, nIdent int, k, variant by
 				continue
 			}
 			sent := int64(binary.BigEndian.Uint64(buf[8+12:]))
+			if sent < startNs {
+				continue // late reply from an earlier step
+			}
 			atomic.AddUint64(&r.got, 1)
 			r.mu.Lock()
 			if len(r.rtts) < 200000 {
@@ -155,10 +179,9 @@ func run(c net.PacketConn, dst net.Addr, reqPps, size, nIdent int, k, variant by
 			r.mu.Unlock()
 		}
 	}()
-	start := time.Now()
 	tick := time.NewTicker(time.Millisecond)
 	var seq uint32
-	var sentN uint64
+	var sentN, writeErrs uint64
 	for t := range tick.C {
 		el := t.Sub(start)
 		if el > dur {
@@ -167,7 +190,9 @@ func run(c net.PacketConn, dst net.Addr, reqPps, size, nIdent int, k, variant by
 		want := uint64(float64(reqPps) * el.Seconds())
 		for sentN < want {
 			id := uint16(identMin + int(seq)%nIdent)
-			c.WriteTo(pkt(8, id, uint16(seq), payload(k, variant, size, seq)), dst)
+			if _, err := c.WriteTo(pkt(8, id, uint16(seq), payload(k, variant, size, seq)), dst); err != nil {
+				writeErrs++
+			}
 			seq++
 			sentN++
 		}
@@ -185,8 +210,9 @@ func run(c net.PacketConn, dst net.Addr, reqPps, size, nIdent int, k, variant by
 		return float64(r.rtts[int(q*float64(len(r.rtts)-1))]) / 1e6
 	}
 	exp := sentN * uint64(max(int(k), 1))
-	fmt.Printf("%-22s req/s=%-6d size=%-4d idents=%-3d k=%d v=%d sent=%-6d got=%-6d (%.1f%% of expected %d) rtt p50=%.1f p99=%.1f ms\n",
-		tag, reqPps, size, nIdent, k, variant, sentN, r.got, 100*float64(r.got)/float64(max64(exp, 1)), exp, p(.5), p(.99))
+	got := atomic.LoadUint64(&r.got)
+	fmt.Printf("%-22s req/s=%-6d size=%-4d idents=%-3d k=%d v=%d sent=%-6d got=%-6d (%.1f%% of expected %d) err=%-4d rtt p50=%.1f p99=%.1f ms\n",
+		tag, reqPps, size, nIdent, k, variant, sentN, got, 100*float64(got)/float64(max64(exp, 1)), exp, writeErrs, p(.5), p(.99))
 	r.mu.Unlock()
 }
 
@@ -197,10 +223,45 @@ func max64(a, b uint64) uint64 {
 	return b
 }
 
+func resolveDst(dst string) (*net.IPAddr, error) {
+	if strings.TrimSpace(dst) == "" {
+		return nil, fmt.Errorf("missing -dst peer IP")
+	}
+	a, err := net.ResolveIPAddr("ip4", dst)
+	if err != nil || a.IP == nil {
+		if err == nil {
+			err = fmt.Errorf("no IPv4 address for %q", dst)
+		}
+		return nil, fmt.Errorf("invalid -dst %q: %w", dst, err)
+	}
+	return a, nil
+}
+
+func parseStep(st string) (reqPps, size, nIdent int, k, variant byte, dur time.Duration, err error) {
+	f := strings.Split(st, ":")
+	a := []int{0, 0, 0, 0, 0, 4}
+	for i := range f {
+		if i >= len(a) { // extra fields: ignore instead of panicking
+			break
+		}
+		if a[i], err = strconv.Atoi(f[i]); err != nil {
+			return 0, 0, 0, 0, 0, 0, fmt.Errorf("bad step %q field %d (%q): %w", st, i, f[i], err)
+		}
+	}
+	if a[0] < 1 || a[2] < 1 || a[5] < 1 || a[3] < 0 || a[3] > 255 || a[4] < 0 || a[4] > 255 {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("step %q out of range (rate>=1, idents>=1, secs>=1)", st)
+	}
+	return a[0], a[1], a[2], byte(a[3]), byte(a[4]), time.Duration(a[5]) * time.Second, nil
+}
+
 func client(dstIP string, quick bool) {
+	dst, err := resolveDst(dstIP)
+	if err != nil {
+		fmt.Println("error:", err)
+		os.Exit(1)
+	}
 	c := listen()
 	defer c.Close()
-	dst := &net.IPAddr{IP: net.ParseIP(dstIP)}
 	d := 6 * time.Second
 	if quick {
 		d = 3 * time.Second
@@ -227,20 +288,29 @@ func client(dstIP string, quick bool) {
 }
 
 func custom(dstIP, steps string) {
+	dst, err := resolveDst(dstIP)
+	if err != nil {
+		fmt.Println("error:", err)
+		os.Exit(1)
+	}
+	type stepSpec struct {
+		reqPps, size, nIdent int
+		k, variant           byte
+		dur                  time.Duration
+	}
+	var parsed []stepSpec
+	for _, st := range strings.Split(steps, ",") {
+		reqPps, size, nIdent, k, variant, dur, err := parseStep(st)
+		if err != nil {
+			fmt.Println("error:", err)
+			os.Exit(1)
+		}
+		parsed = append(parsed, stepSpec{reqPps, size, nIdent, k, variant, dur})
+	}
 	c := listen()
 	defer c.Close()
-	dst := &net.IPAddr{IP: net.ParseIP(dstIP)}
-	for _, st := range strings.Split(steps, ",") {
-		f := strings.Split(st, ":")
-		a := make([]int, 6)
-		a[5] = 4
-		for i := range f {
-			if i >= len(a) { // extra fields: ignore instead of panicking
-				break
-			}
-			a[i], _ = strconv.Atoi(f[i])
-		}
-		run(c, dst, a[0], a[1], a[2], byte(a[3]), byte(a[4]), time.Duration(a[5])*time.Second, "custom")
+	for _, s := range parsed {
+		run(c, dst, s.reqPps, s.size, s.nIdent, s.k, s.variant, s.dur, "custom")
 	}
 }
 

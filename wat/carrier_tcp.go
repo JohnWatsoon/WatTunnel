@@ -526,11 +526,15 @@ const PinLaneBase = 1 << 24
 
 // pinnedConn returns the pinned connection for lane, or nil when lane does not pin or that connection cannot take it.
 func pinnedConn(conns []*poolConn, lane int) *poolConn {
+	return pinnedConnTrusted(conns, lane, nil)
+}
+
+func pinnedConnTrusted(conns []*poolConn, lane int, ts *trustedIPs) *poolConn {
 	if lane < PinLaneBase || len(conns) == 0 {
 		return nil
 	}
 	pc := conns[(lane-PinLaneBase)%len(conns)]
-	if pc == nil || pc.full() || pc.stalledFor(time.Now().UnixNano()) > poolStall {
+	if pc == nil || (ts != nil && !trustedHas(ts, pc.ip)) || pc.full() || pc.stalledFor(time.Now().UnixNano()) > poolStall {
 		return nil
 	}
 	select {
@@ -594,21 +598,29 @@ func expressSkip(n int) int {
 // while the queues are full turns those drops into backpressure. Since 3.0.0 no conn at all holds as well (see
 // TCPPoolClient.Backlogged): the reverse listener and a server whose client is reconnecting no longer drop datagrams.
 func backlogged(conns []*poolConn) bool {
+	return backloggedTrusted(conns, nil)
+}
+
+func backloggedTrusted(conns []*poolConn, ts *trustedIPs) bool {
 	if k := expressSkip(len(conns)); k > 0 { // bulk cannot use the express lane, so its room does not count
-		if full, live := backlogOf(conns[k:]); live {
+		if full, live := backlogOfTrusted(conns[k:], ts); live {
 			return full
 		}
 	}
-	full, _ := backlogOf(conns)
+	full, _ := backlogOfTrusted(conns, ts)
 	return full
 }
 
 // backlogOf: every live conn's queue is full (judged by the unstalled ones while any is), and whether any conn is live.
 func backlogOf(conns []*poolConn) (full, live bool) {
+	return backlogOfTrusted(conns, nil)
+}
+
+func backlogOfTrusted(conns []*poolConn, ts *trustedIPs) (full, live bool) {
 	now := time.Now().UnixNano()
 	n, unstalled, free, freeAny := 0, 0, false, false
 	for _, pc := range conns {
-		if pc == nil {
+		if pc == nil || (ts != nil && !trustedHas(ts, pc.ip)) {
 			continue
 		}
 		select {
@@ -637,27 +649,35 @@ func backlogOf(conns []*poolConn) (full, live bool) {
 // pickConn chooses the connection for one packet on the server side: a pinned (bulk) lane takes its stream's
 // connection, or the least-queued one, both outside the express lane; everything else the least-queued of all.
 func pickConn(conns []*poolConn, lane, start int) *poolConn {
+	return pickConnTrusted(conns, lane, start, nil)
+}
+
+func pickConnTrusted(conns []*poolConn, lane, start int, ts *trustedIPs) *poolConn {
 	if lane >= PinLaneBase && len(conns) > 0 { // a stable order, so a stream keeps its connection
 		bulk := conns[expressSkip(len(conns)):] // bulk keeps off the express lane (3.0.0)
-		if pc := pinnedConn(bulk, lane); pc != nil {
+		if pc := pinnedConnTrusted(bulk, lane, ts); pc != nil {
 			return pc
 		}
-		if pc := leastQueued(bulk, start); pc != nil {
+		if pc := leastQueuedTrusted(bulk, start, ts); pc != nil {
 			return pc
 		}
 	}
-	return leastQueued(conns, start)
+	return leastQueuedTrusted(conns, start, ts)
 }
 
 // leastQueued picks the live conn with the shortest queue; start rotates so ties spread.
 func leastQueued(conns []*poolConn, start int) *poolConn {
+	return leastQueuedTrusted(conns, start, nil)
+}
+
+func leastQueuedTrusted(conns []*poolConn, start int, ts *trustedIPs) *poolConn {
 	now := time.Now().UnixNano()
 	var best, any *poolConn
 	bl, al := int64(1<<62), int64(1<<62)
 	var stuck []*poolConn
 	for i := range conns {
 		pc := conns[(start+i)%len(conns)]
-		if pc == nil {
+		if pc == nil || (ts != nil && !trustedHas(ts, pc.ip)) {
 			continue
 		}
 		select {
@@ -882,6 +902,14 @@ func (c *TCPPoolClient) Edges() []EdgeStat {
 }
 
 func newSlotPoolClient(dial func(ctx context.Context, slot int) (net.Conn, error), conns int, hook ...func(ctx context.Context, slot int, inner func(context.Context, int) (net.Conn, error)) (net.Conn, error)) (*TCPPoolClient, error) {
+	return newSlotPoolClientInit(dial, conns, func(c *TCPPoolClient) {
+		if len(hook) > 0 && hook[0] != nil {
+			c.SetDialHook(hook[0])
+		}
+	})
+}
+
+func newSlotPoolClientInit(dial func(ctx context.Context, slot int) (net.Conn, error), conns int, initFn func(*TCPPoolClient)) (*TCPPoolClient, error) {
 	if conns <= 0 {
 		conns = HostProfile().DefaultPoolConns
 	}
@@ -890,14 +918,15 @@ func newSlotPoolClient(dial func(ctx context.Context, slot int) (net.Conn, error
 	}
 	c := &TCPPoolClient{dial: dial, slots: make([]atomic.Pointer[poolConn], conns),
 		rx: make(chan []byte, poolRxQueue), done: make(chan struct{})}
-	if len(hook) > 0 && hook[0] != nil {
-		c.SetDialHook(hook[0])
-	}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	if _, err := crand.Read(c.id[:]); err != nil {
+		c.cancel()
 		return nil, err
 	}
 	c.peer = poolAddr{key: "server"}
+	if initFn != nil {
+		initFn(c)
+	}
 	for i := range c.slots {
 		c.wg.Add(1)
 		go c.slotLoop(i)
@@ -1329,25 +1358,22 @@ func (c *TCPPoolClient) backlogFrom(from int) (full, live bool) {
 // pool id, so the server sees an independent pool. The clone's slot i dials as slot i+slotOffset of the original
 // would, which moves its starting edge on a multi-address -peer. (-sessions N, client only, 2.3.0.)
 func (c *TCPPoolClient) Clone(slotOffset int) (*TCPPoolClient, error) {
-	n, err := newSlotPoolClient(func(ctx context.Context, slot int) (net.Conn, error) {
+	return newSlotPoolClientInit(func(ctx context.Context, slot int) (net.Conn, error) {
 		return c.dial(ctx, slot+slotOffset)
-	}, len(c.slots))
-	if err != nil {
-		return nil, err
-	}
-	n.ps, n.tlsFn = c.ps, c.tlsFn
-	n.hook.Store(c.hook.Load()) // the fake-SNI wrapper rides along, like every other dial-path setting
-	if o := c.obf.Load(); o != nil {
-		n.setObfs(o) // -tcp-mimic: the clone's connections must look like TLS too
-	}
-	n.keepSlow.Store(c.keepSlow.Load())
-	n.maxBackoff.Store(c.maxBackoff.Load())
-	n.rotate.Store(c.rotate.Load())
-	n.rotBytes.Store(c.rotBytes.Load())
-	if l := c.logf.Load(); l != nil {
-		n.logf.Store(l)
-	}
-	return n, nil
+	}, len(c.slots), func(n *TCPPoolClient) {
+		n.ps, n.tlsFn, n.noDirect = c.ps, c.tlsFn, c.noDirect
+		n.hook.Store(c.hook.Load()) // the fake-SNI wrapper rides along, like every other dial-path setting
+		if o := c.obf.Load(); o != nil {
+			n.setObfs(o) // -tcp-mimic: the clone's connections must look like TLS too
+		}
+		n.keepSlow.Store(c.keepSlow.Load())
+		n.maxBackoff.Store(c.maxBackoff.Load())
+		n.rotate.Store(c.rotate.Load())
+		n.rotBytes.Store(c.rotBytes.Load())
+		if l := c.logf.Load(); l != nil {
+			n.logf.Store(l)
+		}
+	})
 }
 
 func (c *TCPPoolClient) Recv() ([]byte, int, net.Addr, error) {
@@ -1751,18 +1777,30 @@ func (s *TCPPoolServer) SendTo(p []byte, lane int, dst net.Addr) error {
 	s.mu.RLock()
 	conns := s.ordered[a.key] // born-ordered copy kept by add/remove: read-locked without writer contention
 	s.mu.RUnlock()
-	pc := pickConn(conns, lane, int(s.rr.Add(1)))
+	var ts *trustedIPs
+	if s.merge.Load() {
+		ts = s.trusted.Load()
+	}
+	pc := pickConnTrusted(conns, lane, int(s.rr.Add(1)), ts)
 	if pc != nil {
-		if s.merge.Load() && !s.ipTrusted(pc.ip) {
-			// A dialer that never delivered a packet the session could authenticate must not receive the tunnel's
-			// packets. A young connection keeps its grace window to authenticate (a peer may use another egress
-			// address); an older one is closed so the sender can pick a real one.
-			if time.Since(pc.born) > poolTrustGrace {
-				pc.fail()
-			}
-			return nil
-		}
 		pc.enqueue(append(getPkt(len(p))[:0], p...))
+	}
+	// Close old untrusted conns that survived past the grace period.  pickConnTrusted skips them, so they would
+	// linger silently without this sweep.
+	if ts != nil {
+		for _, uc := range conns {
+			if uc == nil {
+				continue
+			}
+			select {
+			case <-uc.done:
+				continue
+			default:
+			}
+			if !trustedHas(ts, uc.ip) && time.Since(uc.born) > poolTrustGrace {
+				uc.fail()
+			}
+		}
 	}
 	return nil // no live conn or full queue: dropped, the session repairs it
 }
@@ -1776,7 +1814,11 @@ func (s *TCPPoolServer) BackloggedTo(dst net.Addr) bool {
 	s.mu.RLock()
 	conns := s.ordered[a.key]
 	s.mu.RUnlock()
-	return backlogged(conns)
+	var ts *trustedIPs
+	if s.merge.Load() {
+		ts = s.trusted.Load()
+	}
+	return backloggedTrusted(conns, ts)
 }
 
 // PoolDrops counts packets dropped because every pool queue was full (process-wide).

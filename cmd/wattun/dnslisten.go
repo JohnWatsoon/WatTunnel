@@ -88,7 +88,9 @@ func startDNSListener(listenAddr string, getTun func() *tunnel, logf func(string
 
 			select {
 			case sem <- struct{}{}:
+				wg.Add(1)
 				go func(q []byte, from net.Addr) {
+					defer wg.Done()
 					defer func() { <-sem }()
 					tun := getTun()
 					ans, err := dialDNSRelay(tun, q)
@@ -133,10 +135,14 @@ func startDNSListener(listenAddr string, getTun func() *tunnel, logf func(string
 					defer wg.Done()
 					defer closer.conns.Delete(c)
 					defer c.Close()
-					writeResp := func(data []byte) {
+					writeResp := func(data []byte) error {
+						_ = c.SetWriteDeadline(time.Now().Add(dnsRelayTimeout))
 						hdr := [2]byte{byte(len(data) >> 8), byte(len(data))}
-						_, _ = c.Write(hdr[:])
-						_, _ = c.Write(data)
+						if _, err := c.Write(hdr[:]); err != nil {
+							return err
+						}
+						_, err := c.Write(data)
+						return err
 					}
 					for {
 						_ = c.SetDeadline(time.Now().Add(dnsRelayTimeout))
@@ -152,6 +158,7 @@ func startDNSListener(listenAddr string, getTun func() *tunnel, logf func(string
 						if _, err := io.ReadFull(c, query); err != nil {
 							return
 						}
+						var werr error
 						select {
 						case sem <- struct{}{}:
 							func() {
@@ -160,16 +167,19 @@ func startDNSListener(listenAddr string, getTun func() *tunnel, logf func(string
 								ans, err := dialDNSRelay(tun, query)
 								if err != nil || len(ans) < 12 {
 									if sf := dnsServfail(query); sf != nil {
-										writeResp(sf)
+										werr = writeResp(sf)
 									}
 									return
 								}
-								writeResp(ans)
+								werr = writeResp(ans)
 							}()
 						default:
 							if sf := dnsServfail(query); sf != nil {
-								writeResp(sf)
+								werr = writeResp(sf)
 							}
+						}
+						if werr != nil {
+							return
 						}
 					}
 				}(conn)

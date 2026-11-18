@@ -184,3 +184,64 @@ func TestUDPReversePunchQuiet(t *testing.T) {
 		t.Fatal("the server punched while the client was talking")
 	}
 }
+
+// 3.3.8 audit: replayed punches and punches from non-peer addresses while the current peer is actively
+// authenticated must not hijack UDPReverseListener.peer.
+func TestUDPReversePunchReplayGuard(t *testing.T) {
+	key := []byte("rev-replay")
+	lis, err := NewUDPReverseListener("127.0.0.1:0", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+	go func() {
+		for {
+			if _, _, _, err := lis.Recv(); err != nil {
+				return
+			}
+		}
+	}()
+
+	realSrv, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer realSrv.Close()
+	attacker, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attacker.Close()
+
+	la := lis.Addr().(*net.UDPAddr)
+	pk := makePunch(punchKey(key))
+	if _, err := realSrv.WriteToUDP(pk, la); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for lis.peer.Load() == nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if cur := lis.peer.Load(); cur == nil || cur.Port != realSrv.LocalAddr().(*net.UDPAddr).Port {
+		t.Fatalf("expected peer=%v, got %v", realSrv.LocalAddr(), cur)
+	}
+
+	// Exact replay from attacker must be rejected even before authAt.
+	if _, err := attacker.WriteToUDP(pk, la); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if cur := lis.peer.Load(); cur.Port != realSrv.LocalAddr().(*net.UDPAddr).Port {
+		t.Fatalf("replayed punch hijacked peer to %v", cur)
+	}
+
+	// Fresh punch while realSrv is actively authenticated must also be ignored.
+	lis.PeerAuthenticated(realSrv.LocalAddr())
+	if _, err := attacker.WriteToUDP(makePunch(punchKey(key)), la); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if cur := lis.peer.Load(); cur.Port != realSrv.LocalAddr().(*net.UDPAddr).Port {
+		t.Fatalf("hijacked active authenticated peer to %v", cur)
+	}
+}

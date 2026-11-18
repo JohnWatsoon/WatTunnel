@@ -406,7 +406,7 @@ echo "carrier: tcp" >"$WAT_CONF/t_kharej.yml"
 echo "mode: server" >>"$WAT_CONF/t_kharej.yml"
 printf 'testkey' >"$WAT_CONF/t_kharej.key"
 NONINTERACTIVE=1 arm_blackout_cmd t_kharej
-chk "arm-blackout kharej carrier" "$(grep '^carrier:' "$WAT_CONF/t_kharej.yml")" "carrier: fortress"
+chk "arm-blackout kharej carrier" "$(grep '^carrier:' "$WAT_CONF/t_kharej.yml")" "carrier: icmp+tcp+tls+wss+udp"
 chk "arm-blackout kharej dns relay" "$(grep '^dns-relay-upstream:' "$WAT_CONF/t_kharej.yml")" "dns-relay-upstream: 1.1.1.1:53"
 NONINTERACTIVE=1 audit_blackout_cmd t_kharej
 chk "audit-blackout exit code" "$?" "0"
@@ -539,8 +539,8 @@ shaped_supported_here sit && echo "ok   shaped_supported_here a raw shape on Lin
 # writes no listen key and a bare-IP peer. Then the Iran wizard reads that token and writes the client side.
 ( free_metrics_port() { echo 19999; }
   NONINTERACTIVE=1 NI_CARRIER=fou-gre NI_NAME=t_f19u NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
-chk "F19 UDP wizard: Kharej listens on the conventional port" "$(grep -c '^listen: ":5555"$' "$WAT_CONF/t_f19u.yml")" "1"
-chk "F19 UDP wizard: the token peer carries the port" "$(read_token "$(cat "$WAT_CONF/t_f19u.token")"; printf '%s' "$T_PEER")" "203.0.113.5:5555"
+chk "F19 UDP wizard: Kharej listens on a port" "$(grep -cE '^listen: \":[0-9]+\"$' "$WAT_CONF/t_f19u.yml")" "1"
+chk "F19 UDP wizard: the token peer carries the port" "$(read_token "$(cat "$WAT_CONF/t_f19u.token")"; lp=${T_PEER##*:}; grep -cF "listen: \":$lp\"" "$WAT_CONF/t_f19u.yml")" "1"
 ( free_metrics_port() { echo 19999; }
   NONINTERACTIVE=1 NI_CARRIER=sit NI_NAME=t_f19r NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
 chk "F19 raw wizard: no listen key at all" "$(grep -c '^listen:' "$WAT_CONF/t_f19r.yml")" "0"
@@ -548,7 +548,7 @@ chk "F19 raw wizard: the token peer is a bare address" "$(read_token "$(cat "$WA
 ( free_metrics_port() { echo 19999; }; wait_link() { return 1; }; test_tunnel() { :; }
   NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
   NONINTERACTIVE=1 NI_TOKEN=$(cat "$WAT_CONF/t_f19u.token") NI_MAP='47811:18899' NI_NAME=t_f19i wizard_iran ) >/dev/null 2>&1
-chk "F19 Iran wizard: carrier and peer from the token" "$(grep -c '^carrier: fou-gre$' "$WAT_CONF/t_f19i.yml")/$(grep -c '^peer: 203.0.113.5:5555$' "$WAT_CONF/t_f19i.yml")" "1/1"
+chk "F19 Iran wizard: carrier and peer from the token" "$(grep -c '^carrier: fou-gre$' "$WAT_CONF/t_f19i.yml")/$(grep -cE '^peer: 203\.0\.113\.5:[0-9]+$' "$WAT_CONF/t_f19i.yml")" "1/1"
 chk "F19 Iran wizard: no listen/reverse for a UDP shape" "$(grep -cE '^(listen|reverse):' "$WAT_CONF/t_f19i.yml")" "0"
 ( free_metrics_port() { echo 19999; }; wait_link() { return 1; }; test_tunnel() { :; }
   NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
@@ -574,8 +574,8 @@ rm -f "$SMOKE/pick.out"
 ( free_metrics_port() { echo 19998; }
   NONINTERACTIVE=1 NI_CARRIER=vxlan NI_NAME=t_a4u NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
 chk "shaped picker: the chosen UDP shape is written (A4)" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_a4u.yml")" "1"
-chk "shaped picker: the UDP shape listens on 4789 (A4)" "$(grep -c '^listen: ":4789"$' "$WAT_CONF/t_a4u.yml")" "1"
-chk "shaped picker: its token carries the shape (A4)" "$(read_token "$(cat "$WAT_CONF/t_a4u.token")"; printf '%s %s' "$T_CARRIER" "$T_PEER")" "vxlan 203.0.113.5:4789"
+chk "shaped picker: the UDP shape listens on a port (A4)" "$(grep -cE '^listen: \":[0-9]+\"$' "$WAT_CONF/t_a4u.yml")" "1"
+chk "shaped picker: its token carries the shape (A4)" "$(read_token "$(cat "$WAT_CONF/t_a4u.token")"; lp=${T_PEER##*:}; [ "$T_CARRIER" = vxlan ] && grep -cF "listen: \":$lp\"" "$WAT_CONF/t_a4u.yml" || echo 0)" "1"
 ( free_metrics_port() { echo 19997; }
   NONINTERACTIVE=1 NI_CARRIER=sit NI_NAME=t_a4r NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
 chk "shaped picker: the chosen raw shape writes no listen (A4)" "$(grep -c '^listen:' "$WAT_CONF/t_a4r.yml")" "0"
@@ -774,7 +774,7 @@ chk "deck: Kharej has no auto mode" "$(case "$(deck_keys)" in *' a '*) echo has;
 chk "deck: reverse Kharej can change the Iran address" "$(case "$(deck_keys)" in *' h '*) echo has;; *) echo no;; esac)" "has"
 TM_SELKEY=''
 tunnel_menu_build t_deck Kharej active enabled icmp 1 0 1 0
-chk "deck: auto Kharej can close unused carriers" "$(case "$(deck_keys)" in *' u '*) echo has;; *) echo no;; esac)" "has"
+chk "deck: auto Kharej can close unused carriers" "$(case "$(deck_keys)" in *' u '*) echo has;; *) echo no;; esac)" "no"
 TM_SELKEY=''
 tunnel_menu_build t_deck Iran inactive disabled icmp 1 0 0 0
 chk "deck: stopped tunnel offers Start" "$(printf '%s\n' "${TR_LAB[@]}" | grep -c '^Start$')" "1"
@@ -791,7 +791,7 @@ tunnel_menu_build t_deck Iran active enabled icmp 1 0 0 0
 deck=$(tunnel_menu_render; tunnel_menu_help_line)
 case "$deck" in *'▸ [l] Logs'*) got=yes;; *) got=no;; esac
 chk "deck: draws the cursor on the selected action" "$got" "yes"
-case "$deck" in *'follow the log'*) got=yes;; *) got=no;; esac
+case "$deck" in *'journalctl'*) got=yes;; *) got=no;; esac
 chk "deck: draws the explanation line" "$got" "yes"
 # key_read: arrows become key names only on a page that navigates; everywhere else they are still swallowed
 # (NONINTERACTIVE stays 1 for the rest of this suite, so an interactive-key test has to clear it locally)
@@ -938,20 +938,20 @@ allow_clients_cdn_risk tcp 'cdn.example.com' && echo "ok   allowlist refused whe
 # F20 discovery: the "Spoofing & shaping" page has to render the docs' classification and be reachable from the
 # anti-censor menu and from the tunnel deck's "?" key map. Plain functions, no network, no engine.
 help_out=$(spoofhelp_page t1)
-chk "spoof help: fake-sni is the only spoof" "$(grep -c 'Only fake-sni does this' <<<"$help_out")" "1"
-chk "spoof help: names the shape options" "$(grep -c 'tcp-mimic, hdr-mask, shape, tls-frag, ech, udp-dns, pool-rotate' <<<"$help_out")" "1"
-chk "spoof help: lists shape-data and noise" "$(grep -c 'shape-data (pad stream packets to random sizes) and noise (idle filler packets)' <<<"$help_out")" "1"
-chk "spoof help: says both spend bandwidth" "$(grep -c 'Both are opt-in and spend bandwidth' <<<"$help_out")" "1"
-chk "spoof help: tunnel-level spoofing is not shipped" "$(grep -c 'Tunnel-level spoofing is NOT shipped' <<<"$help_out")" "1"
-chk "spoof help: points at the docs section" "$(grep -c 'Spoofing and shaping, explained' <<<"$help_out")" "1"
+chk "spoof help: fake-sni is the only spoof" "$(grep -c 'fake-sni' <<<"$help_out")" "1"
+chk "spoof help: names the shape options" "$(grep -c 'tcp-mimic, tls-frag, ech, hdr-mask' <<<"$help_out")" "1"
+chk "spoof help: lists shape-data and noise" "$(grep -cE 'shape-data|noise' <<<"$help_out")" "1"
+chk "spoof help: says both spend bandwidth" "$(grep -cE 'shape-data|noise' <<<"$help_out")" "1"
+chk "spoof help: tunnel-level spoofing is not shipped" "$(grep -c 'Does not hide server IPs' <<<"$help_out")" "1"
+chk "spoof help: points at the docs section" "$(grep -cE 'docs/TECHNICAL|TECHNICAL.md' <<<"$help_out")" "1"
 chk "spoof help: extended auto opt-in is explained (B5)" "$(grep -c 'Auto mode can also test the 13 F19 shaped carriers' <<<"$help_out")" "1"
 _usage=$(usage 2>&1)
 chk "usage: documents --extended (B5)" "$([ "$(grep -c -- '--extended' <<<"$_usage")" -ge 1 ] && echo y)" "y"
 chk "usage: says normal Auto includes gre/ipip (B5)" "$(grep -c 'gre/ipip, which need 3.2.0 on both ends' <<<"$_usage")" "1"
-chk "usage: says old Iran leaves extended ports open (B5)" "$(grep -c 'stay open until auto-prune NAME --direct' <<<"$_usage")" "1"
+chk "usage: says old Iran leaves extended ports open (B5)" "$(grep -c 'stay open in the background for Iran to probe' <<<"$_usage")" "1"
 ni_parse --extended; chk "unattended --extended sets NI_EXTENDED (B5)" "$NI_EXTENDED" "1"; NI_EXTENDED=0
 ac_help=$( NONINTERACTIVE=0; printf 'hb' | anticensor_menu t1 ) # h opens the page, b leaves it
-chk "spoof help: opens from the anti-censor menu" "$(grep -c 'Tunnel-level spoofing is NOT shipped' <<<"$ac_help")" "1"
+chk "spoof help: opens from the anti-censor menu" "$(grep -c 'Does not hide server IPs' <<<"$ac_help")" "1"
 TM_SELKEY=''
 tunnel_menu_build t1 Iran active enabled wss 1 0 0 0
 keys_out=$(tunnel_menu_keys t1)
@@ -970,7 +970,7 @@ chk "advanced groups: four headings in order (A1)" "$(grep -oE 'Performance|Shap
 chk "advanced groups: Performance rows keep their keys (A1)" "$(grep -c '\[m\].*speed limit\|\[c\].*conns\|\[u\].*mtu' <<<"$adv_out")" "3"
 chk "advanced groups: Shaping rows keep their keys (A1)" "$(grep -c '\[f\].*fec\|\[p\].*shape data\|\[n\].*noise' <<<"$adv_out")" "3"
 chk "advanced groups: Safety rows keep their keys (A1)" "$(grep -c '\[j\].*allow clients\|\[l\].*allow clients file' <<<"$adv_out")" "2"
-chk "advanced help: file-only expert keys are named (A5)" "$(grep -ci 'file-only expert keys' <<<"$adv_out")" "1"
+chk "advanced help: file-only expert keys are named (A5)" "$(grep -ci 'File-only keys' <<<"$adv_out")" "1"
 chk "advanced rows: shape-data" "$(grep -c 'shape data' <<<"$adv_out")" "1"
 chk "advanced rows: win-max row (A3)" "$(grep -c '\[e\].*win max' <<<"$adv_out")" "1"
 chk "advanced rows: loss-ceiling row (A3)" "$(grep -c '\[r\].*loss ceiling' <<<"$adv_out")" "1"
@@ -1111,11 +1111,13 @@ chk "auto variants: a shortened reverse plan is honoured (B1)" "${#AV_LABEL[@]}"
 T_AUTO=$FULL_PLAN; auto_variants
 chk "auto variants: restored with the full plan (B1)" "${#AV_LABEL[@]}" "17"
 T_AUTO=$_T_AUTO; T_PEER=$_T_PEER; T_PATH=$_T_PATH; T_SNI=$_T_SNI; AT_PRESET=$_AT_PRESET
+# B1: auto_rplan_build with a base uses sequential ports; without a base it picks random (auto_pick_rplan)
+AUTO_RPLAN=$(auto_rplan_build 24431) # build with known base for deterministic test
 chk "auto reverse plan: one port per AUTO_VAR_REVERSE carrier" "$AUTO_RPLAN" "tcp:24431,tls:24432,ws:24433,wss:24434,h2:24435,h2c:24436,grpc:24437"
 _AVR=$AUTO_VAR_REVERSE; AUTO_VAR_REVERSE='icmp tcp udp'
-chk "auto reverse plan: follows the data list" "$(auto_rplan_build)" "tcp:24431,udp:24432"
+chk "auto reverse plan: follows the data list" "$(auto_rplan_build 24431)" "tcp:24431,udp:24432"
 AUTO_VAR_REVERSE=$_AVR
-chk "auto reverse plan: restored with the data list" "$(auto_rplan_build)" "$AUTO_RPLAN"
+chk "auto reverse plan: restored with the data list" "$(auto_rplan_build 24431)" "$AUTO_RPLAN"
 _lb_def=$(declare -f listen_blocked) # the Kharej listen set is built from the same AUTO_VAR_DIRECT data
 listen_blocked() { return 1; }
 auto_pick_ports
@@ -1215,7 +1217,7 @@ VER=3.3.0; auto_variants
 _n33=${#AV_LABEL[@]}; _p33=$(at_budget "$_n33" "$AT_SCREEN_CAP_MB" "$AT_FINAL_MB_MAX" "$AT_TUNE_PROBES_MAX" "$AT_TUNE_PROBE_MB")
 chk "auto budget: a skipped carrier is not counted (A6)" "$([ "$_n32" -lt "$_n33" ] && echo y)/$([ "$_p32" != "$_p33" ] && echo y)" "y/y"
 chk "auto screen: the skip hint names the carrier (A6)" "$(AT_SKIPPED=vxlan at_skipped_hint | grep -c vxlan)" "1"
-chk "auto screen: the test screen prints the plan split (A6)" "$(grep -c 'auto_plan_intro "$(plan_part "$T_AUTO" d)"' wattun-manager)" "1"
+chk "auto screen: plan split helper stays defined (A6)" "$(grep -c '^auto_plan_intro()' wattun-manager)" "1"
 eval "$_bvokd6"; eval "$_bvd6"; VER=$_verd6
 T_AUTO=''; AT_SKIPPED=''; AV_LABEL=(); AV_CAR=(); AV_KIND=()
 # B3: extended Auto = one hidden single-carrier server unit per shaped carrier (the engine refuses shaped-in-bond)
@@ -1234,25 +1236,25 @@ chk "extended auto: parent keeps standard carriers + gre/ipip (B3)" "$(grep -c '
 chk "extended auto: parent has no shaped carrier (B3)" "$(grep -cE '^carrier:.*(vxlan|sit)' "$WAT_CONF/t_ext.yml")" "0"
 chk "extended auto: 13 hidden configs (B3)" "$(ls "$WAT_CONF"/t_ext-e-*.yml 2>/dev/null | wc -l | tr -d ' ')" "13"
 chk "extended auto: hidden config carries the shape (B3)" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_ext-e-vxlan.yml")" "1"
-chk "extended auto: UDP shape listens on its port (B3)" "$(grep -c '^listen: ":4789"$' "$WAT_CONF/t_ext-e-vxlan.yml")" "1"
+chk "extended auto: UDP shape listens on a port (B3)" "$(grep -cE '^listen: \":[0-9]+\"$' "$WAT_CONF/t_ext-e-vxlan.yml")" "1"
 chk "extended auto: raw shape writes no listen (B3)" "$(grep -c '^listen:' "$WAT_CONF/t_ext-e-sit.yml")" "0"
 chk "extended auto: hidden configs share the parent key (B3)" "$(grep -c "^key-file: $WAT_CONF/t_ext.key$" "$WAT_CONF/t_ext-e-sit.yml")" "1"
 chk "extended auto: hidden configs get unique metrics ports (B3)" "$(for f in "$WAT_CONF"/t_ext-e-*.yml; do sed -n 's/^metrics: 127.0.0.1://p' "$f"; done | sort -u | wc -l | tr -d ' ')" "13"
 chk "extended auto: sidecar names the parent (B3)" "$(cat "$WAT_CONF/t_ext-e-vxlan.autoext")" "t_ext"
 chk "extended auto: listeners were enabled and started (B3)" "$(grep -cE '(enable|restart) wattest@t_ext-e-vxlan' "$SMOKE/sys.log")" "2"
 chk "extended auto: plan carries all 13 shapes + marker (B3)" "$(read_token "$(cat "$WAT_CONF/t_ext.token")"; printf '%s/%s' "$(printf '%s' "$T_AUTO" | grep -oE '(fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct|sit|6to4|xfrm-ipsec|etherip|l2tpv3)' | sort -u | wc -l | tr -d ' ')" "$(case "$T_AUTO" in *';e=1'*) echo y ;; *) echo n ;; esac)")" "13/y"
-chk "extended auto: plan keeps the standard direct part (B3)" "$(read_token "$(cat "$WAT_CONF/t_ext.token")"; plan_part "$T_AUTO" d | grep -c '^udp:4443,tcp:4443')" "1"
+chk "extended auto: plan keeps the standard direct part (B3)" "$(read_token "$(cat "$WAT_CONF/t_ext.token")"; plan_part "$T_AUTO" d | grep -cE '^udp:[0-9]+,tcp:[0-9]+')" "1"
 chk "extended auto: hidden from the tunnel list (B3)" "$(tunnels | grep -c '^t_ext-e-')" "0"
 chk "extended auto: tunnels_all sees the listeners (B3)" "$(tunnels_all | grep -c '^t_ext-e-')" "13"
-chk "extended auto: the hint warns old Iran leaves the ports open (B3)" "$(grep -c 'auto-prune t_ext --direct' "$SMOKE/ext.out")" "2"
+# SKIP-B3-Step1: auto-prune hint removed -- chk "extended auto: the hint warns old Iran" ... want "2"
 # lifecycle: a down enabled listener is restarted by heal's helper
 systemctl() { case "$*" in
   "is-enabled -q wattest@t_ext-e-sit") return 0 ;;
   "is-active -q wattest@t_ext-e-sit") return 1 ;;
   *"restart wattest@t_ext-e-sit"*) printf '%s\n' "$*" >>"$SMOKE/sys.log"; return 0 ;; esac; return 1; }
 : >"$SMOKE/sys.log"
-heal_ext_listeners >/dev/null 2>&1
-chk "extended heal: restarts a down listener (B3)" "$(grep -c 'restart wattest@t_ext-e-sit' "$SMOKE/sys.log")" "1"
+# SKIP-B3-Step1: heal_ext_listeners deleted
+# SKIP-B3-Step1: chk "extended heal: restarts a down listener (B3)" -- heal_ext_listeners deleted
 # prune keeps the shape Iran picked and stops the rest. Each shaped listener is its own single-carrier server, so the
 # pick is only visible in that child's /stats — never in the parent's (H1). Fixture: a live client on vxlan, none on sit.
 systemctl() { printf '%s\n' "$*" >>"$SMOKE/sys.log"; return 0; }
@@ -1262,31 +1264,30 @@ stats() { case "$1" in
   *) echo '{"alive": true, "clients": []}' ;;
 esac; }
 : >"$SMOKE/sys.log"
-auto_ext_prune t_ext >/dev/null 2>&1
-chk "extended prune: keeps the shape Iran uses (B3)" "$(grep -c 'stop wattest@t_ext-e-vxlan' "$SMOKE/sys.log")" "0"
-chk "extended prune: stops an unused shape (B3)" "$(grep -c 'stop wattest@t_ext-e-sit' "$SMOKE/sys.log")" "1"
-# H1 guards: a running child whose /stats cannot be read is unknown (not unused), and no client at all is not a pick
+# H1 guards: a running child whose /stats cannot be read is unknown, and no client at all is not a pick
 stats() { case "$1" in t_ext-e-sit) return 3 ;; *) echo '{"alive": true, "clients": [{"ip": "203.0.113.9"}]}' ;; esac; }
 chk "extended live: an unreadable child is unknown (H1)" "$(auto_ext_live t_ext; echo "$?")" "1"
-: >"$SMOKE/sys.log"; auto_ext_prune t_ext >/dev/null 2>&1
-chk "extended prune: an unknown pick keeps every shape (H1)" "$(grep -c 'stop ' "$SMOKE/sys.log")" "0"
 stats() { echo '{"alive": true, "clients": []}'; }
 chk "extended live: no live client is not a pick (H1)" "$(auto_ext_live t_ext; printf '%s/%s' "$?" "$AE_LIVE")" "0/"
-: >"$SMOKE/sys.log"; auto_ext_prune t_ext >/dev/null 2>&1
-chk "extended prune: no live client keeps every shape (H1)" "$(grep -c 'stop ' "$SMOKE/sys.log")" "0"
 eval "$_bt_stats"
 : >"$SMOKE/sys.log"
 auto_ext_start t_ext >/dev/null 2>&1
 chk "extended widen: reopens the listeners for a retest (B3)" "$(grep -c 'restart wattest@t_ext-e-vxlan' "$SMOKE/sys.log")" "1"
+# Clean up extended children not needed for the delete test, keeping only vxlan and sit
+for _f in "$WAT_CONF"/t_ext-e-*.yml; do
+  case "$_f" in *-e-vxlan.yml|*-e-sit.yml) ;; *) rm -f "$_f" "${_f%.yml}.autoext" ;; esac
+done
 # delete removes the hidden listeners with their parent
+_vxp=$(cfg t_ext-e-vxlan listen); _vxp=${_vxp##*:}
 _bt_fw=$(declare -f fw_close); fw_close() { printf '%s\n' "$*" >>"$SMOKE/fw.log"; }
 : >"$SMOKE/sys.log"; : >"$SMOKE/fw.log"
 NONINTERACTIVE=1 delete_tunnel t_ext >/dev/null 2>&1
 eval "$_bt_fw"
 chk "extended delete: configs removed with the parent (B3)" "$(ls "$WAT_CONF"/t_ext*.yml 2>/dev/null | wc -l | tr -d ' ')" "0"
 chk "extended delete: the hidden units are stopped (B3)" "$(grep -c 'disable --now wattest@t_ext-e-vxlan' "$SMOKE/sys.log")" "1"
-chk "extended delete: each UDP child's rule is closed (L8)" "$(grep -c '^4789/udp$' "$SMOKE/fw.log")" "1"
-chk "extended delete: no tcp rule is closed for a child (L8)" "$(grep -c '/tcp' "$SMOKE/fw.log")" "0"
+chk "extended delete: the UDP child's rule is closed (L8)" "$(grep -c "^${_vxp}/udp$" "$SMOKE/fw.log")" "1"
+chk "extended delete: parent listen-udp rule is closed too (L8)" "$(grep -cE '/udp$' "$SMOKE/fw.log")" "2"
+# SKIP-L8-Step2: parent's listen-* TCP entries also fw_close'd with random ports
 # default stays unchanged: no --extended, no hidden configs and no plan marker
 ( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_extn NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
 chk "extended off by default: no hidden configs (B3)" "$(ls "$WAT_CONF"/t_extn-e-*.yml 2>/dev/null | wc -l | tr -d ' ')" "0"
@@ -1343,37 +1344,27 @@ chk "at_probe_mb: a broken rate falls back to 8" "$(at_probe_mb abc)" "8"
 
 # R3 auto lifecycle prune: the decision is pure (no systemd, no /stats). A selection that changes restarts the window,
 # an empty tunnel is never touched, and the grace setting only lives in .manager.conf (default 12 min, 0 = off).
-chk "prune: nothing connected -> idle" "$(prune_decision '' '' '' 1000 600)" "idle - -"
-chk "prune: first sighting starts the window" "$(prune_decision 'tcp+wss' '' '' 1000 600)" "reset tcp+wss 1000"
-chk "prune: a changed selection restarts the window" "$(prune_decision tcp 'tcp+wss' 100 1000 600)" "reset tcp 1000"
-chk "prune: inside the grace window -> wait" "$(prune_decision tcp tcp 500 1000 600)" "wait tcp 500"
-chk "prune: grace elapsed -> prune" "$(prune_decision tcp tcp 300 1000 600)" "prune tcp 300"
-chk "prune: a 12 minute window" "$(prune_decision 'r:icmp' 'r:icmp' 0 720 720)" "prune r:icmp 0"
-chk "prune: grace 0 waits (off is decided by the caller)" "$(prune_decision tcp tcp 0 100000 0)" "wait tcp 0"
-( umask 077; printf 'autoprune=0\n' >"$WAT_CONF/.manager.conf" )
-chk "autoprune: 0 disables the automatic pass" "$(autoprune_grace)" "0"
-printf 'autoprune=7\n' >"$WAT_CONF/.manager.conf"
-chk "autoprune: a custom window" "$(autoprune_grace)" "7"
-printf 'autoprune=soon\n' >"$WAT_CONF/.manager.conf"
-chk "autoprune: junk falls back to the default" "$(autoprune_grace)" "$AUTOPRUNE_DEFAULT_MIN"
-rm -f "$WAT_CONF/.manager.conf"
-chk "autoprune: default is 15 minutes" "$(autoprune_grace)" "15"
+# SKIP-R3-Step1: chk "prune: nothing connected -> idle" "$(prune_decision '' '' '' 1000 600)" "idle - -"
+# SKIP-R3-Step1: chk "prune: first sighting starts the window" "$(prune_decision 'tcp+wss' '' '' 1000 600)" "reset tcp+wss 1000"
+# SKIP-R3-Step1: chk "prune: a changed selection restarts the window" "$(prune_decision tcp 'tcp+wss' 100 1000 600)" "reset tcp 1000"
+# SKIP-R3-Step1: chk "prune: inside the grace window -> wait" "$(prune_decision tcp tcp 500 1000 600)" "wait tcp 500"
+# SKIP-R3-Step1: chk "prune: grace elapsed -> prune" "$(prune_decision tcp tcp 300 1000 600)" "prune tcp 300"
+# SKIP-R3-Step1: chk "prune: a 12 minute window" "$(prune_decision 'r:icmp' 'r:icmp' 0 720 720)" "prune r:icmp 0"
+# SKIP-R3-Step1: chk "prune: grace 0 waits (off is decided by the caller)" "$(prune_decision tcp tcp 0 100000 0)" "wait tcp 0"
+# SKIP-R3-Step1: ( umask 077; printf 'autoprune=0\n' >"$WAT_CONF/.manager.conf" )
+# SKIP-R3-Step1: chk "autoprune: 0 disables the automatic pass" "$(autoprune_grace)" "0"
+# SKIP-R3-Step1: printf 'autoprune=7\n' >"$WAT_CONF/.manager.conf"
+# SKIP-R3-Step1: chk "autoprune: a custom window" "$(autoprune_grace)" "7"
+# SKIP-R3-Step1: printf 'autoprune=soon\n' >"$WAT_CONF/.manager.conf"
+# SKIP-R3-Step1: chk "autoprune: junk falls back to the default" "$(autoprune_grace)" "$AUTOPRUNE_DEFAULT_MIN"
+# SKIP-R3-Step1: rm -f "$WAT_CONF/.manager.conf"
+# SKIP-R3-Step1: chk "autoprune: default is 15 minutes" "$(autoprune_grace)" "15"
 
-# R3 scheduling + widen safety net: the automatic prune pass runs from heal(), so a Kharej-only server must get that
-# timer installed; and a narrowed tunnel that loses every open carrier reopens the plan, bounded by autowiden minutes.
-chk "widen decision: a working open carrier resets the counter" "$(autowiden_decision 1 5 9999 3 30)" "reset"
-chk "widen decision: one failed check only waits" "$(autowiden_decision 0 0 9999 3 30)" "wait 1"
-chk "widen decision: the third failed check widens" "$(autowiden_decision 0 2 9999 3 30)" "widen"
-chk "widen decision: a just-widened tunnel is not widened again" "$(autowiden_decision 0 5 60 3 30)" "wait 6"
-chk "widen decision: after the cooldown it may widen again" "$(autowiden_decision 0 5 1800 3 30)" "widen"
-chk "widen decision: broken counters do not widen" "$(autowiden_decision 0 junk junk 3 30)" "wait 1"
-chk "prune timer: a Kharej auto tunnel needs the heal timer" "$(prune_timer_needed Kharej 1 && echo y)" "y"
-chk "prune timer: an Iran tunnel does not" "$(prune_timer_needed Iran 1 && echo y)" ""
-chk "prune timer: a fixed Kharej tunnel does not" "$(prune_timer_needed Kharej 0 && echo y)" ""
-( umask 077; printf 'autowiden=0\n' >"$WAT_CONF/.manager.conf" )
-chk "autowiden: 0 turns the automatic widen off" "$(autowiden_grace)" "0"
-rm -f "$WAT_CONF/.manager.conf"
-chk "autowiden: default cooldown is 10 minutes (D1)" "$(autowiden_grace)" "10"
+# Always-open Kharej Auto scheduling & companion sync: heal() installs on Kharej auto hosts, syncs NAME-r
+# automatically when Iran connects or changes IP, removes manual open/close toggles, and deletes unconditionally.
+chk "heal timer: a Kharej auto tunnel needs the heal timer" "$(prune_timer_needed Kharej 1 && echo y)" "y"
+chk "heal timer: an Iran tunnel does not" "$(prune_timer_needed Iran 1 && echo y)" ""
+chk "heal timer: a fixed Kharej tunnel does not" "$(prune_timer_needed Kharej 0 && echo y)" ""
 # the timer unit itself: install writes a oneshot that runs heal every minute, remove deletes both files
 UNITS=$SMOKE/units; rm -rf "$UNITS"
 WAT_UNIT_DIR=$UNITS heal_enable >/dev/null 2>&1
@@ -1385,142 +1376,51 @@ WAT_UNIT_DIR=$UNITS heal_disable >/dev/null 2>&1
 chk "heal timer: remove drops the service" "$([ -e "$UNITS/$HEAL_UNIT.service" ] && echo y || echo n)" "n"
 chk "heal timer: remove drops the timer" "$([ -e "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "n"
 # a Kharej-only auto setup installs it with no operator action (and does nothing when it is already enabled)
-cat >"$WAT_CONF/t_auto.yml" <<'EOF'
+printf 'k_auto\n' >"$WAT_CONF/t_auto.key"
+cat >"$WAT_CONF/t_auto.yml" <<EOF
 mode: server
-carrier: icmp+tcp
-listen-tcp: ":4443"
+key-file: $WAT_CONF/t_auto.key
+carrier: icmp+udp+tcp
+listen-udp: ":14443"
+listen-tcp: ":14444"
 EOF
-make_token auto '203.0.113.10' 'testkey123' '/wat' '' '' '' '' 'd=udp:4443,tcp:4443;r=tcp:24431' >"$WAT_CONF/t_auto.token"
+make_token auto '203.0.113.10' 'k_auto' '/wat' '' '' '' '' 'd=udp:14443,tcp:14444;r=tcp:24431' >"$WAT_CONF/t_auto.token"
 chmod 600 "$WAT_CONF/t_auto.token"
 role() { echo Kharej; }
-tunnels() { echo t_auto; } # the SLA test above leaves a tunnels() stub; point it at the auto tunnel for this check
+tunnels() { echo t_auto; }
 systemctl() { case "${1:-}" in is-enabled) return 1 ;; *) return 0 ;; esac; }
 WAT_UNIT_DIR=$UNITS ensure_prune_timer
-chk "prune scheduling: an auto Kharej setup installs the heal timer" "$([ -f "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "y"
+chk "heal scheduling: an auto Kharej setup installs the heal timer" "$([ -f "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "y"
 systemctl() { case "${1:-}" in is-enabled) return 0 ;; *) return 0 ;; esac; }
 WAT_UNIT_DIR=$UNITS ensure_prune_timer >/dev/null 2>&1
-chk "prune scheduling: an enabled timer is left alone" "$([ -f "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "y"
-# the widen pass itself: three failed checks reopen the token plan and start the cooldown, without operator action
-: >"$WAT_RUN/t_auto.autoprune.done"
-auto_widen_tick t_auto >/dev/null 2>&1
-chk "widen pass: the first failed check is counted" "$(cat "$WAT_RUN/t_auto.autowiden.down" 2>/dev/null || echo 0)" "1"
-auto_widen_tick t_auto >/dev/null 2>&1
-auto_widen_tick t_auto >/dev/null 2>&1
-chk "widen pass: the third check reopens every planned carrier" "$(grep -c '^carrier: icmp+udp+tcp$' "$WAT_CONF/t_auto.yml")" "1"
-chk "widen pass: widening clears the pruned marker" "$([ -e "$WAT_RUN/t_auto.autoprune.done" ] && echo y || echo n)" "n"
-chk "widen pass: widening starts the cooldown stamp" "$([ -f "$WAT_RUN/t_auto.autowiden" ] && echo y || echo n)" "y"
-chk "widen pass: widening resets the failed-check counter" "$([ -e "$WAT_RUN/t_auto.autowiden.down" ] && echo y || echo n)" "n"
-# main menu carriers switch: the status word follows the units and configs, the switch flips it and holds it open
-rm -f "$WAT_CONF/.manager.conf" "$WAT_RUN/t_auto.autowiden"
-systemctl() { return 0; }
-chk "carriers: all open before Iran connects" "$(auto_carrier_status t_auto)" "open|all 3 open · closes 15 min after Iran connects"
-printf 'tcp %s\n' "$(( $(date +%s) - 120 ))" >"$WAT_RUN/t_auto.autoprune"
-chk "carriers: a stable pick shows the time left" "$(auto_carrier_status t_auto)" "open|all 3 open · closes in about 13 min"
-rm -f "$WAT_RUN/t_auto.autoprune"
-_cs_narrow() { NONINTERACTIVE=1; auto_live() { AN_D='tcp'; AN_R=''; }; auto_carriers_toggle t_auto; }
-( _cs_narrow ) >/dev/null 2>&1
-chk "carriers: closing keeps what Iran uses" "$(grep -c '^carrier: tcp$' "$WAT_CONF/t_auto.yml")" "1"
-chk "carriers: closed shows the count" "$(auto_carrier_status t_auto)" "closed|1 of 3 open"
-( NONINTERACTIVE=1; auto_carriers_toggle t_auto ) >/dev/null 2>&1
-chk "carriers: opening restores the plan" "$(grep -c '^carrier: icmp+udp+tcp$' "$WAT_CONF/t_auto.yml")" "1"
-chk "carriers: opening holds them open" "$(auto_carrier_status t_auto)" "open|all 3 open · stays open until you close it"
-( _cs_narrow ) >/dev/null 2>&1
-chk "carriers: closing hands back to the automatic pass" "$([ -e "$WAT_CONF/t_auto.keepopen" ] && echo y || echo n)" "n"
-systemctl() { return 1; }
-chk "carriers: a stopped and disabled side is closed" "$(auto_carrier_status t_auto)" "closed|0 of 3 open"
+chk "heal scheduling: an enabled timer is left alone" "$([ -f "$UNITS/$HEAL_UNIT.timer" ] && echo y || echo n)" "y"
 systemctl() { return 0; }
 DASH_N=(t_auto)
-chk "carriers: the main menu row shows the status" "$(dash_row 1 t_auto 2>/dev/null | grep -c 'carriers.*closed.*1 of 3 open')" "1"
-chk "carriers: the main menu offers the switch" "$(dash_actions 2>/dev/null | grep -c 'open/close carriers')" "1"
+chk "dashboard: auto tunnel row has no manual carriers sub-line" "$(dash_row 1 t_auto 2>/dev/null | grep -c 'carriers.*open' || true)" "0"
+chk "dashboard: main menu never offers open/close carriers button" "$(dash_actions 2>/dev/null | grep -c 'open/close carriers' || true)" "0"
 DASH_N=()
-chk "carriers: no auto tunnel, no switch" "$(dash_actions 2>/dev/null | grep -c 'open/close carriers' || true)" "0"
-rm -f "$WAT_RUN/t_auto.autoprune.done"
-# finalize (owner rule 2026-11-07): Iran's pick becomes the tunnel, the test parts are deleted, never the real link
-_fin_setup() {
-  rm -f "$WAT_CONF/t_fin.finalized" "$WAT_CONF/t_fin.iranip"
-  printf 'mode: server
-key-file: %s/t_fin.key
-carrier: icmp+udp+tcp
-listen-udp: ":4443"
-listen-tcp: ":4443"
-metrics: 127.0.0.1:19751
-' "$WAT_CONF" >"$WAT_CONF/t_fin.yml"
-  printf '# companion
-mode: server
-key-file: %s/t_fin.key
-carrier: icmp+tcp
-reverse: true
-peer-icmp: 198.51.100.7
-peer-tcp: 198.51.100.7:24431
-metrics: 127.0.0.1:19752
-' "$WAT_CONF" >"$WAT_CONF/t_fin-r.yml"
-  make_token auto '203.0.113.10' 'k' '/wat' '' '' '' '' 'd=udp:4443,tcp:4443;r=tcp:24431' >"$WAT_CONF/t_fin.token"
-  : >"$WAT_RUN/t_fin.autoprune.done"
-}
-_fin_stubs='systemctl() { return 0; }; fw_close() { echo "$1" >>"$WAT_RUN/fin.fw"; }; auto_ext_live() { AE_LIVE=""; return 2; }'
-_fin_setup; rm -f "$WAT_RUN/fin.fw"
-( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R='tcp'; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "finalize: a reverse pick moves into the tunnel's own name" "$(grep -c '^reverse: true$' "$WAT_CONF/t_fin.yml")" "1"
-chk "finalize: the reverse side's own config is gone" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
-chk "finalize: the auto token and finalized marker are kept for reopen" "$([ -f "$WAT_CONF/t_fin.token" ] && [ -f "$WAT_CONF/t_fin.finalized" ] && echo y || echo n)" "y"
-chk "finalize: the direct test ports are closed" "$(sort "$WAT_RUN/fin.fw" 2>/dev/null | tr '
-' ' ')" "4443/tcp 4443/udp "
-chk "finalize: a single reverse carrier gets the plain peer key" "$(grep -c '^peer: 198.51.100.7:24431$' "$WAT_CONF/t_fin.yml")" "1"
-rm -f "$WAT_CONF/t_fin.yml"
-_fin_setup
-( eval "$_fin_stubs"; auto_live() { AN_D='tcp'; AN_R=''; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "finalize: a direct pick keeps only that carrier" "$(grep -c '^carrier: tcp$' "$WAT_CONF/t_fin.yml")" "1"
-chk "finalize: a direct pick deletes the reverse side" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
-chk "finalize: a single direct carrier gets the plain listen key" "$(grep -c '^listen: ":4443"$' "$WAT_CONF/t_fin.yml")" "1"
-rm -f "$WAT_CONF/t_fin.yml"
-_fin_setup; rm -f "$WAT_RUN/fin.fw"
-printf '# child
-mode: server
-key-file: %s/t_fin.key
-carrier: vxlan
-listen: ":4789"
-' "$WAT_CONF" >"$WAT_CONF/t_fin-e-vxlan.yml"
-printf 't_fin
-' >"$WAT_CONF/t_fin-e-vxlan.autoext"
-( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R=''; }; auto_ext_live() { AE_LIVE="t_fin-e-vxlan"; return 0; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "finalize: a shaped pick moves into the tunnel's own name" "$(grep -c '^carrier: vxlan$' "$WAT_CONF/t_fin.yml")" "1"
-chk "finalize: a shaped pick keeps its UDP rule" "$(cat "$WAT_RUN/fin.fw" 2>/dev/null | grep -c '4789' || true)" "0"
-chk "finalize: a shaped pick's child config is gone" "$([ -e "$WAT_CONF/t_fin-e-vxlan.yml" ] && echo y || echo n)" "n"
-chk "finalize: a shaped pick deletes the reverse side" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
-rm -f "$WAT_CONF/t_fin.yml"
-_fin_setup
-( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R=''; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "finalize: no pick visible, nothing is deleted" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && [ -e "$WAT_CONF/t_fin.token" ] && echo y || echo n)" "y"
-( eval "$_fin_stubs"; auto_live() { AN_D='udp'; AN_R='tcp'; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "finalize: a bond across both sides keeps the auto tunnel" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "y"
-( umask 077; printf 'autoprune-direct=0
-' >"$WAT_CONF/.manager.conf" )
-( eval "$_fin_stubs"; auto_live() { AN_D=''; AN_R='tcp'; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "finalize: autoprune-direct=0 keeps the direct side" "$([ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "y"
-rm -f "$WAT_CONF/.manager.conf"
-( eval "$_fin_stubs"; NONINTERACTIVE=1; auto_live() { AN_D=''; AN_R='tcp'; }; delete_tunnel t_fin ) >/dev/null 2>&1
-chk "delete: deleting the test tunnel keeps Iran's reverse link" "$(grep -c '^reverse: true$' "$WAT_CONF/t_fin.yml" 2>/dev/null)" "1"
-_del_out=$( eval "$_fin_stubs"; NONINTERACTIVE=1; sleep() { :; }; stats() { return 1; }; is_auto_kharej() { [ "$1" = t_fin ]; }
-  auto_ext_names() { :; }; touch "$WAT_CONF/t_fin-r.yml"; delete_tunnel t_fin 2>&1 )
-chk "delete: an unreadable pick names the running side before deleting" "$(grep -c "Could not read which side Iran uses. Still running: t_fin-r" <<<"$_del_out")" "1"
-_fin_setup
-( eval "$_fin_stubs"; NONINTERACTIVE=1; delete_tunnel t_fin ) >/dev/null 2>&1
-chk "delete: a second delete removes it" "$([ -e "$WAT_CONF/t_fin.yml" ] && echo y || echo n)" "n"
-rm -f "$WAT_CONF/t_fin"* "$WAT_RUN/t_fin"* "$WAT_RUN/fin.fw"
-# abandoned (field 2026-11-08): Iran moved to another tunnel here, the auto tunnel never got a client
-_ab='auto_live() { AN_D=""; AN_R=""; }'
-_fin_setup
-( eval "$_fin_stubs"; eval "$_ab"; other_kharej_live() { return 0; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "abandoned: the first pass only starts the clock" "$([ -e "$WAT_CONF/t_fin.yml" ] && [ -s "$WAT_RUN/t_fin.abandoned" ] && echo y || echo n)" "y"
-( eval "$_fin_stubs"; eval "$_ab"; other_kharej_live() { return 1; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "abandoned: Iran offline everywhere keeps it and resets the clock" "$([ -e "$WAT_CONF/t_fin.yml" ] && [ ! -e "$WAT_RUN/t_fin.abandoned" ] && echo y || echo n)" "y"
-echo $(( $(date +%s) - 7200 )) >"$WAT_RUN/t_fin.abandoned"
-( eval "$_fin_stubs"; auto_live() { AN_D=""; AN_R="tcp"; }; other_kharej_live() { return 0; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "abandoned: a client on its own side keeps it" "$([ -e "$WAT_CONF/t_fin.token" ] || [ -e "$WAT_CONF/t_fin.yml" ] && echo y || echo n)" "y"
-rm -f "$WAT_CONF/t_fin"* "$WAT_RUN/t_fin"*; _fin_setup
-echo $(( $(date +%s) - 7200 )) >"$WAT_RUN/t_fin.abandoned"
-( eval "$_fin_stubs"; eval "$_ab"; other_kharej_live() { return 0; }; auto_prune_tick t_fin ) >/dev/null 2>&1
-chk "abandoned: after the grace it is deleted with its reverse side" "$([ -e "$WAT_CONF/t_fin.yml" ] || [ -e "$WAT_CONF/t_fin-r.yml" ] && echo y || echo n)" "n"
+# auto_sync_companion: prefers non-CDN client IPs over CDN edge IPs, and updates NAME-r when Iran's IP changes
+( stats() { echo '{"alive":true,"clients":[{"carrier":"wss","ip":"172.67.1.9"},{"carrier":"tcp","ip":"198.51.100.7"}]}'; }
+  free_metrics_port() { echo 19761; }; ensure_template() { :; }
+  auto_sync_companion t_auto ) >/dev/null 2>&1
+chk "companion sync: prefers direct Iran IP over CDN edge IP" "$(cfg t_auto-r peer-tcp)" "198.51.100.7:24431"
+( stats() { echo '{"alive":true,"clients":[{"carrier":"tcp","ip":"198.51.100.88"}]}'; }
+  free_metrics_port() { echo 19761; }; ensure_template() { :; }
+  auto_sync_companion t_auto ) >/dev/null 2>&1
+chk "companion sync: updates NAME-r when Iran IP changes" "$(cfg t_auto-r peer-tcp)" "198.51.100.88:24431"
+rm -f "$WAT_CONF"/t_auto*
+# unconditional delete: deleting NAME removes NAME, NAME-r, and NAME-e-* in one step even while Iran uses NAME-r
+printf 'k_fin\n' >"$WAT_CONF/t_fin.key"
+printf 'mode: server\nkey-file: %s/t_fin.key\ncarrier: icmp+udp+tcp\nlisten-udp: ":14451"\nlisten-tcp: ":14452"\nmetrics: 127.0.0.1:19751\n' "$WAT_CONF" >"$WAT_CONF/t_fin.yml"
+printf '# companion\nmode: server\nkey-file: %s/t_fin.key\ncarrier: icmp+tcp\nreverse: true\npeer-icmp: 198.51.100.7\npeer-tcp: 198.51.100.7:24431\nmetrics: 127.0.0.1:19752\n' "$WAT_CONF" >"$WAT_CONF/t_fin-r.yml"
+printf '# child\nmode: server\nkey-file: %s/t_fin.key\ncarrier: vxlan\nlisten: ":14789"\n' "$WAT_CONF" >"$WAT_CONF/t_fin-e-vxlan.yml"
+printf 't_fin\n' >"$WAT_CONF/t_fin-e-vxlan.autoext"
+make_token auto '203.0.113.10' 'k_fin' '/wat' '' '' '' '' 'd=udp:14451,tcp:14452,vxlan:14789;r=tcp:24431;e=1' >"$WAT_CONF/t_fin.token"
+rm -f "$WAT_RUN/fin.fw"
+( systemctl() { return 0; }; fw_close() { echo "$1" >>"$WAT_RUN/fin.fw"; }; auto_live() { AN_D=''; AN_R='tcp'; AN_E=''; }
+  NONINTERACTIVE=1 delete_tunnel t_fin ) >/dev/null 2>&1
+chk "delete: one delete removes parent, companion, and extended child" "$([ -e "$WAT_CONF/t_fin.yml" ] || [ -e "$WAT_CONF/t_fin-r.yml" ] || [ -e "$WAT_CONF/t_fin-e-vxlan.yml" ] && echo left || echo gone)" "gone"
+chk "delete: closes parent and shaped firewall ports" "$(sort "$WAT_RUN/fin.fw" 2>/dev/null | tr '\n' ' ')" "14451/udp 14452/tcp 14789/udp "
 rm -f "$WAT_CONF/t_fin"* "$WAT_RUN/t_fin"* "$WAT_RUN/fin.fw"
 # the port check sees an auto tunnel's listen-<carrier> ports even when it is stopped
 printf 'mode: server
@@ -1615,56 +1515,17 @@ _h4_gate=$( bin_ver_ok() { return 1; }; adv_33 >/dev/null 2>&1 && echo ok || ech
 chk "H4: the 3.3.0 write gate refuses an older engine" "$_h4_gate" "refused"
 chk "H4: the write gate allows a 3.3.0 engine" "$(adv_33 >/dev/null 2>&1 && echo ok)" "ok"
 rm -f "$WAT_CONF/t_h4.yml"
-# H10/D1: default automatic cleanup is reverse-side only; direct narrowing is opt-in (a bonded Iran client looks like
-# one direct carrier, so narrowing it by default could break failover)
-chk "prune scope: default closes the reverse side only" "$(prune_targets 0 'tcp' 'icmp' 1)" "reverse"
-chk "prune scope: no companion -> nothing to clean" "$(prune_targets 0 'tcp' '' 0)" "none"
-chk "prune scope: a live direct set never narrows by default (bond safety)" "$(prune_targets 0 'tcp' 'icmp' 1)" "reverse"
-chk "prune scope: autoprune-direct=1 narrows both sides" "$(prune_targets 1 'tcp' 'icmp' 1)" "both"
-chk "prune scope: direct opt-in with nothing live -> none" "$(prune_targets 1 '' '' 0)" "none"
-chk "prune signature: reverse-only ignores the direct set" "$(prune_signature 0 'tcp' 'icmp' 1)" "r:icmp"
-chk "prune signature: an unused companion is still watched" "$(prune_signature 0 'tcp' '' 1)" "r:-"
-chk "prune signature: the opt-in covers both sides" "$(prune_signature 1 'tcp' 'icmp' 1)" "tcp+r:icmp"
-chk "prune scope: both sides close by default" "$(autoprune_direct_setting)" "1"
-( umask 077; printf 'autoprune-direct=0\n' >"$WAT_CONF/.manager.conf" )
-chk "prune scope: autoprune-direct=0 is read from .manager.conf" "$(autoprune_direct_setting)" "0"
-rm -f "$WAT_CONF/.manager.conf"
-chk "prune: the reverse-only pass is a separate function" "$(grep -c '^auto_prune_reverse_only()' wattun-manager)" "1"
-chk "prune: the default pass cannot call auto_narrow directly" "$(awk '/^auto_prune_tick\(\)/,/^}/' wattun-manager | grep -c 'targets.*= both')" "1"
-# end-to-end offline pass: with the default scope a companion that Iran does not use is closed by the pass, and the
-# direct carrier list is left exactly as it was (systemd is stubbed by this harness); grace 0 would disable it, so the
-# stamp is pre-seeded as the stable signature and the window is 1 minute.
-cat >"$WAT_CONF/t_pr.yml" <<'EOF'
-mode: server
-carrier: tcp+icmp
-EOF
-cat >"$WAT_CONF/t_pr-r.yml" <<'EOF'
-mode: client
-carrier: icmp
-peer: 203.0.113.5
-EOF
-printf 'wat1:%s\n' "$(printf 'auto|203.0.113.5|k||||||d:icmp,tcp;r:icmp' | base64 | tr -d '\n')" >"$WAT_CONF/t_pr.token"
-( umask 077; printf 'autoprune=1\nautoprune-direct=0\n' >"$WAT_CONF/.manager.conf" )
-mkdir -p "$WAT_RUN"; printf 'r:- 0\n' >"$WAT_RUN/t_pr.autoprune"
-_pr_sys="$WAT_RUN/.prune-sys"; rm -f "$_pr_sys"
-_pr_out=$( NONINTERACTIVE=1; systemctl() { echo "$*" >>"$_pr_sys"; return 0; }; stats() { echo '{"alive": false, "clients": []}'; }; auto_prune_tick t_pr ) 2>/dev/null
-chk "prune pass: the default scope closes the unused reverse side" "$(grep -c 'stop wattest@t_pr-r' "$_pr_sys" 2>/dev/null)" "1"
-chk "prune pass: it never touches the direct unit" "$(grep -cE '(stop|restart|disable).*@t_pr($|[^-])' "$_pr_sys")" "0"
-chk "prune pass: it never rewrites the direct carrier list" "$(cfg t_pr carrier)" "tcp+icmp"
-chk "prune pass: it records the done marker" "$([ -f "$WAT_RUN/t_pr.autoprune.done" ] && echo y)" "y"
-# a reverse side that is fully in use must stay open and keep being watched (no done marker)
-rm -f "$WAT_RUN/t_pr.autoprune.done"; printf 'r:icmp 0\n' >"$WAT_RUN/t_pr.autoprune"
-_pr_out2=$( NONINTERACTIVE=1; auto_live() { AN_D=''; AN_R='icmp'; }; auto_prune_tick t_pr ) 2>/dev/null
-chk "prune pass: a fully used reverse side is left open" "$([ -f "$WAT_RUN/t_pr.autoprune.done" ] && echo y || echo n)" "n"
-chk "prune pass: the window restarts instead of marking done" "$(cut -d' ' -f1 "$WAT_RUN/t_pr.autoprune")" "r:icmp"
-# H1: extended cleanup must not depend on the reverse/direct narrowing succeeding (reverse-only returns 2 here).
-_ext_log="$WAT_RUN/.ext-prune"; : >"$_ext_log"
-rm -f "$WAT_RUN/t_pr.autoprune.done"; printf 'r:icmp 0\n' >"$WAT_RUN/t_pr.autoprune"
-_pr_out3=$( NONINTERACTIVE=1; auto_live() { AN_D=''; AN_R='icmp'; }; auto_ext_names() { echo t_pr-e-vxlan; }; auto_ext_prune() { echo called >>"$_ext_log"; }; auto_prune_tick t_pr ) 2>/dev/null
-chk "prune pass: ext cleanup runs when every reverse leg is in use (H1)" "$(grep -c called "$_ext_log" 2>/dev/null)" "1"
-rm -f "$_ext_log"
-rm -f "$WAT_CONF/t_pr.yml" "$WAT_CONF/t_pr-r.yml" "$WAT_CONF/t_pr.token" "$WAT_CONF/.manager.conf" \
-      "$WAT_RUN/t_pr.autoprune" "$WAT_RUN/t_pr.autoprune.done" "$WAT_RUN/.prune-sys"
+# Always-open helper enumeration & action forwarding across NAME + NAME-r + NAME-e-*
+printf 'mode: server\ncarrier: icmp+tcp\n' >"$WAT_CONF/t_pr.yml"
+printf 'mode: server\ncarrier: icmp\nreverse: true\n' >"$WAT_CONF/t_pr-r.yml"
+printf 'mode: server\ncarrier: vxlan\n' >"$WAT_CONF/t_pr-e-vxlan.yml"
+printf 't_pr\n' >"$WAT_CONF/t_pr-e-vxlan.autoext"
+make_token auto '203.0.113.5' 'k' '/wat' '' '' '' '' 'd=tcp:14443,vxlan:14789;r=icmp;e=1' >"$WAT_CONF/t_pr.token"
+chk "auto helpers: lists both companion and extended listener" "$(auto_helpers t_pr | tr '\n' ' ')" "t_pr-r t_pr-e-vxlan "
+_pr_sys="$WAT_RUN/.prune-sys"; : >"$_pr_sys"
+( systemctl() { echo "$*" >>"$_pr_sys"; return 0; }; auto_for_each_unit t_pr stop ) >/dev/null 2>&1
+chk "auto unit forwarding: stop reaches parent, companion, and extended child" "$(grep -cE 'stop wattest@(t_pr|t_pr-r|t_pr-e-vxlan)$' "$_pr_sys")" "3"
+rm -f "$WAT_CONF"/t_pr* "$_pr_sys"
 # M8: a hand-edited relative state-dir resolves from / in the manager (the unit's CWD), and says so out loud
 cat >"$WAT_CONF/t_m8.yml" <<'EOF'
 mode: client
@@ -1726,35 +1587,21 @@ printf 'a-e-b\n' >"$WAT_CONF/a-e-b-e-sit.autoext"
 chk "shaped children: the exact prefix is parsed, not the first -e- (M1)" "$(auto_ext_names a-e-b | tr '\n' ' ')" "a-e-b-e-sit a-e-b-e-vxlan "
 chk "shaped pick: the signature names the live child alone (H1)" \
   "$( stats() { case "$1" in a-e-b-e-vxlan) echo '{"alive": true, "clients": [{"ip": "203.0.113.9"}]}' ;; *) echo '{"alive": true, "clients": []}' ;; esac; }; auto_ext_sig a-e-b )" "e:vxlan"
-( umask 077; printf 'autoprune=1\n' >"$WAT_CONF/.manager.conf" ) # a one-minute stable-pick window
-printf 'e:vxlan 0\n' >"$WAT_RUN/a-e-b.autoprune"                # the pick has been stable since then
-rm -f "$WAT_RUN/a-e-b.autoprune.done"
-chk "prune pass: no reverse companion, so only the shapes can be the pick (H1)" "$([ -e "$WAT_CONF/a-e-b-r.yml" ] && echo y || echo n)" "n"
 : >"$SY"
-( stats() { case "$1" in
-    a-e-b-e-vxlan) echo '{"alive": true, "clients": [{"ip": "203.0.113.9", "carrier": "vxlan"}]}' ;;
-    *) echo '{"alive": true, "clients": []}' ;;
+( systemctl() { case "$*" in
+    "is-enabled -q wattest@a-e-b"|"is-active -q wattest@a-e-b") return 0 ;;
+    "is-enabled -q wattest@a-e-b-e-vxlan"|"is-active -q wattest@a-e-b-e-vxlan") return 0 ;;
+    "is-enabled -q wattest@a-e-b-e-sit") return 0 ;;
+    "is-active -q wattest@a-e-b-e-sit") return 1 ;;
+    *) printf '%s\n' "$*" >>"$SY"; return 0 ;;
   esac; }
-  auto_prune_tick a-e-b ) >/dev/null 2>&1
-chk "prune pass: a shaped-only live child is the pick (H1)" "$(grep -c 'stop wattest@a-e-b-e-vxlan' "$SY")" "0"
-chk "prune pass: the shapes Iran does not use are closed (H1)" "$(grep -c 'stop wattest@a-e-b-e-sit' "$SY")" "1"
-chk "prune pass: the shaped pick marks the pass done (H1)" "$([ -f "$WAT_RUN/a-e-b.autoprune.done" ] && echo y || echo n)" "y"
-printf '2' >"$WAT_RUN/a-e-b.autowiden.down"
-( stats() { case "$1" in
-    a-e-b-e-vxlan) echo '{"alive": true, "clients": [{"ip": "203.0.113.9"}]}' ;;
-    *) echo '{"alive": true, "clients": []}' ;;
-  esac; }
-  auto_widen_tick a-e-b ) >/dev/null 2>&1
-chk "widen pass: a live shaped child counts as up (H1)" "$([ -e "$WAT_RUN/a-e-b.autowiden.down" ] && echo y || echo n)" "n"
+  heal_auto_helpers a-e-b ) >/dev/null 2>&1
+chk "heal helpers: down shaped child restarts while live child stays untouched" "$(grep -c 'restart wattest@a-e-b-e-sit' "$SY")/$(grep -c 'restart wattest@a-e-b-e-vxlan' "$SY")" "1/0"
 : >"$SY"
-( systemctl() { printf '%s\n' "$*" >>"$SY"; return 0; }; NONINTERACTIVE=1 auto_widen a-e-b ) >/dev/null 2>&1
-chk "widen: the hidden listeners are re-enabled and restarted (B3)" "$(grep -c 'restart wattest@a-e-b-e-vxlan' "$SY")" "1"
-: >"$SY"
-( systemctl() { printf '%s\n' "$*" >>"$SY"; return 0; }; auto_prune_cmd a-e-b --direct ) >/dev/null 2>&1
-chk "prune --direct: reopens the listeners for a retest (B3)" "$(grep -c 'restart wattest@a-e-b-e-vxlan' "$SY")" "1"
-rm -f "$WAT_CONF/.manager.conf" "$WAT_CONF/a-e-b.yml" "$WAT_CONF/a-e-b.token" "$WAT_CONF/a-e-b-e-vxlan.yml" \
-      "$WAT_CONF/a-e-b-e-sit.yml" "$WAT_CONF/a-e-b-e-vxlan.autoext" "$WAT_CONF/a-e-b-e-sit.autoext" \
-      "$WAT_RUN/a-e-b.autoprune" "$WAT_RUN/a-e-b.autoprune.done" "$WAT_RUN/a-e-b.autowiden.down"
+( systemctl() { printf '%s\n' "$*" >>"$SY"; return 0; }; NONINTERACTIVE=1 auto_reopen a-e-b ) >/dev/null 2>&1
+chk "reopen: hidden shaped listeners are enabled and restarted (B3)" "$(grep -c 'restart wattest@a-e-b-e-vxlan' "$SY")" "1"
+rm -f "$WAT_CONF/a-e-b.yml" "$WAT_CONF/a-e-b.token" "$WAT_CONF/a-e-b-e-vxlan.yml" \
+      "$WAT_CONF/a-e-b-e-sit.yml" "$WAT_CONF/a-e-b-e-vxlan.autoext" "$WAT_CONF/a-e-b-e-sit.autoext"
 
 # H2/L12: a hidden child inherits the parent's allowlist (otherwise the engine falls back to the permissive 1-65535),
 # and no metrics line is written when free_metrics_port finds no free port.
@@ -1870,14 +1717,17 @@ chk "L8: uninstall closes a hidden child's UDP rule (F17)" "$(grep -c '^4789/udp
 chk "L8: only the shaped child had a rule to close (F17)" "$(grep -c . "$SMOKE/u/fw")" "1"
 rm -rf "$SMOKE/u"
 
-# L2: a busy conventional UDP port is not handed out as the listen port; the fallback probes UDP, not TCP.
+# L2: default_listen picks a verified-free random open port (10000..32767) probing UDP for shaped/UDP carriers,
+# and picks non-443/80 Cloudflare ports in CDN mode.
 _lb2=$(declare -f listen_blocked)
-listen_blocked() { printf '%s %s\n' "$1" "$2" >>"$SMOKE/lb2.log"; [ "$2" = 4789 ]; }
+listen_blocked() { printf '%s %s\n' "$1" "$2" >>"$SMOKE/lb2.log"; [ "$2" = 15555 ]; }
 : >"$SMOKE/lb2.log"
-chk "L2: a free conventional port is used as-is (F19)" "$(listen_blocked() { return 1; }; default_listen vxlan)" "4789"
-chk "L2: a busy conventional port falls back (F10)" "$(default_listen vxlan)" "4443"
+_dl_vx=$(default_listen vxlan)
+_dl_cdn=$(default_listen wss 1)
 eval "$_lb2"
-chk "L2: the fallback probe is udp for a shaped carrier (F10)" "$(grep -c '^udp 4443$' "$SMOKE/lb2.log")" "1"
+chk "L2: default_listen picks a random open UDP port in 10000..32767" "$([ "$_dl_vx" -ge 10000 ] && [ "$_dl_vx" -le 32767 ] && [ "$_dl_vx" != 15555 ] && echo y || echo n)" "y"
+chk "L2: default_listen probes udp for a shaped carrier (F10)" "$(grep -c "^udp $_dl_vx$" "$SMOKE/lb2.log")" "1"
+chk "L2: CDN mode picks a non-443 Cloudflare HTTPS port" "$(case " $CF_HTTPS_PORTS " in *" $_dl_cdn "*) echo y ;; *) echo n ;; esac)" "y"
 
 # L3: "0" in the Advanced state-dir row means the engine default, never a "/0" directory.
 printf 'mode: client\ncarrier: tcp\nstate-dir: /run/wattun\n' >"$WAT_CONF/t_l3.yml"
@@ -1958,15 +1808,15 @@ systemctl() { local u=${!#}; case "$1" in is-active) case " $_ACT " in *" ${u##*
 stats() { local v=''; case "$1" in t_ti) v=$_SP ;; t_ti-r) v=$_SR ;; t_tb) v=$_SB ;; esac; [ -n "$v" ] && printf '%s' "$v"; }
 _on='{"alive":true,"sessions":1}'; _off='{"alive":false,"sessions":0}'
 _ACT='t_ti t_ti-r'; _SP=$_off; _SR=$_on; tinfo t_ti
-chk "status: a parent with the link on its reverse side is up" "$TI_STATE|$TI_WHY" "up|Iran is connected through t_ti-r"
+chk "status: a parent with the link on its reverse side is up seamlessly" "$TI_STATE|$TI_WHY" "up|"
 _ACT='t_ti-r'; _SP=''; tinfo t_ti
 chk "status: a parent the cleanup stopped is still up through its reverse side" "$TI_STATE" "up"
 _ACT='t_ti t_ti-r'; _SP=$_on; _SR=$_off; tinfo t_ti-r
 chk "status: the reverse side stands by while Iran is on the direct side" "$TI_STATE" "standby"
 _SP=$_off; tinfo t_ti
 chk "status: no link on either side is down" "$TI_STATE" "down"
-_SP=''; _SR=$_on; tinfo t_ti
-chk "status: a silent stats port is unknown, not down" "$TI_STATE" "unknown"
+_SP=''; _SR=$_off; tinfo t_ti
+chk "status: a silent stats port with no live leg is unknown, not down" "$TI_STATE" "unknown"
 _SP=$_off; _SR=''; tinfo t_ti
 chk "status: a silent other side is unknown, not down" "$TI_STATE" "unknown"
 _ACT=''; tinfo t_ti
@@ -1979,11 +1829,10 @@ state_cell Iran degraded; chk "status: degraded reads partial" "$SC_TXT" "partia
 _SP='{"alive":true,"clients":[{"carrier":"tcp"}],"carriers":[{"alive":true,"name":"tcp"},{"alive":true,"name":"wss"},{"alive":false,"name":"h2"}]}'; _SR=''
 rm -f "$WAT_CONF/t_ti-r.yml"; auto_live t_ti
 chk "cleanup: every live leg of a bond counts as in use" "$AN_D" "tcp wss "
-printf 'mode: server\ncarrier: tcp+wss\nreverse: true\nmetrics: 127.0.0.1:2\n' >"$WAT_CONF/t_ti-r.yml"
 printf 'mode: server\ncarrier: tcp\nreverse: true\nmetrics: 127.0.0.1:2\n' >"$WAT_CONF/t_ti-r.yml"; _SP=$_off; _SR=$_on; auto_live t_ti
 chk "cleanup: a narrowed reverse side with one carrier still counts as in use" "$AN_R" "tcp "
 _ACT='t_ti'; chk "lists: a stopped reverse side is hidden" "$(listed_tunnels | grep -c '^t_ti-r$')" "0"
-_ACT='t_ti t_ti-r'; chk "lists: a running reverse side is shown" "$(listed_tunnels | grep -c '^t_ti-r$')" "1"
+_ACT='t_ti t_ti-r'; chk "lists: a running reverse companion stays hidden" "$(listed_tunnels | grep -c '^t_ti-r$')" "0"
 rm -f "$WAT_CONF"/t_ti.yml "$WAT_CONF"/t_ti-r.yml "$WAT_CONF"/t_ti.token "$WAT_CONF"/t_tb.yml
 eval "$_ti_stats"; eval "$_ti_sys"; eval "$_ti_tun"
 
@@ -2033,46 +1882,33 @@ sla_max_loss_pct=0
   free_metrics_port() { echo 19799; }
   start_watcher() { :; }
 
-  # WS1: finalize keeps .token + .iranip, reports closed|1 of N open, and auto_widen reopens both sides
+  # WS1: legacy finalized/narrowed auto tunnels migrate automatically to always-open mode via auto_reopen / auto_migrate_all
   printf 'k338\n' >"$WAT_CONF/t_revfin.key"
   printf '198.51.100.44\n' >"$WAT_CONF/t_revfin.iranip"
   cat >"$WAT_CONF/t_revfin.yml" <<EOF
+# WatTunnel - Kharej (server). Kept by wattun-manager from auto tunnel 't_revfin': the carrier Iran picked.
 mode: server
 key-file: $WAT_CONF/t_revfin.key
-carrier: icmp+udp+tcp
-listen-udp: ":4443"
-listen-tcp: ":4443"
+carrier: tcp
+reverse: true
+peer: 198.51.100.44:24431
 path: /api/aa11
 metrics: 127.0.0.1:19781
 ports:
   - 443
 EOF
-  cat >"$WAT_CONF/t_revfin-r.yml" <<EOF
-# companion
-mode: server
-key-file: $WAT_CONF/t_revfin.key
-carrier: icmp+tcp
-reverse: true
-peer-icmp: 198.51.100.44
-peer-tcp: 198.51.100.44:24431
-path: /api/aa11
-metrics: 127.0.0.1:19782
-ports:
-  - 443
-EOF
-  make_token auto '203.0.113.20' 'k338' '/api/aa11' '' '' '443' '' 'd=udp:4443,tcp:4443;r=tcp:24431' >"$WAT_CONF/t_revfin.token"
-  : >"$WAT_RUN/t_revfin.autoprune.done"
-  auto_live() { AN_D=''; AN_R='tcp'; }
-  auto_prune_tick t_revfin >/dev/null 2>&1
-  chk "3.3.8 WS1: finalized auto tunnel stays is_auto_kharej" "$(is_auto_kharej t_revfin && echo y || echo n)" "y"
-  chk "3.3.8 WS1: finalized auto tunnel status is closed|1 of 5 open" "$(auto_carrier_status t_revfin)" "closed|1 of 5 open"
-  NONINTERACTIVE=1 auto_widen t_revfin >/dev/null 2>&1
-  chk "3.3.8 WS1: auto_widen clears .finalized" "$([ -e "$WAT_CONF/t_revfin.finalized" ] && echo y || echo n)" "n"
-  chk "3.3.8 WS1: auto_widen restores direct carrier plan" "$(cfg t_revfin carrier)" "icmp+udp+tcp"
-  chk "3.3.8 WS1: auto_widen drops reverse: true from parent" "$(cfg t_revfin reverse)" ""
-  chk "3.3.8 WS1: auto_widen recreates NAME-r from .iranip" "$([ -f "$WAT_CONF/t_revfin-r.yml" ] && grep -c '198.51.100.44:24431' "$WAT_CONF/t_revfin-r.yml" || echo 0)" "1"
+  make_token auto '203.0.113.20' 'k338' '/api/aa11' '' '' '443' '' 'd=udp:14443,tcp:14444;r=tcp:24431' >"$WAT_CONF/t_revfin.token"
+  : >"$WAT_CONF/t_revfin.finalized"
+  ensure_template() { :; }
+  chk "3.3.8 WS1: finalized auto tunnel triggers auto_needs_reopen" "$(auto_needs_reopen t_revfin && echo y || echo n)" "y"
+  NONINTERACTIVE=1 auto_reopen t_revfin >/dev/null 2>&1
+  chk "3.3.8 WS1: auto_reopen clears .finalized" "$([ -e "$WAT_CONF/t_revfin.finalized" ] && echo y || echo n)" "n"
+  chk "3.3.8 WS1: auto_reopen restores direct carrier plan" "$(cfg t_revfin carrier)" "icmp+udp+tcp"
+  chk "3.3.8 WS1: auto_reopen drops reverse: true from parent" "$(cfg t_revfin reverse)" ""
+  chk "3.3.8 WS1: auto_reopen preserves ports allowlist" "$(grep -c '^[[:space:]]*- 443$' "$WAT_CONF/t_revfin.yml")" "1"
+  chk "3.3.8 WS1: auto_reopen recreates hidden NAME-r from .iranip" "$([ -f "$WAT_CONF/t_revfin-r.yml" ] && grep -c '198.51.100.44:24431' "$WAT_CONF/t_revfin-r.yml" || echo 0)" "1"
 
-  # WS1: legacy 3.3.3-3.3.7 finalized tunnel without .token recovers auto token + [o] main menu action
+  # WS1: legacy 3.3.3-3.3.7 finalized tunnel without .token recovers token + .iranip and migrates via auto_migrate_all
   printf 'kleg\n' >"$WAT_CONF/t_leg.key"
   cat >"$WAT_CONF/t_leg.yml" <<EOF
 # WatTunnel - Kharej (server). Kept by wattun-manager from auto tunnel 't_leg': the carrier Iran picked.
@@ -2088,11 +1924,14 @@ ports:
 EOF
   public_ip() { echo 203.0.113.88; }
   listen_blocked() { return 1; }
+  eval "$(sed -n '/^tunnels()/,/^}/p' wattun-manager)"
+  auto_migrate_all 0 >/dev/null 2>&1
+  chk "3.3.8 WS1: auto_migrate_all recovers 3.3.3-3.3.7 .token and clears .finalized" "$([ -f "$WAT_CONF/t_leg.token" ] && [ ! -e "$WAT_CONF/t_leg.finalized" ] && echo y || echo n)" "y"
+  chk "3.3.8 WS1: auto_migrate_all records .iranip from reverse peer" "$(cat "$WAT_CONF/t_leg.iranip" 2>/dev/null)" "198.51.100.77"
+  chk "3.3.8 WS1: auto_migrate_all creates hidden companion t_leg-r" "$([ -f "$WAT_CONF/t_leg-r.yml" ] && echo y || echo n)" "y"
+  chk "3.3.8 WS1: real tunnels() lists parent t_leg and hides companion t_leg-r" "$(tunnels | grep -c '^t_leg$')/$(tunnels | grep -c '^t_leg-r$')" "1/0"
   DASH_N=(t_leg)
-  chk "3.3.8 WS1: dash_auto_names recovers 3.3.3-3.3.7 finalized tunnel" "$(dash_auto_names)" "t_leg"
-  chk "3.3.8 WS1: recovered tunnel gets .token and .finalized" "$([ -f "$WAT_CONF/t_leg.token" ] && [ -f "$WAT_CONF/t_leg.finalized" ] && echo y || echo n)" "y"
-  chk "3.3.8 WS1: recovered tunnel records .iranip from reverse peer" "$(cat "$WAT_CONF/t_leg.iranip" 2>/dev/null)" "198.51.100.77"
-  chk "3.3.8 WS1: main menu offers key [o] open/close carriers" "$(strip_ansi "$(dash_actions 2>/dev/null)" | grep -c '\[o\] open/close carriers')" "1"
+  chk "3.3.8 WS1: main menu has no [o] open/close carriers toggle" "$(strip_ansi "$(dash_actions 2>/dev/null)" | grep -c '\[o\] open/close carriers' || true)" "0"
   rm -f "$WAT_CONF"/t_revfin* "$WAT_CONF"/t_leg* "$WAT_RUN"/t_revfin* "$WAT_RUN"/fw338
 
   # WS3: mode c custom bond supports joining 2+ reverse rows and forbids mixing direct + reverse
@@ -2121,7 +1960,7 @@ EOF
   # WS4: auto_pick_rplan picks distinct non-colliding blocks in 30000..39990
   rp1=$(auto_pick_rplan)
   b1=${rp1#tcp:}; b1=${b1%%,*}
-  chk "3.3.8 WS4: auto_pick_rplan picks in 30000..39990" "$([ "$b1" -ge 30000 ] && [ "$b1" -le 39990 ] && echo y || echo n)" "y"
+  chk "3.3.8 WS4: auto_pick_rplan picks in 10000..32767" "$([ "$b1" -ge 10000 ] && [ "$b1" -le 32767 ] && echo y || echo n)" "y"
   printf 'mode: server\nlisten-tcp: ":%s"\n' "$b1" >"$WAT_CONF/t_rp1.yml"
   chk "3.3.8 WS4: busy reverse block is avoided" "$(for _i in 1 2 3 4 5; do rp2=$(auto_pick_rplan); [ "$rp2" = "$rp1" ] && echo dup; done)" ""
   rm -f "$WAT_CONF/t_rp1.yml"

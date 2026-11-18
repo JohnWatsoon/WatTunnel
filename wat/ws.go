@@ -60,6 +60,12 @@ func wsMask(b []byte, key [4]byte, pos int) {
 }
 
 func (w *wsConn) writeFrame(op byte, p []byte) error {
+	w.wmu.Lock()
+	defer w.wmu.Unlock()
+	return w.writeFrameLocked(op, p)
+}
+
+func (w *wsConn) writeFrameLocked(op byte, p []byte) error {
 	var hdr [14]byte
 	hdr[0] = 0x80 | op
 	n := 2
@@ -75,8 +81,6 @@ func (w *wsConn) writeFrame(op byte, p []byte) error {
 		binary.BigEndian.PutUint64(hdr[2:], uint64(l))
 		n = 10
 	}
-	w.wmu.Lock()
-	defer w.wmu.Unlock()
 	need := n + 4 + len(p)
 	if cap(w.wbuf) < need {
 		w.wbuf = make([]byte, need)
@@ -202,8 +206,11 @@ func (w *wsConn) Read(p []byte) (int, error) {
 
 func (w *wsConn) Close() error {
 	w.once.Do(func() {
-		w.Conn.SetWriteDeadline(time.Now().Add(time.Second))
-		w.writeFrame(8, []byte{0x03, 0xe8}) // 1000 normal closure, best effort
+		if w.wmu.TryLock() {
+			w.Conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+			_ = w.writeFrameLocked(8, []byte{0x03, 0xe8}) // 1000 normal closure, best effort
+			w.wmu.Unlock()
+		}
 	})
 	return w.Conn.Close()
 }

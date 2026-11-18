@@ -110,6 +110,7 @@ type udpListener struct {
 	target int
 	stat   *portStat
 	mu     sync.Mutex
+	closed bool
 	flows  map[netip.AddrPort]*cflow
 }
 
@@ -169,27 +170,32 @@ func (f *cflow) session() *wat.Session {
 }
 
 func (l *udpListener) newFlow(src netip.AddrPort) *cflow {
-	l.mu.Lock()
-	n := len(l.flows)
-	l.mu.Unlock()
-	if n >= maxUDPFlows {
-		udpFlowCapDrop.Add(1)
-		return nil
-	}
 	var b [8]byte
 	rand.Read(b[:])
 	f := &cflow{id: binary.BigEndian.Uint64(b[:]) | 1, src: src, l: l}
 	f.last.Store(time.Now().UnixNano())
+	// Lock order matches dgramClient.drop: c.mu -> l.mu so Close() cannot miss a concurrent insert.
 	l.c.mu.Lock()
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		l.c.mu.Unlock()
+		return nil
+	}
+	if len(l.flows) >= maxUDPFlows {
+		l.mu.Unlock()
+		l.c.mu.Unlock()
+		udpFlowCapDrop.Add(1)
+		return nil
+	}
 	for l.c.byID[f.id] != nil { // astronomically unlikely, but a clash would cross two users' replies
 		rand.Read(b[:])
 		f.id = binary.BigEndian.Uint64(b[:]) | 1
 	}
 	l.c.byID[f.id] = f
-	l.c.mu.Unlock()
-	l.mu.Lock()
 	l.flows[src] = f
 	l.mu.Unlock()
+	l.c.mu.Unlock()
 	udpFlowsActive.Add(1)
 	l.stat.udpFlows.Add(1)
 	l.stat.connsTotal.Add(1)
@@ -201,6 +207,9 @@ func (l *udpListener) newFlow(src netip.AddrPort) *cflow {
 func (l *udpListener) Close() {
 	l.conn.Close()
 	l.c.mu.Lock()
+	l.mu.Lock()
+	l.closed = true
+	l.mu.Unlock()
 	for id, f := range l.c.byID {
 		if f.l == l {
 			l.c.drop(f, id)
@@ -323,11 +332,15 @@ func serveDgrams(sess *wat.Session, lo, hi int, al *allow, idle time.Duration) {
 					udpFlowCapDrop.Add(1)
 					continue
 				}
+				stat := portReg.get("s", d.Port)
+				if !stat.dgramOK(true, len(d.Data)) {
+					continue
+				}
 				conn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: d.Port})
 				if err != nil {
 					continue
 				}
-				f = &sflow{conn: conn, port: d.Port, stat: portReg.get("s", d.Port)}
+				f = &sflow{conn: conn, port: d.Port, stat: stat}
 				f.stat.udpFlows.Add(1)
 				f.stat.connsTotal.Add(1)
 				mu.Lock()
@@ -357,9 +370,14 @@ func replyPump(sess *wat.Session, id uint64, f *sflow) {
 	for {
 		n, err := f.conn.Read(buf)
 		if err != nil {
-			// a connected UDP socket reports an earlier ICMP port-unreachable as a read error: keep going
-			if strings.Contains(err.Error(), "refused") || strings.Contains(err.Error(), "forcibly closed") {
+			// a connected UDP socket reports an earlier ICMP port-unreachable as a read error, and a >4 KB
+			// local datagram returns EMSGSIZE/WSAEMSGSIZE (the reply is truncated or dropped): keep the flow alive.
+			msg := err.Error()
+			if strings.Contains(msg, "refused") || strings.Contains(msg, "forcibly closed") {
 				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			if strings.Contains(msg, "message too long") || strings.Contains(msg, "larger than the internal message buffer") {
 				continue
 			}
 			return
@@ -374,9 +392,9 @@ func replyPump(sess *wat.Session, id uint64, f *sflow) {
 
 // parseUDPMap parses one -udp entry: PORT or listen:server, optionally @bindaddr; offset is -port-offset.
 func parseUDPMap(m, defBind string, offset int) (addr string, target int, err error) {
-	bind, orig := defBind, m
+	bind, orig := strings.Trim(strings.TrimSpace(defBind), "[]"), m
 	if at := strings.IndexByte(m, '@'); at >= 0 {
-		bind, m = strings.TrimSpace(m[at+1:]), m[:at]
+		bind, m = strings.Trim(strings.TrimSpace(m[at+1:]), "[]"), m[:at]
 	}
 	lp, sp := m, m
 	if i := strings.IndexByte(m, ':'); i >= 0 {
@@ -384,8 +402,9 @@ func parseUDPMap(m, defBind string, offset int) (addr string, target int, err er
 	}
 	l, e1 := strconv.Atoi(strings.TrimSpace(lp))
 	t, e2 := strconv.Atoi(strings.TrimSpace(sp))
-	if e1 != nil || e2 != nil || l < 1 || l > 65535 || t < 1 || t > 65535 {
+	pub := l + offset
+	if e1 != nil || e2 != nil || l < 1 || l > 65535 || t < 1 || t > 65535 || pub < 1 || pub > 65535 {
 		return "", 0, fmt.Errorf("bad -udp entry %q", orig)
 	}
-	return net.JoinHostPort(bind, strconv.Itoa(l+offset)), t, nil
+	return net.JoinHostPort(bind, strconv.Itoa(pub)), t, nil
 }

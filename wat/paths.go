@@ -259,12 +259,14 @@ func (ps *pathSet) allBulkBlocked(fullMask uint64, hasBacklogger bool) bool {
 
 // pacerMode reports whether the currently live path set should run the reliable delivery-rate pacer (3.3.8): true when
 // at least one reliable pool path is live and no uncapped datagram path (udp) is live beside it (an icmp leg is
-// already bounded by its own 16 MB/s token bucket and per-path queue-delay weight).
-func (ps *pathSet) pacerMode() (reliable, direct, anyRel bool) {
+// already bounded by its own 16 MB/s token bucket and per-path queue-delay weight). icmpClamp is true when only
+// capped datagram paths (icmp) remain live and no reliable or uncapped datagram path is live.
+func (ps *pathSet) pacerMode() (reliable, direct, anyRel, icmpClamp bool) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	direct = true
 	anyUncappedUnrel := false
+	anyCappedUnrel := false
 	for i := range ps.p {
 		p := &ps.p[i]
 		if !p.present || p.muted || p.state == pDead {
@@ -281,16 +283,20 @@ func (ps *pathSet) pacerMode() (reliable, direct, anyRel bool) {
 			}
 		} else if p.capBps <= 0 {
 			anyUncappedUnrel = true
+		} else {
+			anyCappedUnrel = true
 		}
 	}
 	reliable = anyRel && !anyUncappedUnrel
-	return reliable, reliable && direct, anyRel
+	icmpClamp = !reliable && anyCappedUnrel && !anyUncappedUnrel
+	return reliable, reliable && direct, anyRel, icmpClamp
 }
 
 func (ps *pathSet) nextPath(interactive bool) int {
 	now := time.Now()
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	ps.eval(now)
 	if ps.mode == "active-backup" {
 		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted && !ps.isFull(0) {
 			return 0
@@ -524,10 +530,15 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 	defer ps.mu.Unlock()
 	ps.eval(now)
 	if ps.mode == "active-backup" {
-		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted {
+		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted && !ps.isFull(0) {
 			return 0
 		}
 		for i := 1; i < len(ps.p); i++ {
+			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted && !ps.isFull(i) {
+				return i
+			}
+		}
+		for i := range ps.p {
 			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted {
 				return i
 			}
@@ -576,7 +587,7 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 	// shortcut: when only capped paths are left, the second pass sends on them past the cap; the pacer is the only
 	// brake then. Upgrade to holding the packet if a bond whose other carriers all died trips the ICMP reroute.
 	for pass := 0; pass < 2; pass++ { // second pass (nothing healthy): spread over every path so one of them answers
-		best, sum := -1, 0.0
+		bestFit, bestAny, sum := -1, -1, 0.0
 		for i := range ps.p {
 			p := &ps.p[i]
 			if !p.present || p.muted || (p.state == pDead || ps.isFull(i) || p.overCap(now)) && pass == 0 {
@@ -590,17 +601,31 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 			// nextPath switches to the smaller-MTU path at the next burst boundary instead of starving it forever.
 			p.credit += w
 			sum += w
-			if (pass > 0 || ps.fits(i, size)) && (best < 0 || p.credit > ps.p[best].credit) {
-				best = i
+			if ps.fits(i, size) && (bestFit < 0 || p.credit > ps.p[bestFit].credit) {
+				bestFit = i
 			}
+			if bestAny < 0 || p.credit > ps.p[bestAny].credit {
+				bestAny = i
+			}
+		}
+		best := bestFit
+		if best < 0 && pass > 0 {
+			best = bestAny
 		}
 		if best >= 0 {
 			ps.p[best].credit -= sum
+			totalW := sum
 			for i := range ps.p {
-				if ps.p[i].credit > 4*sum {
-					ps.p[i].credit = 4 * sum
-				} else if ps.p[i].credit < -4*sum {
-					ps.p[i].credit = -4 * sum
+				if p := &ps.p[i]; p.present && !p.muted && pass == 0 && (p.state == pDead || ps.isFull(i) || p.overCap(now)) {
+					totalW += p.weight(now, ps.cfg.Ramp)
+				}
+			}
+			lim := 4 * max(sum, totalW)
+			for i := range ps.p {
+				if ps.p[i].credit > lim {
+					ps.p[i].credit = lim
+				} else if ps.p[i].credit < -lim {
+					ps.p[i].credit = -lim
 				}
 			}
 			ps.burstPath, ps.burstLeft = best, bulkBurst-1
@@ -708,6 +733,7 @@ func mergeProfiles(ps []Profile) Profile {
 			out.MaxMTU = mm
 		}
 		out.Reliable = out.Reliable && p.Reliable
+		out.NoDirect = out.NoDirect || p.NoDirect
 	}
 	return out
 }

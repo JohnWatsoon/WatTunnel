@@ -413,7 +413,9 @@ Engine usage (flags starting with `-`) is unchanged.
 RSA-signed `SHA256SUMS`; the public key is baked into the script, and a missing or invalid signature aborts the
 install. When `install.sh` finds `wattun-linux-<arch>`, `wattun-manager`, `SHA256SUMS` and `SHA256SUMS.sig` in the same
 folder (or in `WAT_OFFLINE_DIR`), it verifies the RSA signature offline and installs without network access (a local
-`dist/` build without `SHA256SUMS.sig` installs as a local developer build). On a connected host (for example Kharej),
+`dist/` build without `SHA256SUMS.sig` installs as a local developer build). If GitHub is unreachable during an
+interactive `install.sh` run, it prompts for a proxy/mirror URL (`WAT_PROXY` / `WAT_CURL_PROXY`) or a local offline
+`.tar.gz` bundle/directory and still verifies the RSA signature. On a connected host (for example Kharej),
 `wattun bundle [amd64|arm64] [OUT.tar.gz]` downloads those five files from the latest release, verifies the RSA
 signature and SHA-256 digests, and packs `wattun-offline-<arch>.tar.gz`. On an Iran server where GitHub is blocked,
 extract and run `bash install.sh` for a fresh install, or run `wattun update --from wattun-offline-<arch>.tar.gz` to
@@ -421,6 +423,10 @@ update an existing install. For proxy/mirror updates, Settings → `p` saves `up
 (a URL prefix such as `https://ghproxy.net/` sets `WAT_PROXY`; a `socks5h://` or `http://host:port` proxy sets
 `WAT_CURL_PROXY`). Unsigned installs remain explicit opt-ins (`WAT_ALLOW_UNSIGNED_MANAGER=1`,
 `WAT_ALLOW_UNSIGNED_UPDATE=1`).
+
+Manager-created tunnels pick verified-free random high ports (`10000..32767`, below Linux's default ephemeral range and
+outside the metrics/probe bands `18990..18999` and `19700..20999`) instead of squatting common ports (`80`, `443`,
+`8080`, `8443`, `4443`, `123`), unless you pass `--listen` explicitly or enable Cloudflare CDN (`--cdn-domain`).
 
 **Windows (2.5.0).** Releases include `wattun-windows-amd64.exe`, the engine alone (no installer, no manager): run it
 with `-config FILE` or flags, as a client or a server. Every carrier but ICMP works; `icmp` needs a Linux raw socket
@@ -460,21 +466,19 @@ Do not start a second instance on a port that a live one already uses (see [Trou
 
 ## Managing tunnels
 
-The status words mean the same on every screen. An auto Kharej is one tunnel on two units (`NAME`, `NAME-r`), so each
-reads both before it reports:
+The status words mean the same on every screen. An auto Kharej tunnel aggregates its parent unit (`NAME`) and any
+hidden background helpers (`NAME-r`, `NAME-e-*`) into one visible entry:
 
-- `up`: the link works. On an auto parent this includes a link on `NAME-r`, and the page says so.
+- `up`: the link works (including when an auto tunnel connects through its hidden reverse or shaped carrier).
 - `partial`: the link works but a bond leg is down, and the page shows how many. Packet loss alone does not change it.
-- `standby`: `NAME-r` is running while Iran uses `NAME`.
-- `waiting` (Kharej) or `down` (Iran): no link on either unit.
+- `waiting` (Kharej) or `down` (Iran): no link on any unit.
 - `unknown`: a running unit's `/stats` did not answer two tries, so the state is not known.
-- `stopped`: the service is not running. A stopped `NAME-r` leaves the status lists.
+- `stopped`: the service is not running.
 
 Run `wattun` for the dashboard of all tunnels (`wattun-manager` still works). Keys:
 
 - A tunnel's number: manage that tunnel.
 - `n`: new tunnel.
-- `o`: open or close the test carriers of an auto Kharej tunnel (`c` also works).
 - `m`: live monitor.
 - `u`: update.
 - `s`: settings (rollback, uninstall, auto-heal, update proxy).
@@ -532,9 +536,6 @@ wattun blackout NAME [SNI]         # one command to turn the resilience kit on w
 wattun auto-test NAME  # re-run the Auto mode test
 wattun cdn-tune NAME   # re-tune a Cloudflare tunnel
 wattun auto-ip NAME IP # tell an auto tunnel Iran's IP (on Kharej)
-wattun auto-narrow NAME        # close the carrier ports an auto Kharej tunnel no longer needs
-wattun auto-widen NAME         # open every carrier of an auto Kharej tunnel again
-wattun auto-prune NAME [--keep-open|--auto|--direct|--reverse-only]  # automatic cleanup state of an auto Kharej tunnel
 wattun bond-retest NAME        # bonded Iran tunnel: re-test its legs and add one that works again
 wattun bundle [amd64|arm64]    # build a signed offline install/update archive (e.g. on Kharej for Iran)
 wattun update [--from PATH]    # update the binary and manager (or offline from a verified bundle)
@@ -611,10 +612,10 @@ other carriers, including the shaped UDP tier, run as an ordinary user. The shap
 | `grpc` | CDNs that allow gRPC. | 4096 | no | Requests go to `<path>/Tun`. `plain: true` for cleartext behind a proxy. |
 | `gre` | UDP is dropped but GRE (IP protocol 47) passes. | 1364 | yes (raw socket) | 3.2.0, both ends. `peer` is a bare IP like icmp. Each packet is GRE (with a key from the PSK) carrying an IPv4/UDP packet; a BPF filter keeps other GRE traffic out. No `-reverse`. |
 | `ipip` | Same, for IP-in-IP (protocol 4). | 1372 | yes (raw socket) | 3.2.0, both ends. Like `gre` without the GRE header. |
-| `fortress` | Blackout mode: `wattun-manager arm-blackout NAME` writes it. | — | yes (includes icmp) | Not a wire protocol: a manager-written alias expanded to `icmp+tcp+tls+wss+udp` with default listeners 80/tcp, 443/tcp, 8443/tcp and 53/udp. |
+| `fortress` | Legacy CLI alias for blackout mode. | — | yes (includes icmp) | Not a wire protocol: CLI alias expanded to `icmp+tcp+tls+wss+udp` (with fallback listeners `80/tcp`, `443/tcp`, `8443/tcp`, `53/udp` when `listen-*` are omitted). `wattun-manager arm-blackout NAME` writes explicit `carrier: icmp+tcp+tls+wss+udp` with verified random open `listen-*` ports instead. |
 
 Rules for every non-ICMP carrier: the client dials `peer` as `host:port`, and the server listens on `listen`
-(default `:4443`). `mtu` is 256 to 1400 for icmp, udp, gre and ipip, and up to 16384 for the pool carriers (a bond
+(engine CLI default `:4443`; `wattun-manager` picks verified-free random open ports in `10000..32767`). `mtu` is 256 to 1400 for icmp, udp, gre and ipip, and up to 16384 for the pool carriers (a bond
 uses its smallest leg's bound). The 3.3.0 shaped carriers have their own, lower ceilings: see "Shaped carriers".
 
 ### Shaped carriers (3.3.0)
@@ -639,8 +640,10 @@ rejected), Linux + CAP_NET_RAW on both ends. The MTU is 1400 minus the shape's h
 | `l2tpv3` | 115 | 4-byte L2TPv3-style session header with a key-derived session id |
 
 **UDP tier** — the ordinary `udp` carrier with one fixed header per datagram. The client dials `peer` as
-`host[:port]`, the server listens on `listen` (`host[:port]`); a bare host uses the protocol's conventional port
-below, and an explicit port in the address wins. `-reverse` and `-sessions` > 1 are rejected.
+`host[:port]`, the server listens on `listen` (`host[:port]`); `wattun-manager` assigns verified-free random high ports
+(`10000..32767`) so tunnels never conflict with system services like NTP (`123/udp`) or HTTP/3 (`443/udp`), while bare
+CLI invocations without `-listen` fall back to the conventional default ports below. `-reverse` and `-sessions` > 1 are
+rejected.
 
 | Carrier | UDP port | Header on the wire |
 |---|---|---|
@@ -1323,39 +1326,33 @@ shaped carriers are direct only: the server answers the source address a session
 The manager only (`wattun`, no engine flag). It needs `wattun` 2.1.0 on Kharej and `systemd-run`. It finds the carrier that
 works on a route by testing all of them, so the operator does not have to guess.
 
-**Kharej.** In the new-tunnel wizard the first carrier option is `auto`. It asks for an optional Cloudflare-proxied
-domain, used only to test the CDN carriers through Cloudflare. It creates one bonded server tunnel `NAME` that listens
-on every carrier, and prints one token.
+**Kharej.** In the new-tunnel wizard the first carrier option is `auto`. It creates one unified tunnel `NAME` that
+keeps all test carriers open automatically in the background and prints one token.
 
-| Carrier | Listen port |
-|---|---|
-| `udp`, `tcp` | 4443 |
-| `tls` | 8443 |
-| `ws` | 2052 |
-| `wss` | 2053 |
-| `h2` | 2087 |
-| `h2c` | 2082 |
-| `grpc` | 2083 |
-| `icmp`, `gre`, `ipip` | none |
-
-A port that is already taken moves to a free fallback; the real ports are in the token. `gre`/`ipip` arrived in
-3.2.0 and are raw-IP carriers with no listen port; the plan carries them as bare names.
+- **Direct carriers** (`udp`, `tcp`, `tls`, `ws`, `wss`, `h2`, `h2c`, `grpc`): `wattun-manager` picks verified-free
+  random open ports in `10000..32767` (below Linux's default ephemeral range, avoiding `18990..18999` and
+  `19700..20999`, and checking `ss` + `/proc/net` fallback plus existing configs and tokens). Common panel/web ports
+  (`443`, `80`, `8080`, `8443`, `4443`, `2053`, etc.) are never grabbed unless explicitly requested via `--listen` or
+  when `--cdn-domain` is set, in which case CDN carriers (`wss`, `grpc`, `h2`, `ws`, `h2c`) pick non-443/80 Cloudflare
+  proxyable ports (`2053`, `2083`, `2087`, `2096`, `8443` for HTTPS; `2052`, `2082`, `2086`, `2095`, `8880`, `8080` for
+  HTTP — falling back to a random open port with an Origin Rules note if all Cloudflare ports are busy).
+- **Raw-IP carriers** (`icmp`, `gre`, `ipip`): bare carrier entries with no listen port (`gre`/`ipip` arrived in 3.2.0).
 
 **Token.** `wat1:` + base64 of `carrier|peer|key|path|sni|icmp-type|allowed-ports|reverse|plan`. Field 9 (`plan`) looks
-like `d=udp:4443,tcp:4443,...,gre,ipip;r=tcp:34121,tls:34122,ws:34123,wss:34124,h2:34125,h2c:34126,grpc:34127`.
-`d` is the Kharej listen port per carrier; a raw-IP carrier with no listen port (`icmp`, `gre`, `ipip`, and the raw
-shaped carriers) is a bare name in the list. `r` is the port Iran listens on for each reverse test (since 3.3.8 each
-new Kharej auto tunnel picks a collision-free 10-port block in `30000..39990`, so several Kharej servers can use reverse
-mode with the same Iran server without colliding on `24431..24437`; older `24431..24437` tokens keep working). Tokens
-with 7 or 8 fields (older managers, non-auto tunnels) still work. An extended token appends `;e=1`, which older managers
-and `plan_part` ignore.
+like `d=udp:18421,tcp:23104,...,gre,ipip;r=tcp:14902,tls:27511,ws:19240,wss:31088,h2:26705,h2c:15830,grpc:29412`.
+`d` is the Kharej listen port per carrier (bare name for raw-IP carriers). `r` lists the verified-free random open
+ports (`10000..32767`) Iran listens on during reverse probes and reverse tunnels, so several Kharej servers can run
+reverse tunnels to the same Iran server without port collisions (older `24431..24437` and `30000..39990` tokens keep
+working). Tokens with 7 or 8 fields (older managers, non-auto tunnels) still work. An extended token appends `;e=1`,
+which older managers and `plan_part` ignore.
 
 **Reverse side.** A transient unit `wattun-autowatch-NAME` (`systemd-run`, 1 hour at most) polls the Kharej tunnel's
-`/stats` `clients` list. When Iran's first test client connects, it learns Iran's IP and writes and starts a companion
-tunnel `NAME-r`: a reverse server with reverse ICMP and reverse dials to Iran's `r` ports. With a CDN domain set, the IP
-is taken only from `icmp`, `udp`, `tcp` and `tls` clients, because CDN clients show the proxy's IP. Manual fallback on
-Kharej: `wattun auto-ip NAME IRAN_IP`. `NAME-r` appears on the dashboard as the reverse side of `NAME`, follows
-its ports and key, and is deleted with it.
+`/stats` `clients` list for fast initial discovery, and `heal()` (`auto_sync_companion`) keeps watching continuously
+every minute after that so late connections, reboots, and Iran IP changes are picked up automatically. When Iran's
+client connects, Kharej writes and starts the hidden companion `NAME-r` (reverse ICMP on IPv4 plus reverse dials to
+Iran's `r` ports). Non-CDN `clients` (`icmp`, `udp`, `tcp`, `tls`) are preferred so a CDN proxy IP is not mistaken for
+Iran's IP. Manual fallback on Kharej: `wattun auto-ip NAME IRAN_IP`. `NAME-r` is strictly hidden from tunnel lists and
+aggregated into `NAME` for status, stats, traffic, start/stop/restart, ports, key rotation, and deletion.
 
 **Iran test.** Pasting an auto token runs the test (re-run later with `wattun auto-test NAME`). Phases: direct,
 then CDN (if a domain was given), then reverse. Each variant is a throw-away client that runs its own `/speedtest`
@@ -1391,24 +1388,17 @@ Screening runs a throw-away client per variant with 8 streams: the probe starts 
 and a sustained run sized to at least 1.5 s each way at their screening rate, clamped to 20-40 MB each way. A
 finalist that fails the longer run keeps its screening numbers. The table is ranked by download plus upload.
 
-**Extended transports (3.3.0, opt-in).** The Kharej wizard asks once whether to also test the 13 shaped carriers
-(unattended `--extended`); the question and the flag are offered only when the local engine is 3.3.0. Because the
-engine refuses a shaped leg inside the auto bond, extended creates one hidden single-carrier server unit per shape
-(`NAME-e-<shape>`, shared `NAME.key`, own metrics port, the parent's `ports:` allowlist, per-port `limits:` and
-`allow-clients`/`allow-clients-file`; `listen` only for the eight
-UDP shapes, conventional port or a free fallback recorded in the plan; the five raw shapes have no listen/peer) and
-appends the shapes to the plan. Iran tests them like any other direct variant (a bare peer for the raw tier,
-`addr:port` for the UDP tier) and can pick one; an extended plan needs 3.3.0 on **both** ends, and the raw tier needs
-Linux + root/CAP_NET_RAW plus the cloud firewall allowing protocols 41/50/97/115. Anti-censor still adds variants only
-for the direct pool carriers (the shapes have no desync layer); there are no reverse or count-based tuning variants
-for them. The extended listeners are hidden from the tunnel list but follow the parent's life: heal restarts a down
-one, a key change restarts the enabled ones, and delete/uninstall remove them with their state files and UDP firewall
-rules. The default prune reads each child's own `/stats`: it keeps the shapes with a live client and stops the rest
-once one reports a pick, keeps every shape when no child reports traffic or a running child's stats cannot be read,
-and in a shaped-only tunnel with no reverse companion narrows on that pick alone after the same grace; a live hidden
-child also counts as a working carrier for the widen net. `auto-widen` / `auto-prune NAME --direct` re-enable them
-for a retest (a normal Auto test can also re-test them). An older Iran ignores their plan entries; their Kharej
-ports then stay open until that prune/manual close — that trade is why extended is opt-in.
+**Extended transports (3.3.0, CLI opt-in `--extended`).** In `wattun kharej --extended` (CLI-only, never prompted in
+the interactive wizard, offered when the local engine is 3.3.0), extended creates one hidden single-carrier server unit
+per shape (`NAME-e-<shape>`, shared `NAME.key`, own metrics port, the parent's `ports:` allowlist, per-port `limits:`
+and `allow-clients`/`allow-clients-file`; `listen` on verified-free random UDP ports `10000..32767` for the eight UDP
+shapes, bare entries for the five raw shapes) and appends the shapes to the plan. Iran tests them like any other
+direct variant (a bare peer for the raw tier, `addr:port` for the UDP tier) and can pick one; an extended plan needs
+3.3.0 on **both** ends, and the raw tier needs Linux + root/CAP_NET_RAW plus the cloud firewall allowing protocols
+41/50/97/115. Anti-censor still adds variants only for the direct pool carriers (the shapes have no desync layer); there
+are no reverse or count-based tuning variants for them. The extended listeners are hidden from the tunnel list and
+aggregated into `NAME`: heal restarts a down one, port/key/limit changes propagate from `NAME`, and delete/uninstall
+remove them with their state files and UDP firewall rules. An older Iran ignores their plan entries.
 
 **Auto tuning (3.3.0).** After the type (or the bond) is chosen, the manager tries the settings that change its speed,
 one setting at a time, starting from the engine auto values and keeping a value only when it beats the best so far by
@@ -1444,68 +1434,20 @@ auto-heal or the off-peak optimizer run the screening phase (8-16 MB each way pe
 a normal plan if every variant connects); auto-heal runs one at most every 30 minutes and only after the tunnel
 failed. If your server is billed by traffic, pick a fixed carrier instead of Auto.
 
-**After Iran has picked.** The Kharej auto tunnel is the real server for the carrier Iran chose. It keeps every carrier
-port open so that Iran's test and auto-heal can reach any of them — which is attack surface once Iran has picked. The
-heal pass closes what is unused by itself: it stops the stale `wattun-autowatch` helper and, once Iran's pick has been
-stable for `autoprune` minutes (`.manager.conf`, default 15, `0` = off; raised from 5 in 3.3.8), runs `auto-narrow` on
-both sides. A side with nothing in use stops, and the other keeps only the carriers in use. A bonded Iran client keeps
-all its legs, because the live legs are read from `carriers[]` in `/stats`, not only from `clients[]`. `.manager.conf
-autoprune-direct=0` limits the pass to the reverse side. To try another carrier afterwards, press `o` on Kharej's main
-menu (or run `wattun-manager auto-widen NAME`); otherwise the widen safety net reopens the plan after 3 failed heal
-checks. On Iran, `auto-test` measures a live active reverse tunnel via its own `/speedtest` instead of reporting all
-rows failed when Kharej's unused ports are closed. A changed pick restarts the window, so a flapping selection is never
-pruned. Hidden extended listeners are decided from each child's own `/stats` (see "Extended transports"): the pass keeps
-the shapes with a live client and stops the rest once one reports a pick, keeps every shape when that pick is unknown or
-unreadable, and `auto-widen` / `auto-prune --direct` re-enable the stopped ones.
+**Always-open background carriers & migration (3.3.8).** Since 3.3.8 an auto Kharej tunnel keeps every planned
+carrier open automatically in the background and stays **one unified entry** (`NAME`) on the dashboard, `status`,
+`monitor`, and pickers (`NAME-r` and `NAME-e-*` helpers are always hidden, aggregated into `NAME`'s status, traffic,
+and client counts, and follow `NAME`'s start, stop, restart, port edits, key rotation, and deletion). Because nothing
+is pruned or closed after Iran picks, Iran can run `wattun auto-test NAME`, switch carriers, build bonds, or auto-heal
+failover at any time without needing manual `[o]`/`[c]` toggles or hitting closed ports. Existing 3.3.3–3.3.7 tunnels
+that were narrowed or finalized (including without a `.token` file) automatically recover their token and reopen all
+planned carriers on `heal` or dashboard open (`auto_reopen`), while preserving `ports:` allowlists and respecting
+intentionally stopped tunnels. `wattun delete NAME` deletes `NAME` and all hidden helpers unconditionally.
 
-**The pick becomes the tunnel (3.3.3; reversible in 3.3.8).** On the next heal pass after that close, the manager keeps
-the one unit Iran uses as the tunnel and deletes the unused test units (`auto_finalize`), writing `NAME.finalized`. A
-reverse pick moves `NAME-r.yml` into `NAME.yml`, and a shaped pick moves its `NAME-e-<shape>.yml` the same way. Both
-keep the same key file, traffic counters, `NAME.token` and `NAME.iranip` (3.3.8: `NAME.token` is no longer deleted, so
-`wattun token NAME`, key rotation, main-menu `o`, `auto-widen` and the 3-failed-checks automatic widen keep working at
-any time; finalized tunnels from 3.3.3–3.3.7 without `NAME.token` recover their token automatically when the dashboard
-or `token` command runs). Nothing is finalized while Iran is not connected, while its pick cannot be read, or when Iran
-bonds across both sides. `autoprune-direct=0`, `autoprune=0` and `NAME.keepopen` also prevent it. Deleting an auto
-tunnel while Iran runs on its reverse side or on a shaped child runs this same step instead of a plain delete, so the
-test tunnel never takes Iran's link with it. A second delete removes the tunnel. The port check of new tunnels reads
-every `listen:` and `listen-<carrier>:` line of every config, stopped ones too, so a new tunnel never takes a port an
-existing one owns.
-
-**An auto tunnel Iran left is deleted.** If Iran moves to a tunnel made outside the auto flow (for example a bot-made
-reverse tunnel), no auto unit ever becomes the pick and the step above never runs. So each heal pass also checks:
-no unit of the auto tunnel (parent, `NAME-r`, hidden children) has a client, and another Kharej tunnel on the host
-does. When that holds for `max(autoprune, 60)` minutes in a row (`$RUN/NAME.abandoned` keeps the start time), the
-auto tunnel is deleted like `delete NAME`, together with its reverse side and hidden listeners. If Iran is offline
-everywhere, or a child's stats cannot be read, nothing is deleted and the clock starts over.
-`autoprune=0` and `NAME.keepopen` turn this off too.
-
-The pass runs inside `heal`. The manager installs the heal timer where it is needed: the auto Kharej wizard and
-`auto-ip` install it, and any later manager run does the same for an existing auto Kharej tunnel, so a Kharej-only
-server is cleaned up without operator action. `wattun-manager heal` triggers one pass by hand.
-
-**Widen safety net (3.3.0).** It applies only while the tunnel is still auto: with `autoprune-direct=0`, with
-`NAME.keepopen`, or before the pick becomes the tunnel (above). A pruned tunnel keeps only the carriers Iran used, so
-if that carrier is blocked there is nothing left to fail over to. When the heal pass sees a pruned auto tunnel with no working open carrier for 3
-consecutive checks, it reopens the full token plan (`auto-widen`) and logs
-`wattun-auto: ... reopening the whole plan`. It does so at most once per `autowiden` minutes (`.manager.conf`, default
-10; `0` disables the automatic widen), and a reopen starts a fresh stable-selection window, so the tunnel narrows again
-after a new stable pick. Manual control is always available: `wattun-manager auto-narrow NAME` closes every unused
-carrier now (both sides); `wattun-manager auto-prune NAME --keep-open` opts one tunnel out of both automatic passes (every carrier stays
-open), `--auto` turns them back on, `--direct` opts into direct-side narrowing and `--reverse-only` returns to the
-default; `wattun-manager auto-widen NAME` opens every carrier of the token's plan again.
-The manager's main menu shows `carriers open` or `closed` under each auto Kharej tunnel, with the open count and the
-time until the automatic close, and key `c` switches it (key `u` on the tunnel page does the same). Opening there runs
-`auto-widen` and sets `NAME.keepopen`, so everything stays open; closing runs `auto-narrow` and removes that file, which
-returns the tunnel to the automatic passes. The bare `auto-widen` command sets no hold, so the tunnel narrows again
-after a new stable pick.
-`auto-narrow` reads which carriers have a live Iran session (`/stats` `clients` on `NAME`, alive `carriers` on
-`NAME-r`). The tunnel card shows "Iran uses ..." and how many carriers are still open.
-
-**Costs and limits.** Several ports are open on Kharej at once until the default reverse-side cleanup (or a manual
-`auto-narrow`) closes them. An interactive test prints its worst-case traffic and a rough time before it starts.
-Kharej must be
-2.1.0 or newer (the `clients` field and the reverse dial backoff). The wire format did not change, so 2.1.0 peers work
-with 2.0.x ones for normal tunnels.
+**Costs and limits.** Several verified-free random high ports stay open on Kharej in the background for failover and
+re-testing. An interactive test prints its worst-case traffic and a rough time before it starts. Kharej must be 2.1.0 or
+newer (the `clients` field and the reverse dial backoff). The wire format did not change, so 2.1.0 peers work with
+2.0.x ones for normal tunnels.
 
 ## CDN tuning
 
@@ -2867,7 +2809,8 @@ A restart cuts every connection. WatTunnel avoids restarts on a live system.
 | tcp, tls, ws never connect | That carrier is filtered on this path. Check with `nc -vz HOST PORT` from the client. On a path where only ping passes tCP and UDP are cut: use `icmp`. |
 | tcp pool connects, then drops after a few packets | A middlebox cuts long TCP flows. Try `tls`, `wss` or `grpc`, or `reverse`. |
 | Pool carriers or UDP forwards do not work, the other end is older | Version mismatch. Both ends must run 1.3.0 or newer for pool carriers and 1.2.0 or newer for UDP forwards. Check `wattun -version` on both ends. |
-| `listen tcp ...: address already in use` | Another process owns the port. `ss -ltnp \| grep :PORT`. Never start a test on a port a live instance uses; test ports should be 10811 or higher. |
+| `listen tcp ...: address already in use` | Another process owns the port. `ss -ltnp \| grep :PORT`. Manager-created tunnels pick verified random high ports (`10000..32767`) automatically; never reuse a port a live instance or panel holds. |
+| Startup fails on `-allow-ports` | Malformed port tokens in `-allow-ports` are rejected at startup (use `N`, `N/tcp`, or `N/udp`), and a `/udp`-only list (like `-allow-ports 53/udp`) allows only UDP port 53 rather than opening all TCP ports. |
 | `restart needed for KEY` in the log | You changed a key other than `ports:`. Only `ports:` is hot-reloaded. Do a handover. |
 | Config does not apply | A parse error keeps the old config. The log says `config FILE: line N: ...`. |
 | WireGuard (or another UDP VPN) connects, small apps like Telegram work, web pages do not | Its packets are bigger than one tunnel packet. Update both ends to 2.5.0 (big datagrams are split), or set `MTU = 1280` in WireGuard (udp carrier, or icmp with `mtu: 1400`). `dgram_dropped_size` in `/stats` rising confirms it. |
@@ -2961,9 +2904,9 @@ tunnel, ships in `dist/` as `wattun-wprobe-<os>-<arch>`, and needs Linux + CAP_N
 Update **both** servers for every release, unless an entry says otherwise. Versions 2.4.9 to 2.4.16 were steps
 toward one fix for CDN tunnels that got slower over time. If you are on any of them, go straight to 2.4.17 or later.
 
-- **3.3.8: faster bonded tunnels, reversible Kharej Auto cleanup, reverse bonds, multi-Kharej reverse port blocks, offline Iran bundles, and IPv6 manager support.** The wire format is unchanged, so old and new peers work together.
-  - **Engine bonding fixes:** bonded sessions now keep late-ACK window immunity and full receive-window headroom, forward pool backpressure (`Backlogged()`) and connection-death repair across `BondIO`/`MultiRaw`, pace mixed `icmp+pool` bonds at pool speed while a pool leg is alive (clamping back to the ICMP ceiling if all pool legs die), size `relV2` `cwnd` for multi-RTT bonds without draining on `probeRTT`, preserve 4 KB MTU on HTTP carriers (`ws`/`wss`/`h2`/`h2c`/`grpc`) through CDNs while keeping 16 KB on `tcp`/`tls`/reverse pools, peek the true next winner at burst boundaries without starving smaller-MTU legs, and keep slow connections alive on bonded `tcp`/`tls`/reverse pools.
-  - **Manager & installer:** `auto_finalize` keeps `NAME.token` and `NAME.iranip` (and recovers tokens on 3.3.3–3.3.7 finalized tunnels), key `o` on Kharej's main menu reopens or closes carriers anytime, default cleanup grace is 15 minutes, Iran `auto-test` measures a live active reverse tunnel via `/speedtest`, `c` joins 2+ reverse rows as well as direct rows, each new Kharej auto tunnel allocates its own reverse port slice in `30000..39990`, `wattun bundle` + `wattun update --from` provide RSA-verified offline installs/updates, and the manager accepts IPv6 addresses across wizards, tokens and validators. Details: `docs/release-notes/v3.3.8.md`.
+- **3.3.8: faster bonded tunnels, always-open unified Kharej Auto tunnels, random open port selection, `/unslop` TUI overhaul, signed offline Iran bundles, IPv6 manager support, and security/reliability fixes.** The wire format is unchanged, so old and new peers work together.
+  - **Engine & tools:** bonded sessions keep late-ACK window immunity and full receive-window headroom, forward `Backlogged()`/`ConnDeaths()`, clamp `takeDgrams`/frames to `NextPath` `pathMTU`, propagate `Profile.NoDirect` through `mergeProfiles()` and `TCPPoolClient.Clone()` (4 KB on CDN HTTP carriers, 16 KB on `tcp`/`tls`/reverse pools), track `pathMinRTT` separately from `srtt` for multi-RTT `cwnd`/`probeRTT`, pace mixed bonds safely without clamping non-ICMP bonds to 16 MB/s, keep `SetKeepSlow(true)` on bonded pools, and award SWRR credit fairly. Hardened `cmd/wprobe` against unauthenticated ICMP amplification (`k <= 8`, payload cap), rejected malformed `-allow-ports` and `/udp`-only fallbacks to `1-65535`, isolated untrusted reverse-pool connections before auth, validated `parseSize` and quota period rolls, scaled `alive()` with `-ping-every`, and fixed `AF_PACKET` close races and IPv6 `udpBatch`/`ProbeFakeMode`.
+  - **Manager, installer & TUI:** Kharej Auto tunnels stay one unified entry (`NAME`, hiding `NAME-r` and `NAME-e-*` and aggregating stats/traffic/controls) with all planned carriers kept open automatically in the background (removing `auto-narrow`/`auto-prune`/`auto-finalize`, manual `[o]`/`[c]`/`[u]` toggles, and the interactive `--extended` prompt; 3.3.3–3.3.7 narrowed/finalized tunnels reopen automatically); `wattun-manager` picks verified-free random open ports (`10000..32767`, or non-443/80 Cloudflare ports when `--cdn-domain` is set, plus random ports in `arm-blackout`); `install.sh` and `wattun-manager` received the `/unslop` TUI overhaul; `wattun bundle` + `wattun update --from` + Settings → `p` + `install.sh` interactive recovery provide RSA-verified offline/proxy updates; `c`/`b` support custom reverse bonds; Iran port editor warns on unencrypted panel inbounds; and IPv6 addresses work across wizards, tokens, companions, and validators. Details: `docs/release-notes/v3.3.8.md`.
 - **3.3.7 (with 3.3.5–3.3.6): encryption outside the session lock, scheduled quota resets (`day`/`week`/`month`), `-decoy`, `[::1]` fallback, 128 server sessions, and token QR codes.** Details: `docs/release-notes/v3.3.7.md`.
 - **3.3.4: kernel boost by default, per-IP cap 1024.** The wire format is unchanged, so old and new peers work together.
   The installer and `wattun update` apply `boost` (bbr, `fq`, 64 MB buffers) unless the server is a container or opted out,

@@ -828,6 +828,8 @@ type desyncConn struct {
 	sumSeq    uint32   // sum/seqsum: seq of the outbound data segment being mirrored (0 = none yet)
 	tcpOpts   []byte   // kernel TCP options observed on outbound non-SYN segments (e.g. timestamps)
 	fakeSent  bool     // fake packet has been injected
+	pending   int      // scheduled AfterFunc markers still in flight before ackCh may release Wrap
+	ackReady  bool     // dup-ACK arrived while scheduled timers were still pending
 	waitAck   uint32   // duplicate ACK expected from server (isn+1 / SND.NXT)
 	sent      [][]byte // needsAck modes: the markers sent at once on fire, kept for one retransmit (resend)
 	at        time.Time
@@ -982,6 +984,34 @@ func (t *desyncTracker) announce(k desyncKey, isn uint32, known bool, rcvNxt ...
 	return ch
 }
 
+// extractTimestampOpts returns a 12-byte NOP-NOP-Timestamp TCP option slice if opts contains RFC 7323 kind 8.
+func extractTimestampOpts(opts []byte) []byte {
+	for i := 0; i < len(opts); {
+		switch opts[i] {
+		case 0:
+			return nil
+		case 1:
+			i++
+			continue
+		}
+		if i+1 >= len(opts) {
+			return nil
+		}
+		l := int(opts[i+1])
+		if l < 2 || i+l > len(opts) {
+			return nil
+		}
+		if opts[i] == 8 && l == 10 {
+			out := make([]byte, 12)
+			out[0], out[1] = 0x01, 0x01
+			copy(out[2:], opts[i:i+10])
+			return out
+		}
+		i += l
+	}
+	return nil
+}
+
 // noteHandshake remembers the packets of handshakes toward the peer that nobody announced (yet); mu held.
 func (t *desyncTracker) noteHandshake(out, in desyncKey, d, s ipAddr, th []byte, off int, seq, ackv uint32, syn, ackf bool, payload int, now time.Time) {
 	isDstPeer := t.isPeer(d)
@@ -995,13 +1025,17 @@ func (t *desyncTracker) noteHandshake(out, in desyncKey, d, s ipAddr, th []byte,
 				}
 			}
 		}
-		t.recent[out] = &desyncHS{isn: seq, haveSyn: true, at: now}
+		var opts []byte
+		if off > 20 {
+			opts = extractTimestampOpts(th[20:off])
+		}
+		t.recent[out] = &desyncHS{isn: seq, haveSyn: true, opts: opts, at: now}
 	case isSrcPeer && syn && ackf && payload == 0:
 		if m := t.recent[in]; m != nil && m.haveSyn {
 			m.srvSeq, m.srvAck, m.haveSA = seq, ackv, true
 		}
 	case isDstPeer && !syn && off > 20:
-		if m := t.recent[out]; m != nil && len(m.opts) == 0 {
+		if m := t.recent[out]; m != nil {
 			m.opts = append([]byte(nil), th[20:off]...)
 		}
 	}
@@ -1145,6 +1179,10 @@ func (t *desyncTracker) handleIP(ip []byte) {
 	// cleared the middlebox DPI and reached the server before real application data is sent.
 	if c := t.conns[in]; c != nil && c.fakeSent {
 		if !syn && ackf && !rst && payload == 0 && ackv == c.waitAck {
+			if c.pending > 0 {
+				c.ackReady = true
+				return
+			}
 			delete(t.conns, in)
 			if ackCh := t.ackWait[in]; ackCh != nil {
 				delete(t.ackWait, in)
@@ -1228,6 +1266,7 @@ func (t *desyncTracker) fireLocked(k desyncKey, c *desyncConn, base, ack uint32)
 						t.logf("wat: fake-sni ttl auto: the peer's TTL is not learned yet, handshake left unclassified (calibrates from the first SYN-ACK)")
 					}
 				}
+				t.abandonLocked(k)
 				return
 			}
 		}
@@ -1354,8 +1393,8 @@ func (t *desyncTracker) fireLocked(k desyncKey, c *desyncConn, base, ack uint32)
 		hlenPkt := fakePacketWithOptions(k, base-uint32(len(hello)), ack, ttl, fakeHelloZeroRecord(hello), c.tcpOpts)
 		t.keep(c, sumPkt)
 		t.keep(c, hlenPkt)
-		time.AfterFunc(time.Millisecond, func() { t.send(sumPkt) })
-		time.AfterFunc(2*time.Millisecond, func() { t.send(hlenPkt) })
+		t.scheduleMarkerLocked(k, c, time.Millisecond, sumPkt)
+		t.scheduleMarkerLocked(k, c, 2*time.Millisecond, hlenPkt)
 		_ = t.fireFFLocked(k, c, base, ack, ttl, hello, 3*time.Millisecond)
 	case "seqsum":
 		// dual marker (2.8.0): the below-window seq fake first, then the in-window bad-checksum mirror
@@ -1369,7 +1408,7 @@ func (t *desyncTracker) fireLocked(k desyncKey, c *desyncConn, base, ack uint32)
 		// inside the sniffer's lock and a sleep here stalls every concurrent fire and Wrap announce
 		// (audit 2026-10-21). close() never nils t.send, so a fire racing shutdown is a dropped packet.
 		t.keep(c, pkt)
-		time.AfterFunc(time.Millisecond, func() { t.send(pkt) })
+		t.scheduleMarkerLocked(k, c, time.Millisecond, pkt)
 	case "sum":
 		// sum mode mirrors the triggering data segment: in-window seq (base = c.sumSeq), damaged checksum
 		pkt := fakePacketWithOptions(k, base, ack, ttl, hello, c.tcpOpts)
@@ -1393,6 +1432,29 @@ func (t *desyncTracker) fireLocked(k desyncKey, c *desyncConn, base, ack uint32)
 	}
 }
 
+// scheduleMarkerLocked fires pkt after d without holding t.mu, keeping ackCh blocked until all scheduled timers finish.
+func (t *desyncTracker) scheduleMarkerLocked(k desyncKey, c *desyncConn, d time.Duration, pkt []byte) {
+	c.pending++
+	time.AfterFunc(d, func() {
+		t.send(pkt)
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.closed || t.conns[k] != c {
+			return
+		}
+		if c.pending > 0 {
+			c.pending--
+		}
+		if c.pending == 0 && c.ackReady {
+			delete(t.conns, k)
+			if ackCh := t.ackWait[k]; ackCh != nil {
+				delete(t.ackWait, k)
+				close(ackCh)
+			}
+		}
+	})
+}
+
 // fireFFLocked builds the F&F record re-frame + segment plan for one fake hello and injects it below the stream
 // start (mu held): the first piece goes out now, the rest at the preset's 1 ms "delays" via time.AfterFunc — a
 // sleep here would stall every concurrent fire and Wrap announce (audit 2026-10-21). startDelay shifts the whole
@@ -1413,7 +1475,7 @@ func (t *desyncTracker) fireFFLocked(k desyncKey, c *desyncConn, base, ack uint3
 		if d := startDelay + time.Duration(i)*time.Millisecond; d <= 0 {
 			t.send(pkt)
 		} else {
-			time.AfterFunc(d, func() { t.send(pkt) }) // the preset's 1 ms spacing; frames arrive in sequence order
+			t.scheduleMarkerLocked(k, c, d, pkt)
 		}
 	}
 	return true

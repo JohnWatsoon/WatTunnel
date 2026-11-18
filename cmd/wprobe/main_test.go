@@ -65,3 +65,39 @@ func TestPayloadLayout(t *testing.T) {
 		t.Errorf("small seq = %#08x, want %#08x", got, uint32(seq))
 	}
 }
+
+func TestClampEchoParams(t *testing.T) {
+	k, sz := clampEchoParams(0, 600, 608)
+	if k != 1 || sz != 600 {
+		t.Fatalf("k=0 case = (%d, %d), want (1, 600)", k, sz)
+	}
+	k, sz = clampEchoParams(255, 65535, 100)
+	if k != maxProbeK || sz != 92 {
+		t.Fatalf("amplification clamp = (%d, %d), want (%d, 92)", k, sz, maxProbeK)
+	}
+	k, sz = clampEchoParams(2, 2000, 2048)
+	if k != 2 || sz != maxProbeSize {
+		t.Fatalf("MTU clamp = (%d, %d), want (2, %d)", k, sz, maxProbeSize)
+	}
+}
+
+func TestResolveDstAndParseStep(t *testing.T) {
+	if _, err := resolveDst(""); err == nil {
+		t.Fatal("empty dst must fail")
+	}
+	if _, err := resolveDst("not a host!!!"); err == nil {
+		t.Fatal("garbage dst must fail")
+	}
+	if a, err := resolveDst("127.0.0.1"); err != nil || a.IP.String() != "127.0.0.1" {
+		t.Fatalf("resolveDst(127.0.0.1) = (%v, %v)", a, err)
+	}
+	r, s, n, k, v, d, err := parseStep("100:600:4:2:1:5")
+	if err != nil || r != 100 || s != 600 || n != 4 || k != 2 || v != 1 || d.Seconds() != 5 {
+		t.Fatalf("parseStep valid failed: (%d,%d,%d,%d,%d,%v,%v)", r, s, n, k, v, d, err)
+	}
+	for _, bad := range []string{"", "0:600:1", "10:600:0", "abc:600:1", "10:600:1:1:0:0"} {
+		if _, _, _, _, _, _, err := parseStep(bad); err == nil {
+			t.Errorf("parseStep(%q) unexpectedly succeeded", bad)
+		}
+	}
+}

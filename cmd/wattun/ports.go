@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -74,10 +75,11 @@ func parseSize(s string) (int64, error) {
 		}
 	}
 	f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
-	if err != nil || f < 0 {
+	val := f * mul
+	if err != nil || f < 0 || math.IsNaN(val) || math.IsInf(val, 0) || val >= float64(1<<63) {
 		return 0, fmt.Errorf("bad size %q", s)
 	}
-	return int64(f * mul), nil
+	return int64(val), nil
 }
 
 func parseLimitItem(s string) (limitSpec, error) {
@@ -151,15 +153,41 @@ func (b *bucket) refill() {
 }
 
 func (b *bucket) wait(n int) {
-	b.mu.Lock()
-	b.refill()
-	b.tokens -= float64(n)
-	var d time.Duration
-	if b.tokens < 0 {
-		d = time.Duration(-b.tokens / b.rate * float64(time.Second))
+	b.waitFor(n, nil)
+}
+
+func (b *bucket) waitFor(n int, abort func() bool) bool {
+	if n <= 0 {
+		return true
 	}
-	b.mu.Unlock()
-	if d > 0 {
+	rem := float64(n)
+	for {
+		if abort != nil && abort() {
+			return false
+		}
+		b.mu.Lock()
+		b.refill()
+		if b.tokens >= rem {
+			b.tokens -= rem
+			b.mu.Unlock()
+			return true
+		}
+		if b.tokens > 0 && rem > b.burst {
+			// A write larger than burst drains in slices so it never wedges on tokens >= rem.
+			rem -= b.tokens
+			b.tokens = 0
+		}
+		need := rem - b.tokens
+		if need > b.burst {
+			need = b.burst
+		}
+		d := time.Duration(need / b.rate * float64(time.Second))
+		b.mu.Unlock()
+		if d > 50*time.Millisecond {
+			d = 50 * time.Millisecond
+		} else if d < 200*time.Microsecond {
+			d = 200 * time.Microsecond
+		}
 		time.Sleep(d)
 	}
 }
@@ -291,7 +319,19 @@ func (p *portStat) copy(dst io.Writer, src io.Reader, up bool) (int64, error) {
 				b = p.bUp.Load()
 			}
 			if b != nil {
-				b.wait(n)
+				ok := b.waitFor(n, func() bool {
+					if p.exceeded() {
+						return true
+					}
+					cur := p.bDown.Load()
+					if up {
+						cur = p.bUp.Load()
+					}
+					return cur != b
+				})
+				if !ok && p.exceeded() {
+					return total, fmt.Errorf("port %d quota exceeded", p.port)
+				}
 			}
 			w, werr := dst.Write(buf[:n])
 			p.add(up, w)
@@ -380,8 +420,17 @@ func (r *registry) applyLimits(ls []limitSpec) {
 	for _, l := range ls {
 		r.limits[l.Port] = l
 	}
+	for port, q := range r.loaded {
+		if r.limits[port].Quota == 0 && q != 0 {
+			delete(r.loaded, port)
+		}
+	}
 	for _, p := range r.stats {
-		p.setLimit(r.limits[p.port])
+		lim := r.limits[p.port]
+		if lim.Quota == 0 {
+			p.qused.Store(0)
+		}
+		p.setLimit(lim)
 	}
 	for p := range r.pstart {
 		if r.limits[p].Period == "" {

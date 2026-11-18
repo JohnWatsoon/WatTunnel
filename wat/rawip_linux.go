@@ -72,9 +72,19 @@ func NewRawIPIO(gre, server bool, peerIP, srcIP string, key []byte) (*RawIPIO, e
 	}
 	bindIP := net.IPv4zero
 	if srcIP != "" {
-		if bindIP = net.ParseIP(srcIP); bindIP == nil {
-			return nil, errors.New("wat: bad source ip")
+		ip := net.ParseIP(srcIP)
+		if ip == nil || ip.To4() == nil {
+			return nil, errors.New("wat: rawip requires an IPv4 source ip")
 		}
+		bindIP = ip.To4()
+	}
+	var dstIP net.IP
+	if !server {
+		ip := net.ParseIP(peerIP)
+		if ip == nil || ip.To4() == nil {
+			return nil, errors.New("wat: rawip requires an IPv4 peer ip")
+		}
+		dstIP = ip.To4()
 	}
 	c, err := net.ListenIP(proto, &net.IPAddr{IP: bindIP})
 	if err != nil {
@@ -86,12 +96,7 @@ func NewRawIPIO(gre, server bool, peerIP, srcIP string, key []byte) (*RawIPIO, e
 	}
 	r.key, r.in, r.sport = rawIPIdent(key)
 	if !server {
-		ip := net.ParseIP(peerIP)
-		if ip == nil {
-			c.Close()
-			return nil, errors.New("wat: bad peer ip")
-		}
-		r.dst = &net.IPAddr{IP: ip}
+		r.dst = &net.IPAddr{IP: dstIP}
 	}
 	c.SetReadBuffer(8 << 20)
 	c.SetWriteBuffer(8 << 20)

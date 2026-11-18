@@ -209,14 +209,14 @@ def classify_payload(data, args):
 def sim_marker_survives(mode, args):
     """Does a fake marker of this mode survive the DPI's packet validation? None = the client sent no fake
     (mode none), or the fake is discarded so the DPI classifies the real first payload instead. "clear" = the fake
-    was honoured: a stateful middlebox forgets the flow and inspects its first payload again (rst)."""
+    was honoured: a stateful middlebox forgets the flow and inspects its first payload again (rst/synrst)."""
     if mode == "none":
         return None
-    if mode == "rst":
-        # RST+ACK with a damaged checksum: a checksum-validating DPI drops it and nothing changes; a DPI that
-        # trusts it clears the flow's state, so the next payload is inspected as if fresh. It never whitelists.
+    if mode in ("rst", "synrst"):
+        # RST+ACK / SYN|RST with a damaged checksum: a checksum-validating DPI drops it and nothing changes; a
+        # DPI that trusts it clears the flow's state, so the next payload is inspected as if fresh.
         return "clear" if not args.checksum_check else None
-    if mode == "seq" or mode == "ttl":
+    if mode in ("seq", "ttl", "hlen0"):
         return not args.window_check
     if mode == "sum":
         return not args.checksum_check
@@ -227,8 +227,16 @@ def sim_marker_survives(mode, args):
         # segments split around the SNI: the marker is below the stream start (seq trick) and the SNI sits in
         # a later segment, so both reassembly and window checking decide it.
         return not args.window_check and not args.no_reassemble
+    if mode == "ff":
+        # fragmented F&F record+segment plan: depends on segment/record reassembly.
+        return not args.no_reassemble
+    if mode in ("fakeip", "paws"):
+        # separate SYN/hello to a whitelisted IP or valid-checksum stale-TSval segment: survives window & checksum.
+        return True
+    if mode == "all":
+        return not args.window_check or not args.checksum_check or not args.no_reassemble
     raise SystemExit(f"emulate_dpi.py: unknown --inject-fake mode {mode!r} "
-                     "(modelled: none seq ttl sum seqsum rst split)")
+                     "(modelled: none seq ttl sum seqsum rst split hlen0 fakeip synrst paws ff all)")
 
 
 def decide(flow, data, args):
@@ -264,10 +272,11 @@ class Flow:
         self.sni = None
         self.fake_len = 0
         self.first_len = 0
-        # token bucket, c2s only
+        # token bucket, serialized across directions when --throttle-dir both
         self.tokens = 0.0
         self.last = self.started
         self.throttled = False
+        self._pace_lock = asyncio.Lock()
 
     def log(self, verdict, rule, sni, fake_len, note=""):
         self.verdict, self.rule, self.sni, self.fake_len = verdict, rule, sni, fake_len
@@ -295,23 +304,24 @@ class Flow:
                 f.write(json.dumps(rec, separators=(",", ":")) + "\n")
 
     async def pace(self, n):
-        """Throttle c2s bytes: K bytes/s after M seconds, measured from flow start."""
+        """Throttle bytes: K bytes/s after M seconds, measured from flow start."""
         if self.args.throttle_bps <= 0:
             return
         if time.monotonic() - self.started < self.args.throttle_after:
             return
-        self.throttled = True
-        rate = self.args.throttle_bps
-        while n > 0:
-            now = time.monotonic()
-            self.tokens = min(rate * 0.5, self.tokens + rate * (now - self.last))
-            self.last = now
-            if self.tokens < 1:
-                await asyncio.sleep(0.01)
-                continue
-            use = min(n, self.tokens)
-            self.tokens -= use
-            n -= use
+        async with self._pace_lock:
+            self.throttled = True
+            rate = self.args.throttle_bps
+            while n > 0:
+                now = time.monotonic()
+                self.tokens = min(rate * 0.5, self.tokens + rate * (now - self.last))
+                self.last = now
+                if self.tokens < 1:
+                    await asyncio.sleep(0.01)
+                    continue
+                use = min(n, self.tokens)
+                self.tokens -= use
+                n -= use
 
 
 class DPI:
@@ -442,6 +452,10 @@ async def amain(args):
 
 
 def _split_addr(s):
+    if s.startswith("["):
+        host, _, rest = s[1:].partition("]")
+        port = rest.lstrip(":")
+        return (host or "::1"), int(port)
     host, _, port = s.rpartition(":")
     if not host:
         host = "127.0.0.1"
@@ -465,7 +479,7 @@ def parse_args(argv):
     ap.add_argument("--throttle-after", type=float, default=2.0, help="seconds after flow start before pacing")
     ap.add_argument("--throttle-dir", choices=["c2s", "both"], default="c2s")
     ap.add_argument("--inject-fake", default="none",
-                    choices=["none", "seq", "ttl", "sum", "seqsum", "rst", "split"],
+                    choices=["none", "seq", "ttl", "sum", "seqsum", "rst", "split", "hlen0", "fakeip", "synrst", "paws", "ff", "all"],
                     help="fake-SNI mode the DPI is asked to model")
     ap.add_argument("--fake-sni", default="www.example.com")
     ap.add_argument("--fake-hello", default="", help='"sni base64" lines from testbench/hello_dump')
@@ -561,6 +575,20 @@ def self_test(args):
     ok(mode_verdict("split", window_check=True)[0] == "block", "split: below-window segments are discarded")
     ok(mode_verdict("seq", whitelist={"other.example"})[0] == "block",
        "seq with a non-allowlisted fake SNI -> block")
+    ok(mode_verdict("hlen0")[0] == "allow" and mode_verdict("hlen0", window_check=True)[0] == "block",
+       "hlen0 dies under window checks")
+    ok(mode_verdict("ff")[0] == "allow" and mode_verdict("ff", no_reassemble=True)[0] == "block",
+       "ff relies on reassembly")
+    ok(mode_verdict("paws", window_check=True, checksum_check=True)[0] == "allow",
+       "paws survives window + checksum validation")
+    ok(mode_verdict("fakeip", window_check=True, checksum_check=True)[0] == "allow",
+       "fakeip survives window + checksum validation")
+    ok(mode_verdict("synrst")[0] == "block" and mode_verdict("synrst")[1].startswith("rst-cleared/"),
+       "synrst clears flow when checksum unchecked")
+    ok(mode_verdict("all", window_check=True, checksum_check=True)[0] == "allow" and
+       mode_verdict("all", window_check=True, checksum_check=True, no_reassemble=True)[0] == "block",
+       "all survives while any marker survives")
+    ok(_split_addr("[::1]:18444") == ("::1", 18444), "_split_addr handles bracketed IPv6")
 
     print(f"SELFTEST OK ({checks} checks)")
     return 0

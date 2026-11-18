@@ -241,9 +241,11 @@ func (d *Desync) Close() error { d.inj.close(); return nil }
 
 // desyncInjector is one sniffer for the pool of one client process, over the portable tracker.
 type desyncInjector struct {
-	tr     *desyncTracker
-	fd     int
-	closed sync.Once
+	tr      *desyncTracker
+	fd      int
+	closing atomic.Bool
+	wg      sync.WaitGroup
+	closed  sync.Once
 }
 
 // newDesyncInjector starts the sniffer. peerIP is the pool's server IP.
@@ -254,27 +256,34 @@ func newDesyncInjector(cfg DesyncConfig, peerIP ipAddr) (*desyncInjector, error)
 	}
 	d := &desyncInjector{fd: fd, tr: newDesyncTracker(cfg, peerIP)}
 	d.tr.send = d.sendRaw
+	d.wg.Add(1)
 	go d.loop()
 	return d, nil
 }
 
 func (d *desyncInjector) close() {
 	d.closed.Do(func() {
+		d.closing.Store(true)
 		d.tr.close()
+		d.wg.Wait()
 		unix.Close(d.fd)
 	})
 }
 
 // loop reads ethernet frames and feeds them to the tracker.
 func (d *desyncInjector) loop() {
+	defer d.wg.Done()
 	// 64 KB: AF_PACKET delivers one frame per read, and TSO/GRO can hand the tap multi-KB
 	// super-frames; a 2048-byte read silently truncated them and the fake trigger was missed
 	// intermittently (audit 2026-10-22).
 	buf := make([]byte, 65536)
 	pfd := []unix.PollFd{{Fd: int32(d.fd), Events: unix.POLLIN}}
-	for {
+	for !d.closing.Load() {
 		// Poll with 200 ms timeout so the goroutine sleeps in the kernel when idle instead of spinning on EAGAIN.
 		nReady, err := unix.Poll(pfd, 200)
+		if d.closing.Load() {
+			return
+		}
 		if err != nil {
 			if err == unix.EINTR {
 				continue

@@ -369,3 +369,29 @@ func TestQuotaPeriod(t *testing.T) {
 		t.Fatalf("snapshot: %v", snap)
 	}
 }
+
+func TestParseSizeRejectsOverflowAndNonFinite(t *testing.T) {
+	for _, bad := range []string{"NaN", "nan", "Inf", "+Inf", "infGB", "10000000TB", "-1GB", "abc"} {
+		if v, err := parseSize(bad); err == nil {
+			t.Errorf("parseSize(%q) = %d, want error", bad, v)
+		}
+	}
+}
+
+func TestApplyLimitsClearsRemovedQuotaUsage(t *testing.T) {
+	r := newRegistry()
+	r.loaded[7001] = 500
+	r.applyLimits([]limitSpec{{Port: 7001, Quota: 1000}})
+	st := r.get("s", 7001)
+	if st.qused.Load() != 500 {
+		t.Fatalf("initial qused = %d, want 500", st.qused.Load())
+	}
+	r.applyLimits(nil)
+	if st.qused.Load() != 0 || r.loaded[7001] != 0 {
+		t.Fatalf("removed quota retained usage: qused=%d loaded=%d", st.qused.Load(), r.loaded[7001])
+	}
+	r.applyLimits([]limitSpec{{Port: 7001, Quota: 1000}})
+	if st.qused.Load() != 0 {
+		t.Fatalf("re-added quota inherited stale usage %d", st.qused.Load())
+	}
+}

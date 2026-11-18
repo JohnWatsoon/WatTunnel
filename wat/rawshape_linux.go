@@ -39,9 +39,19 @@ func NewShapedRaw(name string, server bool, peerIP, srcIP string, key []byte) (*
 	}
 	bindIP := net.IPv4zero
 	if srcIP != "" {
-		if bindIP = net.ParseIP(srcIP); bindIP == nil {
-			return nil, errors.New("wat: bad source ip")
+		ip := net.ParseIP(srcIP)
+		if ip == nil || ip.To4() == nil {
+			return nil, errors.New("wat: raw shape requires an IPv4 source ip")
 		}
+		bindIP = ip.To4()
+	}
+	var dstIP net.IP
+	if !server {
+		ip := net.ParseIP(peerIP)
+		if ip == nil || ip.To4() == nil {
+			return nil, errors.New("wat: raw shape requires an IPv4 peer ip")
+		}
+		dstIP = ip.To4()
 	}
 	proto := rawShapeSpecs[s].proto
 	c, err := net.ListenIP("ip4:"+strconv.Itoa(proto), &net.IPAddr{IP: bindIP})
@@ -50,12 +60,7 @@ func NewShapedRaw(name string, server bool, peerIP, srcIP string, key []byte) (*
 	}
 	r := &ShapedRawIO{c: c, shape: s, server: server, rbuf: make([]byte, 2048), k: newRawShapeKey(s, key)}
 	if !server {
-		ip := net.ParseIP(peerIP)
-		if ip == nil {
-			c.Close()
-			return nil, errors.New("wat: bad peer ip")
-		}
-		r.dst = &net.IPAddr{IP: ip}
+		r.dst = &net.IPAddr{IP: dstIP}
 	}
 	c.SetReadBuffer(8 << 20)
 	c.SetWriteBuffer(8 << 20)

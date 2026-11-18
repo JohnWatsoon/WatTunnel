@@ -50,12 +50,15 @@ type HTTPServerOptions struct {
 
 func normPath(p string) string {
 	if p == "" {
-		p = "/wat"
+		return "/wat"
 	}
 	if p[0] != '/' {
 		p = "/" + p
 	}
-	return strings.TrimRight(p, "/")
+	if p = strings.TrimRight(p, "/"); p == "" {
+		return "/"
+	}
+	return p
 }
 
 func (o HTTPClientOptions) host(peer string) string {
@@ -75,7 +78,11 @@ func (o HTTPClientOptions) engine(alpn string) (*tlsEngine, error) {
 		t.DialHook = o.DialHook
 	}
 	if t.ServerName == "" && o.Host != "" {
-		t.ServerName, _, _ = strings.Cut(o.Host, ":")
+		if h, _, err := net.SplitHostPort(o.Host); err == nil {
+			t.ServerName = strings.Trim(h, "[]")
+		} else {
+			t.ServerName = strings.Trim(o.Host, "[]")
+		}
 	}
 	return newTLSEngine(t, alpn)
 }
@@ -389,7 +396,7 @@ func (c *h2Conn) SetWriteDeadline(time.Time) error { return nil }
 
 // wait blocks the server handler until the stream is closed (locally or by the peer), then waits briefly for an
 // in-flight Write so the ResponseWriter is never used after the handler returns.
-func (c *h2Conn) wait(ctx context.Context) {
+func (c *h2Conn) wait(ctx context.Context) bool {
 	select {
 	case <-c.done:
 	case <-ctx.Done():
@@ -399,7 +406,9 @@ func (c *h2Conn) wait(ctx context.Context) {
 	go func() { c.mu.Lock(); c.mu.Unlock(); close(locked) }()
 	select {
 	case <-locked:
+		return true
 	case <-time.After(2 * time.Second):
+		return false
 	}
 }
 
@@ -416,7 +425,7 @@ func newH2Client(peer string, conns int, o HTTPClientOptions, grpc bool) (*TCPPo
 	}
 	path := normPath(o.Path)
 	if grpc {
-		path += "/Tun"
+		path = strings.TrimRight(path, "/") + "/Tun"
 	}
 	scheme := "http"
 	var eng *tlsEngine
@@ -459,14 +468,28 @@ func newH2Client(peer string, conns int, o HTTPClientOptions, grpc bool) (*TCPPo
 						return nil, err
 					}
 					if o.DialHook != nil {
-						return o.DialHook(c)
+						c, err = o.DialHook(c)
 					}
-					return c, nil
+					if err == nil {
+						tcpConn.Store(&c)
+					}
+					return c, err
 				}}
 			if eng != nil {
-				tr.DialTLSContext = func(ctx context.Context, _, a string) (net.Conn, error) { return eng.dial(ctx, a) }
+				tr.DialTLSContext = func(ctx context.Context, _, a string) (net.Conn, error) {
+					c, err := eng.dial(ctx, a)
+					if err == nil {
+						tcpConn.Store(&c)
+					}
+					return c, err
+				}
 			}
-			rt, closeTr = tr, tr.CloseIdleConnections
+			rt, closeTr = tr, func() {
+				tr.CloseIdleConnections()
+				if cp := tcpConn.Load(); cp != nil {
+					(*cp).Close()
+				}
+			}
 		}
 		rctx, cancel := context.WithCancel(ctx)
 		pr, pw := io.Pipe()
@@ -535,7 +558,7 @@ func NewGRPCPoolClient(peer string, conns int, o HTTPClientOptions) (*TCPPoolCli
 func h2Server(addr string, o HTTPServerOptions, grpc bool) (*TCPPoolServer, error) {
 	path := normPath(o.Path)
 	if grpc {
-		path += "/Tun"
+		path = strings.TrimRight(path, "/") + "/Tun"
 	}
 	return newHTTPPoolServer(addr, o, func(l *httpListener) http.Handler {
 		return pathMux(path, l.decoy, func(w http.ResponseWriter, r *http.Request) bool {
@@ -567,8 +590,7 @@ func h2Server(addr string, o HTTPServerOptions, grpc bool) (*TCPPoolServer, erro
 				sc = newGRPCConn(c)
 			}
 			l.push(sc)
-			c.wait(r.Context())
-			if grpc {
+			if c.wait(r.Context()) && grpc {
 				w.Header().Set("Grpc-Status", "0")
 			}
 			return true

@@ -86,9 +86,7 @@ Done. Users connect to the Iran server's IP, and Kharej forwards only to its own
 
 > **Important (avoid Iran IP filtering):** WatTunnel encrypts only **Iran ↔ Kharej**. Your panel inbound on Kharej (the config you give end users) **must also be encrypted** — use **VLESS+Reality**, **VLESS+WS+TLS**, **VLESS Encryption (PQ)**, or **Shadowsocks 2022**. Plain `VLESS + TCP header` is unencrypted between the user and your Iran server, so Iranian ISP DPI detects and blocks the Iran IP.
 
-**Auto uses data.** The manager prints the worst case before it starts: up to 1184 MB for a normal test, about 416 MB
-more if the token was made with `--extended`, and far less on a filtered route. On a traffic-billed server, pick a type
-yourself:
+**Auto uses data.** The manager prints the worst case before it starts: up to 1184 MB for a normal test, and far less on a filtered route (`--extended` adds shaped carriers via CLI, up to 416 MB more). On a traffic-billed server, pick a type yourself:
 
 | Your route | Use |
 |---|---|
@@ -114,23 +112,17 @@ wattun update          # update the binary and the menu (or: wattun update --fro
 
 | Status | Meaning |
 |---|---|
-| `up` | The link works, also when an auto tunnel's link is on its other side |
+| `up` | The link works (including when an auto tunnel connects over a background carrier) |
 | `partial` | The link works but a bond leg is down; the tunnel page shows how many |
-| `standby` | The side of an auto tunnel that Iran is not using |
 | `waiting` / `down` | No link (`waiting` on Kharej, `down` on Iran) |
 | `unknown` | The tunnel's stats did not answer, so the state is not known |
 | `stopped` | The service is not running |
 
-**After Iran picks a type,** an auto Kharej tunnel closes unused test ports about 15 minutes later and keeps the carrier
-Iran uses under the same tunnel name (its connections drop once during that switch). The Kharej main menu shows
-`carriers open` or `closed` under each auto tunnel, with the open count and the time left. Press `o` there to reopen all
-carriers (held open until you press `o` again) or to close unused ones right away; `wattun token NAME` keeps working at
-any time. Each Kharej auto tunnel gets its own reverse port range, so several Iran or Kharej tunnels can use reverse
-mode side by side without port collisions.
-
-To change the type or re-test on Iran later, press `o` on Kharej's main menu first so every test port is open. If you
-skip that, the active connection is still measured live, and if the link ever goes down the manager reopens every
-carrier on Kharej automatically after 3 failed checks (at most once per 10 minutes).
+**Always-open Auto & random ports.** An auto Kharej tunnel appears as one unified entry and keeps all test carriers
+open automatically in the background on verified-free random high ports (`10000..32767`, never taking `443`, `80`,
+`8080`, or `8443` unless you ask or pass `--cdn-domain`), so Iran can re-test (`wattun auto-test NAME`), bond, or
+auto-heal failover at any time without port conflicts or manual carrier toggles. Existing 3.3.3–3.3.7 narrowed or
+finalized tunnels reopen automatically on update.
 
 ## What it does
 

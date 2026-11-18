@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 )
 
@@ -30,9 +31,14 @@ func batchDisabled() bool { return os.Getenv("WAT_BATCH") == "" || os.Getenv("WA
 
 func icmpBatchDisabled() bool { return os.Getenv("WAT_BATCH") == "0" }
 
+type batchPacketConn interface {
+	ReadBatch(ms []ipv4.Message, flags int) (int, error)
+	WriteBatch(ms []ipv4.Message, flags int) (int, error)
+}
+
 // mmsgRx reads up to rxBatch datagrams per system call and hands them out one by one.
 type mmsgRx struct {
-	pc   *ipv4.PacketConn
+	pc   batchPacketConn
 	msgs []ipv4.Message
 	n, i int
 
@@ -42,7 +48,7 @@ type mmsgRx struct {
 	from net.Addr // and their source
 }
 
-func newMmsgRx(pc *ipv4.PacketConn) *mmsgRx {
+func newMmsgRx(pc batchPacketConn) *mmsgRx {
 	r := &mmsgRx{pc: pc, msgs: make([]ipv4.Message, rxBatch)}
 	for i := range r.msgs {
 		r.msgs[i].Buffers = [][]byte{make([]byte, rxBufSz)}
@@ -102,7 +108,7 @@ var errTrunc = errors.New("wat: datagram truncated (receive buffer too small; lo
 
 // mmsgTx sends a burst with sendmmsg. Shared by every session of a server, hence the lock.
 type mmsgTx struct {
-	pc   *ipv4.PacketConn
+	pc   batchPacketConn
 	mu   sync.Mutex
 	msgs []ipv4.Message
 }
@@ -162,7 +168,10 @@ func newUDPBatch(c *net.UDPConn) *udpBatch {
 	if batchDisabled() {
 		return nil
 	}
-	pc := ipv4.NewPacketConn(c)
+	var pc batchPacketConn = ipv4.NewPacketConn(c)
+	if la, ok := c.LocalAddr().(*net.UDPAddr); ok && la.IP != nil && la.IP.To4() == nil {
+		pc = ipv6.NewPacketConn(c)
+	}
 	b := &udpBatch{rx: newMmsgRx(pc), tx: mmsgTx{pc: pc}, c: c}
 	if gsoWanted {
 		b.gso.Store(true)

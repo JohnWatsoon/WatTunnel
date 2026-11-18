@@ -74,10 +74,16 @@ func NewICMPIOSource(server, reverse bool, peerIP, srcIP string, key []byte, kin
 	bindIP := net.IPv4zero
 	if srcIP != "" {
 		ip := net.ParseIP(srcIP)
-		if ip == nil {
-			return nil, errors.New("wat: bad source ip")
+		if ip == nil || ip.To4() == nil {
+			return nil, errors.New("wat: icmp requires an IPv4 source ip")
 		}
-		bindIP = ip
+		bindIP = ip.To4()
+	}
+	if !server || reverse && peerIP != "" {
+		ip := net.ParseIP(peerIP)
+		if ip == nil || ip.To4() == nil {
+			return nil, errors.New("wat: icmp requires an IPv4 peer ip")
+		}
 	}
 	c, err := net.ListenIP("ip4:icmp", &net.IPAddr{IP: bindIP})
 	if err != nil {
@@ -85,12 +91,7 @@ func NewICMPIOSource(server, reverse bool, peerIP, srcIP string, key []byte, kin
 	}
 	io := &ICMPIO{c: c, server: server, sendsReq: server == reverse, reqType: req, repType: rep, identBase: IdentBase(key), rbuf: make([]byte, 2048)}
 	if !server || reverse && peerIP != "" {
-		ip := net.ParseIP(peerIP)
-		if ip == nil {
-			c.Close()
-			return nil, errors.New("wat: bad peer ip")
-		}
-		io.dst = &net.IPAddr{IP: ip}
+		io.dst = &net.IPAddr{IP: net.ParseIP(peerIP).To4()}
 	}
 	c.SetReadBuffer(8 << 20)
 	c.SetWriteBuffer(8 << 20)

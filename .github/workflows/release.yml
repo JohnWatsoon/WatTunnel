@@ -29,7 +29,12 @@ jobs:
       - run: go test -count=1 -timeout 15m ./...
       # The raw/ICMP tests skip without root in the suite above; run the same sudo set as CI's icmp job so a tag
       # cannot ship a raw-shaped carrier whose only end-to-end test never ran (audit L5/F13).
-      - run: sudo -E env "PATH=$PATH" go test -count=1 -timeout 15m -run 'TestICMP|TestRawIP|TestRawIPShapedLoopback' ./wat/
+      - name: root ICMP / raw-IP tests
+        run: |
+          for pat in TestICMP TestRawIP TestRawIPShapedLoopback; do
+            go test -list "^$pat" ./wat/ | grep -q "^$pat" || { echo "::error::missing test matching $pat"; exit 1; }
+          done
+          sudo -E env "PATH=$PATH" go test -count=1 -timeout 15m -run 'TestICMP|TestRawIP|TestRawIPShapedLoopback' ./wat/
       - run: sh build.sh
         env:
           WAT_SIGN_KEY: ${{ secrets.WAT_SIGN_KEY }}
@@ -42,13 +47,16 @@ jobs:
       # every release must carry a verifiable signature: the installer (and WAT_PROXY users especially) refuses
       # a download whose SHA256SUMS it cannot check
       - run: 'test -f dist/SHA256SUMS.sig || { echo "::error::dist/SHA256SUMS.sig missing — set the WAT_SIGN_KEY secret (RSA PEM)"; exit 1; }'
-      - name: the signature verifies against the key shipped in install.sh
+      - name: the signature verifies against the key shipped in install.sh and wattun-manager
         run: |
           awk '/^SIG_PUB=/{on=1;next} on&&/^PEM$/{on=0} on' install.sh > /tmp/sigpub.pem
+          awk '/^SIG_PUB=/{on=1;next} on&&/^PEM$/{on=0} on' wattun-manager > /tmp/sigpub_mgr.pem
           grep -q 'BEGIN PUBLIC KEY' /tmp/sigpub.pem || { echo "::error::could not extract SIG_PUB from install.sh"; exit 1; }
+          diff -u /tmp/sigpub.pem /tmp/sigpub_mgr.pem || { echo "::error::SIG_PUB differs between install.sh and wattun-manager"; exit 1; }
           openssl dgst -sha256 -verify /tmp/sigpub.pem -signature dist/SHA256SUMS.sig dist/SHA256SUMS
       # Pinned to a full commit SHA (the mutable v2 tag was 3bb12739 at pin time): this job holds
       # contents:write and WAT_SIGN_KEY, so a retagged/hijacked action must not be able to swap the signed dist/.
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           files: dist/*
+          body_path: docs/release-notes/${{ github.ref_name }}.md

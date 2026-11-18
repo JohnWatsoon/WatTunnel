@@ -234,11 +234,12 @@ func main() {
 	wat.SetLossCeiling(*lossCeil)
 	wat.SetGovernor(*governor)
 	if *dnsUpstream != "" {
-		u := *dnsUpstream
-		if !strings.Contains(u, ":") {
-			u += ":53"
+		dnsRelayUpstream = withDefaultPort(*dnsUpstream, 53)
+	}
+	if *allowList != "" {
+		if _, _, err := parseAllowList(*allowList); err != nil {
+			log.Fatalf("-allow-ports: %v", err)
 		}
-		dnsRelayUpstream = u
 	}
 	if _, _, ok := wat.ICMPTypes(*icmpType); !ok {
 		log.Fatalf("-icmp-type must be echo, timestamp, info or mask, got %q", *icmpType)
@@ -322,13 +323,28 @@ func main() {
 	if *pingEvery < 0 || *pingEvery > 60 { // Alive and the server IdleTimeout are 3x this value
 		log.Fatalf("-ping-every must be 0..60 seconds, got %d", *pingEvery)
 	}
+	if *metrics != "" {
+		fixed, changed := loopbackMetricsAddr(*metrics)
+		if changed {
+			log.Printf("metrics: %s is not a loopback address; serving on %s instead (it exposes stats, pprof and /speedtest)", *metrics, fixed)
+		}
+		*metrics = fixed
+	}
 	if *decoy != "" {
 		if u, err := url.Parse(*decoy); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			log.Fatalf("-decoy must be an http:// or https:// URL with a host, got %q", *decoy)
 		} else if loopbackHost(u.Hostname()) {
 			// the proxy rewrites Host to the decoy's, so a loopback service sees a local request from anyone who
 			// reaches the tunnel port: the metrics server (stats, pprof, /quota/reset) must never be the decoy
-			if _, mp, _ := net.SplitHostPort(*metrics); mp != "" && mp == u.Port() {
+			dp := u.Port()
+			if dp == "" {
+				if u.Scheme == "https" {
+					dp = "443"
+				} else {
+					dp = "80"
+				}
+			}
+			if _, mp, _ := net.SplitHostPort(*metrics); mp != "" && mp == dp {
 				log.Fatalf("-decoy %s is this tunnel's own metrics address; point it at a public web server", *decoy)
 			}
 			log.Printf("warning: -decoy %s is a loopback service: everyone who reaches the tunnel port can reach it; never point it at a wattun metrics port", *decoy)
@@ -863,7 +879,13 @@ func main() {
 				p, err = c.Clone(k * max(*conns, 1))
 			case *wat.UDPClient:
 				var uc *wat.UDPClient
-				if uc, err = wat.NewUDPClient(pick(peerBy, *peer, "udp")); err == nil {
+				udpPeer := pick(peerBy, *peer, "udp")
+				if src := pick(srcIPBy, *srcIP, "udp"); src != "" {
+					uc, err = wat.NewUDPClientAddr(udpPeer, &net.UDPAddr{IP: net.ParseIP(src)})
+				} else {
+					uc, err = wat.NewUDPClient(udpPeer)
+				}
+				if err == nil {
 					uc.SetDNS(*udpDNS)
 					p = uc
 				}
@@ -902,10 +924,14 @@ func main() {
 		}
 		return tun.stats()
 	}
-	// A server counts as alive only while a client was heard in the last 10 s, like a client does: a session that is
-	// still in the table but silent (every pool conn blackholed) is not alive (3.0.1).
+	// A server counts as alive only while a client was heard recently (10 s default, scaled with -ping-every):
+	// a session that is still in the table but silent (every pool conn blackholed) is not alive (3.0.1).
+	aliveWin := 10 * time.Second
+	if w := 3 * time.Duration(*pingEvery) * time.Second; w > aliveWin {
+		aliveWin = w
+	}
 	alive := func() bool {
-		return srv != nil && srv.Sessions() > 0 && time.Since(srv.LastRecv()) < 10*time.Second || tun != nil && tun.alive()
+		return srv != nil && srv.Sessions() > 0 && time.Since(srv.LastRecv()) < aliveWin || tun != nil && tun.alive()
 	}
 	// rxAge: ms since the last authenticated packet from the peer (server: from any client), -1 if none yet.
 	rxAge := func() int64 {
@@ -936,6 +962,7 @@ func main() {
 	}
 	if fileCfg != nil {
 		portReg.applyLimits(fileCfg.Limits)
+		portReg.rollPeriods(time.Now())
 	}
 	go portReg.run(stateEvery)
 	log.Printf("wattun %s up (ident base %d, lanes %d, max %.0f MB/s; host: %d CPU, %d MB RAM, %s tier, conns %d, sessions %d)",
@@ -948,17 +975,15 @@ func main() {
 	}
 
 	if *metrics != "" {
-		fixed, changed := loopbackMetricsAddr(*metrics)
-		if changed {
-			log.Printf("metrics: %s is not a loopback address; serving on %s instead (it exposes stats, pprof and /speedtest)", *metrics, fixed)
-		}
-		*metrics = fixed
-		if _, p, err := net.SplitHostPort(fixed); err == nil {
-			if n, err := strconv.Atoi(p); err == nil {
-				metricsPort.Store(int32(n))
-			}
-		}
 		go func() {
+			ln, err := net.Listen("tcp", *metrics)
+			if err != nil {
+				log.Printf("metrics %s: %v", *metrics, err)
+				return
+			}
+			if ta, ok := ln.Addr().(*net.TCPAddr); ok && ta.Port > 0 {
+				metricsPort.Store(int32(ta.Port))
+			}
 			mux := http.NewServeMux()
 			mux.HandleFunc("/debug/pprof/", guard(pprof.Index))
 			mux.HandleFunc("/debug/pprof/profile", guard(pprof.Profile))
@@ -1090,7 +1115,7 @@ func main() {
 				}
 				json.NewEncoder(w).Encode(out)
 			}))
-			log.Println(http.ListenAndServe(*metrics, mux))
+			log.Println(http.Serve(ln, mux))
 		}()
 	}
 	go func() {
@@ -1122,13 +1147,9 @@ func main() {
 	}()
 
 	if server {
-		var al *allow
+		al := newAllow(*allowList, *allowFile)
 		if fileCfg != nil && fileCfg.PortsSet { // the config's ports replace -allow-file / -allow-ports
-			al = newAllow("", "")
-			al.setPorts(fileCfg.tcpPorts())
-			al.setUDPPorts(fileCfg.udpPorts())
-		} else {
-			al = newAllow(*allowList, *allowFile)
+			al.setConfigPorts(fileCfg.tcpPorts(), fileCfg.udpPorts())
 		}
 		// M4: a flag-run server with no explicit allowlist source forwards every 127.0.0.1 port. Warn once and
 		// keep the documented default (the operator opts in with -allow-ports or a `ports:` list).
@@ -1142,8 +1163,7 @@ func main() {
 						al.reset(*allowList)
 						return nil
 					}
-					al.setPorts(c.tcpPorts())
-					al.setUDPPorts(c.udpPorts())
+					al.setConfigPorts(c.tcpPorts(), c.udpPorts())
 					return nil
 				},
 				onLimits: func(c *fileConfig) { portReg.applyLimits(c.Limits) }}
@@ -1174,11 +1194,12 @@ func main() {
 		}
 	} else {
 		cfgPorts := fileCfg != nil && fileCfg.PortsSet
-		if *maps != "" || !cfgPorts && *udpMaps == "" { // without -map and without ports: keep the old "bad -map entry" failure
+		bindHost := strings.Trim(strings.TrimSpace(*bind), "[]")
+		if *maps != "" || !cfgPorts && *udpMaps == "" && *dnsListen == "" { // without -map and without ports: keep the old "bad -map entry" failure
 			for _, m := range strings.Split(*maps, ",") {
-				bindAddr := *bind
+				bindAddr := bindHost
 				if at := strings.Index(m, "@"); at >= 0 { // 18999:18999@127.0.0.1 keeps a port private
-					bindAddr = strings.TrimSpace(m[at+1:])
+					bindAddr = strings.Trim(strings.TrimSpace(m[at+1:]), "[]")
 					m = m[:at]
 				}
 				f := strings.Split(strings.TrimSpace(m), ":")
@@ -1191,13 +1212,17 @@ func main() {
 					// range too: uint16(target) would silently wrap 70000->4464 and route 0 to the speed test
 					log.Fatalf("bad -map entry %q", m)
 				}
-				addr := net.JoinHostPort(bindAddr, strconv.Itoa(lp+*offset))
+				pub := lp + *offset
+				if pub < 1 || pub > 65535 {
+					log.Fatalf("bad -map entry %q with -port-offset %d: listen port %d out of 1..65535", m, *offset, pub)
+				}
+				addr := net.JoinHostPort(bindAddr, strconv.Itoa(pub))
 				ln, err := net.Listen("tcp", addr)
 				if err != nil {
 					log.Fatalf("listen %s: %v", addr, err)
 				}
 				log.Printf("forwarding %s -> server :%d", addr, sp)
-				ps := portReg.get("c", lp+*offset)
+				ps := portReg.get("c", pub)
 				go acceptLoop(ln, func(c net.Conn) { forward(tun, c, sp, ps) })
 			}
 		}
@@ -1206,7 +1231,7 @@ func main() {
 			if strings.TrimSpace(m) == "" {
 				continue
 			}
-			addr, target, err := parseUDPMap(strings.TrimSpace(m), *bind, *offset)
+			addr, target, err := parseUDPMap(strings.TrimSpace(m), bindHost, *offset)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -1217,7 +1242,11 @@ func main() {
 		}
 		if *cfgPath != "" { // config ports: public port N -> server port N, added and removed live
 			uls := newUDPListeners(func(p, t int) (*udpListener, error) {
-				addr := net.JoinHostPort(*bind, strconv.Itoa(p+*offset))
+				pub := p + *offset
+				if pub < 1 || pub > 65535 {
+					return nil, fmt.Errorf("udp port %d with -port-offset %d out of 1..65535", p, *offset)
+				}
+				addr := net.JoinHostPort(bindHost, strconv.Itoa(pub))
 				l, err := dc.listen(addr, t)
 				if err == nil {
 					log.Printf("forwarding udp %s -> server :%d", addr, t)
@@ -1225,11 +1254,15 @@ func main() {
 				return l, err
 			})
 			ls := newListeners(func(p, t int) (net.Listener, error) {
-				addr := net.JoinHostPort(*bind, strconv.Itoa(p+*offset))
+				pub := p + *offset
+				if pub < 1 || pub > 65535 {
+					return nil, fmt.Errorf("port %d with -port-offset %d out of 1..65535", p, *offset)
+				}
+				addr := net.JoinHostPort(bindHost, strconv.Itoa(pub))
 				ln, err := net.Listen("tcp", addr)
 				if err == nil {
 					log.Printf("forwarding %s -> server :%d", addr, t)
-					ps := portReg.get("c", p+*offset)
+					ps := portReg.get("c", pub)
 					go acceptLoop(ln, func(c net.Conn) { forward(tun, c, t, ps) })
 				}
 				return ln, err
@@ -1321,6 +1354,7 @@ func forward(tun *tunnel, c net.Conn, target int, ps *portStat) {
 	st.SetGroup(uint32(target)) // fair queuing: one port's heavy streams share the link with the others
 	if _, err := st.Write(hdr[:]); err != nil {
 		ps.errs.Add(1)
+		st.Reset()
 		c.Close()
 		return
 	}
@@ -1587,27 +1621,51 @@ func serve(sess *wat.Session, lo, hi int, al *allow) {
 // allow is the set of target ports a client may reach. With a file it is re-read whenever the file changes, so
 // adding or removing a port never restarts the server (a restart would cut every client session).
 type allow struct {
-	mu    sync.RWMutex
-	ports map[int]bool
-	udp   map[int]bool // udp target ports: `N/udp` entries in the config ports list, -allow-ports or -allow-file
-	file  string
-	mtime time.Time
-	size  int64 // allow-file size, checked next to mtime (a same-granularity rewrite changes size)
-	cfg   bool  // ports come from the config file: authoritative, even when empty
-}
-
-func parsePorts(txt string) map[int]bool {
-	m := map[int]bool{}
-	for _, f := range strings.FieldsFunc(txt, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r' }) {
-		if p, err := strconv.Atoi(f); err == nil && p > 0 && p < 65536 {
-			m[p] = true
-		}
-	}
-	return m
+	mu       sync.RWMutex
+	ports    map[int]bool
+	udp      map[int]bool // udp target ports: `N/udp` entries in the config ports list, -allow-ports or -allow-file
+	file     string
+	mtime    time.Time
+	size     int64 // allow-file size, checked next to mtime (a same-granularity rewrite changes size)
+	cfg      bool  // ports come from the config file: authoritative, even when empty
+	explicit bool  // -allow-ports was non-empty (distinguishes "53/udp" from empty unrestricted default)
 }
 
 func isPortSep(r rune) bool {
 	return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r'
+}
+
+// parseAllowList validates a comma/whitespace-separated port list (N, N/tcp, N/udp).
+func parseAllowList(txt string) (tcp, udp map[int]bool, err error) {
+	tcp, udp = map[int]bool{}, map[int]bool{}
+	for _, f := range strings.FieldsFunc(txt, isPortSep) {
+		if s, ok := strings.CutSuffix(f, "/udp"); ok {
+			p, e := strconv.Atoi(s)
+			if e != nil || p < 1 || p > 65535 {
+				return nil, nil, fmt.Errorf("bad port entry %q", f)
+			}
+			udp[p] = true
+			continue
+		}
+		s := strings.TrimSuffix(f, "/tcp")
+		p, e := strconv.Atoi(s)
+		if e != nil || p < 1 || p > 65535 {
+			return nil, nil, fmt.Errorf("bad port entry %q", f)
+		}
+		tcp[p] = true
+	}
+	return tcp, udp, nil
+}
+
+func parsePorts(txt string) map[int]bool {
+	m := map[int]bool{}
+	for _, f := range strings.FieldsFunc(txt, isPortSep) {
+		s := strings.TrimSuffix(f, "/tcp")
+		if p, err := strconv.Atoi(s); err == nil && p > 0 && p < 65536 {
+			m[p] = true
+		}
+	}
+	return m
 }
 
 // parseUDPPorts collects the `N/udp` tokens of a ports list (parsePorts skips them).
@@ -1623,18 +1681,30 @@ func parseUDPPorts(txt string) map[int]bool {
 	return m
 }
 
-// reset reinstalls list as the allowlist, undoing an authoritative config ports: list. A running
-// allow-file poller resumes applying the file on its next tick (reload skips only while a.cfg).
+// reset reinstalls list as the allowlist, undoing an authoritative config ports: list. If -allow-file is
+// configured, mtime/size are cleared and the file is re-applied immediately.
 func (a *allow) reset(list string) {
 	m, um := parsePorts(list), parseUDPPorts(list)
 	a.mu.Lock()
 	a.ports, a.udp, a.cfg = m, um, false
+	a.explicit = strings.TrimSpace(list) != ""
+	a.mtime, a.size = time.Time{}, 0
+	hasFile := a.file != ""
 	a.mu.Unlock()
+	if hasFile {
+		a.reload()
+		return
+	}
 	log.Printf("allowed target ports: %d", len(m))
 }
 
 func newAllow(list, file string) *allow {
-	a := &allow{ports: parsePorts(list), udp: parseUDPPorts(list), file: file}
+	a := &allow{
+		ports:    parsePorts(list),
+		udp:      parseUDPPorts(list),
+		file:     file,
+		explicit: strings.TrimSpace(list) != "",
+	}
 	if file != "" {
 		a.reload()
 		go func() {
@@ -1668,6 +1738,22 @@ func (a *allow) reload() {
 	log.Printf("allowed target ports: %d", len(m))
 }
 
+// setConfigPorts atomically installs both tcp and udp config ports as the authoritative allowlist.
+func (a *allow) setConfigPorts(tcp, udp []int) {
+	m := make(map[int]bool, len(tcp))
+	for _, p := range tcp {
+		m[p] = true
+	}
+	um := make(map[int]bool, len(udp))
+	for _, p := range udp {
+		um[p] = true
+	}
+	a.mu.Lock()
+	a.ports, a.udp, a.cfg = m, um, true
+	a.mu.Unlock()
+	log.Printf("allowed target ports: %d (udp: %d)", len(m), len(um))
+}
+
 // setPorts installs the config file's tcp ports as the (authoritative) allowlist.
 func (a *allow) setPorts(ports []int) {
 	m := map[int]bool{}
@@ -1696,7 +1782,7 @@ func (a *allow) setUDPPorts(ports []int) {
 func (a *allow) udpOK(port, lo, hi int) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.file != "" || a.cfg || len(a.ports) > 0 || len(a.udp) > 0 {
+	if a.file != "" || a.cfg || a.explicit || len(a.ports) > 0 || len(a.udp) > 0 {
 		return a.udp[port]
 	}
 	return port >= lo && port <= hi
@@ -1705,7 +1791,7 @@ func (a *allow) udpOK(port, lo, hi int) bool {
 func (a *allow) ok(port, lo, hi int) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.file != "" || a.cfg || len(a.ports) > 0 { // a file is authoritative, even when empty
+	if a.file != "" || a.cfg || a.explicit || len(a.ports) > 0 { // a file or explicit list is authoritative, even when empty
 		return a.ports[port]
 	}
 	return port >= lo && port <= hi
@@ -1718,7 +1804,7 @@ func (a *allow) ok(port, lo, hi int) bool {
 func (a *allow) relayFor(port, lo, hi int) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.file != "" || a.cfg || len(a.ports) > 0 {
+	if a.file != "" || a.cfg || a.explicit || len(a.ports) > 0 {
 		return !a.ports[port]
 	}
 	if lo != 1 || hi != 65535 {

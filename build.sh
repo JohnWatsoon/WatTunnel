@@ -14,8 +14,9 @@ GO=${GO:-$(command -v go || true)}
 VER=$(sed -n 's/^const Version = "\([0-9A-Za-z.+-]*\)".*/\1/p' wat/version.go)
 [ -n "$VER" ] || { echo "BUILD_FAIL version (wat/version.go)"; exit 1; }
 ARCHES=${*:-"amd64 arm64 windows"}
-export CGO_ENABLED=0 GOFLAGS=-mod=mod
+export CGO_ENABLED=0
 mkdir -p dist
+rm -f dist/wattun-* dist/install.sh dist/SHA256SUMS dist/SHA256SUMS.sig
 for a in $ARCHES; do
   case "$a" in
     amd64|arm64) os=linux; arch=$a; out="dist/wattun-linux-$a" ;;
@@ -29,8 +30,8 @@ for a in $ARCHES; do
   printf '%s  %s\n' "$sum" "${out##*/}" > "$out.sha256"
   echo "wattun $VER $os/$arch $sum"
 done
-# The ICMP path prober (cmd/wprobe) ships too, same OS/arch set; the SHA256SUMS glob below picks it up.
-for a in amd64 arm64 windows; do
+# The ICMP path prober (cmd/wprobe) ships too, matching ARCHES; the SHA256SUMS glob below picks it up.
+for a in $ARCHES; do
   case "$a" in
     amd64|arm64) os=linux; arch=$a; out="dist/wattun-wprobe-linux-$a" ;;
     windows) os=windows; arch=amd64; out="dist/wattun-wprobe-windows-amd64.exe" ;;

@@ -2323,3 +2323,41 @@ func TestDesyncResendKeepsDelayedMarkers(t *testing.T) {
 		}
 	}
 }
+
+// 3.3.8 audit: ackCh must not release Wrap before scheduled ff/seqsum/all marker timers finish, and ttl=0 miss
+// closes wait immediately instead of stalling 500 ms.
+func TestDesyncTimerAckHoldAndTTLMissClose(t *testing.T) {
+	tr, sent := desyncTestTracker("ff", 0)
+	defer tr.close()
+	k := testClientKey()
+	const isn, srvSeq = uint32(19000), uint32(2500)
+	ch := tr.announce(k, isn+1, true)
+	ackCh := tr.ackChan(k)
+	feedFullHandshake(tr, k, isn, srvSeq)
+	<-ch
+	// Immediate dup-ACK for segment 0 arrives while 1..10 ms timers are still pending.
+	tr.handleIP(desyncTestPkt(k.dstIP, k.srcIP, k.dstPt, k.srcPt, srvSeq+1, isn+1, testFlagACK, nil, 64))
+	select {
+	case <-ackCh:
+		t.Fatal("ackCh closed before scheduled ff marker timers finished")
+	default:
+	}
+	select {
+	case <-ackCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ackCh never closed after scheduled ff markers finished")
+	}
+	if sent.n() < 2 {
+		t.Fatalf("expected all ff markers before ackCh closed, got %d", sent.n())
+	}
+
+	// ttl=0 miss closes wait channel without stalling Wrap.
+	tr2, _ := desyncTestTracker("ttl", 0)
+	defer tr2.close()
+	ch2 := tr2.announce(k, isn+1, true, srvSeq+1)
+	select {
+	case <-ch2:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("ttl=0 miss left wait channel open")
+	}
+}

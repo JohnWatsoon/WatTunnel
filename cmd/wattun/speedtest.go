@@ -26,12 +26,12 @@ package main
 import (
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JohnWatsoon/WatTunnel/wat"
@@ -151,8 +151,12 @@ func runSpeedTest(tun *tunnel, dir string, size uint64, streams int, done <-chan
 			return res
 		}
 	}
-	res.Seconds = time.Since(t0).Seconds()
-	res.MBps = float64(size) / 1e6 / res.Seconds
+	sec := time.Since(t0).Seconds()
+	if sec < 1e-6 {
+		sec = 1e-6
+	}
+	res.Seconds = sec
+	res.MBps = float64(size) / 1e6 / sec
 	res.Mbit = res.MBps * 8
 	res.OK = true
 	return res
@@ -163,14 +167,16 @@ func runSpeedTest(tun *tunnel, dir string, size uint64, streams int, done <-chan
 // kept up to sessions×32 streams running until the 3-minute cap (audit 2026-10-21).
 func speedOne(sess *wat.Session, dir string, size uint64, done <-chan struct{}) speedResult {
 	res := speedResult{Dir: dir, Bytes: size}
-	fail := func(err error) speedResult { res.Error = err.Error(); return res }
 	if !sess.Alive() {
-		return fail(errors.New("tunnel is not connected"))
+		res.Error = "tunnel is not connected"
+		return res
 	}
 	st, err := sess.OpenStream()
 	if err != nil {
-		return fail(err)
+		res.Error = err.Error()
+		return res
 	}
+	fail := func(err error) speedResult { st.Reset(); res.Error = err.Error(); return res }
 	timer := time.AfterFunc(speedTestLimit, st.Reset)
 	defer timer.Stop()
 	fin := make(chan struct{})
@@ -218,8 +224,12 @@ func speedOne(sess *wat.Session, dir string, size uint64, done <-chan struct{}) 
 			return fail(fmt.Errorf("received %d of %d bytes (is the server running wattun 1.8.1 or newer?)", n, size))
 		}
 	}
-	res.Seconds = time.Since(t0).Seconds()
-	res.MBps = float64(size) / 1e6 / res.Seconds
+	sec := time.Since(t0).Seconds()
+	if sec < 1e-6 {
+		sec = 1e-6
+	}
+	res.Seconds = sec
+	res.MBps = float64(size) / 1e6 / sec
 	res.Mbit = res.MBps * 8
 	res.OK = true
 	return res
@@ -235,9 +245,16 @@ func speedTestStreams(s string) int {
 	return n
 }
 
+var speedTestBusy atomic.Bool
+
 // speedTestHandler serves /speedtest?dir=down|up&mb=N on the client's metrics address.
 func speedTestHandler(tun *tunnel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !speedTestBusy.CompareAndSwap(false, true) {
+			http.Error(w, "speedtest already running", http.StatusTooManyRequests)
+			return
+		}
+		defer speedTestBusy.Store(false)
 		dir := r.URL.Query().Get("dir")
 		if dir != "up" {
 			dir = "down"

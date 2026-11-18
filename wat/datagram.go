@@ -221,3 +221,14 @@ func (s *Session) onDgramFrag(flow uint64, port int, id uint64, idx, cnt int, da
 		s.stats.DgramDropRx++
 	}
 }
+
+// pruneReasm drops incomplete fragment buffers older than fragKeep (under s.mu) so idle or low-rate sessions
+// below fragPending cannot pin up to reasmMaxBytes indefinitely.
+func (s *Session) pruneReasm(now time.Time) {
+	for kk, bb := range s.reasm {
+		if now.Sub(bb.at) > fragKeep {
+			reasmHeld.Add(-int64(bb.bytes))
+			delete(s.reasm, kk)
+		}
+	}
+}

@@ -123,7 +123,7 @@ func probeOnce(cfg DesyncConfig, mode, addr, peer string, filler []byte) (bool, 
 		}
 		defer d.Close()
 	}
-	nc, err := net.DialTimeout("tcp4", addr, probeTimeout)
+	nc, err := net.DialTimeout("tcp", addr, probeTimeout)
 	if err != nil {
 		return false, nil // a dial that fails is a cut too (or the peer is down: every mode fails alike)
 	}
@@ -214,8 +214,12 @@ func ProbeName(carrier, sni, host, peer string) string {
 	if sni != "" {
 		return sni
 	}
-	h, _, _ := strings.Cut(peer, ":")
-	return h
+	first, _, _ := strings.Cut(peer, ",")
+	first = strings.TrimSpace(first)
+	if h, _, err := net.SplitHostPort(first); err == nil {
+		return strings.Trim(h, "[]")
+	}
+	return strings.Trim(first, "[]")
 }
 
 // note is the package-level log line of the fake-SNI layer (raw-send failures); it keeps the injector free of a

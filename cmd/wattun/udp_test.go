@@ -244,6 +244,23 @@ func TestUDPAllowParsing(t *testing.T) {
 	if addr, tgt, err := parseUDPMap("51820:51821@127.0.0.1", "0.0.0.0", 10); err != nil || addr != "127.0.0.1:51830" || tgt != 51821 {
 		t.Fatalf("parseUDPMap: %q %d %v", addr, tgt, err)
 	}
+	if addr, tgt, err := parseUDPMap("51820:51821@[::1]", "0.0.0.0", 0); err != nil || addr != "[::1]:51820" || tgt != 51821 {
+		t.Fatalf("parseUDPMap bracketed v6 @bind: %q %d %v", addr, tgt, err)
+	}
+	if addr, tgt, err := parseUDPMap("51820", "[::1]", 0); err != nil || addr != "[::1]:51820" || tgt != 51820 {
+		t.Fatalf("parseUDPMap bracketed defBind: %q %d %v", addr, tgt, err)
+	}
+	for _, bad := range []struct {
+		m   string
+		off int
+	}{
+		{"65000", 1000},
+		{"100", -200},
+	} {
+		if addr, _, err := parseUDPMap(bad.m, "0.0.0.0", bad.off); err == nil {
+			t.Errorf("parseUDPMap(%q, %d) = %q, want overflow error", bad.m, bad.off, addr)
+		}
+	}
 }
 
 func TestUDPListenersApplyAddsAndRemoves(t *testing.T) {

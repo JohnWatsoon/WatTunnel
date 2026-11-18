@@ -910,3 +910,340 @@ func TestBondMultiRTTCwnd(t *testing.T) {
 		t.Fatalf("probeRTT should not drain when srtt spread is explained by pathRTT")
 	}
 }
+
+// 3.3.8 audit: tcp+wss MultiRaw server admitted on tcp must clamp wss frames to 4096-overhead (NoDirect),
+// keep s.cc.direct=false once wss is active, propagate NoDirect in mergeProfiles, and copy noDirect in Clone().
+func TestBondTCPWSSNoDirectServerAndClone(t *testing.T) {
+	mp := mergeProfiles([]Profile{
+		{Reliable: true, MTU: 4096, MaxMTU: 16384},
+		{Reliable: true, NoDirect: true, MTU: 4096, MaxMTU: 16384},
+	})
+	if !mp.NoDirect {
+		t.Fatalf("mergeProfiles dropped NoDirect: %+v", mp)
+	}
+
+	wsCli, err := NewWSPoolClient("127.0.0.1:1", 2, HTTPClientOptions{Path: "/wat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wsCli.Close()
+	if !wsCli.Profile().NoDirect {
+		t.Fatalf("NewWSPoolClient missing NoDirect")
+	}
+	cloned, err := wsCli.Clone(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cloned.Close()
+	if !cloned.Profile().NoDirect {
+		t.Fatalf("TCPPoolClient.Clone dropped NoDirect")
+	}
+
+	tcpRaw := &mockRawWithProfile{prof: Profile{Reliable: true, MTU: 4096, MaxMTU: 16384}}
+	wssRaw := &mockRawWithProfile{prof: Profile{Reliable: true, NoDirect: true, MTU: 4096, MaxMTU: 16384}}
+	mr := NewMultiRaw([]string{"tcp", "wss"}, []RawIO{tcpRaw, wssRaw})
+	defer mr.Close()
+	if !mr.Profile().NoDirect {
+		t.Fatalf("MultiRaw.Profile dropped NoDirect")
+	}
+
+	base := &subIO{srv: &Server{raw: mr, sessions: map[uint64]*srvSess{}}, done: make(chan struct{})}
+	sub := newMultiSubIO(base, mr, PathTimings{}, 0) // admitted on tcp
+	s, err := NewSession(Config{Key: []byte("tcp-wss-338"), Direct: true}, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Both paths become active; tcp is muted so NextPath chooses wss.
+	sub.SetPeer(&TaggedAddr{Idx: 0, Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1111}})
+	sub.SetPeer(&TaggedAddr{Idx: 1, Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 2222}})
+	sub.ToggleMute(0)
+
+	s.mu.Lock()
+	s.syncBondPacer()
+	if s.cc.direct {
+		s.mu.Unlock()
+		t.Fatalf("s.cc.direct remained true while NoDirect wss leg is active")
+	}
+	st := s.newStream(1)
+	st.snd.write(bytes.Repeat([]byte("X"), 32<<10))
+	s.cc.tokens = 1 << 20
+	pkt, ok := s.build(time.Now())
+	s.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected build to emit packet on wss")
+	}
+	if len(pkt.p) > 4096-tagLen {
+		t.Fatalf("wss packet plaintext+hdr=%d exceeds 4 KB NoDirect cap (%d)", len(pkt.p), 4096-tagLen)
+	}
+}
+
+// 3.3.8 audit: udp+tcp bond must NOT clamp rate to ICMPPathBps when udp revives, while icmp+tcp must;
+// false->true promotion clears stale bwRing/maxBW.
+func TestBondUDPTCPNoICMPClampAndResetBW(t *testing.T) {
+	kUDP := newMockKid(Profile{MTU: 1400, MaxMTU: 1400})
+	kTCP := newMockKid(Profile{Reliable: true, MTU: 4096, MaxMTU: 16384})
+	defer kUDP.Close()
+	defer kTCP.Close()
+	bond, err := NewBondIO([]PacketIO{kUDP, kTCP}, BondOptions{Names: []string{"udp", "tcp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bond.Close()
+	s, err := NewSession(Config{Key: []byte("udp-tcp-338"), MaxBps: 200e6}, bond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Kill udp -> tcp only -> reliable=true, populate stale maxBW, then revive udp -> rate must stay 50e6.
+	bond.ps.mu.Lock()
+	bond.ps.p[0].state = pDead
+	bond.ps.mu.Unlock()
+	s.mu.Lock()
+	s.syncBondPacer()
+	if !s.cc.reliable {
+		s.mu.Unlock()
+		t.Fatalf("expected reliable=true while only tcp is live")
+	}
+	s.cc.maxBW, s.cc.bwSeen, s.cc.bwLen, s.cc.rate = 40e6, true, 1, 50e6
+	s.mu.Unlock()
+
+	bond.OnAck(0, 20*time.Millisecond, 100) // udp revives
+	s.mu.Lock()
+	s.syncBondPacer()
+	gotRate, gotRel := s.cc.rate, s.cc.reliable
+	s.mu.Unlock()
+	if gotRel {
+		t.Fatalf("expected reliable=false once udp is live alongside tcp")
+	}
+	if gotRate < 49e6 {
+		t.Fatalf("udp+tcp slammed rate to %.0f after udp revival, want 50e6 preserved", gotRate)
+	}
+
+	// Kill udp again -> false->true promotion must clear stale maxBW/bwSeen.
+	bond.ps.mu.Lock()
+	bond.ps.p[0].state = pDead
+	bond.ps.mu.Unlock()
+	s.mu.Lock()
+	s.syncBondPacer()
+	if s.cc.maxBW != 0 || s.cc.bwSeen || s.cc.bwLen != 0 {
+		s.mu.Unlock()
+		t.Fatalf("stale BW not cleared on false->true promotion: maxBW=%v bwSeen=%v bwLen=%d", s.cc.maxBW, s.cc.bwSeen, s.cc.bwLen)
+	}
+	s.mu.Unlock()
+
+	// icmp+tcp: when tcp dies, icmpOnly clamp to ICMPPathBps must apply.
+	kICMP := newMockKid(Profile{})
+	kTCP2 := newMockKid(Profile{Reliable: true, MTU: 4096, MaxMTU: 16384})
+	defer kICMP.Close()
+	defer kTCP2.Close()
+	bond2, _ := NewBondIO([]PacketIO{kICMP, kTCP2}, BondOptions{Names: []string{"icmp", "tcp"}})
+	defer bond2.Close()
+	s2, _ := NewSession(Config{Key: []byte("icmp-tcp-338"), MaxBps: 200e6}, bond2)
+	defer s2.Close()
+	bond2.ps.mu.Lock()
+	bond2.ps.p[1].state = pDead
+	bond2.ps.mu.Unlock()
+	s2.mu.Lock()
+	s2.cc.rate = 50e6
+	s2.syncBondPacer()
+	rate2 := s2.cc.rate
+	s2.mu.Unlock()
+	if rate2 != ICMPPathBps {
+		t.Fatalf("icmp+tcp with dead tcp should clamp to ICMPPathBps (%.0f), got %.0f", ICMPPathBps, rate2)
+	}
+}
+
+// 3.3.8 audit: active-backup nextPath/choose parity on fullMask, eval parity, and credit clamp fairness.
+func TestBondNextChooseParityAndCreditClamp(t *testing.T) {
+	ps := newPathSet([]string{"udp", "tcp"}, true, PathTimings{Mode: "active-backup"})
+	ps.setProfiles([]Profile{
+		{MTU: 1400, MaxMTU: 1400},
+		{Reliable: true, MTU: 4096, MaxMTU: 16384},
+	})
+	ps.allBulkBlocked(1<<0, true) // primary udp full
+	if next, got := ps.nextPath(false), ps.choose(16384, false); next != 1 || got != 1 {
+		t.Fatalf("active-backup full primary: next=%d choose=%d, want 1/1", next, got)
+	}
+
+	// eval parity: silent tcp burstPath transitions to pDead in nextPath before sizing 16 KB.
+	ps2 := newPathSet([]string{"tcp", "icmp"}, true, PathTimings{Silence: 50 * time.Millisecond})
+	ps2.setProfiles([]Profile{
+		{Reliable: true, MTU: 4096, MaxMTU: 16384},
+		{},
+	})
+	ps2.mu.Lock()
+	ps2.burstPath, ps2.burstLeft = 0, 5
+	ps2.p[0].firstUnacked = time.Now().Add(-500 * time.Millisecond)
+	ps2.p[1].lastAck = time.Now()
+	ps2.mu.Unlock()
+	if next := ps2.nextPath(false); next != 1 {
+		t.Fatalf("nextPath did not evaluate silent tcp path dead: got %d, want 1", next)
+	}
+
+	// Credit clamp must not squash an isFull peer's earned credit down to a low-weight active leg's 4*w.
+	ps3 := newPathSet([]string{"icmp", "tcp"}, true, PathTimings{})
+	ps3.mu.Lock()
+	ps3.p[0].w = 0.05
+	ps3.p[1].w = 1.0
+	ps3.p[1].credit = 0.9
+	ps3.mu.Unlock()
+	ps3.allBulkBlocked(1<<1, true)
+	_ = ps3.choose(500, false)
+	ps3.mu.Lock()
+	tcpCred := ps3.p[1].credit
+	ps3.mu.Unlock()
+	if tcpCred < 0.89 {
+		t.Fatalf("full tcp credit squashed to %v by low-weight active leg", tcpCred)
+	}
+}
+
+// 3.3.8 audit: takeDgrams respects NextPath MTU, pathAcked tracks pathMinRTT separately from srtt,
+// and bonded reliable sessions keep spurious-resend tracking in lostRing.
+func TestBondDgramMTUMultiRTTAndSpurious(t *testing.T) {
+	icmpRaw := &mockRawWithProfile{prof: Profile{}}
+	tcpRaw := &mockRawWithProfile{prof: Profile{Reliable: true, MTU: 4096, MaxMTU: 16384}}
+	mr := NewMultiRaw([]string{"icmp", "tcp"}, []RawIO{icmpRaw, tcpRaw})
+	defer mr.Close()
+	base := &subIO{srv: &Server{raw: mr, sessions: map[uint64]*srvSess{}}, done: make(chan struct{})}
+	sub := newMultiSubIO(base, mr, PathTimings{}, 1) // admitted on tcp -> s.maxPlain=16352
+	s, err := NewSession(Config{Key: []byte("dgram-mtu-338"), Direct: true}, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	sub.SetPeer(&TaggedAddr{Idx: 0, Addr: &net.IPAddr{IP: net.ParseIP("127.0.0.1")}})
+	sub.SetPeer(&TaggedAddr{Idx: 1, Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3333}})
+	sub.ToggleMute(1) // force NextPath -> icmp (640 B)
+	s.SendDatagram(1, 5000, bytes.Repeat([]byte("D"), 400))
+	s.SendDatagram(1, 5000, bytes.Repeat([]byte("E"), 400))
+	s.mu.Lock()
+	s.cc.tokens = 1 << 20
+	pkt, ok := s.build(time.Now())
+	s.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected datagram packet on icmp")
+	}
+	if len(pkt.p)+tagLen > MaxPayload {
+		t.Fatalf("icmp datagram packet %d B exceeded MaxPayload %d", len(pkt.p)+tagLen, MaxPayload)
+	}
+
+	// pathAcked sets pathMinRTT from pc.minRTT (not queued srtt) and keeps lostRing spurious tracking.
+	s.mu.Lock()
+	now := time.Now()
+	s.pcc[0].minRTT, s.pcc[0].srtt, s.pcc[0].at = 40*time.Millisecond, 40*time.Millisecond, now
+	s.pcc[1].minRTT, s.pcc[1].srtt, s.pcc[1].at = 160*time.Millisecond, 400*time.Millisecond, now
+	s.pcc[1].reliable = true
+	s.cc.reliable = true
+	s.cc.minRTT, s.cc.minRTTAt = 40*time.Millisecond, now
+	s.pathAcked(nil, 0, 0, now, 0)
+	if s.cc.pathMinRTT != 160*time.Millisecond || s.cc.pathRTT != 400*time.Millisecond {
+		s.mu.Unlock()
+		t.Fatalf("got pathMinRTT=%v pathRTT=%v, want 160ms/400ms", s.cc.pathMinRTT, s.cc.pathRTT)
+	}
+	sp := &sentPkt{pn: 99, at: now, size: 1000, lane: 1, ctrl: [][]byte{{frBoot, 1}}}
+	s.lose(sp)
+	if len(s.lostRing) != 1 {
+		s.mu.Unlock()
+		t.Fatalf("bonded reliable lose() did not record sp in lostRing")
+	}
+	s.matchLost(rangeSet{{lo: 99, hi: 100}}, 100, now.Add(10*time.Millisecond))
+	if s.cc.spuriousN != 1 {
+		s.mu.Unlock()
+		t.Fatalf("matchLost spuriousN=%d, want 1", s.cc.spuriousN)
+	}
+	s.mu.Unlock()
+}
+
+// 3.3.8 audit: verify frBoot recovery when server clock stepped back > replayWin, reverse-merge untrusted skip,
+// and datagram fragment expiry under fragPending.
+func TestAuditEngineFixes(t *testing.T) {
+	// 1. Server clock step-back frBoot recovery
+	cli, srv := memPair(t, Config{})
+	cli.mu.Lock()
+	cli.peerBoot = 111
+	cli.rxAny, cli.rxLargest = true, 50000
+	cli.rxRing[50000%cli.replayWin] = 50001
+	cli.rxRanges.add(50000, 50001)
+	cli.rxAt = time.Now()
+	cli.kexPriv = nil // exercise steady-state PSK/current-AEAD packet path directly
+	aead := cli.aead
+	sid := cli.sid
+	cli.mu.Unlock()
+	_ = srv
+
+	var plain []byte
+	plain = append(plain, frBoot)
+	plain = appendUv(plain, 222)
+	var pkt [128]byte
+	const newPN = dirServerBit | 100 // well below 50000 & outside replayWin
+	binary.BigEndian.PutUint64(pkt[:], sid)
+	binary.BigEndian.PutUint64(pkt[8:], newPN)
+	var nonce [12]byte
+	copy(nonce[4:], pkt[8:16])
+	sealed := aead.Seal(pkt[:hdrLen], nonce[:], plain, pkt[:8])
+	if cli.hk != nil {
+		maskHdr(cli.hk, sealed)
+	}
+	cli.handle(sealed, 0, nil)
+	cli.mu.Lock()
+	gotBoot, gotLargest := cli.peerBoot, cli.rxLargest
+	cli.mu.Unlock()
+	if gotBoot != 222 || gotLargest != newPN {
+		t.Fatalf("frBoot clock step-back recovery failed: boot=%d largest=%x", gotBoot, gotLargest)
+	}
+
+	// 2. Fragment expiry below fragPending
+	cli.mu.Lock()
+	cli.onDgramFrag(1, 53, 7, 0, 2, bytes.Repeat([]byte("F"), 100), time.Now().Add(-2*fragKeep))
+	if len(cli.reasm) != 1 {
+		cli.mu.Unlock()
+		t.Fatalf("expected 1 incomplete fragment")
+	}
+	cli.pruneReasm(time.Now())
+	rem := len(cli.reasm)
+	cli.mu.Unlock()
+	if rem != 0 {
+		t.Fatalf("pruneReasm left %d expired fragments", rem)
+	}
+
+	// 3. Reverse-merge pickConnTrusted skips untrusted connections once trusted IPs exist
+	trusted := newPoolConn(&dummyConn{})
+	trusted.ip = "198.51.100.1"
+	trusted.qb.Store(4096)
+	stranger := newPoolConn(&dummyConn{})
+	stranger.ip = "203.0.113.9"
+	stranger.qb.Store(0)
+	defer trusted.fail()
+	defer stranger.fail()
+	ts := trustedIPs{"198.51.100.1"}
+	picked := pickConnTrusted([]*poolConn{stranger, trusted}, 0, 0, &ts)
+	if picked != trusted {
+		t.Fatalf("pickConnTrusted chose untrusted stranger over trusted conn")
+	}
+	if full := backloggedTrusted([]*poolConn{stranger}, &ts); !full {
+		t.Fatalf("backloggedTrusted should report full when only untrusted conns exist")
+	}
+
+	// 4. normPath("/") and ProbeName IPv6
+	if normPath("/") != "/" || normPath("") != "/wat" {
+		t.Fatalf("normPath(\"/\")=%q normPath(\"\")=%q", normPath("/"), normPath(""))
+	}
+	if got := ProbeName("tls", "", "", "[2001:db8::1]:443"); got != "2001:db8::1" {
+		t.Fatalf("ProbeName IPv6=%q, want 2001:db8::1", got)
+	}
+}
+
+type dummyConn struct{ net.Conn }
+
+func (dummyConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (dummyConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (dummyConn) Close() error                     { return nil }
+func (dummyConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (dummyConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (dummyConn) SetDeadline(time.Time) error      { return nil }
+func (dummyConn) SetReadDeadline(time.Time) error  { return nil }
+func (dummyConn) SetWriteDeadline(time.Time) error { return nil }
