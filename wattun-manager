@@ -1381,8 +1381,14 @@ v_carrier_list() { # "icmp+udp" etc: every leg a known carrier, no duplicates; "
     [ "$saw_down" = 0 ] && { err "Carrier list '$v': every leg is :up, so nothing carries the downlink."; return 1; }
   fi
   for c in ${v//+/ }; do
-    case " $seen " in *" $c "*) err "Carrier '$c' appears twice in '$v'."; return 1 ;; esac
-    seen="$seen $c"
+    # dedupe on the BASE carrier like the engine does (cmd/wattun/main.go leg loop): udp:up+udp:down is two
+    # different leg strings over one socket, and the engine exits 2 on it (docs/TECHNICAL.md "refused as a
+    # duplicate udp") — the manager must refuse it too or it writes a config the tunnel cannot start with
+    # (2026-11-20 review F1)
+    local b
+    b=$(carrier_leg_base "$c")
+    case " $seen " in *" $b "*) err "Carrier '$b' appears twice in '$v' (a $c leg counts as its base)."; return 1 ;; esac
+    seen="$seen $b"
   done
   return 0
 }
@@ -6817,9 +6823,14 @@ carrier_toggle_cmd() { # want(mute|unmute) NAME PATH
   fi
   [ -n "$res" ] || { err "Tunnel '$n' did not answer http://$m/carrier/toggle (is it running? does path '$p' exist?)."; return 1; }
   muted=$(jget "$res" muted)
-  case "$muted" in
-    true) ok "Path '$p' is now muted." ;;
-    false) ok "Path '$p' is now unmuted." ;;
+  # interpret the answer against what was ASKED (2026-11-20 review F2): the engine's ToggleMute is a no-op that
+  # answers {"muted":false} on a single-carrier server (wat.Server.ToggleMute only handles a bond), so a mute
+  # request answered with muted:false is a REFUSAL, not a success
+  case "$want:$muted" in
+    mute:true) ok "Path '$p' is now muted." ;;
+    mute:false) err "The engine refused (muted:false): muting needs a bonded tunnel — a single carrier cannot be muted."; return 1 ;;
+    unmute:false) ok "Path '$p' is now unmuted." ;;
+    unmute:true) err "The engine answered muted:true to an unmute request: $res"; return 1 ;;
     *) err "Unexpected answer from http://$m/carrier/toggle: $res"; return 1 ;;
   esac
   status_row "$n" # the refreshed one-line status
