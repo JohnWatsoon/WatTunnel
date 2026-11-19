@@ -452,6 +452,8 @@ func (srv *Server) CarrierStats() []CarrierStat {
 			o := &out[i]
 			o.Name, o.Sent, o.Acked, o.Lost = c.Name, o.Sent+c.Sent, o.Acked+c.Acked, o.Lost+c.Lost
 			o.Alive = o.Alive || c.Alive
+			o.Muted = o.Muted || c.Muted // found on the 2026-11-19 Kharej smoke: the per-session merge dropped the
+			// mute flag, so /stats on a multi-session server never showed muted (the manager reads this field)
 			if c.Present {
 				n[i]++
 				o.Share += c.Share

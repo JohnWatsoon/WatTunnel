@@ -403,3 +403,26 @@ func TestBifrostEndpointRoundTrip(t *testing.T) {
 		t.Fatalf("hostile frame changed the endpoint: leg=%d port=%d (the junk after the port must be ignored)", leg2, port2)
 	}
 }
+
+// The 2026-11-19 Kharej smoke found this: Server.CarrierStats summed per-session stats but
+// dropped the Muted field, so /stats on a multi-session server never showed a muted leg (the
+// manager's mute state detection reads exactly this field).
+func TestServerCarrierStatsKeepsMuted(t *testing.T) {
+	links := twoLinks(t)
+	rig := newBondRig(t, links, fastTimings)
+	if _, err := rig.cli.OpenStream(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // the session must be admitted so its stats exist
+	if !rig.srv.ToggleMute(0) {
+		t.Fatal("ToggleMute reported already-muted")
+	}
+	cs := rig.srv.CarrierStats()
+	if len(cs) < 2 || !cs[0].Muted || cs[1].Muted {
+		t.Fatalf("server stats lost the mute flag: %+v", cs)
+	}
+	rig.srv.ToggleMute(0)
+	if cs := rig.srv.CarrierStats(); cs[0].Muted {
+		t.Fatal("unmute did not clear the flag in server stats")
+	}
+}
