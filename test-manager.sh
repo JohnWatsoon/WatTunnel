@@ -636,6 +636,128 @@ chk "shaped picker: the chosen raw shape writes no listen (A4)" "$(grep -c '^lis
 rm -f "$WAT_CONF"/t_a4*.yml "$WAT_CONF"/t_a4*.key "$WAT_CONF"/t_a4*.token
 NI_CARRIER=''; NI_NAME=''; CARRIER=''
 
+# 1e. Directional bond legs (Bifrost, 3.3.9): a '+'-bond leg may end in :up (uplink only) or :down
+# (downlink only, udp-only). The suffix is stripped for every base-carrier check and kept when the
+# config is written; a single carrier never takes a suffix, a shaped carrier never takes one at all
+# (it cannot be a bond leg anyway, D7), and a bond must keep at least one leg able to carry each
+# direction. A directional leg signals itself with the frEndpoint frame: both ends need 3.3.9.
+for c in 'udp:up+udp' 'udp:up+udp:down' 'udp:down+udp:up' 'icmp+udp:down' 'tcp+udp:down' 'tls+udp:down' 'icmp+udp:up+udp:down'; do
+  v_carrier_list "$c" && echo "ok   v_carrier_list directional $c" || { echo "FAIL v_carrier_list directional $c"; fail=1; }
+done
+for c in 'udp:up' 'udp:down' 'tcp:down+udp' 'tls:down+udp' 'icmp:down+udp' 'udp:down+udp:down' 'udp:up+udp:up' 'udp:up+tcp:up+tls:up' \
+         'sit:up+udp' 'vxlan:down+udp' 'fou-gre:up+udp' 'bogus:up+udp' 'udp:up+' 'bogus:up'; do
+  expect_fail v_carrier_list "$c"
+done
+chk "leg base strips :up" "$(carrier_leg_base 'udp:up')" "udp"
+chk "leg base strips :down" "$(carrier_leg_base 'udp:down')" "udp"
+chk "leg base keeps a plain name" "$(carrier_leg_base udp)" "udp"
+chk "leg dir up" "$(carrier_leg_dir 'udp:up')" "up"
+chk "leg dir down" "$(carrier_leg_dir 'udp:down')" "down"
+chk "leg dir empty when bidirectional" "$(carrier_leg_dir udp)" ""
+carrier_ok 'udp:up' && carrier_ok 'udp:down' && carrier_ok 'fou-gre:up' && echo "ok   carrier_ok strips a direction suffix" || { echo "FAIL carrier_ok suffix strip"; fail=1; }
+expect_fail carrier_ok 'bogus:up'
+chk "min ver: a directional leg needs 3.3.9 on both ends" "$(carrier_min_ver 'udp:up')/$(carrier_min_ver 'udp:down')" "3.3.9/3.3.9"
+chk "min ver: plain udp stays 2.1.0" "$(carrier_min_ver udp)" "2.1.0"
+_bb=$(declare -f bin_ver_ok)
+bin_ver_ok() { ver_ge 3.3.6 "$1" 2>/dev/null && echo 1; } # an engine stuck on 3.3.6
+expect_fail carrier_ok_here 'udp:up'
+chk "min ver: plain legs still run on 3.3.6" "$(carrier_ok_here udp && echo y)" "y"
+eval "$_bb"
+chk "listen: a directional udp bond still writes a global listen" "$(carrier_write_listen 'udp:up+udp:down' && echo y)" "y"
+ni_parse --carrier 'udp:up+udp'
+chk "unattended --carrier keeps the suffix" "$NI_CARRIER" "udp:up+udp"
+NI_CARRIER='udp:up+udp'; CARRIER=''
+pick_carrier auto >/dev/null 2>&1
+chk "the picker keeps a directional bond" "$CARRIER" "udp:up+udp"
+printf 'mode: client\n' >"$WAT_CONF/t_bf.yml"
+set_value t_bf carrier 'udp:up+udp'
+chk "config writer: carrier key keeps the suffix" "$(cfg t_bf carrier)" "udp:up+udp"
+rm -f "$WAT_CONF/t_bf.yml"
+NI_CARRIER=''; CARRIER=''
+expect_err_msg() { local txt=$1; shift; "$@" >"$SMOKE/err.txt" 2>&1; grep -qF "$txt" "$SMOKE/err.txt" && echo "ok   error text: $txt" || { echo "FAIL error text: wanted '$txt', got: $(cat "$SMOKE/err.txt")"; fail=1; }; }
+expect_err_msg "is udp-only in 3.3.9" v_carrier_list 'tcp:down+udp'
+expect_err_msg "every leg is :down" v_carrier_list 'udp:down+udp:down'
+expect_err_msg "every leg is :up" v_carrier_list 'udp:up+udp:up'
+expect_err_msg "only makes sense on a '+'-bond leg" v_carrier_list 'udp:up'
+expect_err_msg "F19 shaped carriers are single-carrier only" v_carrier_list 'sit:up+udp'
+rm -f "$SMOKE/err.txt"
+
+# 1f. mute / unmute (Phoenix, 3.3.8): POST /carrier/toggle on the tunnel's metrics server, the leg
+# name exactly as /stats lists it (?carrier=NAME) or a numeric index (?path=N); the endpoint flips
+# the mute bit, so the command short-circuits when /stats already shows the wanted state, prints the
+# new state from the answer and re-prints the tunnel's status line. No root, no systemd: stats() and
+# curl are stubbed here the same way the stats_flat tests stub them, and the POSTed URL is captured
+# to a file because a variable set inside the $( ) capture would not survive it.
+( printf 'mode: client\ncarrier: udp:up+udp\npeer: 203.0.113.9:4443\nmetrics: 127.0.0.1:1\n' >"$WAT_CONF/t_mute.yml"
+  printf 'mode: client\ncarrier: udp\npeer: 203.0.113.9:4443\nmetrics: 127.0.0.1:2\n' >"$WAT_CONF/t_single.yml"
+  printf 'mode: client\ncarrier: udp\npeer: 203.0.113.9:4443\n' >"$WAT_CONF/t_nomute.yml"
+  STATS_UP=1; : >"$SMOKE/post.url"
+  stats() { # the tunnel's /stats: udp:up unmuted, udp:down muted; a single-carrier tunnel lists no paths
+    case "$1" in
+      t_single) printf '{"alive":true,"srtt_ms":21.5,"streams":3,"sessions":1,"bytes_in":100,"bytes_out":100,"rate_bps":0}\n' ;;
+      *) [ "$STATS_UP" = 1 ] && printf '{"alive":true,"srtt_ms":21.5,"streams":3,"sessions":1,"bytes_in":100,"bytes_out":100,"rate_bps":0,"carriers":[{"name":"udp:up","alive":true,"muted":false,"srtt_ms":21.5,"share":0.5},{"name":"udp:down","alive":true,"muted":true,"srtt_ms":21.5,"share":0.5}]}\n' ;;
+    esac; return 0; }
+  curl() { local url=${@: -1}; printf '%s\n' "$url" >>"$SMOKE/post.url"
+    case "$url" in
+      *:1/carrier/toggle*) case "$url" in
+          *carrier=udp:down*|*path=1*) printf '{"path":1,"carrier":"udp:down","muted":false}\n' ;;
+          *) printf '{"path":0,"carrier":"udp:up","muted":true}\n' ;;
+        esac ;;
+      *:2/carrier/toggle*) : ;; # the engine refuses muting without a bond: an empty answer
+    esac; }
+  out=$(mute_cmd t_mute udp:up)
+  chk "mute: POSTs the carrier name" "$(cat "$SMOKE/post.url")" "http://127.0.0.1:1/carrier/toggle?carrier=udp:up"
+  case "$out" in *"now muted"*) echo "ok   mute: prints the new state" ;; *) echo "FAIL mute: prints the new state, got: $out"; fail=1 ;; esac
+  : >"$SMOKE/post.url"
+  mute_cmd t_mute udp:down >/dev/null
+  chk "mute: already muted does not toggle" "$(cat "$SMOKE/post.url")" ""
+  : >"$SMOKE/post.url"
+  unmute_cmd t_mute udp:up >/dev/null
+  chk "unmute: already unmuted does not toggle" "$(cat "$SMOKE/post.url")" ""
+  : >"$SMOKE/post.url"
+  out=$(unmute_cmd t_mute udp:down)
+  chk "unmute: POSTs the carrier name" "$(cat "$SMOKE/post.url")" "http://127.0.0.1:1/carrier/toggle?carrier=udp:down"
+  case "$out" in *"now unmuted"*) echo "ok   unmute: prints the new state" ;; *) echo "FAIL unmute: prints the new state, got: $out"; fail=1 ;; esac
+  : >"$SMOKE/post.url"
+  mute_cmd t_mute 1 >/dev/null
+  chk "mute: a muted path short-circuits by index too" "$(cat "$SMOKE/post.url")" ""
+  expect_fail mute_cmd t_mute nosuch
+  expect_fail mute_cmd t_mute
+  expect_fail mute_cmd
+  expect_fail mute_cmd t_missing udp:up
+  expect_fail mute_cmd t_nomute udp:up
+  out=$(mute_cmd t_single udp 2>&1)
+  case "$out" in *"did not answer"*) echo "ok   mute: a single-carrier tunnel is refused" ;; *) echo "FAIL mute: single-carrier refusal, got: $out"; fail=1 ;; esac
+  rm -f "$WAT_CONF/t_mute.yml" "$WAT_CONF/t_single.yml" "$WAT_CONF/t_nomute.yml" "$SMOKE/post.url"
+  exit "$fail" ) || fail=1
+( # stats down (fresh CAR_*: tinfo early-returns), the metrics POST still answers; the path is known
+  # from the config bond, so a name falls back to ?carrier= and a number posts ?path=N
+  printf 'mode: client\ncarrier: udp:up+udp\npeer: 203.0.113.9:4443\nmetrics: 127.0.0.1:1\n' >"$WAT_CONF/t_mute.yml"
+  : >"$SMOKE/post.url"
+  stats() { return 1; }
+  curl() { local url=${@: -1}; printf '%s\n' "$url" >>"$SMOKE/post.url"
+    case "$url" in
+      *carrier=udp:down*|*path=1*) printf '{"path":1,"carrier":"udp:down","muted":false}\n' ;;
+      *) printf '{"path":0,"carrier":"udp:up","muted":true}\n' ;;
+    esac; }
+  out=$(mute_cmd t_mute 1)
+  chk "mute without stats: POSTs the numeric path" "$(cat "$SMOKE/post.url")" "http://127.0.0.1:1/carrier/toggle?path=1"
+  case "$out" in *"now unmuted"*) echo "ok   mute without stats: prints the new state" ;; *) echo "FAIL mute without stats: got: $out"; fail=1 ;; esac
+  : >"$SMOKE/post.url"
+  out=$(mute_cmd t_mute udp:up)
+  chk "mute without stats: the name falls back to the config bond" "$(cat "$SMOKE/post.url")" "http://127.0.0.1:1/carrier/toggle?carrier=udp:up"
+  rm -f "$WAT_CONF/t_mute.yml" "$SMOKE/post.url"
+  exit "$fail" ) || fail=1
+( # the tunnel is down: nothing answers
+  printf 'mode: client\ncarrier: udp:up+udp\npeer: 203.0.113.9:4443\nmetrics: 127.0.0.1:1\n' >"$WAT_CONF/t_mute.yml"
+  stats() { return 1; }
+  curl() { return 7; }
+  expect_fail mute_cmd t_mute udp:up
+  expect_err_msg "did not answer" mute_cmd t_mute udp:up
+  expect_err_msg "No path 'nosuch' on tunnel 't_mute'" mute_cmd t_mute nosuch
+  rm -f "$WAT_CONF/t_mute.yml"
+  exit "$fail" ) || fail=1
+
 # 2. Unattended flags: --sessions, --conns, --mtu, --policy
 ni_parse --sessions 16 --conns 16 --mtu 1400 --policy latency
 chk "unattended --sessions" "$NI_SESSIONS" "16"

@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026111804   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026111901   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -1198,8 +1198,9 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   legacy-mask-flip: joins a pre-3.0 plain-header peer (3.3.8; default off, the automatic flip was a downgrade)
 #   udp-dns-edns: structurally complete udp-dns frames (3.3.8; both ends, opt-in)
 #   probe-guard: demand a key-derived token on HTTP-family tunnel requests (3.3.8; both ends, opt-in)
+#   mtu-adapt: sender-side payload clamp for size-selective loss (3.3.8; single-ended, no wire signal, opt-in)
 #   max-sessions/max-conns: denial-of-service caps (server sessions, public connections); the defaults fit (3.3.5)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy'
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'
@@ -1262,7 +1263,10 @@ is_pool() { case "$1" in tcp|tls|ws|wss|h2|h2c|grpc) return 0 ;; esac; return 1;
 is_pool_list() { local c; for c in ${1//+/ }; do is_pool "$c" && return 0; done; return 1; }
 has_ech_list() { local c; for c in ${1//+/ }; do case "$c" in tls|wss|h2|grpc) return 0 ;; esac; done; return 1; }
 undisguised_legs() { local c out=''; for c in ${1//+/ }; do is_pool "$c" || out="${out:+$out }$c"; done; echo "$out"; }
-carrier_ok() { # single carrier name, including the F19 shaped tier (3.3.0)
+carrier_ok() { # single carrier name, including the F19 shaped tier (3.3.0); a bond leg's :up/:down
+               # direction suffix (3.3.9) is stripped and the base checked — the bond-level suffix
+               # rules (udp-only :down, one leg per direction, bond-only, never shaped) live in v_carrier_list
+  case "$1" in *:up|*:down) set -- "${1%:*}" ;; esac
   case "$1" in
     icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip) return 0 ;;
     sit|6to4|xfrm-ipsec|etherip|l2tpv3) return 0 ;;
@@ -1270,11 +1274,19 @@ carrier_ok() { # single carrier name, including the F19 shaped tier (3.3.0)
   esac
   return 1
 }
+carrier_leg_base() { # bond leg -> carrier name without the :up/:down direction suffix (3.3.9; no suffix = carries both directions)
+  case "$1" in *:up|*:down) echo "${1%:*}" ;; *) echo "$1" ;; esac
+}
+carrier_leg_dir() { # bond leg -> up|down|'' ('' = bidirectional)
+  case "$1" in *:up) echo up ;; *:down) echo down ;; *) echo '' ;; esac
+}
 # B2 (2026-11-04): the oldest engine that can run a carrier at all. Auto itself needs 2.1.0; gre/ipip arrived in 3.2.0;
-# the 13 shaped carriers are 3.3.0-only on both ends. Used by the Kharej plan writer and the Iran variant builder, so an
-# old engine never receives a carrier it cannot start or test.
+# the 13 shaped carriers are 3.3.0-only on both ends; a :up/:down directional leg signals itself with the frEndpoint
+# frame (0x0e), so both ends need the release that speaks it (3.3.9, wat/version.go). Used by the Kharej plan writer
+# and the Iran variant builder, so an old engine never receives a carrier it cannot start or test.
 carrier_min_ver() {
   case "$1" in
+    *:up|*:down) echo 3.3.9 ;;
     gre|ipip) echo 3.2.0 ;;
     sit|6to4|xfrm-ipsec|etherip|l2tpv3|fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct) echo 3.3.0 ;;
     *) echo 2.1.0 ;;
@@ -1298,7 +1310,7 @@ carrier_has_listen() { ! is_raw_carrier "$1"; }
 carrier_write_listen() { # carrier list -> 0 when the config needs a global listen: key (single raw shape: no listen)
   local c
   case "$1" in
-    *+*) for c in ${1//+/ }; do case "$c" in udp|tcp|tls|ws|wss|h2|h2c|grpc) return 0 ;; esac; done; return 1 ;;
+    *+*) for c in ${1//+/ }; do case "$(carrier_leg_base "$c")" in udp|tcp|tls|ws|wss|h2|h2c|grpc) return 0 ;; esac; done; return 1 ;;
     *) carrier_has_listen "$1" ;;
   esac
 }
@@ -1335,15 +1347,40 @@ shaped_real_name() { # F19 carrier -> the real protocol name the UI must say it 
 shaped_raw_proto() { # raw tier -> the IP protocol number it imitates
   case "$1" in sit|6to4) echo 41 ;; xfrm-ipsec) echo 50 ;; etherip) echo 97 ;; l2tpv3) echo 115 ;; esac
 }
-v_carrier_list() { # "icmp+udp" etc: every leg a known carrier, no duplicates; "auto" only alone
-  local v=${1:-} c seen=''
+v_carrier_list() { # "icmp+udp" etc: every leg a known carrier, no duplicates; "auto" only alone; bond legs may
+                   # carry a :up/:down direction suffix (3.3.9, both ends): :down is udp-only, the suffix is
+                   # bond-only (a single carrier always carries both directions), a bond must keep at least
+                   # one leg able to carry each direction, and a shaped carrier never takes a suffix (it
+                   # cannot be a bond leg at all — D7, so the check runs on the stripped leg names)
+  local v=${1:-} c base dir seen='' plain=0 saw_up=0 saw_down=0 bases=''
   [ -n "$v" ] || { err "Choose a carrier."; return 1; }
   if [ "$v" = auto ]; then return 0; fi
   case "$v" in *++*|+*|*+) err "Carrier list '$v' has an empty leg."; return 1 ;; esac
-  # D7: the engine refuses shaped carriers in a bond in 3.3.0 (untested, per-protocol port defaults collide)
-  case "$v" in *+*) is_shaped_list "$v" && { err "F19 shaped carriers are single-carrier only in 3.3.0; the engine refuses them in a '+'-bond ('$v')."; return 1; } ;; esac
+  case "$v" in
+    *+*) # D7: the engine refuses shaped carriers in a bond in 3.3.0 (untested, per-protocol port defaults collide)
+      for c in ${v//+/ }; do bases="${bases:+$bases+}$(carrier_leg_base "$c")"; done
+      is_shaped_list "$bases" && { err "F19 shaped carriers are single-carrier only in 3.3.0; the engine refuses them in a '+'-bond ('$v')."; return 1; } ;;
+    *) case "$v" in *:up|*:down) err "A :up/:down direction suffix only makes sense on a '+'-bond leg ('$v' alone would lose a direction)."; return 1 ;; esac ;;
+  esac
   for c in ${v//+/ }; do
-    carrier_ok "$c" || { err "Unknown carrier '$c' (use icmp, udp, tcp, tls, ws, wss, h2, h2c, grpc, gre, ipip, sit, 6to4, xfrm-ipsec, etherip, l2tpv3, fou-gre, gue-ipip, vxlan, geneve, dnscrypt-udp, ntp-direct, openvpn-dco, srtp-direct; join several with + to bond)."; return 1; }
+    base=$(carrier_leg_base "$c")
+    carrier_ok "$base" || { err "Unknown carrier '$c' (use icmp, udp, tcp, tls, ws, wss, h2, h2c, grpc, gre, ipip, sit, 6to4, xfrm-ipsec, etherip, l2tpv3, fou-gre, gue-ipip, vxlan, geneve, dnscrypt-udp, ntp-direct, openvpn-dco, srtp-direct; join several with + to bond; a bond leg may end in :up or :down, 3.3.9 on both ends)."; return 1; }
+    dir=$(carrier_leg_dir "$c")
+    case "$dir" in
+      down) [ "$base" = udp ] || { err "Carrier '$c': :down is udp-only in 3.3.9 (the engine refuses the rest)."; return 1; }
+            saw_down=1 ;;
+      up) saw_up=1 ;;
+      *) plain=1 ;;
+    esac
+  done
+  # a bond whose legs all point the same way has no leg left for the other direction (checked
+  # before the duplicate pass so it names the real problem: :down is udp-only, so an all-:down
+  # bond is also a duplicate-udp bond)
+  if [ "$plain" = 0 ]; then
+    [ "$saw_up" = 0 ] && { err "Carrier list '$v': every leg is :down, so nothing carries the uplink."; return 1; }
+    [ "$saw_down" = 0 ] && { err "Carrier list '$v': every leg is :up, so nothing carries the downlink."; return 1; }
+  fi
+  for c in ${v//+/ }; do
     case " $seen " in *" $c "*) err "Carrier '$c' appears twice in '$v'."; return 1 ;; esac
     seen="$seen $c"
   done
@@ -3625,8 +3662,10 @@ wizard_iran() {
       echo "key-file: $CONF/$name.key"
       echo "carrier: $T_CARRIER"
       echo "peer: $T_PEER"
-      local _bl # M1: a bond token's per-leg endpoints (empty for a single carrier); each leg dials its own
-      for ((_bl=0; _bl<${#T_LEG_C[@]}; _bl++)); do echo "peer-${T_LEG_C[$_bl]}: ${T_LEG_P[$_bl]}"; done
+      local _bl # M1: a bond token's per-leg endpoints (empty for a single carrier); each leg dials its own.
+                # A directional leg (:up/:down, 3.3.9) dials the same address as its base carrier, and the
+                # engine registers per-carrier flags under the base name, so the key loses the suffix.
+      for ((_bl=0; _bl<${#T_LEG_C[@]}; _bl++)); do echo "peer-$(carrier_leg_base "${T_LEG_C[$_bl]}"): ${T_LEG_P[$_bl]}"; done
       if [ "$T_CARRIER" = udp ] && [ "$T_PATH" = dns ]; then echo "udp-dns: true" # DNS-shaped udp: the token's path field carries "dns"
       elif [ -n "$T_PATH" ]; then echo "path: $T_PATH"; fi
       [ -n "$T_SNI" ] && { echo "sni: $T_SNI"; echo "host: $T_SNI"; }
@@ -6738,6 +6777,55 @@ live_monitor() {
   done
   cur_show
 }
+
+# ======================================================================================
+#  Path mute (Phoenix, 3.3.8): mute NAME PATH / unmute NAME PATH flip the bond's manual
+#  per-path mute over the engine's existing POST /carrier/toggle metrics endpoint
+#  (cmd/wattun main.go: ?path=N or ?carrier=NAME, NAME = the leg name exactly as /stats
+#  lists it, e.g. udp or the suffixed leg udp:up; answer {"path":N,"carrier":"..","muted":b}).
+#  It only reads the config for the metrics address and talks HTTP to the loopback
+#  metrics server, so it works without root (main() exempts it from the root gate).
+# ======================================================================================
+carrier_toggle_cmd() { # want(mute|unmute) NAME PATH
+  local want=$1 n=${2:-} p=${3:-} m i idx=-1 aligned=0 res muted
+  [ -n "$n" ] && [ -n "$p" ] || { err "Usage: $SELF $want NAME PATH (PATH = a bonded path as /stats names it, e.g. udp or udp:up)."; return 1; }
+  need_tunnel "$n" || return 1
+  m=$(cfg "$n" metrics)
+  [ -n "$m" ] || { err "Tunnel '$n' has no metrics endpoint in $n.yml (muting talks to the metrics server)."; return 1; }
+  tinfo "$n" # fills CAR_* from /stats when the tunnel answers
+  if [[ "$p" =~ ^[0-9]+$ ]]; then
+    if [ "$TI_AUTO" = 0 ] && [ "$CAR_COUNT" -gt 0 ]; then # an auto Iran /stats hides dead legs: its indexes shift
+      if [ "$((10#$p))" -ge "$CAR_COUNT" ]; then err "Tunnel '$n' has paths 0-$((CAR_COUNT-1)), not '$p'."; return 1; fi
+      idx=$((10#$p)); aligned=1
+    fi
+  else
+    for ((i=0; i<CAR_COUNT; i++)); do [ "${CAR_NAME[$i]}" = "$p" ] && { idx=$i; aligned=1; break; }; done
+    if [ "$idx" -lt 0 ]; then # a dead auto leg is filtered out of /stats; the engine still knows it by name
+      [[ "+$(cfg "$n" carrier)+" == *"+$p+"* ]] || { err "No path '$p' on tunnel '$n' (paths: $(cfg "$n" carrier))."; return 1; }
+    fi
+  fi
+  if [ "$aligned" = 1 ]; then # already in the wanted state: no flip needed (the endpoint toggles)
+    case "$want:${CAR_MUTED[$idx]}" in
+      mute:true) ok "Path '$p' is already muted."; status_row "$n"; return 0 ;;
+      unmute:false) ok "Path '$p' is already unmuted."; status_row "$n"; return 0 ;;
+    esac
+  fi
+  if [[ "$p" =~ ^[0-9]+$ ]]; then
+    res=$(curl -fs -X POST --noproxy '*' --max-time 3 "http://$m/carrier/toggle?path=$((10#$p))" 2>/dev/null)
+  else
+    res=$(curl -fs -X POST --noproxy '*' --max-time 3 "http://$m/carrier/toggle?carrier=$p" 2>/dev/null)
+  fi
+  [ -n "$res" ] || { err "Tunnel '$n' did not answer http://$m/carrier/toggle (is it running? does path '$p' exist?)."; return 1; }
+  muted=$(jget "$res" muted)
+  case "$muted" in
+    true) ok "Path '$p' is now muted." ;;
+    false) ok "Path '$p' is now unmuted." ;;
+    *) err "Unexpected answer from http://$m/carrier/toggle: $res"; return 1 ;;
+  esac
+  status_row "$n" # the refreshed one-line status
+}
+mute_cmd()   { carrier_toggle_cmd mute "$@"; }
+unmute_cmd() { carrier_toggle_cmd unmute "$@"; }
 
 # ======================================================================================
 #  Tunnel actions
@@ -9978,6 +10066,8 @@ Usage: $SELF [command]
   ports NAME            edit the port mappings of a tunnel
   test NAME             connection doctor + speed test
   speedtest NAME [MB]   speed test only (default 10 MB each way)
+  mute NAME PATH        mute one bonded path (PATH = the leg name from /stats, e.g. udp or udp:up)
+  unmute NAME PATH      unmute it again; both talk to the running tunnel's metrics server (no root)
   logs NAME             follow the log
   token NAME            print the Kharej token again
   preset NAME [PRESET]  apply built-in anti-censorship preset (rst-fast, mci, irancell, blackout, conservative)
@@ -10070,7 +10160,7 @@ main() {
     case "${1:-}" in ''|new|monitor|ports|logs) err "'${1:-(no command)}' needs a terminal; unattended use: kharej, iran, cdn-tune, auto-test, delete, uninstall, status, test, token, matrix (see: help)"; exit 1 ;; esac
     case "${1:-}" in delete|uninstall) [ "$NI_YES" = 1 ] || { err "$1 without a terminal needs --yes"; exit 1; } ;; esac
   fi
-  [ "$(id -u)" -eq 0 ] || { err "Run as root."; exit 1; }
+  case "${1:-}" in mute|unmute) ;; *) [ "$(id -u)" -eq 0 ] || { err "Run as root."; exit 1; } ;; esac
   if [ ! -x "$BIN" ]; then
     if [ "$SANDBOX" = 1 ]; then
       [ "${1:-}" = update ] || { err "Sandbox $WAT_PREFIX: no wattun binary at $BIN yet. Install it with: $SELF update"; exit 1; }
@@ -10079,12 +10169,12 @@ main() {
   case "${1:-}" in heal|auto-watch|auto-retest) ;; *)
     [ "$SANDBOX" = 1 ] && hint "Sandbox $WAT_PREFIX: configs $CONF, binary $BIN, units ${WAT_PREFIX}@NAME, runtime $RUN (production wattun is not touched)." ;;
   esac
-  mkdir -p "$CONF" "$RUN"; chmod 700 "$CONF"
+  mkdir -p "$CONF" "$RUN"; [ "$(id -u)" -eq 0 ] && chmod 700 "$CONF"
   trap on_int INT
   trap cleanup EXIT
   trap 'cleanup; exit 143' TERM HUP
   # Ensure the heal timer runs on Kharej auto hosts too (syncs reverse companion, migrates legacy tunnels, heals helpers).
-  case "${1:-}" in uninstall|update) ;; *) ensure_heal_timer ;; esac
+  case "${1:-}" in uninstall|update|mute|unmute) ;; *) ensure_heal_timer ;; esac
   case "${1:-}" in
     "") main_menu ;;
     new) new_tunnel "${2:-}" ;;
@@ -10105,6 +10195,8 @@ main() {
     ports) need_tunnel "${2:?name}" && run_flow edit_ports "$2" ;;
     test) need_tunnel "${2:?name}" && test_tunnel "$2" ;;
     speedtest) need_tunnel "${2:?name}" && speed_test "$2" "${3:-10}" ;;
+    mute) mute_cmd "${2:-}" "${3:-}" ;;
+    unmute) unmute_cmd "${2:-}" "${3:-}" ;;
     logs) need_tunnel "${2:?name}" && journalctl -u "${WAT_PREFIX}@$2" -f -o short-iso ;;
     token) need_tunnel "${2:?name}" && show_token "$2" ;;
     preset) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run preset_cmd "${NI_POS[0]:-${2:-}}" "${NI_POS[1]:-${3:-}}" ;;
