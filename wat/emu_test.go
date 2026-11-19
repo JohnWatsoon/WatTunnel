@@ -127,6 +127,12 @@ type emuDgIO struct {
 }
 
 func (s *emuDgIO) Send(p []byte, lane int) error { s.tx.send(p); return nil }
+
+// CopiesOnSend: the datagram model copies p synchronously into the wire queue (like the real udp/raw carriers,
+// carrier_udp.go CopiesOnSend). Without this the session refuses to recycle its out buffers and every packet
+// allocates, which showed up as 10% CPU in getOut/mallocgc on the 2026-11-19 profile — an artifact of the
+// measuring tool, not of the engine.
+func (s *emuDgIO) CopiesOnSend() bool { return true }
 func (s *emuDgIO) Recv() ([]byte, int, net.Addr, error) {
 	select {
 	case p := <-s.rx.out:
@@ -438,6 +444,9 @@ func (r *emuRaw) Recv() ([]byte, int, net.Addr, error) {
 func (r *emuRaw) SendTo(p []byte, lane int, dst net.Addr) error {
 	return r.io.Send(p, lane)
 }
+
+// CopiesOnSend: same contract as emuDgIO (see there): the model copies synchronously.
+func (r *emuRaw) CopiesOnSend() bool { return true }
 func (r *emuRaw) Close() error     { return r.io.Close() }
 func (r *emuRaw) Profile() Profile { return r.io.prof }
 
