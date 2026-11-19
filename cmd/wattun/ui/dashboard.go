@@ -52,7 +52,7 @@ func (a *app) header() string {
 		meta = append(meta, "WatTunnel · "+v)
 	}
 	meta = append(meta, "github.com/JohnWatsoon", "t.me/WatxDev")
-	return comp.Banner(meta, a.width)
+	return comp.Banner(meta)
 }
 
 // knownVersion is the engine version from the freshest successful poll ("" before the first one).

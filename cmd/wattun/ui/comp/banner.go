@@ -1,9 +1,16 @@
 package comp
 
 // The WatTun identity block: kite + WATTUN wordmark (the mark the manager uses), the meta
-// block right-aligned beside it, and the packet-pulse boot animation (5 frames, 75 ms each).
+// block right-aligned beside it, and the packet-pulse boot animation frames.
 // Lifted from the manager's visual language (owner: these are the elements that made it look
 // like a product) and rebuilt as plain styled strings for the bubbletea app.
+//
+// Width discipline (learned from the first cut rendering ragged over SSH): every row of the
+// banner block is EXACTLY bannerW cells wide — the art uses plain ASCII where a terminal's
+// rune-width of a glyph could disagree with lipgloss (the wordmark is uniform # blocks, the
+// kite uses / \ — nothing ambiguous), the meta block is joined at a FIXED column, and the
+// terminal width is never used inside the block: a wide terminal sees the same centered block,
+// a narrow one truncates instead of re-flowing. The mark cannot smear.
 
 import (
 	"strings"
@@ -11,64 +18,71 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// BannerKite + BannerWord: the 3-row mark. Kite is the geometric diamond, Word the WATTUN glyph row.
-var BannerKite = []string{
-	"   ╱╲  ",
-	"  ╱──╲ ",
-	" ╱ ╲╱  ",
+// bannerW is the fixed cell width of the identity block (kite + gap + wordmark + gap + meta).
+const bannerW = 78
+
+// bannerKite + bannerWord: the 3-row mark, ASCII-safe (no ambiguous-width glyphs).
+var bannerKite = []string{
+	`   /\   `,
+	`  /--\  `,
+	` /  \/  `,
 }
 
-var BannerWord = []string{
-	"██   ██  ▄██▄  ██████ ██████ ██  ██ ██▄  ██",
-	"██ █ ██ ██▄▄██   ██     ██   ██  ██ ██▀█▄██",
-	" ▀█▀█▀  ██  ██   ██     ██   ▀████▀ ██  ▀██",
+var bannerWord = []string{
+	"##   ##  ####  ###### ###### ##  ## ###   ##",
+	"## # ## ######   ##     ##   ##  ## ####  ##",
+	" ## ### ##  ##   ##     ##   ###### ## #### ",
 }
 
-// Banner renders the identity block: kite + wordmark left, meta lines right-aligned, one blank
-// line after. meta lines are the grey side block ("WatTunnel · v3.3.9", "github.com/...", ...).
-// width is the terminal width the meta block aligns to.
-func Banner(meta []string, width int) string {
-	bold := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("22d3ee"))
-	grey := Dim
-	accent := Accent
+// banner styles (created once).
+var (
+	bannerKiteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("22d3ee"))
+	bannerWordStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("22d3ee"))
+	bannerMetaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8a8a8a"))
+	bannerKeyStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("22d3ee"))
+)
+
+// Banner renders the identity block: kite + wordmark left, up to 3 meta lines joined at a FIXED
+// column, every row exactly bannerW cells. meta lines longer than the meta column are truncated.
+func Banner(meta []string) string {
+	const metaW = 30
+	const metaX = bannerW - metaW // fixed join column
 	rows := make([]string, 3)
 	for i := 0; i < 3; i++ {
-		left := accent.Render(BannerKite[i]) + " " + bold.Render(BannerWord[i])
+		left := bannerKiteStyle.Render(bannerKite[i]) + " " + bannerWordStyle.Render(bannerWord[i])
+		leftW := len(bannerKite[i]) + 1 + len(bannerWord[i]) // ASCII only: len == cells
+		pad := metaX - leftW
+		if pad < 1 {
+			pad = 1
+		}
 		var right string
 		if i < len(meta) {
-			right = grey.Render(meta[i])
-		}
-		pad := 0
-		if w := lipgloss.Width(left); width > w+2 {
-			pad = width - lipgloss.Width(right) - w - 2
-			if pad < 2 {
-				pad = 2
-			}
+			m := truncRunes(meta[i], metaW)
+			right = bannerMetaStyle.Render(m) + strings.Repeat(" ", maxInt(metaW-len([]rune(m)), 0))
+		} else {
+			right = strings.Repeat(" ", metaW)
 		}
 		rows[i] = left + strings.Repeat(" ", pad) + right
 	}
 	return strings.Join(rows, "\n")
 }
 
-// PulseFrames is the boot animation: 5 frames of the packet (▸) flying along the dashed line
-// into the kite, then the settled mark. frame 0..4; frame >= 4 renders the settled banner rows.
+// PulseFrames is the boot animation: 3 frames of the packet (>) flying along the dashed line,
+// then the settled mark (the caller renders Banner after the last frame). frame 0..2.
 func PulseFrames() []string {
-	line := "       " + Dim.Render("┃")
-	frames := []string{
-		line + "\n ╺▸\n" + line,
-		line + "\n ╺━▸\n" + line,
-		line + "\n   ╺━━╋▸\n" + line,
+	line := "       |"
+	return []string{
+		line + "\n >\n" + line,
+		line + "\n -->\n" + line,
+		line + "\n   --x>\n" + line,
 	}
-	return frames
 }
 
-// KeyBar renders the footer keybar the old UI made useful: "[1] open  [m] mute" — accent keys,
-// dim labels. Pairs are key, label.
+// KeyBar renders the footer keybar: "[1] open  [m] mute" — accent keys, dim labels.
 func KeyBar(pairs ...[2]string) string {
 	parts := make([]string, 0, len(pairs))
-	key := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("22d3ee"))
 	for _, p := range pairs {
-		parts = append(parts, key.Render("["+p[0]+"]")+" "+Dim.Render(p[1]))
+		parts = append(parts, bannerKeyStyle.Render("["+p[0]+"]")+" "+Dim.Render(p[1]))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -100,6 +114,24 @@ func FormatBytes(n uint64) string {
 	}
 	suffix := []string{"KB", "MB", "GB", "TB", "PB"}[exp]
 	return f1(float64(n)/float64(div)) + " " + suffix
+}
+
+func truncRunes(s string, w int) string {
+	r := []rune(s)
+	if len(r) <= w {
+		return s
+	}
+	if w <= 1 {
+		return string(r[:w])
+	}
+	return string(r[:w-1]) + "…"
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func itoa(n uint64) string {
