@@ -2,12 +2,14 @@ package wat
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -266,6 +268,10 @@ func mustCopy(r io.Reader) int64 { n, _ := io.Copy(io.Discard, r); return n }
 
 func emuRun(t *testing.T, cli *Session, srv *Server) {
 	emuServe(srv)
+	// M0 (2026-11-18): per-request interactive timings and app-vs-wire byte accounting, so a paired baseline vs
+	// candidate comparison has retained rows, not just printed percentiles. EMU_ROWS=path appends one CSV row per
+	// run: revision-tagged by the caller, machine-parsed by the M0/M3 comparison, never a gate.
+	in0, inB0, in0Pkts := srv.Stats().BytesIn, srv.Stats().BytesOut, srv.Stats().PktsOut // server view: BytesIn = uplink wire, BytesOut = downlink wire
 	t0 := time.Now()
 	if os.Getenv("EMU_TRACE") != "" {
 		stopTr := make(chan struct{})
@@ -302,7 +308,7 @@ func emuRun(t *testing.T, cli *Session, srv *Server) {
 	}
 	wg.Wait()
 	par := float64(tot) / time.Since(t0).Seconds() / 1e6
-	// latency of small requests while a bulk download runs
+	// latency of small requests while a bulk download runs: every request keeps its own timing (M0)
 	bulk := make(chan struct{})
 	go func() { emuGet(cli, 32<<20); close(bulk) }()
 	time.Sleep(time.Second)
@@ -320,7 +326,27 @@ func emuRun(t *testing.T, cli *Session, srv *Server) {
 		ss.RateBps/1e6, ss.SRTT, ss.MinRTT)
 	t.Logf("server out %d client in %d (bytes %d vs %d), client late-acked %d dup %d too-old %d", ss.PktsOut, cs.PktsIn, ss.BytesOut, cs.BytesIn, cs.AckLate, cs.RxDup, cs.RxTooOld)
 	t.Logf("server cc %+v floor %.1f MB/s cwnd %d losstime %v x%.2f winblocked %d", ss.CC, ss.FloorBps/1e6, ss.Cwnd, ss.LossTime, ss.RelLossMul, ss.WinBlocked)
+	if p := os.Getenv("EMU_ROWS"); p != "" {
+		// one CSV line per run: wire bytes (ACKs, retransmits, repairs included) minus the pre-run snapshot,
+		// app bytes as the delivered total, interactive requests one field each in issue order
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "%.2f,%.2f,%d,%d,%d,%d,%d,%d", single, par, ss.PktsOut-in0Pkts, ss.BytesOut-inB0, ss.BytesIn-in0, n, tot, len(lat))
+		for _, d := range lat {
+			fmt.Fprintf(&sb, ",%d", d.Microseconds())
+		}
+		sb.WriteByte('\n')
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err == nil {
+			f.WriteString(sb.String())
+			f.Close()
+		} else {
+			t.Logf("EMU_ROWS %s: %v (row not written)", p, err)
+		}
+	}
 }
+
+// in0Pkts remembers the pre-run server packet count for the EMU_ROWS wire accounting (set alongside in0/inB0).
+var in0Pkts uint64
 
 func emuInit() float64 { n, _ := strconv.ParseFloat(os.Getenv("EMU_INIT"), 64); return n * 1e6 }
 
@@ -356,11 +382,19 @@ func TestEmu(t *testing.T) {
 		}
 		sio := &emuDgIO{tx: b, rx: a, done: make(chan struct{}), prof: prof}
 		cio := &emuDgIO{tx: a, rx: b, done: make(chan struct{}), prof: prof}
-		cli, err := NewSession(Config{Key: key, MaxPayload: emuMTU(), SID: 77}, cio)
+		// M0 (2026-11-19): default the datagram payload to the udp carrier's 1400 ceiling. The old unset default
+		// (640 B session packets) doubled the wire cost of a bulk transfer (1.60x vs 1.55x at 1400 with the same
+		// throughput), which every M0/M3 comparison would have misread as a pacer problem. EMU_PROFILE (or an
+		// explicit EMU_MTU) still overrides.
+		mtu := emuMTU()
+		if mtu == 0 {
+			mtu = udpProfile.MTU
+		}
+		cli, err := NewSession(Config{Key: key, MaxPayload: mtu, SID: 77}, cio)
 		if err != nil {
 			t.Fatal(err)
 		}
-		srv := NewServer(Config{Key: key, MaxPayload: emuMTU(), InitBps: emuInit()}, &emuRaw{sio})
+		srv := NewServer(Config{Key: key, MaxPayload: mtu, InitBps: emuInit()}, &emuRaw{sio})
 		t.Cleanup(func() { cli.Close(); srv.Close() })
 		emuRun(t, cli, srv)
 	case "tcp", "tcpdirect": // tcpdirect: no emulated link, as fast as the loopback allows (CPU profiling)
