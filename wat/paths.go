@@ -167,8 +167,9 @@ type PathTimings struct {
 	// the server's downlink is dropped). The client periodically sends ONE normal authenticated packet (a probe
 	// PING) from the ":down" leg's own socket to refresh the mapping; the interval is the base plus uniform jitter
 	// of up to 40 % (default 25 s → 25-35 s), comfortably inside typical 30-60 s UDP NAT timeouts. Automatic for
-	// ":down" legs only — without it they are unusable behind NAT — and skipped while server data is arriving on
-	// the leg (the mapping demonstrably works then).
+	// ":down" legs only — without it they are unusable behind NAT. Unconditional at the cadence: a NAT UDP mapping
+	// is refreshed by outbound traffic only, so arriving downlink does not prove the mapping's idle budget
+	// (2026-11-20 review defect 1: the old skip let the mapping lapse mid-flow).
 	DownKnock time.Duration
 	// MtuAdapt turns on the Hornet-MTU sender-side clamp (3.3.9, -mtu-adapt; default off, dead code when off):
 	// after hornetLosses consecutive losses of packets bigger than hornetBigPkt the path's datagrams are capped
@@ -433,6 +434,9 @@ func (ps *pathSet) allBulkBlocked(fullMask uint64, hasBacklogger bool) bool {
 		if !p.present || p.muted {
 			continue
 		}
+		if !ps.canSendLocked(i) {
+			continue // a direction-locked leg is never bulk capacity on this end (2026-11-20 review defect 2):
+		} // counting it made the pump build into a full pool queue and drop, never setting held
 		anyPresent = true
 		full := i < 64 && fullMask&(uint64(1)<<uint(i)) != 0
 		if !full && p.state != pDead && !p.overCap(now) {
@@ -457,6 +461,10 @@ func (ps *pathSet) pacerMode() (reliable, direct, anyRel, icmpClamp bool) {
 		if !p.present || p.muted || p.state == pDead {
 			continue
 		}
+		if !ps.canSendLocked(i) {
+			continue // a direction-locked leg must not sway the pacer on this end (2026-11-20 review suspect 4):
+		} // a client's ":down" leg counted as a live uncapped udp path and downgraded the CC the
+		// reliable pool leg alone would run
 		var prof Profile
 		if i < len(ps.profs) {
 			prof = ps.profs[i]
@@ -872,10 +880,12 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 			ps.burstPath, ps.burstLeft = best, bulkBurst-1
 			return best
 		}
-		// No healthy path could frame size (e.g. only capped/dead paths fit): undo pass-0 credit before pass 1.
+		// No healthy path could frame size (e.g. only capped/dead paths fit): undo pass-0 credit before pass 1
+		// — the same canSendLocked guard its earning counterpart has, so a direction-locked leg does not accrue
+		// unbounded negative credit (2026-11-20 review nit 5; harmless to selection, a trap to read).
 		for i := range ps.p {
 			p := &ps.p[i]
-			if p.present && !p.muted && p.state != pDead && !ps.isFull(i) && !p.overCap(now) {
+			if p.present && !p.muted && p.state != pDead && !ps.isFull(i) && !p.overCap(now) && ps.canSendLocked(i) {
 				p.credit -= p.weight(now, ps.cfg.Ramp)
 			}
 		}

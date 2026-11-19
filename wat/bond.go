@@ -49,12 +49,11 @@ type BondIO struct {
 	prober atomic.Value // func(int)
 	prev   []byte
 
-	// Bifrost NAT knock (found live 2026-11-19): the ":down" legs this client must knock for, when the next knock
-	// is due on each (tickLoop-owned), the last packet received on each leg (recvKid-owned, unix ns) and how many
-	// knocks went out. Server data arriving on a leg proves its NAT mapping works, so knocks pause while it flows.
+	// Bifrost NAT knock (found live 2026-11-19): the ":down" legs this client must knock for, when the next
+	// knock is due on each (tickLoop-owned) and how many knocks went out. Knocked unconditionally at the
+	// cadence — see the tickLoop comment for why arrivals do not pause it.
 	knockLegs []int
 	knockAt   []time.Time
-	lastRecv  []atomic.Int64
 	knocks    []atomic.Uint64
 }
 
@@ -85,7 +84,6 @@ func NewBondIO(kids []PacketIO, opt BondOptions) (*BondIO, error) {
 	b.ps = newPathSet(names, true, tm, false)
 	b.ps.setProfiles(b.profs)
 	b.knockAt = make([]time.Time, len(kids))
-	b.lastRecv = make([]atomic.Int64, len(kids))
 	b.knocks = make([]atomic.Uint64, len(kids))
 	for i := range kids {
 		if b.ps.p[i].dir == DirDown { // Bifrost NAT knock: only a ":down" leg never sends otherwise
@@ -117,7 +115,6 @@ func (b *BondIO) recvKid(i int) {
 			continue
 		}
 		backoff = time.Millisecond
-		b.lastRecv[i].Store(time.Now().UnixNano()) // Bifrost NAT knock: arrivals on a leg pause its knocks
 		buf := getPkt(len(p))
 		copy(buf, p)
 		select {
@@ -147,8 +144,11 @@ func (b *BondIO) tickLoop() {
 		// Bifrost NAT knock (found live 2026-11-19, Kharej box): fire at most one knock per leg per jittered
 		// cadence tick. The knock reuses the probe path — one tiny ack-eliciting PING on the leg — so it is a
 		// normal authenticated packet, not a new wire surface, and its arrival on the server populates the leg's
-		// destination through the same authenticated-source mechanism as any packet (SetPeer). Skipped while the
-		// leg is delivering downlink (its mapping demonstrably works); knockAt is only touched here.
+		// destination through the same authenticated-source mechanism as any packet (SetPeer). Knocked
+		// unconditionally at the cadence: a NAT UDP mapping is refreshed by OUTBOUND traffic only (the
+		// statefulNAT rig documents the same model), so arriving downlink proves nothing about how much idle
+		// time the mapping has seen — suppressing knocks while downlink flowed let the mapping lapse mid-flow
+		// (2026-11-20 review defect 1: recurring downlink blackout cycles).
 		now := time.Now()
 		for _, i := range b.knockLegs {
 			if now.Before(b.knockAt[i]) {
@@ -158,11 +158,7 @@ func (b *BondIO) tickLoop() {
 				b.knockAt[i] = now.Add(knockWait) // no prober yet (session still starting): retry shortly,
 				continue                          // don't burn a whole cadence gap on it
 			}
-			gap := knockGap(b.ps.cfg.DownKnock)
-			b.knockAt[i] = now.Add(gap)
-			if now.UnixNano()-b.lastRecv[i].Load() < int64(gap) {
-				continue // server data arrived on the leg within the last cadence: no knock needed
-			}
+			b.knockAt[i] = now.Add(knockGap(b.ps.cfg.DownKnock))
 			b.knocks[i].Add(1)
 			f(i)
 		}
@@ -557,6 +553,9 @@ func (m *multiSubIO) SetPathEndpoint(legIdx, port int, src net.Addr) {
 	if legIdx < 0 || legIdx >= len(m.slots) || port <= 0 || port > 65535 {
 		return
 	}
+	if m.ps.p[legIdx].dir != DirDown {
+		return // the announce is a receive-only-leg concept (2026-11-20 review nit 8): on any other leg the
+	} // slot is owned by the leg's own traffic, never by a frame
 	t, ok := src.(*TaggedAddr)
 	if !ok || t.Idx < 0 || t.Idx >= len(m.slots) {
 		return

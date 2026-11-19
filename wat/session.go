@@ -656,12 +656,23 @@ func (s *Session) appendEndpoint(p []byte, now time.Time) []byte {
 	if !ok {
 		return p
 	}
-	q := p
+	// bound the announce like appendKex bounds the kex: a full-size packet plus one frame per leg would exceed
+	// maxPlain, and the oversized datagram rides no sendable path (ip fragmentation on udp, over the route MTU
+	// on icmp) — found by the 2026-11-20 review (defect 3); bail without touching epAt, the next packet retries
+	total := 0
 	for _, i := range s.epLegs {
 		port := lp.PathLocalPort(i)
 		if port <= 0 || port > 65535 {
 			return p // the leg's socket has no port yet (or none at all): retry on a later packet
 		}
+		total += 1 + uvlen(uint64(i)) + 2
+	}
+	if len(p)+total > s.maxPlain {
+		return p
+	}
+	q := p
+	for _, i := range s.epLegs {
+		port := lp.PathLocalPort(i)
 		q = append(q, frEndpoint)
 		q = appendUv(q, uint64(i))
 		var pb [2]byte

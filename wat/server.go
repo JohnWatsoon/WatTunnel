@@ -542,9 +542,13 @@ func (srv *Server) run() {
 				continue
 			}
 		}
+		// 2026-11-20 review nit 7: the pooled buffer is taken only once the slot is won — allocating before
+		// the select lost one buffer to GC for every packet dropped under inbox overload
+		buf := srv.getBuf(p)
 		select {
-		case ss.io.inbox <- rxPkt{srv.getBuf(p), lane, src}:
+		case ss.io.inbox <- rxPkt{buf, lane, src}:
 		default: // overloaded: a dropped datagram is just loss
+			srv.putBuf(buf)
 		}
 	}
 }

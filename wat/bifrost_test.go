@@ -540,6 +540,16 @@ func TestBifrostNATKnock(t *testing.T) {
 		received = g
 		done <- err
 	}()
+	// defect 1 (2026-11-20 review): knocks must continue while downlink FLOWS — a NAT mapping is refreshed by
+	// outbound traffic only, so the old lastRecv-based skip suppressed knocks mid-flow and let the mapping
+	// lapse, blacking out the leg in cycles (retransmit hid the stalls and this test still passed). The counter
+	// must advance inside any 400 ms window of the flow (the cadence gap tops out at 350 ms).
+	time.Sleep(400 * time.Millisecond)
+	k0 := rig.cli.CarrierStats()[1].Knocks
+	time.Sleep(400 * time.Millisecond)
+	if k1 := rig.cli.CarrierStats()[1].Knocks; k1 <= k0 {
+		t.Fatalf("no knock while downlink was flowing: %d -> %d (suppression regression?)", k0, k1)
+	}
 	select {
 	case err := <-done:
 		if err != nil {
