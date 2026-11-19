@@ -2,6 +2,7 @@ package wat
 
 import (
 	"math"
+	mrand "math/rand/v2"
 	"net"
 	"strings"
 	"sync"
@@ -149,6 +150,7 @@ type CarrierStat struct {
 	Sent    uint64  `json:"sent"`
 	Acked   uint64  `json:"acked"`
 	Lost    uint64  `json:"lost"`
+	Knocks  uint64  `json:"knocks,omitempty"` // Bifrost NAT knocks sent on this leg (":down" legs, client side only)
 	Present bool    `json:"-"`
 }
 
@@ -160,6 +162,14 @@ type PathTimings struct {
 	Ramp       time.Duration // a revived path goes from a 10 % to a full share over this (default 3 s)
 	IdleProbe  time.Duration // a live path with nothing sent for this long gets a PING (default 5 s)
 	Mode       string        // "balanced" (default), "active-backup", "replicate"
+	// DownKnock is the base cadence of the Bifrost NAT knock (found live 2026-11-19, Kharej box: a client behind
+	// NAT whose bond has a ":down" leg never sends from that leg's socket, so the NAT holds no mapping for it and
+	// the server's downlink is dropped). The client periodically sends ONE normal authenticated packet (a probe
+	// PING) from the ":down" leg's own socket to refresh the mapping; the interval is the base plus uniform jitter
+	// of up to 40 % (default 25 s → 25-35 s), comfortably inside typical 30-60 s UDP NAT timeouts. Automatic for
+	// ":down" legs only — without it they are unusable behind NAT — and skipped while server data is arriving on
+	// the leg (the mapping demonstrably works then).
+	DownKnock time.Duration
 	// MtuAdapt turns on the Hornet-MTU sender-side clamp (3.3.9, -mtu-adapt; default off, dead code when off):
 	// after hornetLosses consecutive losses of packets bigger than hornetBigPkt the path's datagrams are capped
 	// at hornetClampPayload for hornetClampHold, then retried at full size (the detector re-fires while the
@@ -201,6 +211,9 @@ func (t PathTimings) norm() PathTimings {
 	if t.IdleProbe <= 0 {
 		t.IdleProbe = 5 * time.Second
 	}
+	if t.DownKnock <= 0 {
+		t.DownKnock = 25 * time.Second
+	}
 	if t.Mode == "" {
 		t.Mode = "balanced"
 	}
@@ -209,6 +222,14 @@ func (t PathTimings) norm() PathTimings {
 
 // bulkBurst: consecutive bulk packets sent on the same path.
 const bulkBurst = 24
+
+// knockGap is one Bifrost NAT-knock interval (found live 2026-11-19): the DownKnock base plus uniform jitter of up
+// to 40 % of it (default 25-35 s). Jittered on purpose — a fixed period would let a NAT (or a watcher) learn the
+// knock schedule — and bounded well inside typical 30-60 s UDP NAT timeouts, so one knock always lands before a
+// mapping could expire.
+func knockGap(base time.Duration) time.Duration {
+	return base + time.Duration(mrand.Float64()*float64(base)*0.4)
+}
 
 // ICMPPathBps caps the bulk bytes/s a bond sends on its icmp path (Iran reroutes ICMP above ~30 MB/s); the other
 // carriers of the bond are not held to it (3.2.0, before: the whole session was capped at 16 MB/s whenever icmp was

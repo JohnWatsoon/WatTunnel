@@ -404,6 +404,166 @@ func TestBifrostEndpointRoundTrip(t *testing.T) {
 	}
 }
 
+// ---- Bifrost NAT knock (found live 2026-11-19, Kharej box) ----
+//
+// A client behind NAT whose bond has a receive-only ":down" leg never sends from that leg's socket, so the NAT
+// holds no mapping for it and the server's downlink to the leg is dropped at the NAT. The fix: the client
+// periodically sends ONE small authenticated packet (a probe PING, no new wire format) from the ":down" leg's own
+// socket, refreshing the mapping; its arrival on the server populates the leg's destination through the same
+// authenticated-source path as any packet. The tests below prove the failure and the fix against a stateful NAT
+// model: downlink passes only within `timeout` of an outbound packet from the same socket.
+
+// statefulNAT models an endpoint-mapping NAT with a UDP timeout: a downlink datagram is delivered only if an
+// uplink datagram left the same socket within the timeout (mapping created or refreshed by outbound traffic
+// alone, the conservative case — control rig proves real deployments where inbound never refreshes).
+type statefulNAT struct {
+	lastOut atomic.Int64 // unix ns of the last client→server packet through the NAT
+	timeout time.Duration
+}
+
+func (n *statefulNAT) allows(now time.Time) bool {
+	last := n.lastOut.Load()
+	return last != 0 && now.UnixNano()-last <= int64(n.timeout)
+}
+
+// natClient wraps a leg's linkClient behind the stateful NAT: outbound traffic refreshes the mapping, inbound
+// traffic is dropped unless a mapping is live.
+type natClient struct {
+	*linkClient
+	nat *statefulNAT
+}
+
+func (c *natClient) Send(p []byte, path int) error {
+	c.nat.lastOut.Store(time.Now().UnixNano())
+	return c.linkClient.Send(p, path)
+}
+
+func (c *natClient) Recv() ([]byte, int, net.Addr, error) {
+	for {
+		p, i, a, err := c.linkClient.Recv()
+		if err != nil || c.nat.allows(time.Now()) {
+			return p, i, a, err
+		}
+		// no mapping: the NAT silently drops the downlink datagram
+	}
+}
+
+// natRig is bifrostRig with leg 1's client socket behind a stateful NAT and a tunable knock cadence.
+func natRig(t *testing.T, links []*bondLink, tm PathTimings, timeout time.Duration) (*bondRig, *statefulNAT) {
+	t.Helper()
+	key := []byte("bond-key")
+	names := []string{"link0:up", "link1:down"}
+	raws := []RawIO{&linkRaw{l: links[0], done: make(chan struct{})}, &linkRaw{l: links[1], done: make(chan struct{})}}
+	srv := NewServer(Config{Key: key, Bond: tm}, NewMultiRaw(names, raws))
+	srv.IdleTimeout = 20 * time.Second
+	go func() {
+		for s := range srv.New {
+			go func(s *Session) {
+				for {
+					st, err := s.Accept()
+					if err != nil {
+						return
+					}
+					go serveUDPStream(st)
+				}
+			}(s)
+		}
+	}()
+	t.Cleanup(srv.Close)
+	nat := &statefulNAT{timeout: timeout}
+	kids := []PacketIO{
+		&linkClient{l: links[0], done: make(chan struct{}), port: 20000},
+		&natClient{linkClient: &linkClient{l: links[1], done: make(chan struct{}), port: 20001}, nat: nat},
+	}
+	b, err := NewBondIO(kids, BondOptions{Names: names, Timings: tm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := NewSession(Config{Key: key}, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cli.Close)
+	return &bondRig{links: links, srv: srv, key: key, cli: cli}, nat
+}
+
+// TestBifrostNATKnock: (1) without knocks the downlink on the ":down" leg is dropped at the NAT while the server
+// keeps sending (the live Kharej failure), (2) with knocks the transfer completes byte-intact, (3) the knock
+// cadence is jittered and bounded, (4) knocks bypass the data scheduler: the client's Sent on the ":down" leg
+// stays 0 and the knock count is observable in CarrierStats.
+func TestBifrostNATKnock(t *testing.T) {
+	// (3) the scheduling function directly: default base 25 s → every gap inside [25,35) s, and jittered (not a
+	// fixed value, not out of bounds)
+	lo, hi := 25*time.Second, 35*time.Second
+	distinct := map[time.Duration]bool{}
+	for i := 0; i < 200; i++ {
+		g := knockGap(lo)
+		if g < lo || g >= hi {
+			t.Fatalf("knockGap out of bounds: %v (want [%v,%v))", g, lo, hi)
+		}
+		distinct[g] = true
+	}
+	if len(distinct) < 20 {
+		t.Fatalf("knockGap not jittered: %d distinct values in 200 draws", len(distinct))
+	}
+
+	// (1) control: knocks deferred beyond the test window (DownKnock 1 h) — the NAT (700 ms timeout) drops the
+	// downlink although the server keeps sending on the ":down" leg
+	links := twoLinks(t)
+	rig, _ := natRig(t, links, PathTimings{Silence: 300 * time.Millisecond, ProbeFirst: 200 * time.Millisecond,
+		ProbeMax: time.Second, Ramp: 500 * time.Millisecond, IdleProbe: time.Second, DownKnock: time.Hour}, 700*time.Millisecond)
+	var got atomic.Int64
+	go func() {
+		g, _, _ := bondDownload(rig.cli, 1<<20)
+		got.Store(int64(g))
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	if got.Load() != 0 {
+		t.Fatalf("downlink crossed the NAT without any knock: %d bytes delivered", got.Load())
+	}
+	if ss := rig.srv.CarrierStats(); ss[1].Sent == 0 {
+		t.Fatal("control precondition failed: the server never tried the :down leg")
+	}
+	rig.cli.Close()
+	rig.srv.Close()
+
+	// (2)+(4) the fix: knocks every 250-350 ms keep the mapping alive and the download completes byte-intact
+	links = twoLinks(t)
+	tm := PathTimings{Silence: 300 * time.Millisecond, ProbeFirst: 200 * time.Millisecond, ProbeMax: time.Second,
+		Ramp: 500 * time.Millisecond, IdleProbe: time.Second, DownKnock: 250 * time.Millisecond}
+	rig, _ = natRig(t, links, tm, 700*time.Millisecond)
+	const n = 4 << 20
+	done := make(chan error, 1)
+	var received int
+	go func() {
+		g, _, err := bondDownload(rig.cli, n)
+		received = g
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("download behind the NAT failed: %v (got %d of %d)", err, received, n)
+		}
+		if received != n {
+			t.Fatalf("short download behind the NAT: %d of %d", received, n)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("download behind the NAT timed out (knocks did not keep the mapping alive?)")
+	}
+	cs := rig.cli.CarrierStats()
+	if cs[1].Knocks == 0 {
+		t.Fatalf("no knocks were sent on the :down leg: %+v", cs[1])
+	}
+	if cs[1].Sent != 0 {
+		t.Fatalf("knocks counted as data: client Sent on the :down leg = %d (want 0, knocks are control-plane)", cs[1].Sent)
+	}
+	if cs[0].Knocks != 0 {
+		t.Fatalf("knocks on the :up leg (only :down legs knock): %+v", cs[0])
+	}
+	t.Logf("knock rig: %d knocks on the :down leg, client %+v", cs[1].Knocks, cs)
+}
+
 // The 2026-11-19 Kharej smoke found this: Server.CarrierStats summed per-session stats but
 // dropped the Muted field, so /stats on a multi-session server never showed a muted leg (the
 // manager's mute state detection reads exactly this field).
