@@ -18,6 +18,8 @@
 //	udp-bulk    one UDP flow at -rate MB/s for -secs
 //	spray-bulk  UDP, new source port every 2 datagrams, at -rate for -secs (watch persec: a block mid-run shows)
 //	ptcp-bulk   one fake TCP flow at -rate for -secs
+//	spray-raw   raw-socket UDP 5-tuple rotation ceiling: one SOCK_RAW/IPPROTO_UDP socket, sport+dport
+//	           rotate every 12-20 pkts, sendmmsg bursts, -spray-rates sweep (IPv4 only; see sprayraw_linux.go)
 package main
 
 import (
@@ -50,7 +52,7 @@ const (
 	spHi    = 64999
 )
 
-var testIDs = map[string]byte{"udp": 1, "spray": 2, "ptcp": 3, "ptcp-spray": 4, "udp-bulk": 5, "spray-bulk": 6, "ptcp-bulk": 7}
+var testIDs = map[string]byte{"udp": 1, "spray": 2, "ptcp": 3, "ptcp-spray": 4, "udp-bulk": 5, "spray-bulk": 6, "ptcp-bulk": 7, "spray-raw": 8}
 
 func testName(id byte) string {
 	for n, i := range testIDs {
@@ -72,6 +74,11 @@ var (
 	sni   = flag.String("sni", "www.google.com", "send: SNI of the ptcp ClientHello")
 	dur   = flag.Duration("for", 10*time.Minute, "recv: stop after this long")
 	nofw  = flag.Bool("no-fw", false, "do not touch iptables")
+
+	sprayRates    = flag.String("spray-rates", "30,60,100", "send: spray-raw target MB/s sweep, comma list")
+	spraySports   = flag.String("spray-ports", "49152-65535", "spray-raw source port range (keep -port outside the dport range)")
+	sprayDports   = flag.String("spray-dports", "41000-41999", "spray-raw destination port range on the peer (recv side listens)")
+	sprayTupleCap = flag.Float64("spray-tuples", 5000, "spray-raw cap on new 5-tuples per second (token bucket)")
 )
 
 func main() {
@@ -318,7 +325,7 @@ type key struct {
 
 type stat struct {
 	got, bytes, total, flows int
-	flowSet                  map[uint32]bool
+	flowCnt                  map[uint32]int // flow id -> packets seen (flow = tuple id for spray-raw)
 	first, last              time.Time
 	sec                      []int // bytes per second since first
 }
@@ -337,13 +344,13 @@ func (b *board) rec(h hdr, v6 bool, n int) {
 	k := key{h.id, v6}
 	s := b.m[k]
 	if s == nil {
-		s = &stat{flowSet: map[uint32]bool{}, first: now}
+		s = &stat{flowCnt: map[uint32]int{}, first: now}
 		b.m[k] = s
 	}
 	s.got++
 	s.bytes += n
 	s.total, s.flows = int(h.total), int(h.flows)
-	s.flowSet[h.flow] = true
+	s.flowCnt[h.flow]++
 	s.last = now
 	i := int(now.Sub(s.first) / time.Second)
 	for len(s.sec) <= i {
@@ -375,7 +382,7 @@ func (b *board) flush(all bool) {
 		if s.total > 0 {
 			line += fmt.Sprintf("/%d", s.total)
 		}
-		line += fmt.Sprintf(" flows=%d", len(s.flowSet))
+		line += fmt.Sprintf(" flows=%d", len(s.flowCnt))
 		if s.flows > 0 {
 			line += fmt.Sprintf("/%d", s.flows)
 		}
@@ -389,6 +396,18 @@ func (b *board) flush(all bool) {
 		}
 		if k.id == testIDs["ptcp"] {
 			line += fmt.Sprintf(" hello=%d", b.hello.Swap(0))
+		}
+		if k.id == testIDs["spray-raw"] {
+			// rotation should keep every tuple under the ~29-34-packet cut the 2026-11-14 field
+			// run measured; tuples at or past 34 mean the middlebox saw one tuple live too long
+			mx, over := 0, 0
+			for _, c := range s.flowCnt {
+				mx = max(mx, c)
+				if c >= 34 {
+					over++
+				}
+			}
+			line += fmt.Sprintf(" pkts_per_tuple_max=%d tuples_over_34=%d", mx, over)
 		}
 		fmt.Println(line)
 		delete(b.m, k)
@@ -430,6 +449,7 @@ func recv(ctx context.Context) {
 		}
 		go recvTCP(r, b)
 	}
+	go recvSprayUDP(b, &f, uc) // spray-raw: raw UDP on -spray-dports, replies from the main socket
 	log.Printf("receiving on port %d (udp + fake tcp, v4 + v6) for %s", *port, *dur)
 	tk := time.NewTicker(500 * time.Millisecond)
 	defer tk.Stop()
@@ -701,6 +721,8 @@ func (s *sender) run(ctx context.Context, t string, id byte) string {
 			c.Close()
 		}
 		return fmt.Sprintf("pkts=%d flows=%d rate=%.0fMB/s", n, flows, *rate)
+	case "spray-raw":
+		return s.sprayRaw(ctx, id)
 	case "ptcp", "ptcp-bulk":
 		f := s.newFlow()
 		s.wr(f, fSYN, nil)
