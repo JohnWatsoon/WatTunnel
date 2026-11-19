@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026111901   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112001   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -8818,19 +8818,16 @@ bonding_menu() { # name
         pause ;;
       t)
         echo
-        ask_ok "Path index to toggle mute" "0" v_num || continue
-        local pidx=$REPLY_V m=$(cfg "$n" metrics)
-        if [ -n "$m" ]; then
-          local res
-          res=$(curl -fs -X POST --noproxy '*' --max-time 3 "http://$m/carrier/toggle?path=$pidx" 2>/dev/null)
-          if [ -n "$res" ]; then
-            ok "Toggled mute on path $pidx (muted: $(jget "$res" muted))."
-          else
-            err "Failed to toggle path $pidx on metrics server http://$m."
-          fi
-        else
-          warn "Tunnel '$n' has no metrics endpoint configured."
-        fi
+        ask_ok "Path index to mute or unmute" "0" v_num || continue
+        local pidx=$REPLY_V act
+        ask_ok "mute or unmute?" "mute" v_nonempty || continue
+        act=$REPLY_V
+        # routed through carrier_toggle_cmd (2026-11-20 review F3): it carries the auto dead-leg index
+        # realignment, the range check and the engine-answer interpretation this raw POST lacked
+        case "$act" in
+          mute|unmute) carrier_toggle_cmd "$act" "$n" "$pidx" ;;
+          *) err "Choose mute or unmute." ;;
+        esac
         pause ;;
       m)
         echo

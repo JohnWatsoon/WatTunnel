@@ -641,11 +641,15 @@ NI_CARRIER=''; NI_NAME=''; CARRIER=''
 # config is written; a single carrier never takes a suffix, a shaped carrier never takes one at all
 # (it cannot be a bond leg anyway, D7), and a bond must keep at least one leg able to carry each
 # direction. A directional leg signals itself with the frEndpoint frame: both ends need 3.3.9.
-for c in 'udp:up+udp' 'udp:up+udp:down' 'udp:down+udp:up' 'icmp+udp:down' 'tcp+udp:down' 'tls+udp:down' 'icmp+udp:up+udp:down'; do
+for c in 'icmp+udp:down' 'tcp+udp:down' 'tls+udp:down' 'tcp:up+udp:down' 'icmp:up+udp:down'; do
   v_carrier_list "$c" && echo "ok   v_carrier_list directional $c" || { echo "FAIL v_carrier_list directional $c"; fail=1; }
 done
+# the engine dedupes bond legs on the BASE carrier (udp:up and udp:down are one socket), so every
+# same-base-directional form is refused exactly like a plain duplicate (2026-11-20 review F1; the old pins
+# wrongly accepted them and the manager would have written a config the engine exits 2 on)
 for c in 'udp:up' 'udp:down' 'tcp:down+udp' 'tls:down+udp' 'icmp:down+udp' 'udp:down+udp:down' 'udp:up+udp:up' 'udp:up+tcp:up+tls:up' \
-         'sit:up+udp' 'vxlan:down+udp' 'fou-gre:up+udp' 'bogus:up+udp' 'udp:up+' 'bogus:up'; do
+         'sit:up+udp' 'vxlan:down+udp' 'fou-gre:up+udp' 'bogus:up+udp' 'udp:up+' 'bogus:up' \
+         'udp:up+udp' 'udp:up+udp:down' 'udp:down+udp:up' 'icmp+udp:up+udp:down'; do
   expect_fail v_carrier_list "$c"
 done
 chk "leg base strips :up" "$(carrier_leg_base 'udp:up')" "udp"
@@ -663,15 +667,15 @@ bin_ver_ok() { ver_ge 3.3.6 "$1" 2>/dev/null && echo 1; } # an engine stuck on 3
 expect_fail carrier_ok_here 'udp:up'
 chk "min ver: plain legs still run on 3.3.6" "$(carrier_ok_here udp && echo y)" "y"
 eval "$_bb"
-chk "listen: a directional udp bond still writes a global listen" "$(carrier_write_listen 'udp:up+udp:down' && echo y)" "y"
-ni_parse --carrier 'udp:up+udp'
-chk "unattended --carrier keeps the suffix" "$NI_CARRIER" "udp:up+udp"
-NI_CARRIER='udp:up+udp'; CARRIER=''
+chk "listen: a directional bond with a udp leg still writes a global listen" "$(carrier_write_listen 'tcp:up+udp:down' && echo y)" "y"
+ni_parse --carrier 'tcp:up+udp'
+chk "unattended --carrier keeps the suffix" "$NI_CARRIER" "tcp:up+udp"
+NI_CARRIER='tcp:up+udp'; CARRIER=''
 pick_carrier auto >/dev/null 2>&1
-chk "the picker keeps a directional bond" "$CARRIER" "udp:up+udp"
+chk "the picker keeps a directional bond" "$CARRIER" "tcp:up+udp"
 printf 'mode: client\n' >"$WAT_CONF/t_bf.yml"
-set_value t_bf carrier 'udp:up+udp'
-chk "config writer: carrier key keeps the suffix" "$(cfg t_bf carrier)" "udp:up+udp"
+set_value t_bf carrier 'tcp:up+udp'
+chk "config writer: carrier key keeps the suffix" "$(cfg t_bf carrier)" "tcp:up+udp"
 rm -f "$WAT_CONF/t_bf.yml"
 NI_CARRIER=''; CARRIER=''
 expect_err_msg() { local txt=$1; shift; "$@" >"$SMOKE/err.txt" 2>&1; grep -qF "$txt" "$SMOKE/err.txt" && echo "ok   error text: $txt" || { echo "FAIL error text: wanted '$txt', got: $(cat "$SMOKE/err.txt")"; fail=1; }; }
@@ -737,12 +741,12 @@ rm -f "$SMOKE/err.txt"
   stats() { return 1; }
   curl() { local url=${@: -1}; printf '%s\n' "$url" >>"$SMOKE/post.url"
     case "$url" in
-      *carrier=udp:down*|*path=1*) printf '{"path":1,"carrier":"udp:down","muted":false}\n' ;;
+      *carrier=udp:down*|*path=1*) printf '{"path":1,"carrier":"udp:down","muted":true}\n' ;;
       *) printf '{"path":0,"carrier":"udp:up","muted":true}\n' ;;
     esac; }
   out=$(mute_cmd t_mute 1)
   chk "mute without stats: POSTs the numeric path" "$(cat "$SMOKE/post.url")" "http://127.0.0.1:1/carrier/toggle?path=1"
-  case "$out" in *"now unmuted"*) echo "ok   mute without stats: prints the new state" ;; *) echo "FAIL mute without stats: got: $out"; fail=1 ;; esac
+  case "$out" in *"now muted"*) echo "ok   mute without stats: prints the new state" ;; *) echo "FAIL mute without stats: got: $out"; fail=1 ;; esac
   : >"$SMOKE/post.url"
   out=$(mute_cmd t_mute udp:up)
   chk "mute without stats: the name falls back to the config bond" "$(cat "$SMOKE/post.url")" "http://127.0.0.1:1/carrier/toggle?carrier=udp:up"
@@ -1184,7 +1188,7 @@ cfg_coverage_missing() { # [extra names...] -> engine flags with no manager path
   local f miss=''
   for f in $(cfg_flag_names) "$@"; do
     case "$f" in
-      config|mode|key|key-file|map|udp|ports|listen|peer|host|path|sni|metrics|version) continue ;;
+      config|mode|key|key-file|map|udp|ports|listen|peer|host|path|sni|metrics|version|ui) continue ;;
       listen-*|peer-*|src-ip-*) continue ;;
     esac
     case " $CFG_FILE_ONLY $CFG_PORTS_UI " in *" $f "*) continue ;; esac
