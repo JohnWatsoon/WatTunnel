@@ -65,12 +65,12 @@ var shapedUDPCarrier = nameSet(wat.UDPShapedCarrierNames())
 // are single-carrier in 3.3.0 and are rejected inside a '+' bond.
 var shapedRawCarrier = nameSet(wat.RawShapedCarrierNames())
 
-// validCarrier adds the manager's fortress alias on top of every -carrier name.
-var validCarrier = func() map[string]bool {
-	m := nameSet(carrierNames)
-	m["fortress"] = true
-	return m
-}()
+// validCarrier is every -carrier name the leg loop accepts. The manager's fortress alias is deliberately NOT
+// here: the exact-match expansion at flag parsing turns "fortress" into its 5-carrier bond before any name
+// check runs, and a bare fortress entry would admit "fortress+udp" as a leg that build() has no case for —
+// nil carriers, panic at startup (found by the 2026-11-20 project-wide review; fortress-as-a-leg now gets
+// the standard "unknown -carrier" exit 2).
+var validCarrier = nameSet(carrierNames)
 
 var poolCarriers = map[string]bool{"tcp": true, "tls": true, "ws": true, "wss": true, "h2": true, "h2c": true, "grpc": true}
 
@@ -1016,15 +1016,21 @@ func main() {
 	}
 
 	if *metrics != "" {
+		// listen + publish the port SYNCHRONOUSLY, before the session pump can admit anything: isMetricsPort
+		// guards "never forward to the metrics server", and an async store left a millisecond-scale startup
+		// window where a tunneled stream could dial straight into /stats or pprof (2026-11-20 review, S1)
+		var mln net.Listener
+		mln, err := net.Listen("tcp", *metrics)
+		if err != nil {
+			log.Printf("metrics %s: %v", *metrics, err)
+		} else if ta, ok := mln.Addr().(*net.TCPAddr); ok && ta.Port > 0 {
+			metricsPort.Store(int32(ta.Port))
+		}
 		go func() {
-			ln, err := net.Listen("tcp", *metrics)
-			if err != nil {
-				log.Printf("metrics %s: %v", *metrics, err)
+			if mln == nil {
 				return
 			}
-			if ta, ok := ln.Addr().(*net.TCPAddr); ok && ta.Port > 0 {
-				metricsPort.Store(int32(ta.Port))
-			}
+			ln := mln
 			mux := http.NewServeMux()
 			mux.HandleFunc("/debug/pprof/", guard(pprof.Index))
 			mux.HandleFunc("/debug/pprof/profile", guard(pprof.Profile))
