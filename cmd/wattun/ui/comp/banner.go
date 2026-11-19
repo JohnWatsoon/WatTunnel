@@ -14,16 +14,20 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// The ORIGINAL mark, verbatim from the manager (the owner's benchmark): the box-drawing kite and
+// the ██ block wordmark. Kept as-is after the ## replacement was rejected - the glyphs were never
+// the alignment problem (the hand-rolled padding was); lipgloss.JoinHorizontal positions rows as
+// units, and every glyph here is single-width.
 var bannerKite = []string{
-	`  /\  `,
-	` /--\ `,
-	`/  \/ `,
+	"   ╱╲  ",
+	"  ╱──╲ ",
+	" ╱ ╲╱  ",
 }
 
 var bannerWord = []string{
-	"##   ##  ####  ###### ###### ##  ## ###   ##",
-	"## # ## ######   ##     ##   ##  ## ####  ##",
-	" ## ### ##  ##   ##     ##   ###### ## #### ",
+	"██   ██  ▄██▄  ██████ ██████ ██  ██ ██▄  ██",
+	"██ █ ██ ██▄▄██   ██     ██   ██  ██ ██▀█▄██",
+	" ▀█▀█▀  ██  ██   ██     ██   ▀████▀ ██  ▀██",
 }
 
 var (
