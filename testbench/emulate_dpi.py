@@ -228,13 +228,19 @@ def sim_marker_survives(mode, args):
         # a later segment, so both reassembly and window checking decide it.
         return not args.window_check and not args.no_reassemble
     if mode == "ff":
-        # fragmented F&F record+segment plan: depends on segment/record reassembly.
-        return not args.no_reassemble
+        # fragmented F&F record+segment plan: every ff sequence number is BELOW the stream start the
+        # server holds (wat/desync.go fireFFLocked), so a window-checking middlebox discards the
+        # segments outright — reassembly alone does not save it (2026-11-20 review F11; the old model
+        # let ff survive a window-checking DPI the real markers cannot).
+        return not args.window_check and not args.no_reassemble
     if mode in ("fakeip", "paws"):
         # separate SYN/hello to a whitelisted IP or valid-checksum stale-TSval segment: survives window & checksum.
         return True
     if mode == "all":
-        return not args.window_check or not args.checksum_check or not args.no_reassemble
+        # all four markers (seq, sum, hlen0, ff) are below-window or bad-checksum, so window+checksum
+        # DPI blocks it regardless of reassembly (2026-11-20 review F12: the old third term stood for
+        # ff, which is window-sensitive like seq — see F11).
+        return not args.window_check or not args.checksum_check
     raise SystemExit(f"emulate_dpi.py: unknown --inject-fake mode {mode!r} "
                      "(modelled: none seq ttl sum seqsum rst split hlen0 fakeip synrst paws ff all)")
 
@@ -579,15 +585,18 @@ def self_test(args):
        "hlen0 dies under window checks")
     ok(mode_verdict("ff")[0] == "allow" and mode_verdict("ff", no_reassemble=True)[0] == "block",
        "ff relies on reassembly")
+    ok(mode_verdict("ff", window_check=True)[0] == "block",
+       "ff: below-window segments die under window checks (F11)")
     ok(mode_verdict("paws", window_check=True, checksum_check=True)[0] == "allow",
        "paws survives window + checksum validation")
     ok(mode_verdict("fakeip", window_check=True, checksum_check=True)[0] == "allow",
        "fakeip survives window + checksum validation")
     ok(mode_verdict("synrst")[0] == "block" and mode_verdict("synrst")[1].startswith("rst-cleared/"),
        "synrst clears flow when checksum unchecked")
-    ok(mode_verdict("all", window_check=True, checksum_check=True)[0] == "allow" and
-       mode_verdict("all", window_check=True, checksum_check=True, no_reassemble=True)[0] == "block",
-       "all survives while any marker survives")
+    ok(mode_verdict("all", window_check=True, checksum_check=True)[0] == "block",
+       "all: window+checksum DPI blocks every marker incl. ff (F12)")
+    ok(mode_verdict("all", window_check=True, checksum_check=True, no_reassemble=True)[0] == "block",
+       "all: still blocked with reassembly off")
     ok(_split_addr("[::1]:18444") == ("::1", 18444), "_split_addr handles bracketed IPv6")
 
     print(f"SELFTEST OK ({checks} checks)")
