@@ -85,7 +85,10 @@ type mmsghdr struct {
 	_   [4]byte // pad to 64 bytes; fieldprobe targets 64-bit linux only (amd64/arm64)
 }
 
-func sendmmsgRaw(fd int, pkts [][]byte, sa *unix.SockaddrInet4) error {
+// sendmmsgRaw sends the batch and returns how many messages the kernel accepted (a partial batch
+// is possible under ENOBUFS-style backpressure — the caller must count sent, not attempted, or the
+// reply ratio and MB/s lie; 2026-11-20 review F8).
+func sendmmsgRaw(fd int, pkts [][]byte, sa *unix.SockaddrInet4) (int, error) {
 	iovs := make([]unix.Iovec, len(pkts))
 	hdrs := make([]mmsghdr, len(pkts))
 	for i, p := range pkts {
@@ -95,18 +98,20 @@ func sendmmsgRaw(fd int, pkts [][]byte, sa *unix.SockaddrInet4) error {
 		hdrs[i].hdr.Namelen = unix.SizeofSockaddrInet4
 		hdrs[i].hdr.Iov = &iovs[i]
 	}
+	sent := 0
 	for done := 0; done < len(pkts); {
 		n, _, errno := unix.Syscall6(unix.SYS_SENDMMSG, uintptr(fd),
 			uintptr(unsafe.Pointer(&hdrs[done])), uintptr(len(pkts)-done), 0, 0, 0)
 		if errno != 0 {
-			return errno
+			return sent, errno
 		}
 		if n == 0 {
-			return io.ErrUnexpectedEOF
+			return sent, io.ErrUnexpectedEOF
 		}
+		sent += int(n)
 		done += int(n)
 	}
-	return nil
+	return sent, nil
 }
 
 // ---- sender side
@@ -177,7 +182,7 @@ func (s *sender) sprayRaw(ctx context.Context, id byte) string {
 		tb := newTokenBucket(*sprayTupleCap)
 		p := &pacer{start: time.Now(), bps: r * 1e6}
 		end := time.Now().Add(time.Duration(*secs) * time.Second)
-		pkts, tuples := 0, 0
+		pkts, sent, tuples := 0, 0, 0 // attempted, kernel-accepted, tuples (F8: ratio and MB/s go by sent)
 		r0 := replies.Load()
 		for time.Now().Before(end) && ctx.Err() == nil {
 			if d := tb.delay(time.Now()); d > 0 {
@@ -190,10 +195,12 @@ func (s *sender) sprayRaw(ctx context.Context, id byte) string {
 				fillUDPHdr(bufs[i], sport, dport, *size)
 				fillRaw(bufs[i][8:], id, tuple, uint32(pkts+i), replyPort)
 			}
-			if err := sendmmsgRaw(fd, bufs[:burst], sa); err != nil {
+			n, err := sendmmsgRaw(fd, bufs[:burst], sa)
+			if err != nil {
 				log.Printf("sendmmsg: %v", err)
 			}
 			pkts += burst
+			sent += n
 			tuples++
 			p.wait(burst * *size)
 		}
@@ -201,15 +208,15 @@ func (s *sender) sprayRaw(ctx context.Context, id byte) string {
 		time.Sleep(1500 * time.Millisecond) // let tail replies arrive before reading the counter
 		got := replies.Load() - r0
 		ratio := 0.0
-		if pkts > 0 {
-			ratio = float64(got) / float64(pkts)
+		if sent > 0 {
+			ratio = float64(got) / float64(sent)
 		}
 		tps := 0.0
 		if el > 0 {
 			tps = float64(tuples) / el
 		}
-		fmt.Printf("SPRAYRAW rate=%.0f pkts=%d MB/s=%.2f tuples=%d tuples/s=%.0f replies=%d reply_ratio=%.4f\n",
-			r, pkts, float64(pkts**size)/el/1e6, tuples, tps, got, ratio)
+		fmt.Printf("SPRAYRAW rate=%.0f pkts=%d sent=%d MB/s=%.2f tuples=%d tuples/s=%.0f replies=%d reply_ratio=%.4f\n",
+			r, pkts, sent, float64(sent**size)/el/1e6, tuples, tps, got, ratio)
 		time.Sleep(500 * time.Millisecond) // receiver flushes a test after 2 s idle
 	}
 	return fmt.Sprintf("rates=%v size=%d sports=%s dports=%s tuple_cap=%.0f/s reply_port=%d",
@@ -218,20 +225,15 @@ func (s *sender) sprayRaw(ctx context.Context, id byte) string {
 
 // ---- receiver side
 
-// bpfDport keeps only IPv4, IHL=5, UDP, dport in [lo,hi]. Offsets are from the IP header: a
-// classic BPF filter on an AF_INET raw socket sees the IP header, not an Ethernet one.
+// bpfDport converts the platform-independent program (sprayraw_sched.go, where its test runs) to
+// the kernel's sock_filter shape.
 func bpfDport(lo, hi uint16) []unix.SockFilter {
-	return []unix.SockFilter{
-		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 0},
-		{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, Jt: 6, K: 0x0f}, // IHL>5 or not v4: drop
-		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 9},
-		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jf: 4, K: unix.IPPROTO_UDP},
-		{Code: unix.BPF_LD | unix.BPF_H | unix.BPF_ABS, K: 22}, // dport at IP header 20 + UDP 2
-		{Code: unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K, Jf: 2, K: uint32(lo)},
-		{Code: unix.BPF_JMP | unix.BPF_JGT | unix.BPF_K, Jt: 1, K: uint32(hi)},
-		{Code: unix.BPF_RET | unix.BPF_K, K: 0xffffffff},
-		{Code: unix.BPF_RET | unix.BPF_K, K: 0},
+	prog := bpfDportProgram(lo, hi)
+	out := make([]unix.SockFilter, len(prog))
+	for i, ins := range prog {
+		out[i] = unix.SockFilter{Code: ins.Code, Jt: ins.Jt, Jf: ins.Jf, K: ins.K}
 	}
+	return out
 }
 
 // recvSprayUDP listens on one raw IPPROTO_UDP socket filtered to the spray dport range — a range

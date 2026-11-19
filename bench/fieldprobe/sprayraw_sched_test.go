@@ -83,3 +83,36 @@ func TestTokenBucket(t *testing.T) {
 		t.Fatalf("beyond capacity: delay %v, want > 0", d)
 	}
 }
+
+// The receiver's BPF program, interpreted (F7, 2026-11-20 review): the first version used JSET on
+// the IHL nibble — taken for EVERY real IPv4 header (0x45 & 0x0f != 0), so a working filter attach
+// dropped all packets and the probe would have measured nothing. These cases run the actual
+// program through a kernel-shaped interpreter.
+func TestBpfDportProgram(t *testing.T) {
+	mk := func(ihlByte byte, proto byte, dport uint16) []byte {
+		p := make([]byte, 28) // 20 IP + 8 UDP
+		p[0] = ihlByte
+		p[9] = proto
+		p[22], p[23] = byte(dport>>8), byte(dport)
+		return p
+	}
+	prog := bpfDportProgram(41000, 41999)
+	if got := runBPF(prog, mk(0x45, 17, 41000)); got == 0 {
+		t.Fatal("valid IHL=5 UDP frame at lo dport was dropped (filter inverted?)")
+	}
+	if got := runBPF(prog, mk(0x45, 17, 41999)); got == 0 {
+		t.Fatal("valid frame at hi dport was dropped")
+	}
+	if got := runBPF(prog, mk(0x46, 17, 41000)); got != 0 {
+		t.Fatal("IHL=6 frame was accepted")
+	}
+	if got := runBPF(prog, mk(0x45, 6, 41000)); got != 0 {
+		t.Fatal("TCP frame was accepted")
+	}
+	if got := runBPF(prog, mk(0x45, 17, 40999)); got != 0 {
+		t.Fatal("dport below the range was accepted")
+	}
+	if got := runBPF(prog, mk(0x45, 17, 42000)); got != 0 {
+		t.Fatal("dport above the range was accepted")
+	}
+}
