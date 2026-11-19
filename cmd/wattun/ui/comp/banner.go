@@ -1,16 +1,12 @@
 package comp
 
-// The WatTun identity block: kite + WATTUN wordmark (the mark the manager uses), the meta
-// block right-aligned beside it, and the packet-pulse boot animation frames.
-// Lifted from the manager's visual language (owner: these are the elements that made it look
-// like a product) and rebuilt as plain styled strings for the bubbletea app.
+// The WatTun identity block: kite + WATTUN wordmark (the mark the manager uses) with the meta
+// block beside it. Lifted from the manager's visual language and rebuilt for the bubbletea app.
 //
-// Width discipline (learned from the first cut rendering ragged over SSH): every row of the
-// banner block is EXACTLY bannerW cells wide — the art uses plain ASCII where a terminal's
-// rune-width of a glyph could disagree with lipgloss (the wordmark is uniform # blocks, the
-// kite uses / \ — nothing ambiguous), the meta block is joined at a FIXED column, and the
-// terminal width is never used inside the block: a wide terminal sees the same centered block,
-// a narrow one truncates instead of re-flowing. The mark cannot smear.
+// Layout discipline (the hard-earned rule): lipgloss does ALL positioning — JoinHorizontal
+// Top-aligns the art and the meta block as units, so no manual padding arithmetic can ever
+// disagree with styled-string widths. ASCII-only art (no ambiguous-width glyphs). The block is
+// exactly as wide as its content; callers center it with lipgloss.Place against the terminal.
 
 import (
 	"strings"
@@ -18,14 +14,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// bannerW is the fixed cell width of the identity block (kite + gap + wordmark + gap + meta).
-const bannerW = 78
-
-// bannerKite + bannerWord: the 3-row mark, ASCII-safe (no ambiguous-width glyphs).
 var bannerKite = []string{
-	`   /\   `,
-	`  /--\  `,
-	` /  \/  `,
+	`  /\  `,
+	` /--\ `,
+	`/  \/ `,
 }
 
 var bannerWord = []string{
@@ -34,7 +26,6 @@ var bannerWord = []string{
 	" ## ### ##  ##   ##     ##   ###### ## #### ",
 }
 
-// banner styles (created once).
 var (
 	bannerKiteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("22d3ee"))
 	bannerWordStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("22d3ee"))
@@ -42,40 +33,26 @@ var (
 	bannerKeyStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("22d3ee"))
 )
 
-// Banner renders the identity block: kite + wordmark left, up to 3 meta lines joined at a FIXED
-// column, every row exactly bannerW cells. meta lines longer than the meta column are truncated.
+// Banner renders the identity block: kite + wordmark left, up to 3 dim meta lines beside it,
+// top-aligned as units (lipgloss.JoinHorizontal — no manual padding anywhere).
 func Banner(meta []string) string {
-	const metaW = 30
-	const metaX = bannerW - metaW // fixed join column
-	rows := make([]string, 3)
+	art := make([]string, 3)
 	for i := 0; i < 3; i++ {
-		left := bannerKiteStyle.Render(bannerKite[i]) + " " + bannerWordStyle.Render(bannerWord[i])
-		leftW := len(bannerKite[i]) + 1 + len(bannerWord[i]) // ASCII only: len == cells
-		pad := metaX - leftW
-		if pad < 1 {
-			pad = 1
-		}
-		var right string
-		if i < len(meta) {
-			m := truncRunes(meta[i], metaW)
-			right = bannerMetaStyle.Render(m) + strings.Repeat(" ", maxInt(metaW-len([]rune(m)), 0))
-		} else {
-			right = strings.Repeat(" ", metaW)
-		}
-		rows[i] = left + strings.Repeat(" ", pad) + right
+		art[i] = bannerKiteStyle.Render(bannerKite[i]) + " " + bannerWordStyle.Render(bannerWord[i])
 	}
-	return strings.Join(rows, "\n")
-}
-
-// PulseFrames is the boot animation: 3 frames of the packet (>) flying along the dashed line,
-// then the settled mark (the caller renders Banner after the last frame). frame 0..2.
-func PulseFrames() []string {
-	line := "       |"
-	return []string{
-		line + "\n >\n" + line,
-		line + "\n -->\n" + line,
-		line + "\n   --x>\n" + line,
+	left := strings.Join(art, "\n")
+	var right string
+	if len(meta) > 0 {
+		m := make([]string, len(meta))
+		for i, line := range meta {
+			m[i] = bannerMetaStyle.Render(truncRunes(line, 28))
+		}
+		right = strings.Join(m, "\n")
 	}
+	if right == "" {
+		return left
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 }
 
 // KeyBar renders the footer keybar: "[1] open  [m] mute" — accent keys, dim labels.
@@ -125,13 +102,6 @@ func truncRunes(s string, w int) string {
 		return string(r[:w])
 	}
 	return string(r[:w-1]) + "…"
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func itoa(n uint64) string {
