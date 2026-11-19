@@ -6,7 +6,7 @@
 
 **Encrypted Iran ↔ Kharej port forwarding that keeps working when the network is filtered, even when only ping gets through.**
 
-[![Release](https://img.shields.io/badge/release-v3.3.8-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
+[![Release](https://img.shields.io/badge/release-v3.3.9-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go)](go.mod)
 ![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20windows-lightgrey?style=flat-square)
@@ -131,6 +131,11 @@ forwards any TCP or UDP port between them. One static binary, no dependencies.
 
 - **Rides what your route lets through:** `icmp`, `udp`, `tcp`, `tls`, `ws`, `wss`, `h2`, `h2c`, `grpc`, `gre`, `ipip`,
   Cloudflare with ECH, reverse mode, or several of them bonded into one tunnel.
+- **Hands-on bond control:** give a bond leg one direction only (`carrier: tcp:up+udp:down` — uplink over one
+  carrier, downlink over another; each carrier once per bond; both ends need the same release), let `-mtu-adapt`
+  shrink the payload while an ISP drops large packets but small ones pass (off by default, set per end, invisible
+  to the other side), and `wattun mute NAME PATH` / `wattun unmute NAME PATH` to take one leg out of a bond or put
+  it back without a restart.
 - **Gets past filters:** fake-SNI desync, `udp-dns`, `tcp-mimic`, connection rotation with `pool-rotate`, and `wattun matrix NAME` to
   try the combinations and apply the best. `wattun blackout NAME` turns the whole kit on.
 - **Hard to classify:** no constant byte in a packet header, idle packets at random sizes, HTTP carriers that answer like

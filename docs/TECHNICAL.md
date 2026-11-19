@@ -19,6 +19,8 @@ Version: see `wat/version.go` (`wattun -version`).
 4. [Carriers](#carriers)
    - [Shaped carriers (3.3.0)](#shaped-carriers-330)
 5. [Bonding](#bonding)
+   - [Directional bond legs (up/down)](#directional-bond-legs-updown)
+   - [Muting one leg by hand](#muting-one-leg-by-hand)
 6. [Traffic shape](#traffic-shape-what-a-dpi-sees-300)
    - [Stream padding and idle noise](#stream-padding-and-idle-noise-330)
 7. [Spoofing and shaping, explained](#spoofing-and-shaping-explained)
@@ -537,6 +539,8 @@ wattun auto-test NAME  # re-run the Auto mode test
 wattun cdn-tune NAME   # re-tune a Cloudflare tunnel
 wattun auto-ip NAME IP # tell an auto tunnel Iran's IP (on Kharej)
 wattun bond-retest NAME        # bonded Iran tunnel: re-test its legs and add one that works again
+wattun mute NAME PATH          # stop this end from sending on one bond leg, by hand
+wattun unmute NAME PATH        # put a muted bond leg back to work
 wattun bundle [amd64|arm64]    # build a signed offline install/update archive (e.g. on Kharej for Iran)
 wattun update [--from PATH]    # update the binary and manager (or offline from a verified bundle)
 wattun rollback | help
@@ -838,7 +842,9 @@ the two installs do not collide).
 
 `carrier: icmp+udp+tcp` joins several carriers into ONE session. The session keeps working when any one of them
 is blocked, and traffic is spread over the carriers that are alive (watch `carriers` in `/stats`). Use any
-combination of the carriers above, joined with `+`.
+combination of the carriers above, joined with `+`. A leg can also be limited to one direction with a `:up` /
+`:down` suffix ([Directional bond legs](#directional-bond-legs-updown)), and one leg can be silenced by hand from
+the manager ([Muting one leg by hand](#muting-one-leg-by-hand)).
 
 `peer` and `listen` are the defaults for every carrier in the bond. `peer-NAME` and `listen-NAME` override them for
 one carrier, where NAME is the carrier name (`peer-udp`, `peer-tcp`, `listen-udp`, `listen-tcp`, ...). They are
@@ -867,6 +873,54 @@ listen-tcp: :4444
 ports:
   - 443
 ```
+
+### Directional bond legs (up/down)
+
+A leg of a bond can be limited to one direction: suffix the carrier with `:up` (it carries only the uplink,
+client → server) or `:down` (only the downlink, server → client). A leg without a suffix carries both directions,
+as before. Each carrier appears at most once per bond (as before): the suffix tags its direction, it does not
+clone it — give the downlink its own carrier, e.g. uplink over `tcp` and downlink over `udp`:
+
+```yaml
+carrier: tcp:up+udp:down
+```
+
+- **Who sends what.** The client sends uplink only over its `:up` legs and the server never replies on them;
+  `:down` legs carry only the server's traffic back to the client.
+- **How the server learns a `:down` leg.** A receive-only leg on the client is one the server has never heard from,
+  so it would not know where to send. The client therefore announces the leg in a new `frEndpoint` frame (type
+  `0x0e`), which carries only the leg's index and the local port the client bound — nothing else. It rides at the
+  end of an ordinary authenticated uplink packet, so an older server stops at the unknown frame type and ignores
+  it. The server takes the leg's IP from the source address of the packet that carried the frame, an address it
+  has just authenticated: **an IP address never crosses the wire**, so there is nothing to reflect.
+- **Validation at startup.** Every bond must keep at least one leg able to carry each direction (an all-`:up` or
+  all-`:down` bond stops the start), and direction suffixes only make sense bonded: a suffix on a carrier that is
+  not part of a `+` list is refused. In this version `:down` is udp-only. Each carrier still appears at most once
+  per bond (`udp:up+udp:down` is refused as a duplicate `udp` — one socket per carrier per side), so a directional
+  split pairs two different carriers, as in the example above. The per-carrier `peer-NAME` / `listen-NAME`
+  overrides address a leg by its base carrier name, exactly as before.
+- **Mixed versions.** Both ends need 3.3.9 for the suffixes to be honored (the feature is new in 3.3.9). A mixed pair falls back to today's
+  behavior: every leg carries both directions and the uplink keeps working, so the tunnel stays up — only the
+  directional split is lost.
+
+Use it on an asymmetric route: keep a proven uplink leg free of downlink, or steer the downlink onto a leg whose
+only job is to receive.
+
+### Muting one leg by hand
+
+`wattun mute NAME PATH` stops this end from sending on one leg of a bonded tunnel, and `wattun unmute NAME PATH`
+puts it back; NAME is the tunnel and PATH the leg — its carrier name (`udp`) or its index from the bond page. The
+commands talk to the tunnel's metrics endpoint (`POST /carrier/toggle`), so nothing restarts and open connections
+stay up; traffic just moves to the remaining legs.
+
+A muted leg is an operator override, not a failure: the bond page shows it grey with `muted`, and the `carriers`
+entry in `/stats` keeps its real `alive` state next to `"muted": true`, so a muted leg is distinguishable from a
+dead one. The leg is still probed like any other and can be unmuted at any time. Each end mutes independently:
+Iran muting `udp` stops Iran's uplink on it; Kharej must mute its own view to stop the downlink.
+
+PATH takes either the leg's carrier name exactly as `/stats` lists it (`udp`, or the suffixed leg `udp:up`) or
+its index from the bond page; muting an already-muted leg (and unmuting a live one) is a no-op — the manager sees
+the wanted state and skips the call, so the flip endpoint never double-fires.
 
 ### Bond auto-retest (3.3.0)
 
@@ -1610,7 +1664,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `mode` | (required) | both | `client` or `server`. |
 | `key` | | both | Pre-shared key. Prefer `key-file`. |
 | `key-file` | | both | File with the key (whitespace trimmed). Same on both ends. |
-| `carrier` | `icmp` | both | One of the carriers above (including the 3.3.0 [shaped carriers](#shaped-carriers-330)), or several joined with `+` (see Bonding). A shaped carrier must be alone: a `+` list that contains one stops startup. |
+| `carrier` | `icmp` | both | One of the carriers above (including the 3.3.0 [shaped carriers](#shaped-carriers-330)), or several joined with `+` (see Bonding). A shaped carrier must be alone: a `+` list that contains one stops startup. A bonded leg may carry a `:up` / `:down` suffix (3.3.9): `udp:up` carries only the uplink, `udp:down` only the downlink (`:down` is udp-only; both ends 3.3.9). See [Directional bond legs](#directional-bond-legs-updown). |
 | `peer-NAME`, `listen-NAME` | = `peer`, `listen` | client / server | Bonded carriers only: per-carrier address (`peer-udp`, `listen-tcp`, ...). A shaped raw-tier carrier has no `listen-NAME`. |
 | `peer` | | client (server with `reverse`) | icmp, udp: server IP. Pool carriers: `host:port`. Shaped raw tier: the server's bare IP (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`). Shaped UDP tier: `host[:port]`, a bare host using the protocol's conventional port. Reverse pool carriers: Kharej sets Iran's `IP:port`. Reverse icmp: Kharej sets Iran's IP, Iran keeps Kharej's. |
 | `listen` | `:4443` | server (client with `reverse`) | Address for non-ICMP carriers. With `reverse` Iran listens here and Kharej's `peer` must point to it. A shaped UDP-tier carrier defaults to the protocol's conventional port instead of `:4443`; the shaped raw tier has no `listen`. |
@@ -1632,6 +1686,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `pool-rotate` | 0 (off) | client, or the dialing server of a `reverse` tunnel since 3.0.2 (pool carriers: tcp, tls, ws, wss, h2, grpc) | Recycle each healthy pool connection after this long (`30m`, `4h`), so no single flow shows a months-stable lifetime; each connection's actual budget is jittered ±40 % and re-rolled on every recycle, so redials never line up into a detectable period. The session resends anything in flight, so the cost is one redial on one connection at a time. 0 = off. Since 2.8.0. |
 | `pool-rotate-bytes` | 0 (off) | client, or the dialing server of a `reverse` tunnel since 3.0.2 (pool carriers: tcp, tls, ws, wss, h2, grpc) | With or instead of `pool-rotate`: also recycle each healthy pool connection after this many bytes handed to its socket (`500MB`, `4G`, `300k`; decimal units, 1 MB = 10^6). Jittered +/-25 % like the time axis; whichever limit hits first recycles, so the byte axis does not betray the time axis's jitter. 0 = off. Since 2.8.1. |
 | `mtu` | 0 (carrier default) | both | Datagram size cap, including header and tag. 256-1400 for icmp, udp, gre and ipip; up to 16384 for the pool carriers; a bond uses the smallest bound of its legs. |
+| `mtu-adapt` | false | both (3.3.9) | Adaptive payload clamp, opt-in: this end watches its own send paths, and 8 consecutive lost packets larger than 512 B clamp that path's payload to 640 B for 30 s (the clamp renews while the signature persists; any ack resets the counter). No wire signal: the peer is not involved and can run any version. See "Adaptive payload clamp". |
 | `win-max` | 0 (auto) | both | Cap of the receive window per stream in MB, 4 to 64 (3.0.3). Windows are receiver-driven, so the value bounds what the peer's sender buffers per stream. 0 uses the host tier (4 MB lean, 16 standard, 32 high-performance); the fixed cap before 3.0.3 was 16 MB. |
 | `mem-budget` | 0 (eighth of RAM) | both | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0). Since 3.3.6 the default (and the RAM/3 Go memory limit when `GOMEMLIMIT` is unset) is divided by the number of `*.yml` files in the config's directory, one per tunnel on the host, with floors of 64 MB (budget) and 256 MB (limit, never above RAM/3); a startup line says so when there are several. An explicit value or `GOMEMLIMIT` is used as given. See [3.2.0](#320-fast-by-default-bounded-memory-greipip). |
 | `max-mbps` | 0 (carrier default) | both | Pacing ceiling, MB/s per direction, per session. 0 = 16 when `icmp` is among the carriers, 1250 (10 Gbit, i.e. no practical cap) for udp, tcp, tls, ws, wss, h2, h2c and grpc since 2.4.18 (200 from 2.3.0; before that 16 for every carrier; the server's value caps the download). See "ICMP path limits and pacing". |
@@ -1789,7 +1844,7 @@ Every flag can also be a config key. Flags win over the file.
 | `-mode client\|server` | | Role. |
 | `-key SECRET`, `-key-file FILE` | | Pre-shared key. |
 | `-config FILE` | | Config file (above). |
-| `-carrier NAME` | `icmp` | Transport, or `a+b+c` to bond several. Also the 3.3.0 [shaped carriers](#shaped-carriers-330) (Linux + root for the raw tier; both ends 3.3.0 and the same name; single carrier only, a `+` list that contains one stops startup); `fortress` is the manager alias `icmp+tcp+tls+wss+udp` (80/443/8443/53). |
+| `-carrier NAME` | `icmp` | Transport, or `a+b+c` to bond several. Also the 3.3.0 [shaped carriers](#shaped-carriers-330) (Linux + root for the raw tier; both ends 3.3.0 and the same name; single carrier only, a `+` list that contains one stops startup); `fortress` is the manager alias `icmp+tcp+tls+wss+udp` (80/443/8443/53). A bonded leg may carry a `:up` / `:down` suffix (3.3.9) for one-direction-only — see [Directional bond legs](#directional-bond-legs-updown). |
 | `-peer-NAME ADDR`, `-listen-NAME ADDR` | | Bonded carriers: per-carrier peer / listen address (no `-listen-NAME` for the shaped raw tier). |
 | `-peer ADDR` | | Server IP (icmp, udp, shaped raw tier) or `host:port` (pool and shaped UDP tier; a shaped UDP-tier bare host uses the protocol's conventional port). |
 | `-listen ADDR` | `:4443` | Listen address of non-ICMP carriers; a shaped UDP-tier carrier defaults to its protocol's conventional port instead. |
@@ -1807,6 +1862,7 @@ Every flag can also be a config key. Flags win over the file.
 | `-pool-rotate D` | `0` (off) | Client, pool carriers: recycle a healthy connection after this long (`30m`, `4h`, seconds), jittered ±40%; 0 = off (2.8.0; a `reverse` server that dials honours it since 3.0.2). |
 | `-pool-rotate-bytes N` | `0` (off) | With or instead of `-pool-rotate`: also recycle after this many bytes (`500MB`, `4GB`, `300k`), jittered ±25%; 0 = off (2.8.1; `reverse` server since 3.0.2). |
 | `-mtu N` | 0 | Datagram cap. |
+| `-mtu-adapt` | off | Both ends (3.3.9): adaptive payload clamp — 8 consecutive lost packets larger than 512 B clamp that send path's payload to 640 B for 30 s; single-ended, no wire signal, the peer is uninvolved. See "Adaptive payload clamp". |
 | `-win-max N` | 0 (auto) | Both ends: cap the per-stream receive window in MB, 4-64 (0 = host tier: 4, 16 or 32-64) (3.0.3). |
 | `-mem-budget N` | 0 (eighth of RAM) | MB of stream buffers (send data and grown receive windows) the whole process may hold before every stream shrinks to small buffers (3.2.0; the default is split over the `*.yml` configs in the `-config` directory since 3.3.6, see `mem-budget`; see "3.2.0: fast by default, bounded memory, gre/ipip"). |
 | `-max-mbps F` | 0 | Pace ceiling per direction and session; 0 = 16 with icmp, 1250 otherwise (2.4.18; 200 from 2.3.0). |
@@ -1923,6 +1979,31 @@ covered too. With FEC off the receive ring does not exist at all.
 Counters: `fec_sent`, `fec_recovered`, and `fec_state` (`on` while this end sends parity, `off` when FEC is off or
 the gate is closed; with several sessions or clients, `on` while any of them has it open).
 
+## Adaptive payload clamp (`-mtu-adapt`)
+
+Some ISPs quietly drop large packets while small ones keep passing — the ICMP-clamp signature: bulk stalls while
+ping and interactive traffic stay fine. `mtu-adapt: true` (flag `-mtu-adapt`, default off) makes an end watch its
+own send paths for exactly that signature and shrink its payload on its own:
+
+- **Detector.** 8 consecutive lost packets larger than 512 B on one send path clamp that path's payload to 640 B
+  for 30 s. While the signature persists the clamp renews itself; any ack resets the counter, so the ordinary
+  random loss of a healthy path never trips it.
+- **Per path.** In a bond, a clamped leg does not shrink the other legs. A path that stops showing the signature
+  gets its full size back when the 30 s hold expires.
+- **Single-ended.** There is no wire signal at all — no frame, no receiver involvement, nothing agreed. One end
+  can run it alone next to a peer of any version; the peer just sees smaller packets.
+
+What it is not: not a replacement for `mtu` (`mtu` caps the size all the time; the clamp applies only while the
+signature is there), not a negotiation (nothing is sent, the peer decides nothing), and not loss-based congestion
+control — the delay rule is untouched, only the packet size of the affected path is capped.
+
+Turn it on per end when a route behaves like this: small packets pass, large ones vanish, and lowering `mtu` by
+hand fixes bulk. Off by default; without it nothing changes.
+
+The constants are fixed in the engine (8 consecutive losses, "big" = the wire packet beyond 512 B, clamp to
+640 B for 30 s; the hold expires by itself and the detector re-fires while the losses persist; any ack resets the
+loss run). The clamp is per path inside a bond and never exceeds the configured `mtu` — it only lowers it.
+
 ## Per-port traffic and limits
 
 Both ends count traffic per port (client: the public port users connect to; server: the target port) and expose it
@@ -2021,7 +2102,7 @@ sends `curl -X POST`).
 | Field | Meaning |
 |---|---|
 | `version` | The wattun version string (for example `2.0.2`). |
-| `carriers` | Only with bonded carriers (`carrier: a+b`): one entry per carrier with `name`, `alive`, `srtt_ms`, `share` (fraction of traffic), `sent`, `acked`, `lost`. |
+| `carriers` | Only with bonded carriers (`carrier: a+b`): one entry per carrier with `name`, `alive`, `muted` (an operator override, see "Muting one leg by hand" — distinguishable from `alive: false`), `srtt_ms`, `share` (fraction of traffic), `sent`, `acked`, `lost`. |
 | `ports` | Per-port counters (same data as `/ports`). |
 | `alive` | Server: at least one client session and an authenticated packet from a client in the last 10 s (3.0.1; before, a session whose connections were all dead still counted until it closed, 45 s after its last packet). Client: an authenticated packet from the server arrived in the last 10 s (each side pings at least every 2 s, so an idle link stays alive); with `sessions` > 1, on any session. |
 | `last_rx_age_ms` | Since 2.0.1. Milliseconds since the last authenticated packet from the peer (server: from any client, including sessions that have closed). `-1` = none since the process started. Monitors should use this rather than ping: it only moves on real tunnel packets. |
@@ -2906,6 +2987,13 @@ tunnel, ships in `dist/` as `wattun-wprobe-<os>-<arch>`, and needs Linux + CAP_N
 Update **both** servers for every release, unless an entry says otherwise. Versions 2.4.9 to 2.4.16 were steps
 toward one fix for CDN tunnels that got slower over time. If you are on any of them, go straight to 2.4.17 or later.
 
+- **3.3.9: security seals, the emergency-token round trip fixed, directional bond legs, `-mtu-adapt`, and `wattun mute`/`unmute`.** Old peers interoperate: the only new frame (`frEndpoint`, 0x0e) rides last in a packet and is ignored by older peers, and a mixed pair just keeps both directions on its ordinary legs.
+  - **Security seals.** `-no-pq` is now a classic-curve allowlist (future post-quantum groups cannot bloat the ClientHello again); the automatic masked→plain header downgrade is removed (`-legacy-mask-flip` restores it for pre-3.0 peers — a filter that dropped packets for ~3 s used to expose the header); `-probe-guard` makes the ws/wss/h2/h2c/grpc tunnel answer only token-carrying requests (an active prober gets the decoy/nginx pages, never a real 101/200); `udp-dns-edns` makes the udp-dns frames structurally complete DNS (EDNS0 OPT, real TXT answers echoing the query's id and question); `ntp-direct` and `srtp-direct` frames are protocol-valid (stratum 2, NTP-epoch timestamps with originate echo and an NTS-cookie extension field; directional SSRCs and a wrapping RTP clock); the `tls` carrier resumes sessions instead of a full ECDHE per reconnect.
+  - **Emergency-token round trip fixed (M1).** `arm-blackout` finalized a multi-carrier bond but the printed token still described the pre-arming single carrier; `refresh_token` now regenerates the token from the finalized config (carrier list, one endpoint per leg, path), bond tokens carry one endpoint per leg, and the Iran import writes `peer-<carrier>:` per leg. Proven by a sandbox case: export → import into an empty config reproduces the finalized server state exactly.
+  - **Directional bond legs (`:up`/`:down`).** A bond leg may carry one direction only (`carrier: tcp:up+udp:down`); the server learns a client's `:down` udp leg from the new `frEndpoint` frame (leg index + bound port; the IP always comes from the authenticated packet source, never the wire). Each carrier appears at most once per bond; both ends need 3.3.9, a mixed pair degrades to bidirectional legs with the uplink intact.
+  - **`-mtu-adapt` (per end, off by default).** 8 consecutive lost packets beyond 512 B clamp that path's payload to 640 B for 30 s (re-fires while the signature persists; any ack resets it). No wire signal — single-ended, invisible to the peer, safe with mixed versions. Models the measured size-selective loss signature.
+  - **`wattun mute NAME PATH` / `wattun unmute NAME PATH`.** Take one bonded leg out of service by hand (or put it back) over the running tunnel's metrics endpoint, without a restart; `/stats` shows `muted` so an override is distinguishable from a dead leg.
+  - **Manager:** suffixed legs validate and round-trip through tokens/configs, `carrier_min_ver` gates them to 3.3.9, `mute`/`unmute` work without root, and `MGR_VERSION` is 2026111901. Details: `docs/release-notes/v3.3.9.md`.
 - **3.3.8: faster bonded tunnels, always-open unified Kharej Auto tunnels, random open port selection, `/unslop` TUI overhaul, signed offline Iran bundles, IPv6 manager support, and security/reliability fixes.** The wire format is unchanged, so old and new peers work together.
   - **Engine & tools:** bonded sessions keep late-ACK window immunity and full receive-window headroom, forward `Backlogged()`/`ConnDeaths()`, clamp `takeDgrams`/frames to `NextPath` `pathMTU`, propagate `Profile.NoDirect` through `mergeProfiles()` and `TCPPoolClient.Clone()` (4 KB on CDN HTTP carriers, 16 KB on `tcp`/`tls`/reverse pools), track `pathMinRTT` separately from `srtt` for multi-RTT `cwnd`/`probeRTT`, pace mixed bonds safely without clamping non-ICMP bonds to 16 MB/s, keep `SetKeepSlow(true)` on bonded pools, and award SWRR credit fairly. Hardened `cmd/wprobe` against unauthenticated ICMP amplification (`k <= 8`, payload cap), rejected malformed `-allow-ports` and `/udp`-only fallbacks to `1-65535`, isolated untrusted reverse-pool connections before auth, validated `parseSize` and quota period rolls, scaled `alive()` with `-ping-every`, and fixed `AF_PACKET` close races and IPv6 `udpBatch`/`ProbeFakeMode`.
   - **Manager, installer & TUI:** Kharej Auto tunnels stay one unified entry (`NAME`, hiding `NAME-r` and `NAME-e-*` and aggregating stats/traffic/controls) with all planned carriers kept open automatically in the background (removing `auto-narrow`/`auto-prune`/`auto-finalize`, manual `[o]`/`[c]`/`[u]` toggles, and the interactive `--extended` prompt; 3.3.3–3.3.7 narrowed/finalized tunnels reopen automatically); `wattun-manager` picks verified-free random open ports (`10000..32767`, or non-443/80 Cloudflare ports when `--cdn-domain` is set, plus random ports in `arm-blackout`); `install.sh` and `wattun-manager` received the `/unslop` TUI overhaul; `wattun bundle` + `wattun update --from` + Settings → `p` + `install.sh` interactive recovery provide RSA-verified offline/proxy updates; `c`/`b` support custom reverse bonds; Iran port editor warns on unencrypted panel inbounds; and IPv6 addresses work across wizards, tokens, companions, and validators. Details: `docs/release-notes/v3.3.8.md`.

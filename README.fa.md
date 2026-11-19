@@ -6,7 +6,7 @@
 
 **تونل رمزنگاری‌شده‌ی ایران ⇄ خارج که وقتی شبکه فیلتر است هم کار می‌کند، حتی وقتی فقط پینگ رد می‌شود.**
 
-[![Release](https://img.shields.io/badge/release-v3.3.8-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
+[![Release](https://img.shields.io/badge/release-v3.3.9-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go)](go.mod)
 ![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20windows-lightgrey?style=flat-square)
@@ -153,6 +153,7 @@ wattun update          # update the binary and the menu (or: wattun update --fro
 WatTunnel سرور **ایران** (جایی که کاربرها وصل می‌شوند) را به سرور **خارج** (جایی که سرویس شما اجرا می‌شود) وصل می‌کند و هر پورت TCP و UDP را بینشان می‌رساند. یک فایل اجرایی است، بدون هیچ وابستگی.
 
 - **از هر راهی که مسیرتان باز گذاشته رد می‌شود:** `icmp`، `udp`، `tcp`، `tls`، `ws`، `wss`، `h2`، `h2c`، `grpc`، `gre`، `ipip`، کلودفلر با ECH، حالت معکوس، یا چند روش با هم در یک تونل.
+- **کنترل دستی باند:** یک کریر باند را می‌شود با پسوند جهت به یک سمت محدود کرد (`carrier: udp:up+udp:down`؛ هر دو سرور باید نسخه‌ی یکسان داشته باشند)، `-mtu-adapt` وقتی اپراتور بسته‌های بزرگ را حذف می‌کند ولی بسته‌های کوچک رد می‌شوند اندازه‌ی بار همان مسیر را خودبه‌خود کم می‌کند (پیش‌فرض خاموش، جدا برای هر سر، برای طرف مقابل نامرئی)، و `wattun mute NAME PATH` و `wattun unmute NAME PATH` یک کریر را بدون ری‌استارت از مدار خارج می‌کنند یا برمی‌گردانند.
 - **از فیلتر می‌گذرد:** SNI جعلی، `udp-dns`، `tcp-mimic`، چرخش اتصال‌ها با `pool-rotate`، و `wattun matrix NAME` که ترکیب‌ها را امتحان می‌کند و بهترین را می‌گذارد. `wattun blackout NAME` کل جعبه‌ابزار را روشن می‌کند.
 - **سخت شناسایی می‌شود:** هیچ بایت ثابتی در سرآیند بسته نیست، بسته‌های بیکار اندازه‌ی تصادفی دارند، کریرهای HTTP مثل nginx جواب می‌دهند (یا با `decoy` درخواست‌های غریبه را به یک سایت واقعی می‌سپارند)، و ۱۳ کریر شکلی مثل `vxlan` و `ntp-direct` هم هست. `shape-data` و `noise` اختیاری‌اند و پهنای باند خرج می‌کنند.
 - **خودش را تنظیم می‌کند:** پیش‌فرض‌ها از هسته و رم سرور می‌آیند و تست خودکار، نشست و اتصال را روی مسیر شما تنظیم می‌کند.
