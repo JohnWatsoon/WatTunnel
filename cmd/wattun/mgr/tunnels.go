@@ -1,5 +1,3 @@
-//go:build mgrp2
-
 // Package mgr — P2: tunnel page (deck), port & limits editors, delete and
 // change_key. Faithful port of wattun-manager (bash): same prompts, same
 // validation texts, same defaults, same key order. Bash functions cited per
@@ -66,11 +64,6 @@ func p2Rproto(c string) string {
 		return "udp"
 	}
 	return "tcp"
-}
-
-var p2ShapedUDP = map[string]bool{
-	"fou-gre": true, "gue-ipip": true, "vxlan": true, "geneve": true,
-	"dnscrypt-udp": true, "ntp-direct": true, "openvpn-dco": true, "srtp-direct": true,
 }
 
 // bash new_key: 40 base64 chars from 32 random bytes, no /+=

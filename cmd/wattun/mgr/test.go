@@ -1,5 +1,3 @@
-//go:build mgrp3
-
 // Port of the bash speed_test(): drives the tunnel's own /speedtest endpoint on the
 // local metrics address (Iran only) and prints the two result lines with bars.
 // The bash uses curl; here net/http. URL and params are pinned by test against the

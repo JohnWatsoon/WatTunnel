@@ -1,5 +1,3 @@
-//go:build mgrp3
-
 // Port of the anti-censor carrier matrix: ac_matrix_cmd / ac_matrix / ac_matrix_apply
 // / ac_load plus the at_* probe helpers it uses (at_prep, at_start, at_wait, at_probe,
 // at_measure, at_curl, at_kill, at_busy/at_idle/at_print, at_rank, at_table,
@@ -30,12 +28,11 @@ const acSNIS = "mci.ir,irancell.ir,tci.ir,divar.ir" // curated allowlisted SNIs
 const acModes = "seq seqsum sum ttl rst synrst paws"
 
 // AC_ALLMODES (H6): the single mode list shared by the validator and the matrix.
-const acAllModes = "rst synrst paws seq seqsum sum ttl split hlen0 fakeip ff all auto"
 
-const atScreenMBStart = 8
-const atScreenCapMB = 16
+const removed_atScreenMBStart = 8
+const removed_atScreenCapMB = 16
 const atFinalMBMin = 20
-const atFinalMBMax = 40
+const removed_atFinalMBMax = 40
 
 // ac_mode_ok(): 1 when the installed wattun knows the mode.
 func acModeOK(mode, binVer string) bool {

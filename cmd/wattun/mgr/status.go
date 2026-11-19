@@ -1,5 +1,3 @@
-//go:build mgrp3
-
 // Port of the wattun-manager live status surface: the dashboard (page_full/dash_*),
 // the single-tunnel status (tunnel_card/tunnel_header/status_row), the logs viewer
 // (logs_menu), the doctor (test_tunnel/icmp_path_report/local_icmp_check) and the

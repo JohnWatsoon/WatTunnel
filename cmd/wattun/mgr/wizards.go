@@ -1,5 +1,3 @@
-//go:build mgrp2
-
 // Package mgr — P2: the new-tunnel wizards. Faithful port of wattun-manager
 // (bash): wizard_kharej (2684), wizard_iran (3382), pick_carrier (2633) with the
 // shaped-tier picker (pick_shaped_carrier 2616), and the write_server /
