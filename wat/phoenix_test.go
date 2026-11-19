@@ -50,10 +50,11 @@ func TestPhoenixBlipDoesNotKillLeg(t *testing.T) {
 	}
 }
 
-// TestPhoenixMuteOverridesHealth: the manual override beats the health engine - a muted leg is Alive (the link
-// works) but carries nothing, and the session rides the others; unmuting puts it back to work. This is the
-// operator control the surviving Phoenix scope requires (ToggleMute is already exposed via /stats-adjacent APIs
-// and the bond's PathMuter interface).
+// TestPhoenixMuteOverridesHealth: the manual override beats the health engine - a muted leg stays configured
+// and healthy but carries nothing (stats() reports Alive=false WITH Muted=true: Alive means "currently
+// carrying", see the inline note below), and the session rides the others; unmuting puts it back to work. This
+// is the operator control the surviving Phoenix scope requires (ToggleMute is already exposed via
+// /stats-adjacent APIs and the bond's PathMuter interface).
 func TestPhoenixMuteOverridesHealth(t *testing.T) {
 	links := twoLinks(t)
 	rig := newBondRig(t, links, fastTimings)

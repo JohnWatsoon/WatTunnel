@@ -913,9 +913,9 @@ puts it back; NAME is the tunnel and PATH the leg — its carrier name (`udp`) o
 commands talk to the tunnel's metrics endpoint (`POST /carrier/toggle`), so nothing restarts and open connections
 stay up; traffic just moves to the remaining legs.
 
-A muted leg is an operator override, not a failure: the bond page shows it grey with `muted`, and the `carriers`
-entry in `/stats` keeps its real `alive` state next to `"muted": true`, so a muted leg is distinguishable from a
-dead one. The leg is still probed like any other and can be unmuted at any time. Each end mutes independently:
+A muted leg is an operator override, not a failure: the bond page shows it grey with `muted`, and in the `carriers`
+entry of `/stats` (a `:down` leg additionally reports `knocks` — its NAT-knock count, client side only, omitted when zero) a muted leg reports `alive: false` next to `"muted": true` — `alive` means "currently carrying",
+so the `muted` flag alone is what separates an operator override from a dead leg. The leg is still probed like any other and can be unmuted at any time. Each end mutes independently:
 Iran muting `udp` stops Iran's uplink on it; Kharej must mute its own view to stop the downlink.
 
 PATH takes either the leg's carrier name exactly as `/stats` lists it (`udp`, or the suffixed leg `udp:up`) or
