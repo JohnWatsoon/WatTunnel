@@ -87,6 +87,14 @@ type Tunnel struct {
 	Active  bool     // systemd reports the wattun@Name unit active
 }
 
+// Role is the operator-facing side name: server configs are the Kharej box, client configs Iran.
+func (t Tunnel) Role() string {
+	if t.Mode == "server" {
+		return "Kharej"
+	}
+	return "Iran"
+}
+
 // FetchStats GETs /stats and copies the known fields out of it. The decode is lenient: unknown fields are
 // ignored and a field that is missing or of an unexpected type stays at its zero value without an error —
 // only transport failures and unparseable JSON are errors.

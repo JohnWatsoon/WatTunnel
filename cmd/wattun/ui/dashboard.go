@@ -1,9 +1,9 @@
 package ui
 
-// The dashboard page: one live line per tunnel config in the config dir (harness.ReadTunnels, refreshed
-// every few polls so new or removed tunnels appear without a restart) under a single summary line, with the
-// tunnel list as the page's focused card. Each row shows the mode badge, the carrier list, a live rate bar
-// fed by the 1 s polls and a systemd dot; the cursor moves with the arrows and enter opens the detail page.
+// The dashboard page: the identity banner + a live summary line, then the tunnels table — columns
+// #, NAME, ROLE, CARRIER, STATE, RTT, TRAFFIC — one row per tunnel config in the config dir
+// (harness.ReadTunnels, refreshed every few polls so new or removed tunnels appear live). The
+// cursor moves with the arrows and enter opens the detail page. Sections fade in staggered.
 
 import (
 	"fmt"
@@ -14,36 +14,55 @@ import (
 
 // dashboard column widths (runes). Tight enough for the minW notice threshold of 72 columns.
 const (
-	dashNameW = 14
-	dashModeW = 6
-	dashCarrW = 14
-	dashBarW  = 9
-	dashRateW = 10
+	dashNumW   = 3
+	dashNameW  = 12
+	dashRoleW  = 8
+	dashCarrW  = 16
+	dashStateW = 12
+	dashRttW   = 8
 )
 
-// View renders the dashboard: header + glided summary, the tunnels card, the key hints; the three sections
-// fade in staggered on a page switch.
+// View renders the dashboard: the identity banner + live summary, the tunnels table, the footer
+// keybar; the sections fade in staggered on a page switch.
 func (a *app) viewDashboard() string {
 	var secs []string
 
-	// section 0: title + single live summary line
-	var head strings.Builder
-	head.WriteString(comp.Title("wattun") + "  " + comp.Dim.Render("tunnels from "+confDir()) + "\n")
-	head.WriteString(a.summaryLine())
-	secs = append(secs, head.String())
+	// section 0: the identity banner (kite + WATTUN mark, meta right) + the live summary line
+	secs = append(secs, a.header()+"\n"+a.summaryLine())
 
-	// section 1: the tunnel list, the page's one focused card
-	secs = append(secs, comp.Label("tunnels")+"\n"+comp.Card(true).Render(a.dashRows()))
+	// section 1: the tunnels table
+	secs = append(secs, comp.SectionLabel("Tunnels", fmt.Sprintf("%d total", len(a.tunnels)), a.width)+"\n"+a.dashTable())
 
-	// section 2: key hints
-	secs = append(secs, comp.KeyHint(
+	// section 2: the footer keybar
+	secs = append(secs, comp.KeyBar(
 		[2]string{"↑/↓", "select"},
-		[2]string{"enter", "detail"},
+		[2]string{"enter", "open"},
 		[2]string{"1", "dashboard"},
 		[2]string{"q", "quit"},
 	))
 
 	return a.joinSections(secs)
+}
+
+// header is the identity block: the kite + WATTUN banner with the meta block right-aligned
+// (engine version from the freshest successful poll), used by every page.
+func (a *app) header() string {
+	var meta []string
+	if v := a.knownVersion(); v != "" {
+		meta = append(meta, "WatTunnel · "+v)
+	}
+	meta = append(meta, "github.com/JohnWatsoon", "t.me/WatxDev")
+	return comp.Banner(meta, a.width)
+}
+
+// knownVersion is the engine version from the freshest successful poll ("" before the first one).
+func (a *app) knownVersion() string {
+	for _, s := range a.states {
+		if s.have && s.err == nil && s.st.Version != "" {
+			return s.st.Version
+		}
+	}
+	return ""
 }
 
 // joinSections renders the sections with the stagger fade-in, one blank line between them.
@@ -58,7 +77,7 @@ func (a *app) joinSections(secs []string) string {
 	return pageFrame(a, strings.Join(out, "\n\n"))
 }
 
-// summaryLine is the one live line under the title: tunnel count, aggregate glided rate, worst SRTT among
+// summaryLine is the one live line under the banner: tunnel count, aggregate glided rate, worst SRTT among
 // the alive tunnels, spinner while a fetch is in flight.
 func (a *app) summaryLine() string {
 	if a.tunnelsErr != nil {
@@ -95,9 +114,9 @@ func (a *app) anyData() bool {
 	return false
 }
 
-// dashRows is the card body: either a placeholder (loading / broken config dir / no tunnels) or one row per
-// tunnel, cursor on the selected one.
-func (a *app) dashRows() string {
+// dashTable is the section body: either a placeholder (loading / broken config dir / no tunnels) or the
+// tunnels table — columns #, NAME, ROLE, CARRIER, STATE, RTT, TRAFFIC, cursor on the selected row.
+func (a *app) dashTable() string {
 	switch {
 	case a.loading:
 		return comp.Dim.Render(a.spin.View() + " reading " + confDir() + "…")
@@ -109,65 +128,60 @@ func (a *app) dashRows() string {
 			comp.Dim.Render("create one with the manager; it appears here within a few seconds")
 	}
 
-	nameW := 0 // widest tunnel name, clamped so a huge name cannot eat the row
-	for _, t := range a.tunnels {
-		if w := len([]rune(t.Name)); w > nameW {
-			nameW = w
-		}
-	}
-	nameW = clampInt(nameW, 8, dashNameW)
-
-	var rows []string
+	head := "  " + comp.Dim.Render(
+		pad("#", dashNumW)+" "+pad("NAME", dashNameW)+" "+pad("ROLE", dashRoleW)+" "+
+			pad("CARRIER", dashCarrW)+" "+pad("STATE", dashStateW)+" "+pad("RTT", dashRttW)+" TRAFFIC")
+	rows := []string{head}
 	for i, t := range a.tunnels {
 		cursor := "  "
 		if i == a.dash.sel {
 			cursor = comp.Accent.Render("▸ ")
 		}
-		name := comp.Text.Render(pad(trunc(t.Name, nameW), nameW))
-		mode := comp.Dim.Render(pad(strings.ToUpper(t.Mode), dashModeW))
+		num := comp.Dim.Render(pad(fmt.Sprintf("%d", i+1), dashNumW))
+		name := comp.Text.Render(pad(trunc(t.Name, dashNameW), dashNameW))
+		role := comp.Dim.Render(pad(t.Role(), dashRoleW))
 		carr := comp.Dim.Render(pad(trunc(t.Carrier, dashCarrW), dashCarrW))
-		live := a.liveCell(t)
-		dot := comp.Dot(a.states[t.Name] != nil && a.states[t.Name].active)
-		rows = append(rows, cursor+name+" "+mode+" "+carr+" "+live+" "+dot)
+		state := a.stateCell(t)
+		rtt := a.rttCell(t)
+		traffic := a.trafficCell(t)
+		rows = append(rows, cursor+num+" "+name+" "+role+" "+carr+" "+state+" "+rtt+" "+traffic)
 	}
 	return strings.Join(rows, "\n")
 }
 
-// liveCell is the right half of a row: rate bar + glided MB/s, or the dim/bad placeholder for a tunnel
-// whose stats are not in yet or unreachable.
-func (a *app) liveCell(t Tunnel) string {
+// stateCell is the STATE column: systemd + stats alive state, colored like the old UI (waiting is warn).
+func (a *app) stateCell(t Tunnel) string {
 	s := a.states[t.Name]
 	switch {
 	case s == nil || !s.have:
-		return comp.Dim.Render(strings.Repeat(" ", dashBarW) + " " + pad("…", dashRateW))
+		return comp.Dim.Render(pad("…", dashStateW))
 	case s.err != nil:
-		// the full error text belongs on the detail page; here the row stays quiet and fixed-width
-		return comp.Dim.Render(pad("no stats", dashBarW+dashRateW+1))
+		return comp.Warn.Render(pad("no stats", dashStateW))
+	case !s.active:
+		return comp.Bad.Render(pad("down", dashStateW))
+	case s.st.Alive:
+		return comp.Ok.Render(pad("● up", dashStateW))
+	default:
+		return comp.Warn.Render(pad("○ waiting", dashStateW))
 	}
-	bar := comp.Bar(a.ratePct(s), dashBarW)
-	rate := comp.Text.Render(pad(fmt.Sprintf("%.1f MB/s", s.rateMBs), dashRateW))
-	return bar + " " + rate
 }
 
-// ratePct is the fill fraction behind a row's bar: utilization against the pacer's ceiling when /stats
-// reports one (the bar's ok/warn/bad thresholds then mean real headroom), otherwise a comparative share of
-// the busiest tunnel so the bars still rank tunnels against each other.
-func (a *app) ratePct(s *tunState) float64 {
-	if s.st.CeilingBps > 0 {
-		return s.st.RateBps / s.st.CeilingBps * 100
+// rttCell is the RTT column: the session's srtt in ms, or a dash while nothing is connected.
+func (a *app) rttCell(t Tunnel) string {
+	s := a.states[t.Name]
+	if s == nil || !s.have || s.err != nil || !s.st.Alive {
+		return comp.Dim.Render(pad("–", dashRttW))
 	}
-	top := 0.0
-	for _, o := range a.states {
-		if o.have && o.err == nil && o.st.RateBps > top {
-			top = o.st.RateBps
-		}
+	return comp.Text.Render(pad(fmt.Sprintf("%.0f ms", s.st.SRTT.Seconds()*1000), dashRttW))
+}
+
+// trafficCell is the TRAFFIC column: session totals up + down (the same numbers the old UI showed).
+func (a *app) trafficCell(t Tunnel) string {
+	s := a.states[t.Name]
+	if s == nil || !s.have || s.err != nil {
+		return comp.Dim.Render("↑0 B ↓0 B")
 	}
-	if top <= 0 {
-		return 0
-	}
-	// a comparative share is not a utilization: cap the fill just under comp.Bar's warn threshold (70 %)
-	// so the busiest tunnel's bar stays ok-colored and the MB/s number carries the alarm
-	return s.st.RateBps / top * 69
+	return comp.Text.Render("↑" + comp.FormatBytes(s.st.BytesOut) + " ↓" + comp.FormatBytes(s.st.BytesIn))
 }
 
 func plural(n int) string {

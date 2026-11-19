@@ -144,8 +144,8 @@ func (a *app) viewDetail() string {
 	}
 	var secs []string
 
-	// section 0: header + live state line
-	secs = append(secs, a.detHeader(*t))
+	// section 0: the identity banner + the tunnel's header line
+	secs = append(secs, a.header()+"\n"+a.detHeader(*t))
 
 	// section 1: THROUGHPUT — the focused card: autoscaling sparkline + now/peak
 	var spark strings.Builder
@@ -167,7 +167,7 @@ func (a *app) viewDetail() string {
 	if st := a.statusLine(); st != "" {
 		foot.WriteString(st + "\n")
 	}
-	foot.WriteString(comp.KeyHint(
+	foot.WriteString(comp.KeyBar(
 		[2]string{"↑/↓", "carrier"},
 		[2]string{"m", "mute"},
 		[2]string{"t", "test"},
