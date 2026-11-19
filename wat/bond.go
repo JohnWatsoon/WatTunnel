@@ -16,6 +16,10 @@ import (
 
 const bondRecvQueue = 4096
 
+// knockWait is how long a Bifrost NAT knock waits when it cannot fire yet: the first knock of a session
+// (giving the session time to attach its prober) and each retry while the prober is still absent.
+const knockWait = 250 * time.Millisecond
+
 // BondOptions configures NewBondIO. Names and Lanes are per child (Lanes: ICMP identifiers to stripe over, 1 for
 // everything else).
 type BondOptions struct {
@@ -86,7 +90,10 @@ func NewBondIO(kids []PacketIO, opt BondOptions) (*BondIO, error) {
 	for i := range kids {
 		if b.ps.p[i].dir == DirDown { // Bifrost NAT knock: only a ":down" leg never sends otherwise
 			b.knockLegs = append(b.knockLegs, i)
-			b.knockAt[i] = time.Now().Add(knockGap(b.ps.cfg.DownKnock))
+			// first knock at a fraction of the cadence, not after a full gap: a fresh session behind NAT gets
+			// nothing on the leg until a mapping exists (found while re-verifying the 2026-11-20 knock: a
+			// 25-35 s startup dead window); the knockWait floor gives the session a moment to attach its prober
+			b.knockAt[i] = time.Now().Add(knockFirst(knockGap(b.ps.cfg.DownKnock)))
 		}
 	}
 	for i := range kids {
@@ -147,15 +154,17 @@ func (b *BondIO) tickLoop() {
 			if now.Before(b.knockAt[i]) {
 				continue
 			}
+			if f == nil {
+				b.knockAt[i] = now.Add(knockWait) // no prober yet (session still starting): retry shortly,
+				continue                          // don't burn a whole cadence gap on it
+			}
 			gap := knockGap(b.ps.cfg.DownKnock)
 			b.knockAt[i] = now.Add(gap)
 			if now.UnixNano()-b.lastRecv[i].Load() < int64(gap) {
 				continue // server data arrived on the leg within the last cadence: no knock needed
 			}
-			if f != nil {
-				b.knocks[i].Add(1)
-				f(i)
-			}
+			b.knocks[i].Add(1)
+			f(i)
 		}
 	}
 }
@@ -451,6 +460,7 @@ type multiSubIO struct {
 type peerSlot struct {
 	dst   *TaggedAddr // last authenticated source on this carrier
 	lanes []int       // lanes (ICMP identifiers) the client used on it
+	heard bool        // dst came from real traffic on this leg, not from an frEndpoint announce
 	rr    int
 }
 
@@ -519,6 +529,7 @@ func (m *multiSubIO) SetPeer(a net.Addr) {
 	}
 	m.mu.Lock()
 	s.dst = t
+	s.heard = true // traffic-observed source: ground truth for downlink (see SetPathEndpoint)
 	if !containsLane(s.lanes, t.Lane) && len(s.lanes) < 8 {
 		s.lanes = append(s.lanes, t.Lane)
 	}
@@ -563,6 +574,15 @@ func (m *multiSubIO) SetPathEndpoint(legIdx, port int, src net.Addr) {
 		return
 	}
 	m.mu.Lock()
+	if s := &m.slots[legIdx]; s.heard {
+		// A packet has already arrived on this leg (a NAT knock or client data): its observed source is where
+		// downlink demonstrably reaches. Behind a port-translating NAT the announced port is the client's
+		// private one while the observed source carries the NAT's translation — an announce here would clobber
+		// the working endpoint every endpointEvery and flap the downlink. Announces bootstrap only; a client
+		// that rebinds its listen port is relearned from the new socket's next knock.
+		m.mu.Unlock()
+		return
+	}
 	m.slots[legIdx] = peerSlot{dst: &TaggedAddr{Idx: legIdx, Addr: &net.UDPAddr{IP: ip, Port: port}}}
 	m.mu.Unlock()
 	m.ps.markPresent(legIdx)

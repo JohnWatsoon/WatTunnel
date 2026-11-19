@@ -231,6 +231,18 @@ func knockGap(base time.Duration) time.Duration {
 	return base + time.Duration(mrand.Float64()*float64(base)*0.4)
 }
 
+// knockFirst is when a Bifrost NAT-knock sequence begins: an eighth of the (jittered) cadence, floored at
+// knockWait (defined in bond.go). A fresh session behind NAT has neither a mapping nor a server-side endpoint
+// yet, so waiting a full 25-35 s gap would be a startup dead window (found re-verifying the knock, 2026-11-20);
+// an eighth keeps the same ratio for the fast test cadences and still defers an hour-cadence control test far
+// past its window.
+func knockFirst(gap time.Duration) time.Duration {
+	if f := gap / 8; f > knockWait {
+		return f
+	}
+	return knockWait
+}
+
 // ICMPPathBps caps the bulk bytes/s a bond sends on its icmp path (Iran reroutes ICMP above ~30 MB/s); the other
 // carriers of the bond are not held to it (3.2.0, before: the whole session was capped at 16 MB/s whenever icmp was
 // among the carriers).

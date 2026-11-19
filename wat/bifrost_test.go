@@ -586,3 +586,45 @@ func TestServerCarrierStatsKeepsMuted(t *testing.T) {
 		t.Fatal("unmute did not clear the flag in server stats")
 	}
 }
+
+// TestBifrostEndpointTrafficPrecedence pins the port-translating-NAT (NAPT) fix, found 2026-11-20 while
+// re-verifying the knock: the frEndpoint announce carries the client's private listen port while a knock's
+// observed source carries the NAT's translation, and the announce re-fires every endpointEvery — before the
+// fix it replaced the slot wholesale, so downlink behind an NAPT flapped (correct for ≤500 ms per cadence).
+// Now the announce bootstraps only: once real traffic is heard on the leg, its observed source is ground
+// truth, and a client that rebinds is relearned from the new socket's next knock.
+func TestBifrostEndpointTrafficPrecedence(t *testing.T) {
+	links := twoLinks(t)
+	raws := []RawIO{&linkRaw{l: links[0], done: make(chan struct{})}, &linkRaw{l: links[1], done: make(chan struct{})}}
+	for _, r := range raws {
+		r := r.(*linkRaw)
+		t.Cleanup(func() { close(r.done) })
+	}
+	base := &subIO{inbox: make(chan rxPkt, 8), done: make(chan struct{})}
+	t.Cleanup(func() { close(base.done) })
+	m := newMultiSubIO(base, NewMultiRaw([]string{"link0:up", "link1:down"}, raws), PathTimings{}, 0)
+
+	// the authenticated uplink source (the NAT's public address, learned from the ":up" packet)
+	src := &TaggedAddr{Idx: 0, Lane: 0, Addr: &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 51000}}
+	slotPort := func() int {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.slots[1].dst == nil {
+			return -1
+		}
+		return m.slots[1].dst.Addr.(*net.UDPAddr).Port
+	}
+
+	m.SetPathEndpoint(1, 5501, src) // bootstrap announce: the client's private listen port
+	if p := slotPort(); p != 5501 {
+		t.Fatalf("announce did not bootstrap the slot: port=%d want 5501", p)
+	}
+	m.SetPeer(&TaggedAddr{Idx: 1, Lane: 0, Addr: &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 49152}}) // a knock through the NAPT
+	if p := slotPort(); p != 49152 {
+		t.Fatalf("traffic did not take over the slot: port=%d want 49152", p)
+	}
+	m.SetPathEndpoint(1, 5501, src) // the announce re-fires every endpointEvery: must not clobber
+	if p := slotPort(); p != 49152 {
+		t.Fatalf("announce clobbered the traffic-learned endpoint (NAPT flap): port=%d want 49152", p)
+	}
+}
