@@ -447,8 +447,8 @@ func (r *emuRaw) SendTo(p []byte, lane int, dst net.Addr) error {
 
 // CopiesOnSend: same contract as emuDgIO (see there): the model copies synchronously.
 func (r *emuRaw) CopiesOnSend() bool { return true }
-func (r *emuRaw) Close() error     { return r.io.Close() }
-func (r *emuRaw) Profile() Profile { return r.io.prof }
+func (r *emuRaw) Close() error       { return r.io.Close() }
+func (r *emuRaw) Profile() Profile   { return r.io.prof }
 
 func emuSize() int {
 	if n, _ := strconv.Atoi(os.Getenv("EMU_SIZE")); n > 0 {
