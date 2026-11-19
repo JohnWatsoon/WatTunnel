@@ -12,13 +12,15 @@ import (
 	"time"
 )
 
-// simDir is one direction of a lossy, delayed, rate-limited link with a 700 B size cap.
+// simDir is one direction of a lossy, delayed, rate-limited link with a size cap (700 B default: the ICMP-path
+// model; the R3 Hornet-MTU experiment needs a wider pipe: newSimDirCap).
 type simDir struct {
 	mu       sync.Mutex
 	loss     float64
 	delay    time.Duration
 	bps      float64
 	maxQueue time.Duration
+	capBytes int
 	free     time.Time
 	q        chan simItem
 	out      chan []byte
@@ -35,7 +37,12 @@ type simItem struct {
 }
 
 func newSimDir(loss float64, delay time.Duration, bps float64, maxQueue time.Duration, seed int64) *simDir {
-	d := &simDir{loss: loss, delay: delay, bps: bps, maxQueue: maxQueue,
+	return newSimDirCap(loss, delay, bps, maxQueue, seed, 700)
+}
+
+// newSimDirCap is newSimDir with a different per-packet size cap.
+func newSimDirCap(loss float64, delay time.Duration, bps float64, maxQueue time.Duration, seed int64, capBytes int) *simDir {
+	d := &simDir{loss: loss, delay: delay, bps: bps, maxQueue: maxQueue, capBytes: capBytes,
 		q: make(chan simItem, 1<<16), out: make(chan []byte, 1<<16), rnd: rand.New(rand.NewSource(seed))}
 	go func() {
 		for it := range d.q {
@@ -56,7 +63,7 @@ func (d *simDir) send(p []byte) {
 	defer d.mu.Unlock()
 	d.sent++
 	now := time.Now()
-	if len(p) > 700 {
+	if len(p) > d.capBytes {
 		d.dropped++
 		return
 	}
