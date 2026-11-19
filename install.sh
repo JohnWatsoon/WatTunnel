@@ -745,6 +745,10 @@ ReadWritePaths=/etc/wattun /run/wattun
 [Install]
 WantedBy=multi-user.target
 EOF
+  # WAT_BIN override (2026-11-20 review F6): the heredoc stays quoted, so the documented WAT_BIN path is
+  # substituted afterwards — without this the unit always ExecStart'd /usr/local/bin/wattun, silently
+  # ignoring the override (systemd would restart the old binary forever)
+  sed -i "s|^ExecStart=.*|ExecStart=$BIN -config /etc/wattun/%i.yml|" "$TMP/unit"
   if ! cmp -s "$TMP/unit" "$UNIT" 2>/dev/null; then
     install -m 644 "$TMP/unit" "$UNIT" || { ERRMSG="cannot write $UNIT"; return 1; }
   fi
