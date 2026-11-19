@@ -111,6 +111,16 @@ func (u *UDPClient) SetPeer(net.Addr) {}
 func (u *UDPClient) Profile() Profile { return udpProfile }
 func (u *UDPClient) Close() error     { return u.c.Close() }
 
+// PathLocalPort reports the local UDP port the socket sends from and receives on (Bifrost frEndpoint, 3.3.9):
+// the client announces a ":down" leg's port so the server knows where to push downlink — the leg's socket never
+// sends, so the server cannot learn the address from traffic. 0 when the socket has no port yet.
+func (u *UDPClient) PathLocalPort() int {
+	if la, ok := u.c.LocalAddr().(*net.UDPAddr); ok {
+		return la.Port
+	}
+	return 0
+}
+
 // UDPServer is the server RawIO: every client shares one listening socket.
 type UDPServer struct {
 	c    *net.UDPConn

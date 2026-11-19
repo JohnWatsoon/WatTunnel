@@ -286,6 +286,11 @@ type Session struct {
 	peerBoot uint64
 	wake     chan struct{}
 
+	// Bifrost frEndpoint (3.3.9, client only): the bond legs whose name carries ":down" — this end never sends
+	// on them, so it announces each one's bound receive port to the server (epAt: last announce, endpointEvery).
+	epLegs []int
+	epAt   time.Time
+
 	dq             [][]byte // encoded frDgram frames waiting to go out (unreliable, bounded)
 	dqBytes        int
 	dgIn           chan Datagram
@@ -451,6 +456,16 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 			pr.SetProber(s.probePath)
 		}
 		s.syncBondPacer()
+	}
+	if !cfg.Server { // Bifrost (3.3.9): which bond legs are ":down" — the client announces their receive endpoints
+		// (read outside the chooser block: only a bond implements PathDirs, but the emit path below is io-shaped)
+		if pd, ok := pio.(PathDirs); ok {
+			for i, d := range pd.PathDirs() {
+				if d == DirDown {
+					s.epLegs = append(s.epLegs, i)
+				}
+			}
+		}
 	}
 	s.cc.maxPlain = s.maxPlain
 	if cfg.FEC {
@@ -618,6 +633,43 @@ func (s *Session) appendKex(p []byte, now time.Time) []byte {
 		s.kexReplyPend = false
 	}
 	return append(append(p, frKex), s.kexPub...)
+}
+
+// endpointEvery is the frEndpoint re-announce cadence (Bifrost, 3.3.9). The announced port never changes within
+// a session (the ":down" kid's socket is bound once), so the repeat is pure loss redundancy; like the boot frame
+// it rides packets that go out anyway instead of waking an idle sender (an idle tunnel must not grow a 2 pkt/s
+// heartbeat — see the bootEvery comment in build).
+const endpointEvery = 500 * time.Millisecond
+
+// appendEndpoint adds one frEndpoint frame per ":down" leg as the LAST frames of an uplink packet, after frKex
+// (an older peer stops parsing at either unknown type, which is exactly the wire-safety rule the frame rules
+// require; both ends need 3.3.9 for ":up"/":down" to be honored, and a mixed pair degrades gracefully: the old
+// server ignores the frame and never sends down the ":down" leg). The announce goes out on the first uplink
+// packet and again every endpointEvery while packets flow; it is never the reason a packet goes out. The port
+// comes from the leg's own bound socket; no IP is ever written — the server binds the announce to the packet's
+// authenticated source address (see appendKex's guards for why the packet may still be emitted without it).
+func (s *Session) appendEndpoint(p []byte, now time.Time) []byte {
+	if len(s.epLegs) == 0 || (!s.epAt.IsZero() && now.Sub(s.epAt) < endpointEvery) {
+		return p
+	}
+	lp, ok := s.io.(PathEndpoints)
+	if !ok {
+		return p
+	}
+	q := p
+	for _, i := range s.epLegs {
+		port := lp.PathLocalPort(i)
+		if port <= 0 || port > 65535 {
+			return p // the leg's socket has no port yet (or none at all): retry on a later packet
+		}
+		q = append(q, frEndpoint)
+		q = appendUv(q, uint64(i))
+		var pb [2]byte
+		binary.BigEndian.PutUint16(pb[:], uint16(port))
+		q = append(q, pb[:]...)
+	}
+	s.epAt = now
+	return q
 }
 
 func (s *Session) Close() {
@@ -1052,6 +1104,15 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 			} else if !s.explicitMTU && pathMTU > MaxPayload-overhead {
 				pathMTU = MaxPayload - overhead
 			}
+			// Hornet-MTU (3.3.9, -mtu-adapt): the path whose big packets a filter drops keeps its own sender-side
+			// ceiling while the clamp holds; take min with the profile limit. No wire signal — the peer accepts
+			// smaller packets without any frame, so a single end may enable it and mixed versions are safe. The
+			// clamp auto-expires (hornetClampHold) and the detector re-fires if the losses persist.
+			if cl, ok := s.chooser.(PathClamp); ok {
+				if c := cl.PathClamp(np); c > 0 && pathMTU > c-overhead {
+					pathMTU = c - overhead
+				}
+			}
 		}
 		// Datagrams go before stream data (they are interactive), but as the LAST frames of the packet so an old
 		// peer that stops at the unknown type still sees everything before it. While streams have work, datagrams
@@ -1128,6 +1189,9 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		lane = PinLaneBase + pinSlot
 	}
 	p = s.appendKex(p, now)
+	if len(p) > 0 {
+		p = s.appendEndpoint(p, now) // Bifrost frEndpoint (3.3.9): LAST frames of an uplink packet, after frKex
+	}
 	if len(p) == 0 {
 		s.freeSent(sp)
 		return outPkt{}, false
@@ -1606,7 +1670,13 @@ func (s *Session) lose(sp *sentPkt) {
 	}
 	s.inflight -= sp.size
 	if s.fb != nil {
-		s.fb.OnLoss(sp.lane)
+		// Hornet-MTU (3.3.9, -mtu-adapt): when the io carries the sized feedback (the bond ios), the loss also
+		// feeds its big-packet detector — the plain OnLoss stays for ios that only implement PathFeedback.
+		if ls, ok := s.fb.(PathLossSizer); ok {
+			ls.OnLossSized(sp.lane, sp.size)
+		} else {
+			s.fb.OnLoss(sp.lane)
+		}
 	}
 	if s.fec != nil && len(sp.frames) > 0 {
 		s.fec.onLoss()
@@ -1781,7 +1851,7 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 		// connection cannot be chosen to receive the tunnel's packets. No effect on forward carriers.
 		pa.PeerAuthenticated(src)
 	}
-	eliciting := s.parse(plain, now)
+	eliciting := s.parse(plain, now, src)
 	if eliciting {
 		if s.ackPend == 0 {
 			s.ackSince = now
@@ -1815,7 +1885,7 @@ func (s *Session) rxDup(pn uint64) bool {
 	return s.rxRing[pn%s.replayWin] == pn+1
 }
 
-func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
+func (s *Session) parse(b []byte, now time.Time, src net.Addr) (eliciting bool) {
 	r := &reader{b: b}
 	for len(r.b) > 0 && r.err == nil {
 		switch t := r.byte(); t {
@@ -1914,7 +1984,7 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 			eliciting = true
 			s.onDgramFrag(flow, int(port), id, int(idx), int(cnt), data, now)
 		case frFec:
-			if s.onFec(r, now) {
+			if s.onFec(r, now, src) {
 				eliciting = true
 			}
 		case frKex:
@@ -1924,6 +1994,20 @@ func (s *Session) parse(b []byte, now time.Time) (eliciting bool) {
 			}
 			eliciting = true
 			s.onKex(pub, now)
+		case frEndpoint: // Bifrost (3.3.9): leg_idx uvarint, port 2B BE — a ":down" leg's receive endpoint. Always
+			// the LAST frame of an uplink packet (an older peer stops at the unknown type byte), so parsing stops
+			// here like it does at frPad2. Security invariant: the frame carries NO IP — the announced port is
+			// bound to src, the packet's authenticated source address, and to nothing else; extra bytes after the
+			// port (a hostile sender's) are simply never read.
+			leg := r.uv()
+			pb := r.take(2)
+			if r.err != nil {
+				return
+			}
+			if es, ok := s.io.(PathEndpointSignaler); ok {
+				es.SetPathEndpoint(int(leg), int(binary.BigEndian.Uint16(pb)), src)
+			}
+			return
 		case frPad:
 			if b := r.take(r.uv()); len(b) > 0 && b[0] == padCapMask && s.hk != nil && !s.cfg.Server {
 				s.peerMaskOK.Store(true)

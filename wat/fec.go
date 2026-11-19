@@ -1,6 +1,9 @@
 package wat
 
-import "time"
+import (
+	"net"
+	"time"
+)
 
 // Adaptive FEC (Config.FEC, off by default): one XOR parity packet after a burst of small packets, so a single lost
 // packet of the group is rebuilt by the receiver instead of waiting for a PTO (~1.25 RTT+) or for four later acks.
@@ -204,7 +207,7 @@ func (s *Session) fecKeep(pn uint64, plain []byte, now time.Time) {
 
 // onFec handles a parity frame (r is positioned after the type byte). It returns whether the rebuilt packet was
 // ack-eliciting.
-func (s *Session) onFec(r *reader, now time.Time) bool {
+func (s *Session) onFec(r *reader, now time.Time, src net.Addr) bool {
 	n := r.uv()
 	base := r.uv()
 	if r.err != nil || n == 0 || n > fecMaxK {
@@ -263,7 +266,7 @@ func (s *Session) onFec(r *reader, now time.Time) bool {
 	s.fecKeep(pn, rec, now)
 	s.stats.FecRecovered++
 	f.inRec = true
-	el := s.parse(rec, now)
+	el := s.parse(rec, now, src)
 	f.inRec = false
 	return el
 }

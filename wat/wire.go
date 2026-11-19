@@ -21,6 +21,14 @@ const (
 	frKex       = 0x0b // 32-byte ephemeral X25519 public key: the forward-secrecy key exchange (2.10.0, both ends; see session.go onKex). Older peers stop parsing at it, so it is the effective end of the frame stream; 3.0 padding and 3.3.0 shape-data/noise may append frPad/frPad2 after it, which those peers ignore.
 	frPad       = 0x0c // len (one byte, < 128), then len zero bytes: random padding (3.0.0, hdrmask.go); always the LAST frame of a packet, so an older peer stops at it
 	frPad2      = 0x0d // len (uvarint), then len bytes of filler: data-shaping padding and idle noise (3.3.0, shape.go); always the LAST frame of a packet, so an older peer stops at the type byte. The long form exists because frPad's one-byte length cannot fill a 640/1400 B packet in one frame.
+	// frEndpoint (3.3.9, Bifrost): leg_idx (uvarint), port (2B BE) — a bond ":down" leg's receive endpoint,
+	// announced by the client (uplink only). Always the LAST frame of an uplink packet, so an older peer stops
+	// at the unknown type byte and loses nothing before it; BOTH ends need 3.3.9 for ":up"/":down" to be
+	// honored, and a mixed pair degrades gracefully (the old server ignores the frame and never sends down the
+	// ":down" leg, while ":up" and bidirectional legs still carry uplink). Security invariant: the IP is NEVER
+	// on the wire — the server binds the announced port to the packet's authenticated source address (see
+	// PathEndpointSignaler), so a hostile peer cannot aim the downlink anywhere but its own proven source.
+	frEndpoint = 0x0e
 )
 
 var errBadFrame = errors.New("wat: malformed frame")

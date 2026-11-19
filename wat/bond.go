@@ -70,7 +70,7 @@ func NewBondIO(kids []PacketIO, opt BondOptions) (*BondIO, error) {
 	if opt.Mode != "" {
 		tm.Mode = opt.Mode
 	}
-	b.ps = newPathSet(names, true, tm)
+	b.ps = newPathSet(names, true, tm, false)
 	b.ps.setProfiles(b.profs)
 	for i := range kids {
 		go b.recvKid(i)
@@ -133,7 +133,9 @@ func (b *BondIO) Send(p []byte, path int) error {
 	err := b.kids[path].Send(p, lane)
 	if b.ps.Mode() == "replicate" {
 		for i, kid := range b.kids {
-			if i != path && b.ps.isLiveOrSuspect(i) {
+			// Bifrost (3.3.9): replication copies to every live leg, but a direction-locked leg must still never
+			// carry what this end may not send on it (a ":down" leg is receive-only for the client).
+			if i != path && b.ps.isLiveOrSuspect(i) && b.ps.canSend(i) {
 				b.ps.onSend(i, len(p))
 				l := 0
 				if n := b.lanes[i]; n > 1 {
@@ -203,6 +205,37 @@ func (b *BondIO) OnLoss(path int)                          { b.ps.onLoss(path) }
 func (b *BondIO) SetProber(f func(int))                    { b.prober.Store(f) }
 func (b *BondIO) PathStats() []CarrierStat                 { return b.ps.stats() }
 func (b *BondIO) PacerMode() (bool, bool, bool, bool)      { return b.ps.pacerMode() }
+
+// PathDirs reports each leg's direction lock (Bifrost, 3.3.9). The lock is parsed from the leg-name suffix once
+// at NewBondIO and never changes, so the unsynchronized read is safe.
+func (b *BondIO) PathDirs() []uint8 {
+	out := make([]uint8, len(b.kids))
+	for i := range out {
+		out[i] = b.ps.p[i].dir
+	}
+	return out
+}
+
+// PathLocalPort reports the bound local port of leg i's kid socket (Bifrost frEndpoint announce, 3.3.9): a
+// ":down" leg's kid is a quiet bound socket, and this is the port the server must send downlink to. 0 when the
+// kid does not expose one (it is not a bound socket).
+func (b *BondIO) PathLocalPort(leg int) int {
+	if leg < 0 || leg >= len(b.kids) {
+		return 0
+	}
+	if p, ok := b.kids[leg].(PathLocalPorter); ok {
+		return p.PathLocalPort()
+	}
+	return 0
+}
+
+// OnLossSized is OnLoss with the packet's wire size, for the Hornet-MTU detector (-mtu-adapt, 3.3.9): the
+// session calls the sized variant when the io implements PathLossSizer.
+func (b *BondIO) OnLossSized(path, size int) { b.ps.onLossSized(path, size) }
+
+// PathClamp reports the Hornet-MTU sender-side datagram clamp of path (3.3.9): hornetClampPayload while the
+// detector's clamp holds, else 0. Session.build takes min(limit, clamp) when sizing packets.
+func (b *BondIO) PathClamp(path int) int { return b.ps.clampOf(path) }
 
 // Backlogged updates the per-path full mask and holds the session when no live path has room (3.3.8).
 func (b *BondIO) Backlogged() bool {
@@ -372,7 +405,7 @@ type peerSlot struct {
 
 func newMultiSubIO(base *subIO, mr *MultiRaw, tm PathTimings, admittingIdx int) *multiSubIO {
 	m := &multiSubIO{subIO: base, mr: mr, slots: make([]peerSlot, len(mr.raws)), admittedCarrier: admittingIdx}
-	m.ps = newPathSet(mr.names, false, tm)
+	m.ps = newPathSet(mr.names, false, tm, true)
 	profs := make([]Profile, len(mr.raws))
 	for i, r := range mr.raws {
 		profs[i] = profileOf(r)
@@ -451,9 +484,45 @@ func containsLane(lanes []int, lane int) bool {
 	return false
 }
 
+// SetPathEndpoint records where the client receives downlink on its ":down" leg (Bifrost frEndpoint 0x0e,
+// 3.3.9; both ends need it for the suffixes to be honored). Security invariant: the IP comes ONLY from src, the
+// packet's authenticated source address — the frame carries the announced port alone, so a hostile peer cannot
+// aim the downlink anywhere but its own proven source (a peer that can seal frEndpoint already holds the session
+// key, and its packets' source address is all the server will ever trust). The client never sends on a ":down"
+// leg, so no ordinary packet populates this slot; until the announce arrives the leg stays absent (dst nil) and
+// the server never sends down it. Replaces the slot wholesale: a ":down" leg is udp, so no ICMP lanes are kept.
+func (m *multiSubIO) SetPathEndpoint(legIdx, port int, src net.Addr) {
+	if legIdx < 0 || legIdx >= len(m.slots) || port <= 0 || port > 65535 {
+		return
+	}
+	t, ok := src.(*TaggedAddr)
+	if !ok || t.Idx < 0 || t.Idx >= len(m.slots) {
+		return
+	}
+	var ip net.IP
+	switch v := t.Addr.(type) {
+	case *net.UDPAddr:
+		ip = v.IP
+	case *net.IPAddr:
+		ip = v.IP
+	default:
+		return // no IP in the authenticated source (custom/test raw): nothing trustworthy to bind the endpoint to
+	}
+	if ip == nil {
+		return
+	}
+	m.mu.Lock()
+	m.slots[legIdx] = peerSlot{dst: &TaggedAddr{Idx: legIdx, Addr: &net.UDPAddr{IP: ip, Port: port}}}
+	m.mu.Unlock()
+	m.ps.markPresent(legIdx)
+}
+
 func (m *multiSubIO) Send(p []byte, path int) error {
 	m.mu.Lock()
-	if path < 0 || path >= len(m.slots) || m.slots[path].dst == nil {
+	// Bifrost (3.3.9): a ":down" leg is sendable only once its frEndpoint announce populated the slot (until then
+	// dst is nil, the same gate as any never-heard-from carrier), and an ":up" leg is receive-only for the server
+	// — the chooser already skips both, this is the belt-and-braces gate for direct sends.
+	if path < 0 || path >= len(m.slots) || m.slots[path].dst == nil || !m.ps.canSend(path) {
 		m.mu.Unlock()
 		return errors.New("wat: no peer yet")
 	}
@@ -472,7 +541,7 @@ func (m *multiSubIO) Send(p []byte, path int) error {
 	var dups []dupItem
 	if m.ps.Mode() == "replicate" {
 		for i := range m.slots {
-			if i != path && m.slots[i].dst != nil && m.ps.isLiveOrSuspect(i) {
+			if i != path && m.slots[i].dst != nil && m.ps.isLiveOrSuspect(i) && m.ps.canSend(i) {
 				ds := &m.slots[i]
 				dl := 0
 				if len(ds.lanes) > 0 {
@@ -503,6 +572,12 @@ func (m *multiSubIO) OnLoss(path int)                          { m.ps.onLoss(pat
 func (m *multiSubIO) SetProber(f func(int))                    { m.prober.Store(f) }
 func (m *multiSubIO) PathStats() []CarrierStat                 { return m.ps.stats() }
 func (m *multiSubIO) PacerMode() (bool, bool, bool, bool)      { return m.ps.pacerMode() }
+
+// OnLossSized / PathClamp: the server end of the Hornet-MTU sender-side clamp (-mtu-adapt, 3.3.9) — each end
+// watches its OWN send-path losses and clamps the payload it puts on that path, so both BondIO (client) and
+// multiSubIO (server) implement the sized feedback and the clamp query.
+func (m *multiSubIO) OnLossSized(path, size int) { m.ps.onLossSized(path, size) }
+func (m *multiSubIO) PathClamp(path int) int     { return m.ps.clampOf(path) }
 
 // Backlogged overrides subIO.Backlogged (srv.raw is MultiRaw, not RawBacklogger) so per-carrier pool backpressure
 // works on bonded servers and un-narrowed Auto Kharej listeners (3.3.8).

@@ -94,6 +94,7 @@ func newBondLink(t testing.TB, delay time.Duration, bps float64) *bondLink {
 
 type linkClient struct {
 	l    *bondLink
+	port int // local UDP port the leg reports (Bifrost frEndpoint announce, 3.3.9); 0 = no bound socket
 	done chan struct{}
 	once sync.Once
 }
@@ -122,6 +123,9 @@ func (c *linkClient) SetPeer(net.Addr) {}
 func (c *linkClient) Close() error     { c.once.Do(func() { close(c.done) }); return nil }
 func (c *linkClient) Profile() Profile { return c.l.prof }
 
+// PathLocalPort reports the leg's bound local port for the Bifrost frEndpoint announce (3.3.9); 0 = none.
+func (c *linkClient) PathLocalPort() int { return c.port }
+
 type linkRaw struct {
 	l    *bondLink
 	done chan struct{}
@@ -135,7 +139,9 @@ func (r *linkRaw) Recv() ([]byte, int, net.Addr, error) {
 			if r.l.blocked.Load() {
 				continue
 			}
-			return p, 0, strAddr("cli"), nil
+			// an IP-bearing source, like a real udp raw reports: the server-side Bifrost path (SetPathEndpoint,
+			// 3.3.9) binds an announced ":down" port to the authenticated source address
+			return p, 0, &net.UDPAddr{IP: net.ParseIP("203.0.113.1"), Port: 4444}, nil
 		case <-r.done:
 			return nil, 0, nil, io.EOF
 		}
@@ -633,7 +639,7 @@ func (m *mockKidPacketIO) Profile() Profile { return m.prof }
 
 func TestBondModes(t *testing.T) {
 	// 1. active-backup mode
-	ps := newPathSet([]string{"p0", "p1"}, true, PathTimings{Mode: "active-backup"})
+	ps := newPathSet([]string{"p0", "p1"}, true, PathTimings{Mode: "active-backup"}, false)
 	if m := ps.Mode(); m != "active-backup" {
 		t.Fatalf("expected mode active-backup, got %s", m)
 	}
@@ -808,7 +814,7 @@ func (m *mockBacklogKid) ConnDeaths() uint64 { return m.deaths.Load() }
 // 3.3.8: NextPath(false) must peek the next burst winner at burst boundaries instead of returning the previous 16 KB
 // path, or Session.build sizes packet 25 to 16 KB and ChoosePath can never switch to a 1400 B / 4 KB path.
 func TestBondNextPathBurstBoundary(t *testing.T) {
-	ps := newPathSet([]string{"tcp", "udp"}, true, PathTimings{})
+	ps := newPathSet([]string{"tcp", "udp"}, true, PathTimings{}, false)
 	ps.setProfiles([]Profile{
 		{Reliable: true, MTU: 4096, MaxMTU: 16384},
 		{Reliable: false, MTU: 1400, MaxMTU: 1400},
@@ -1058,7 +1064,7 @@ func TestBondUDPTCPNoICMPClampAndResetBW(t *testing.T) {
 
 // 3.3.8 audit: active-backup nextPath/choose parity on fullMask, eval parity, and credit clamp fairness.
 func TestBondNextChooseParityAndCreditClamp(t *testing.T) {
-	ps := newPathSet([]string{"udp", "tcp"}, true, PathTimings{Mode: "active-backup"})
+	ps := newPathSet([]string{"udp", "tcp"}, true, PathTimings{Mode: "active-backup"}, false)
 	ps.setProfiles([]Profile{
 		{MTU: 1400, MaxMTU: 1400},
 		{Reliable: true, MTU: 4096, MaxMTU: 16384},
@@ -1069,7 +1075,7 @@ func TestBondNextChooseParityAndCreditClamp(t *testing.T) {
 	}
 
 	// eval parity: silent tcp burstPath transitions to pDead in nextPath before sizing 16 KB.
-	ps2 := newPathSet([]string{"tcp", "icmp"}, true, PathTimings{Silence: 50 * time.Millisecond})
+	ps2 := newPathSet([]string{"tcp", "icmp"}, true, PathTimings{Silence: 50 * time.Millisecond}, false)
 	ps2.setProfiles([]Profile{
 		{Reliable: true, MTU: 4096, MaxMTU: 16384},
 		{},
@@ -1084,7 +1090,7 @@ func TestBondNextChooseParityAndCreditClamp(t *testing.T) {
 	}
 
 	// Credit clamp must not squash an isFull peer's earned credit down to a low-weight active leg's 4*w.
-	ps3 := newPathSet([]string{"icmp", "tcp"}, true, PathTimings{})
+	ps3 := newPathSet([]string{"icmp", "tcp"}, true, PathTimings{}, false)
 	ps3.mu.Lock()
 	ps3.p[0].w = 0.05
 	ps3.p[1].w = 1.0

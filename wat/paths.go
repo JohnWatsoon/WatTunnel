@@ -2,6 +2,8 @@ package wat
 
 import (
 	"math"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +41,104 @@ type PathStatser interface{ PathStats() []CarrierStat }
 // PathMuter allows live path muting/unmuting without session restart.
 type PathMuter interface{ ToggleMute(path int) bool }
 
+// Bifrost directional bond legs (3.3.9, frEndpoint 0x0e; BOTH ends need this release for the suffixes to be
+// honored): a bond leg name may carry an ":up" or ":down" suffix — ":up" carries uplink (client→server) only,
+// ":down" downlink (server→client) only, no suffix both ways. The SAME suffix appears in both ends' configs;
+// each end applies its own side's meaning: the client never sends on a ":down" leg (it is the leg the server
+// pushes downlink to) and the server never replies on an ":up" one. A mixed-version pair degrades gracefully:
+// an older server ignores frEndpoint and never sends down the ":down" leg, while uplink on ":up" and
+// bidirectional legs still works. In this release ":down" is restricted to the udp carrier: its client socket
+// is a quiet bound socket whose receive port is announced with frEndpoint (0x0e).
+const (
+	DirBoth uint8 = 0 // unsuffixed leg: today's bidirectional behaviour (the zero value)
+	DirUp   uint8 = 1 // client→server only
+	DirDown uint8 = 2 // server→client only
+)
+
+// LegDirection splits a bond leg name into its carrier name and its direction suffix (Bifrost, 3.3.9):
+// "udp:down" → ("udp", DirDown), "icmp" → ("icmp", DirBoth), "ws:weird" → ("ws:weird", DirBoth) — anything
+// after the last ':' that is not up/down is part of the carrier name, so the split never invents a carrier.
+func LegDirection(leg string) (carrier string, dir uint8) {
+	if i := strings.LastIndexByte(leg, ':'); i > 0 {
+		switch leg[i+1:] {
+		case "up":
+			return leg[:i], DirUp
+		case "down":
+			return leg[:i], DirDown
+		}
+	}
+	return leg, DirBoth
+}
+
+// ValidateBondLegs checks a '+'-split bond carrier list against the directional-leg rules (Bifrost, 3.3.9) and
+// returns "" when the list is acceptable, else a refusal reason for the operator. Carrier-name validity and
+// duplicates stay the caller's checks (they depend on the process's carrier table). Only the udp carrier takes
+// ":down" in this release (frEndpoint signaling), a single carrier cannot be directional, and the bond must keep
+// at least one leg able to carry each direction.
+func ValidateBondLegs(legs []string) string {
+	if len(legs) == 0 {
+		return ""
+	}
+	if len(legs) == 1 {
+		if _, d := LegDirection(legs[0]); d != DirBoth {
+			return ":up/:down are directional BOND legs; a single carrier is always bidirectional (drop the suffix)"
+		}
+		return ""
+	}
+	up, down := 0, 0
+	for _, leg := range legs {
+		base, d := LegDirection(leg)
+		switch d {
+		case DirUp:
+			up++
+		case DirDown:
+			if base != "udp" {
+				return "only the udp carrier supports :down legs in this release — its receive endpoint is announced with frEndpoint (0x0e), which only a quiet bound udp socket has"
+			}
+			down++
+		}
+	}
+	if down == len(legs) {
+		return "every bond leg is :down — no leg could carry uplink; keep at least one bidirectional or :up leg"
+	}
+	if up == len(legs) {
+		return "every bond leg is :up — no leg could carry downlink; keep at least one bidirectional or :down leg"
+	}
+	return ""
+}
+
+// PathDirs is implemented by a chooser PacketIO whose paths carry a direction lock (Bifrost, 3.3.9): the session
+// reads it once at start to learn which of the bond's legs are ":down" and need frEndpoint announces.
+type PathDirs interface{ PathDirs() []uint8 }
+
+// PathEndpoints is implemented by a bond PacketIO that can report the bound local port of one leg's socket
+// (Bifrost, 3.3.9): the client announces it with frEndpoint so the server knows where to send downlink.
+type PathEndpoints interface{ PathLocalPort(leg int) int }
+
+// PathLocalPorter is implemented by a single-carrier PacketIO over a socket with a local port (the udp client):
+// the per-leg query of PathEndpoints delegates to it. 0 = no port (not bound yet).
+type PathLocalPorter interface{ PathLocalPort() int }
+
+// PathEndpointSignaler is the server-side receiver of frEndpoint (Bifrost ":down" legs, 3.3.9): the session
+// parses the frame and hands over the announced leg index and port plus the packet's AUTHENTICATED source
+// address. The implementation must take the IP from src only — the frame carries no IP, so a hostile peer
+// cannot aim the downlink anywhere but its own proven source.
+type PathEndpointSignaler interface {
+	SetPathEndpoint(legIdx, port int, src net.Addr)
+}
+
+// PathLossSizer is the optional richer loss feedback (Hornet-MTU, 3.3.9, -mtu-adapt): OnLossSized carries the
+// lost packet's wire size (sentPkt.size: datagram + tag + IP/ICMP headers) so the io can tell big-packet loss
+// (the ICMP-clamp signature) from small-packet loss. The session calls it instead of PathFeedback.OnLoss when
+// the io implements it, and only for paths it actually sent on — plain OnLoss stays for the other ios.
+type PathLossSizer interface{ OnLossSized(path, size int) }
+
+// PathClamp is the Hornet-MTU sender-side payload clamp (3.3.9, -mtu-adapt): Session.build takes
+// min(limit, PathClamp(next path)) when the chooser provides it, so a path whose big packets a filter drops
+// puts out smaller packets while its clamp holds. The value is a datagram size (header and tag incl), 0 =
+// unclamped. Sender-side only: no wire signal, each end clamps its own sending, mixed versions are safe.
+type PathClamp interface{ PathClamp(path int) int }
+
 // CarrierStat is one carrier of a bond, as seen from this end.
 type CarrierStat struct {
 	Name    string  `json:"name"`
@@ -60,7 +160,27 @@ type PathTimings struct {
 	Ramp       time.Duration // a revived path goes from a 10 % to a full share over this (default 3 s)
 	IdleProbe  time.Duration // a live path with nothing sent for this long gets a PING (default 5 s)
 	Mode       string        // "balanced" (default), "active-backup", "replicate"
+	// MtuAdapt turns on the Hornet-MTU sender-side clamp (3.3.9, -mtu-adapt; default off, dead code when off):
+	// after hornetLosses consecutive losses of packets bigger than hornetBigPkt the path's datagrams are capped
+	// at hornetClampPayload for hornetClampHold, then retried at full size (the detector re-fires while the
+	// pattern persists). Sender-side only — no wire signal, each end watches its own send-path losses, so a
+	// single end may enable it and mixed versions are safe. Bond paths only: the detector rides PathFeedback,
+	// which only the bond ios implement.
+	MtuAdapt bool
 }
+
+// Hornet-MTU sender-side clamp constants (3.3.9, -mtu-adapt). The measured signature (live Iran paths, 2026-10:
+// ICMP payloads above ~668 B vanish while small pings pass; see the R3 hornet experiment) is a path that silently
+// drops every large packet; a detector keyed on CONSECUTIVE big losses sits clearly above the ordinary loss the
+// delay-based CC already absorbs (the design-review bar: ≥ 8 consecutive full-size losses). The clamp value
+// matches the experiment's proven 640 B ceiling; the hold auto-expires so the path re-probes full size and the
+// detector re-clamps if the signature persists — no canary machinery.
+const (
+	hornetBigPkt       = 512              // a lost packet bigger than this wire size counts as "big" (datagram + tag + IP/ICMP headers)
+	hornetLosses       = 8                // consecutive big losses before the clamp engages
+	hornetClampPayload = 640              // clamped datagram size incl. header and tag (the experiment's proven ceiling)
+	hornetClampHold    = 30 * time.Second // clamp hold; expires by itself and re-fires if the losses persist
+)
 
 func (t PathTimings) norm() PathTimings {
 	if t.Silence <= 0 {
@@ -106,6 +226,7 @@ type pathState struct {
 	present bool
 	state   int
 	muted   bool
+	dir     uint8 // direction lock from the leg-name suffix (Bifrost, 3.3.9): DirBoth/DirUp/DirDown; fixed at creation
 
 	srtt, minRTT time.Duration
 	minAt        time.Time
@@ -125,6 +246,11 @@ type pathState struct {
 
 	capBps, tokens float64 // >0: byte cap of this path (token bucket, 50 ms burst)
 	tokAt          time.Time
+
+	// Hornet-MTU sender-side detector (-mtu-adapt, 3.3.9): consecutive lost packets bigger than hornetBigPkt,
+	// and the deadline until which this path's datagrams are clamped to hornetClampPayload (zero = unclamped).
+	lostBig    int
+	clampUntil time.Time
 }
 
 func (p *pathState) refill(now time.Time) {
@@ -147,6 +273,7 @@ type pathSet struct {
 	mu       sync.Mutex
 	cfg      PathTimings
 	mode     string
+	srv      bool // this end is the server: an ":up" leg is receive-only here; a client end refuses ":down" legs (Bifrost, 3.3.9)
 	p        []pathState
 	profs    []Profile     // per-path profile: a packet is never sent on a carrier that cannot frame it (set before traffic)
 	fullMask atomic.Uint64 // 3.3.8: bit i set while path i's pool send queues are full (refreshed per pump round)
@@ -154,17 +281,42 @@ type pathSet struct {
 	burstPath, burstLeft int
 }
 
-func newPathSet(names []string, present bool, cfg PathTimings) *pathSet {
+func newPathSet(names []string, present bool, cfg PathTimings, srv bool) *pathSet {
 	norm := cfg.norm()
-	ps := &pathSet{cfg: norm, mode: norm.Mode, p: make([]pathState, len(names))}
+	ps := &pathSet{cfg: norm, mode: norm.Mode, srv: srv, p: make([]pathState, len(names))}
 	now := time.Now()
 	for i, n := range names {
-		ps.p[i] = pathState{name: n, present: present, w: 1, gap: ps.cfg.ProbeFirst, tokAt: now}
-		if n == "icmp" && len(names) > 1 {
+		base, dir := LegDirection(n)
+		ps.p[i] = pathState{name: n, present: present, w: 1, gap: ps.cfg.ProbeFirst, dir: dir, tokAt: now}
+		if base == "icmp" && len(names) > 1 {
 			ps.p[i].capBps, ps.p[i].tokens = ICMPPathBps, ICMPPathBps/20
 		}
 	}
 	return ps
+}
+
+// canSendLocked reports whether THIS end may send on path i (Bifrost directional legs, 3.3.9): the client sends
+// uplink, so a ":down" leg is receive-only for it; the server sends downlink, so an ":up" leg is receive-only
+// for it. With no suffix anywhere (dir == DirBoth everywhere) every path passes, so the zero value keeps today's
+// behaviour exactly. Caller holds ps.mu and passes a valid index.
+func (ps *pathSet) canSendLocked(i int) bool {
+	switch ps.p[i].dir {
+	case DirUp:
+		return !ps.srv
+	case DirDown:
+		return ps.srv
+	}
+	return true
+}
+
+// canSend is canSendLocked with its own locking, for callers outside the choose/tick critical sections.
+func (ps *pathSet) canSend(i int) bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if i < 0 || i >= len(ps.p) {
+		return false
+	}
+	return ps.canSendLocked(i)
 }
 
 // setProfiles records the profile of every path (BondIO or MultiRaw builds it). Call it before traffic starts.
@@ -298,16 +450,16 @@ func (ps *pathSet) nextPath(interactive bool) int {
 	defer ps.mu.Unlock()
 	ps.eval(now)
 	if ps.mode == "active-backup" {
-		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted && !ps.isFull(0) {
+		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted && !ps.isFull(0) && ps.canSendLocked(0) {
 			return 0
 		}
 		for i := 1; i < len(ps.p); i++ {
-			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted && !ps.isFull(i) {
+			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted && !ps.isFull(i) && ps.canSendLocked(i) {
 				return i
 			}
 		}
 		for i := range ps.p {
-			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted {
+			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted && ps.canSendLocked(i) {
 				return i
 			}
 		}
@@ -316,7 +468,7 @@ func (ps *pathSet) nextPath(interactive bool) int {
 	if interactive {
 		bs := time.Duration(math.MaxInt64)
 		for i := range ps.p {
-			if p := &ps.p[i]; p.present && p.state == pLive && !p.muted && !ps.isFull(i) && p.ramped(now, ps.cfg.Ramp) {
+			if p := &ps.p[i]; p.present && p.state == pLive && !p.muted && !ps.isFull(i) && p.ramped(now, ps.cfg.Ramp) && ps.canSendLocked(i) {
 				if sc := p.score(); sc < bs {
 					bs = sc
 				}
@@ -325,7 +477,7 @@ func (ps *pathSet) nextPath(interactive bool) int {
 		best, bestCred := -1, -1e18
 		for i := range ps.p {
 			p := &ps.p[i]
-			if !p.present || p.state != pLive || p.muted || ps.isFull(i) || !p.ramped(now, ps.cfg.Ramp) || p.score() > bs+bs/4+5*time.Millisecond {
+			if !p.present || p.state != pLive || p.muted || ps.isFull(i) || !p.ramped(now, ps.cfg.Ramp) || p.score() > bs+bs/4+5*time.Millisecond || !ps.canSendLocked(i) {
 				continue
 			}
 			if c := p.icredit + p.w; best < 0 || c > bestCred {
@@ -339,7 +491,7 @@ func (ps *pathSet) nextPath(interactive bool) int {
 	// 3.3.8: peek the actual next bulk winner when burstLeft == 0 or the current burst path is full/capped/dead, so
 	// Session.build sizes packet 25 for the path ChoosePath will pick instead of locking smaller-MTU paths out.
 	if !interactive && ps.burstLeft > 0 {
-		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !ps.isFull(ps.burstPath) && !p.overCap(now) {
+		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !ps.isFull(ps.burstPath) && !p.overCap(now) && ps.canSendLocked(ps.burstPath) {
 			return ps.burstPath
 		}
 	}
@@ -347,7 +499,7 @@ func (ps *pathSet) nextPath(interactive bool) int {
 		best, bestCred := -1, -1e18
 		for i := range ps.p {
 			p := &ps.p[i]
-			if !p.present || p.muted || pass == 0 && (p.state == pDead || ps.isFull(i) || p.overCap(now)) {
+			if !p.present || p.muted || pass == 0 && (p.state == pDead || ps.isFull(i) || p.overCap(now)) || !ps.canSendLocked(i) {
 				continue
 			}
 			w := 1.0
@@ -400,6 +552,9 @@ func (ps *pathSet) onAck(i int, rtt time.Duration) {
 	p.acked++
 	p.lastAck, p.firstUnacked, p.lossRun = now, time.Time{}, 0
 	p.loss -= p.loss * 0.02
+	if ps.cfg.MtuAdapt {
+		p.lostBig = 0 // Hornet-MTU: an ack proves big packets get through again; only consecutive big losses count
+	}
 	if p.state != pLive {
 		if p.state == pDead {
 			p.revived = now
@@ -447,11 +602,64 @@ func (ps *pathSet) onLoss(i int) {
 	ps.mu.Unlock()
 }
 
+// onLossSized is onLoss with the lost packet's wire size (datagram + tag + IP/ICMP headers, sentPkt.size): the
+// Hornet-MTU detector (-mtu-adapt, 3.3.9) counts CONSECUTIVE losses of packets bigger than hornetBigPkt — the
+// measured ICMP-clamp signature drops exactly those while small packets pass — and clamps the path's datagrams
+// to hornetClampPayload for hornetClampHold when the run reaches hornetLosses. An ack or any small loss resets
+// the run; the clamp itself persists to its deadline and the detector re-fires if the losses persist past it.
+// Without -mtu-adapt only the plain counters run (the sized bookkeeping is dead code, same as onLoss).
+func (ps *pathSet) onLossSized(i, size int) {
+	now := time.Now()
+	ps.mu.Lock()
+	if i >= 0 && i < len(ps.p) {
+		p := &ps.p[i]
+		p.lost++
+		p.lossRun++
+		p.loss += (1 - p.loss) * 0.02
+		if ps.cfg.MtuAdapt {
+			if size > hornetBigPkt {
+				p.lostBig++
+				if p.lostBig >= hornetLosses && (p.clampUntil.IsZero() || !now.Before(p.clampUntil)) {
+					p.clampUntil = now.Add(hornetClampHold)
+					p.lostBig = 0 // one clamp per signature: count afresh so the expiry+persist case can re-fire
+				}
+			} else {
+				p.lostBig = 0
+			}
+		}
+	}
+	ps.mu.Unlock()
+}
+
+// clampOf reports path i's sender-side datagram ceiling while the Hornet-MTU clamp holds (hornetClampPayload),
+// else 0. Session.build takes min(limit, clamp) when the chooser implements PathClamp; without -mtu-adapt this
+// is a plain bool check and returns 0 without touching the lock.
+func (ps *pathSet) clampOf(i int) int {
+	if !ps.cfg.MtuAdapt {
+		return 0
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if i < 0 || i >= len(ps.p) {
+		return 0
+	}
+	if p := &ps.p[i]; !p.clampUntil.IsZero() && time.Now().Before(p.clampUntil) {
+		return hornetClampPayload
+	}
+	return 0
+}
+
 // eval moves paths between live, suspect and dead. Caller holds ps.mu.
 func (ps *pathSet) eval(now time.Time) {
 	for i := range ps.p {
 		p := &ps.p[i]
 		if !p.present || p.state == pDead {
+			continue
+		}
+		// Bifrost (3.3.9): this end never sends on a direction-locked leg, so its silence proves nothing —
+		// a receive-only client leg legitimately never sends uplink (and the server never sends down an ":up"
+		// leg). Skip the silence transitions; the leg stays eligible for the direction it does carry.
+		if !ps.canSendLocked(i) {
 			continue
 		}
 		thr := max(3*p.srtt, ps.cfg.Silence)
@@ -530,16 +738,16 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 	defer ps.mu.Unlock()
 	ps.eval(now)
 	if ps.mode == "active-backup" {
-		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted && !ps.isFull(0) {
+		if len(ps.p) > 0 && ps.p[0].present && ps.p[0].state != pDead && !ps.p[0].muted && !ps.isFull(0) && ps.canSendLocked(0) {
 			return 0
 		}
 		for i := 1; i < len(ps.p); i++ {
-			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted && !ps.isFull(i) {
+			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted && !ps.isFull(i) && ps.canSendLocked(i) {
 				return i
 			}
 		}
 		for i := range ps.p {
-			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted {
+			if ps.p[i].present && ps.p[i].state != pDead && !ps.p[i].muted && ps.canSendLocked(i) {
 				return i
 			}
 		}
@@ -550,7 +758,7 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 		// requests must not all ride one carrier, or its silent death would also starve every other path of acks
 		bs := time.Duration(math.MaxInt64)
 		for i := range ps.p {
-			if p := &ps.p[i]; p.present && p.state == pLive && !p.muted && p.ramped(now, ps.cfg.Ramp) && ps.fits(i, size) {
+			if p := &ps.p[i]; p.present && p.state == pLive && !p.muted && p.ramped(now, ps.cfg.Ramp) && ps.fits(i, size) && ps.canSendLocked(i) {
 				if sc := p.score(); sc < bs {
 					bs = sc
 				}
@@ -559,7 +767,7 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 		best, sum := -1, 0.0
 		for i := range ps.p {
 			p := &ps.p[i]
-			if !p.present || p.state != pLive || p.muted || !p.ramped(now, ps.cfg.Ramp) || p.score() > bs+bs/4+5*time.Millisecond || !ps.fits(i, size) {
+			if !p.present || p.state != pLive || p.muted || !p.ramped(now, ps.cfg.Ramp) || p.score() > bs+bs/4+5*time.Millisecond || !ps.fits(i, size) || !ps.canSendLocked(i) {
 				continue
 			}
 			p.icredit += p.w
@@ -578,7 +786,7 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 	// the slow path's packets out of the reported ranges (they were then retransmitted although they arrived: 23 %
 	// of all packets on a 40 ms + 150 ms bond, measured).
 	if ps.burstLeft > 0 {
-		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !ps.isFull(ps.burstPath) && !p.overCap(now) && ps.fits(ps.burstPath, size) {
+		if p := &ps.p[ps.burstPath]; p.present && p.state != pDead && !p.muted && !ps.isFull(ps.burstPath) && !p.overCap(now) && ps.fits(ps.burstPath, size) && ps.canSendLocked(ps.burstPath) {
 			ps.burstLeft--
 			return ps.burstPath
 		}
@@ -590,7 +798,7 @@ func (ps *pathSet) choose(size int, interactive bool) int {
 		bestFit, bestAny, sum := -1, -1, 0.0
 		for i := range ps.p {
 			p := &ps.p[i]
-			if !p.present || p.muted || (p.state == pDead || ps.isFull(i) || p.overCap(now)) && pass == 0 {
+			if !p.present || p.muted || (p.state == pDead || ps.isFull(i) || p.overCap(now)) && pass == 0 || !ps.canSendLocked(i) {
 				continue
 			}
 			w := 1.0
@@ -653,6 +861,9 @@ func (ps *pathSet) tick() []int {
 		p := &ps.p[i]
 		if !p.present || p.muted {
 			continue
+		}
+		if !ps.canSendLocked(i) {
+			continue // Bifrost (3.3.9): a probe IS a send — never probe a leg this end must not send on
 		}
 		if ps.mode == "active-backup" && i > 0 && p.state == pLive {
 			if now.Sub(p.lastSend) >= 50*time.Millisecond {

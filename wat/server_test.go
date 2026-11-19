@@ -487,7 +487,7 @@ func TestServerDefaultSessionCap(t *testing.T) {
 func TestServerToggleMuteShared(t *testing.T) {
 	names := []string{"a", "b"}
 	mr := &MultiRaw{raws: make([]RawIO, 2), names: names}
-	sub := func() *multiSubIO { return &multiSubIO{ps: newPathSet(names, false, PathTimings{})} }
+	sub := func() *multiSubIO { return &multiSubIO{ps: newPathSet(names, false, PathTimings{}, true)} }
 	s1, s2 := sub(), sub()
 	s2.ps.ToggleMute(1) // diverged before the fix: one session muted, the other not
 	srv := &Server{raw: mr, sessions: map[uint64]*srvSess{1: {s: &Session{io: s1}}, 2: {s: &Session{io: s2}}}}

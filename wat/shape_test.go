@@ -101,14 +101,14 @@ func TestPad2Parse(t *testing.T) {
 	streamFrame := append([]byte{frStream}, appendUv(appendUv(appendUv(nil, 1), 0), 3)...)
 	streamFrame = append(streamFrame, 1, 2, 3)
 	pad, _ := appendPad2(nil, 100)
-	if rcv.parse(pad, time.Now()) {
+	if rcv.parse(pad, time.Now(), nil) {
 		t.Fatal("a padding-only packet was ack-eliciting")
 	}
 	if len(rcv.streams) != 0 || len(rcv.ctrl) != 0 {
 		t.Fatal("a padding-only packet created state")
 	}
 	// stream frame, then the padding frame last: delivered and ack-eliciting, padding ignored
-	if !rcv.parse(append(append([]byte(nil), streamFrame...), pad...), time.Now()) {
+	if !rcv.parse(append(append([]byte(nil), streamFrame...), pad...), time.Now(), nil) {
 		t.Fatal("a data packet with trailing padding was not ack-eliciting")
 	}
 	st := rcv.streams[1]
@@ -116,7 +116,7 @@ func TestPad2Parse(t *testing.T) {
 		t.Fatal("stream data before a last padding frame was not delivered")
 	}
 	// padding before a frame: nothing after it is parsed (the frame's own bytes stay unknown to this peer)
-	if rcv.parse(append(append([]byte(nil), pad...), streamFrame...), time.Now()) {
+	if rcv.parse(append(append([]byte(nil), pad...), streamFrame...), time.Now(), nil) {
 		t.Fatal("a frame after padding was parsed")
 	}
 }
@@ -212,7 +212,7 @@ func TestNoiseNotTracked(t *testing.T) {
 	noise, _ := appendPad2(nil, 100)
 	rcv.mu.Lock()
 	pend, streams, ctrl := rcv.ackPend, len(rcv.streams), len(rcv.ctrl)
-	el := rcv.parse(noise, time.Now())
+	el := rcv.parse(noise, time.Now(), nil)
 	afterPend, afterStreams, afterCtrl := rcv.ackPend, len(rcv.streams), len(rcv.ctrl)
 	rcv.mu.Unlock()
 	if el {

@@ -237,7 +237,7 @@ func TestFecRxKeepFollowsParity(t *testing.T) {
 	// one frFec (n=1, covers pn 0, parity length 100) re-opens the ring; it repairs nothing here (no stored group)
 	frame := appendUv(appendUv(appendUv(appendUv(nil, 1), 0), 0), 100)
 	frame = append(frame, make([]byte, 100)...)
-	if rcv.onFec(&reader{b: frame}, now) {
+	if rcv.onFec(&reader{b: frame}, now, nil) {
 		t.Fatal("an unreconstructable parity frame must not be ack-eliciting")
 	}
 	if !rcv.fec.keep.After(now) {
@@ -503,7 +503,7 @@ func TestFecLenOverflow(t *testing.T) {
 	rcv.mu.Lock()
 	defer rcv.mu.Unlock()
 	r := &reader{b: frame}
-	if rcv.onFec(r, time.Now()) {
+	if rcv.onFec(r, time.Now(), nil) {
 		t.Fatal("overflow length must not repair anything")
 	}
 	if r.err == nil {

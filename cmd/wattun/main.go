@@ -163,6 +163,7 @@ func main() {
 	dnsListen := flag.String("dns-listen", "", "client: local address to listen for DNS queries (e.g. 127.0.0.1:53 or 127.0.0.1:5353) and forward them via the tunnel's DNS relay (2.9.0)")
 	pathProbeMax := flag.Duration("path-probe-max", 0, "client, bonded carriers: maximum probe backoff for dead paths (default 30s; blackout mode: 6s)")
 	bondMode := flag.String("bond-mode", "balanced", "client/server, bonded carriers: balanced|active-backup|replicate (default: balanced)")
+	mtuAdapt := flag.Bool("mtu-adapt", false, "bonded carriers, both ends independently: sender-side adaptive payload clamp for paths whose large packets are dropped while small ones pass (the measured ICMP-clamp signature: after 8 consecutive losses of >512 B packets a path's datagrams are capped at 640 B for 30 s, then retried at full size and re-clamped if the pattern persists); no wire signal, single-ended, safe with mixed versions; default off (3.3.9)")
 	peerBy, listenBy, srcIPBy := map[string]*string{}, map[string]*string{}, map[string]*string{}
 	for _, c := range carrierNames {
 		peerBy[c] = flag.String("peer-"+c, "", "client, bonded carriers: server address of the "+c+" carrier (default: -peer)")
@@ -307,21 +308,35 @@ func main() {
 			*v = ":53"
 		}
 	}
+	// Bifrost directional legs (3.3.9): a bond leg may be "carrier:up" / "carrier:down" — the SAME suffix appears
+	// in both ends' configs, and each end applies its own side's meaning. names keeps the suffixed legs as the
+	// bond's leg labels (pathSet names, /stats, the mute API); bases strips the suffix for every carrier-table
+	// lookup and for building the carriers themselves (-peer-NAME / -listen-NAME stay keyed on the base name).
+	// Both ends need this release for the suffixes to be honored: the client announces ":down" legs' receive
+	// ports with frEndpoint (0x0e), which an older server ignores, so the pair degrades to uplink-only on ":up"
+	// and bidirectional legs (validated above; refusals exit 2).
 	names := strings.Split(*carrier, "+")
+	bases := make([]string, len(names))
 	seen := map[string]bool{}
 	anyPool := false
-	for _, n := range names {
-		if !validCarrier[n] || seen[n] {
-			fmt.Fprintln(os.Stderr, "unknown -carrier (icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip|sit|6to4|xfrm-ipsec|etherip|l2tpv3|fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct, joined with + to bond; each at most once)")
+	for i, n := range names {
+		base, _ := wat.LegDirection(n)
+		if !validCarrier[base] || seen[base] {
+			fmt.Fprintln(os.Stderr, "unknown -carrier (icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip|sit|6to4|xfrm-ipsec|etherip|l2tpv3|fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct, joined with + to bond; each at most once; a bond leg may carry an :up/:down suffix)")
 			os.Exit(2)
 		}
-		seen[n] = true
-		anyPool = anyPool || poolCarriers[n]
+		seen[base] = true
+		bases[i] = base
+		anyPool = anyPool || poolCarriers[base]
+	}
+	if reason := wat.ValidateBondLegs(names); reason != "" {
+		fmt.Fprintf(os.Stderr, "-carrier %q: %s\n", *carrier, reason)
+		os.Exit(2)
 	}
 	// D7 (3.3.0): shaped carriers are single-carrier. A bond sizes each packet for the path it takes, and each shaped
 	// carrier derives its own header (the UDP tier also its own conventional port), so a shaped leg in a bond was
 	// untested and could silently use mismatched ports; refuse it here (the manager refuses it too).
-	if bad := shapedBondCarrier(names); bad != "" {
+	if bad := shapedBondCarrier(bases); bad != "" {
 		fmt.Fprintf(os.Stderr, "-carrier %q: %s is a shaped carrier and works as a single carrier only in 3.3.0; bond udp|tcp|tls|ws|wss|h2|h2c|grpc or use it alone\n", *carrier, bad)
 		os.Exit(2)
 	}
@@ -358,7 +373,7 @@ func main() {
 			log.Printf("warning: -decoy %s is a loopback service: everyone who reaches the tunnel port can reach it; never point it at a wattun metrics port", *decoy)
 		}
 		httpLis := false
-		for _, n := range names {
+		for _, n := range bases {
 			httpLis = httpLis || httpCarrier[n] && server != *reverse
 		}
 		if !httpLis {
@@ -441,7 +456,7 @@ func main() {
 		}
 		if *reverse {
 			log.Printf("warning: -allow-clients is ignored with -reverse: the server dials the client, so a session's source address is not the client's")
-		} else if cdn := allowClientsCDN(names, *sni); cdn != "" {
+		} else if cdn := allowClientsCDN(bases, *sni); cdn != "" {
 			// M11 (3.3.0): with a CDN/proxy carrier the source the server sees is the edge's address, so a list would
 			// reject every real client. That is a guaranteed lock-out, not a warning: refuse it at startup.
 			log.Fatalf("-allow-clients cannot be used with %s: the server sees the CDN/proxy address, not the client's, so every real client would be rejected; filter at the proxy or use a direct carrier", cdn)
@@ -822,13 +837,14 @@ func main() {
 		tm.ProbeMax = *pathProbeMax
 	}
 	tm.Mode = *bondMode
+	tm.MtuAdapt = *mtuAdapt // Hornet-MTU (3.3.9): each end clamps its own send paths; off keeps every path as before
 	if len(names) == 1 {
-		pio, raw = build(names[0])
+		pio, raw = build(bases[0])
 	} else { // bonded: one session over all of them
 		var kids []wat.PacketIO
 		var raws []wat.RawIO
 		var lanesPer []int
-		for _, n := range names {
+		for _, n := range bases { // bases: build() switches on the carrier name; the suffixed names slice is the leg label
 			p, r := build(n)
 			kids, raws = append(kids, p), append(raws, r)
 			lanesPer = append(lanesPer, 1)
@@ -868,7 +884,7 @@ func main() {
 		ShapeData: shapeFrac, NoiseBps: noiseBpsVal, NoiseFrom: noiseFrom, NoiseTo: noiseTo,
 		WinMax: uint64(*winMax) << 20,
 		// no CDN can sit in a reverse pool (Kharej dials Iran's IP) or in front of raw tcp/tls: TCP paces (2.4.18)
-		Direct: allReliableDirect(names, *reverse),
+		Direct: allReliableDirect(bases, *reverse),
 	}
 	var tun *tunnel
 	var srv *wat.Server
