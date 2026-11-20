@@ -188,3 +188,107 @@ func RefreshToken(name string) error {
 	out := MakeToken(cr, bp, tok.Key, tok.Path, tok.SNI, tok.Icmp, allow, tok.Rev, tok.Auto)
 	return atomicWrite(f, []byte(out), 0o600)
 }
+
+// rebuildKharejToken mirrors bash rebuild_kharej_token (3.3.8): recover NAME.token that a 3.3.3-3.3.7 finalize (or a
+// manual rm) removed. An auto tunnel gets a fresh plan on new ports, so it leaves NAME.repaste: Iran's saved plan is
+// stale until the new token is pasted there (showToken clears it). true when NAME.token exists afterwards.
+func rebuildKharejToken(n string) bool {
+	tf := filepath.Join(P.Conf, n+".token")
+	if Role(n) != "Kharej" {
+		return false
+	}
+	if fileExists(tf) {
+		return true
+	}
+	key := strings.TrimSpace(strings.SplitN(mustRead(filepath.Join(P.Conf, n+".key")), "\n", 2)[0])
+	if key == "" {
+		return false
+	}
+	allow := MapsAllowStr(YmlMaps(n))
+	apath, sni, itype := Cfg(n, "path"), Cfg(n, "sni"), Cfg(n, "icmp-type")
+	addr := ""
+	if ents, _ := filepath.Glob(filepath.Join(P.Conf, "*.token")); len(ents) > 0 {
+		for _, f := range ents {
+			if t, err := ReadToken(strings.TrimSpace(mustRead(f))); err == nil && t.Peer != "" {
+				addr, _ = SplitHP(strings.SplitN(t.Peer, ",", 2)[0]) // a bond token's first entry carries the host
+				break
+			}
+		}
+	}
+	if addr == "" {
+		addr = publicIP()
+	}
+	if addr == "" {
+		return false
+	}
+	cr, rev := Cfg(n, "carrier"), ""
+	if IsReverse(n) {
+		rev = "1"
+	}
+	head := strings.SplitN(mustRead(filepath.Join(P.Conf, n+".yml")), "\n", 2)[0]
+	if strings.Contains(head, "Kept by wattun-manager from auto tunnel") || strings.Contains(head, "auto: every carrier at once") {
+		lp := ""
+		if rev == "1" {
+			pip := Cfg(n, "peer-icmp")
+			if pip == "" {
+				pip, lp = SplitHP(Cfg(n, "peer"))
+			}
+			if pip != "" {
+				os.WriteFile(filepath.Join(P.Conf, n+".iranip"), []byte(pip+"\n"), 0o600)
+			}
+		} else {
+			_, lp = SplitHP(Cfg(n, "listen"))
+		}
+		pk := autoPickPorts(sni != "")
+		if pk.FAIL != "" {
+			return false
+		}
+		rplan, err := autoPickRplan(intsToStrs(pk.Used))
+		if err != nil {
+			return false
+		}
+		dplan := pk.D
+		if lp != "" && !strings.Contains(cr, "+") { // keep the live carrier on the port Iran already dials
+			if rev == "1" {
+				rplan = setPlanPort(rplan, cr, lp)
+			} else if !IsShapedCarrier(cr) {
+				dplan = setPlanPort(dplan, cr, lp)
+			}
+		}
+		if apath == "" {
+			apath = "/wat"
+		}
+		if atomicWrite(tf, []byte(MakeToken("auto", addr, key, apath, sni, "", allow, "", "d="+dplan+";r="+rplan)), 0o600) != nil {
+			return false
+		}
+		os.WriteFile(filepath.Join(P.Conf, n+".repaste"), nil, 0o600)
+		return true
+	}
+	_, lp := SplitHP(Cfg(n, "listen"))
+	if lp == "" && rev == "1" {
+		_, lp = SplitHP(Cfg(n, "peer"))
+	}
+	if Cfg(n, "udp-dns") == "true" {
+		apath = "dns"
+	}
+	return atomicWrite(tf, []byte(MakeToken(cr, JoinHP(addr, lp), key, apath, sni, itype, allow, rev, "")), 0o600) == nil
+}
+
+// setPlanPort sets carrier c's port in a plan list "a:1,b:2" (bash sed s/(^|,)c:[0-9]+/\1c:p/).
+func setPlanPort(plan, c, p string) string {
+	es := strings.Split(plan, ",")
+	for i, e := range es {
+		if strings.HasPrefix(e, c+":") {
+			es[i] = c + ":" + p
+		}
+	}
+	return strings.Join(es, ",")
+}
+
+func intsToStrs(v []int) []string {
+	out := make([]string, len(v))
+	for i, x := range v {
+		out[i] = fmt.Sprint(x)
+	}
+	return out
+}

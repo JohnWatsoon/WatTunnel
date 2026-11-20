@@ -186,3 +186,35 @@ func TestRefreshToken(t *testing.T) {
 		t.Errorf("auto-r ports block missing: %q", string(rbody))
 	}
 }
+
+// A 3.3.3-3.3.7 finalize removed NAME.token: the rebuild gives an auto token that keeps the live carrier's port,
+// leaves NAME.repaste, and showToken clears the marker.
+func TestRebuildKharejTokenRepaste(t *testing.T) {
+	InitColor(false, 8)
+	dir := t.TempDir()
+	oldConf, oldPick, oldVer := P.Conf, envRandOpenPort, engineVer
+	P.Conf, engineVer = dir, func() string { return "9.9.9" }
+	next := 30000
+	envRandOpenPort = func(string, []string) (int, error) { next++; return next, nil }
+	defer func() { P.Conf, envRandOpenPort, engineVer = oldConf, oldPick, oldVer }()
+	os.WriteFile(filepath.Join(dir, "k.key"), []byte("kk\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "other.token"), []byte(MakeToken("tcp", "203.0.113.9:443", "x", "", "", "", "", "", "")), 0o600)
+	conf := "# WatTunnel - Kharej (server). Kept by wattun-manager from auto tunnel 'k': the carrier Iran picked.\nmode: server\ncarrier: tcp\nlisten: 0.0.0.0:24555\nports:\n  - 8443\n"
+	os.WriteFile(filepath.Join(dir, "k.yml"), []byte(conf), 0o600)
+	if !rebuildKharejToken("k") {
+		t.Fatal("rebuild failed")
+	}
+	tok, err := readTokFile("k")
+	if err != nil || tok.Carrier != "auto" || !strings.Contains(tok.Auto, "tcp:24555") || !strings.HasPrefix(tok.Peer, "203.0.113.9") {
+		t.Fatalf("token = %+v err=%v", tok, err)
+	}
+	if !fileExists(filepath.Join(dir, "k.repaste")) {
+		t.Fatal("no .repaste marker")
+	}
+	NonInteractive = true
+	defer func() { NonInteractive = false }()
+	capture(t, func() { showToken("k") })
+	if fileExists(filepath.Join(dir, "k.repaste")) {
+		t.Error("showToken kept .repaste")
+	}
+}

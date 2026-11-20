@@ -1012,7 +1012,7 @@ func runDelete(n string) bool {
 			os.Remove(filepath.Join(P.Conf, u+ext))
 		}
 	}
-	for _, ext := range []string{".bondretest", ".bondretest.tmp", ".bondfail", ".bondfail.tmp", ".keepopen", ".finalized", ".iranip"} {
+	for _, ext := range []string{".bondretest", ".bondretest.tmp", ".bondfail", ".bondfail.tmp", ".keepopen", ".finalized", ".iranip", ".repaste"} {
 		os.Remove(filepath.Join(P.Conf, n+ext))
 	}
 	for _, ext := range []string{".down", ".cycles", ".retest", ".sla_triggered", ".autoprune", ".autoprune.done", ".autowiden", ".autowiden.down", ".abandoned"} {
@@ -1374,6 +1374,9 @@ func tunnelHead(w io.Writer, n, r, car string, ti *tunnelInfo) {
 		users += fmt.Sprintf(" · %d udp flows", ti.DgramFlows)
 	}
 	fmt.Fprintln(w, "  "+kv("Health", health))
+	if fileExists(filepath.Join(P.Conf, n+".repaste")) {
+		fmt.Fprintln(w, "  "+YEL+"new token: press t and paste it on Iran"+RST)
+	}
 	fmt.Fprintln(w, "  "+kv("Users", users))
 	fmt.Fprintln(w, "  "+kv("Usage", Human(ti.In)+" in · "+Human(ti.Out)+" out"))
 	fmt.Fprintln(w, "  "+kv("Ports", PortsSummary(n, uiW()-16)))

@@ -1305,6 +1305,9 @@ func autoNeedsReopen(n string) bool {
 
 // auto_reopen — reopen all planned carriers (migration from 3.3.0-3.3.8 narrowed/finalized).
 func autoReopen(n string) error {
+	if !fileExists(filepath.Join(P.Conf, n+".token")) {
+		rebuildKharejToken(n)
+	}
 	if !IsAutoKharej(n) {
 		return fmt.Errorf("'%s' is not an auto Kharej tunnel.", n)
 	}
@@ -1411,6 +1414,9 @@ func autoMigrateAll(announce bool) {
 	for _, n := range Tunnels() {
 		if Role(n) != "Kharej" {
 			continue
+		}
+		if !fileExists(filepath.Join(P.Conf, n+".token")) {
+			rebuildKharejToken(n) // 3.3.3-3.3.7 finalize removed it
 		}
 		if !IsAutoKharej(n) {
 			continue

@@ -2113,6 +2113,10 @@ EOF
   chk "3.3.8 WS1: real tunnels() lists parent t_leg and hides companion t_leg-r" "$(tunnels | grep -c '^t_leg$')/$(tunnels | grep -c '^t_leg-r$')" "1/0"
   DASH_N=(t_leg)
   chk "3.3.8 WS1: main menu has no [o] open/close carriers toggle" "$(strip_ansi "$(dash_actions 2>/dev/null)" | grep -c '\[o\] open/close carriers' || true)" "0"
+  chk "rebuilt auto token leaves a .repaste marker" "$([ -f "$WAT_CONF/t_leg.repaste" ] && echo y || echo n)" "y"
+  chk "card shows the repaste notice" "$(strip_ansi "$(tunnel_card t_leg 2>/dev/null)" | grep -c 'paste it on Iran' || true)" "1"
+  show_token t_leg >/dev/null 2>&1
+  chk "show_token clears .repaste" "$([ -e "$WAT_CONF/t_leg.repaste" ] && echo y || echo n)" "n"
   rm -f "$WAT_CONF"/t_revfin* "$WAT_CONF"/t_leg* "$WAT_RUN"/t_revfin* "$WAT_RUN"/fw338
 
   # WS3: mode c custom bond supports joining 2+ reverse rows and forbids mixing direct + reverse

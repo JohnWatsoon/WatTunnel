@@ -112,7 +112,7 @@ func showToken(n string) bool {
 	}
 	f := filepath.Join(P.Conf, n+".token")
 	if Role(n) == "Kharej" && !fileExists(f) {
-		_ = RefreshToken(n)
+		rebuildKharejToken(n)
 	}
 	if !fileExists(f) {
 		Err("No token stored for '" + n + "' (tokens exist only on Kharej tunnels).")
@@ -123,12 +123,18 @@ func showToken(n string) bool {
 		_ = autoReopen(n)
 	}
 	tok := strings.TrimSpace(mustRead(f))
+	rp := filepath.Join(P.Conf, n+".repaste")
 	if NonInteractive || !IsTTY {
 		fmt.Fprintln(Stdout, tok)
+		os.Remove(rp)
 		return true
 	}
 	fmt.Fprintln(Stdout)
 	tokenBox(tok)
+	if fileExists(rp) {
+		Warn("This token is new: paste it on Iran (Iran tunnel page, key t) or Iran's auto test keeps failing.")
+		os.Remove(rp)
+	}
 	return true
 }
 

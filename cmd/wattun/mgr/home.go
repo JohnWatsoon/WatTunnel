@@ -370,6 +370,15 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 		}
 		fmt.Fprintln(w, line)
 	}
+	var rp []string
+	for _, n := range names {
+		if fileExists(filepath.Join(P.Conf, n+".repaste")) {
+			rp = append(rp, n)
+		}
+	}
+	if len(rp) > 0 {
+		fmt.Fprintf(w, "\n  %s!%s new token on %s: open it, press t and paste the token on Iran.\n", YEL, RST, strings.Join(rp, ", "))
+	}
 	if len(stale) > 0 {
 		fmt.Fprintf(w, "\n  %s!%s %s still runs the old binary: open it and restart to load %s.\n", YEL, RST, strings.Join(stale, ", "), orStr(Ver, "the new version"))
 	}

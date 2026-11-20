@@ -5461,6 +5461,7 @@ at_none() { # nothing worked
   if [ "$AT_DLINK" = 0 ]; then
     hint " · Reverse didn't start? On Kharej run:  $SELF auto-ip <name> $(public_ip)"
   fi
+  hint " · Kharej updated to 3.3.8+? Its auto carriers moved to new ports: copy its token again (t) and paste it here"
   hint " · Check Kharej status, token currency, and cloud firewall"
   hint " · Retest after fixing:  ${AT_AGAIN:-paste token again}"
 }
@@ -6868,6 +6869,7 @@ tunnel_card() {
 
   local boot='boot off'; [ "$srv_en" = enabled ] && boot='boot on'
   [ -n "$TI_WHY" ] && box_row "${SC_COL}${TI_WHY}${RST}"
+  [ -f "$CONF/$n.repaste" ] && box_row "${YEL}new token: press t and paste it on Iran${RST}"
   if [ "$srv_act" = active ]; then box_row "${GRY}active${srv_up:+ $srv_up} · $boot${RST}"
   else box_row "${GRY}$srv_act · $boot${RST}"; fi
   if is_auto_kharej "$n"; then
@@ -6998,7 +7000,8 @@ rebuild_kharej_token() { # name -> rc 0 when NAME.token exists or was rebuilt
       elif ! is_shaped_carrier "$cr"; then dplan=$(sed -E "s/(^|,)$cr:[0-9]+/\1$cr:$lp/" <<<"$dplan"); fi
     fi
     ( umask 077
-      make_token auto "$addr" "$key" "${apath:-/wat}" "$sni" "" "$allow" "" "d=$dplan;r=$rplan" >"$CONF/$n.token" )
+      make_token auto "$addr" "$key" "${apath:-/wat}" "$sni" "" "$allow" "" "d=$dplan;r=$rplan" >"$CONF/$n.token"
+      : >"$CONF/$n.repaste" ) # new ports: Iran's saved plan is stale until this token is pasted there (cleared by show_token)
     return 0
   fi
   lis=$(cfg "$n" listen); split_hp "$lis"; lp=$HP_PORT
@@ -7018,6 +7021,10 @@ show_token() {
   fi
   printf '  %s%s%s\n' "$BOLD$YEL" "$(cat "$CONF/$n.token")" "$RST"; token_qr "$(cat "$CONF/$n.token")"
   hint "Contains secret key — share privately."
+  if [ -f "$CONF/$n.repaste" ]; then
+    warn "This token is new: paste it on Iran (Iran tunnel page, key t) or Iran's auto test keeps failing."
+    rm -f "$CONF/$n.repaste"
+  fi
 }
 edit_ports() { # name
   local n=$1 r old=() it i pub=() before par hu
@@ -7231,7 +7238,7 @@ delete_tunnel() {
   bond_retest_disable "$n" # the bond-retest timer belongs to this tunnel
   rm -f "$CONF/$n".yml "$CONF/$n".ech "$CONF/$n".key "$CONF/$n".token "$CONF/$n".auto "$RUN/$n.down" "$RUN/$n.cycles" "$RUN/$n.retest" "$RUN/$n.sla_triggered" \
         "$CONF/$n".bondretest "$CONF/$n".bondretest.tmp "$CONF/$n".bondfail "$CONF/$n".bondfail.tmp "$CONF/$n".keepopen \
-        "$CONF/$n".finalized "$CONF/$n".iranip \
+        "$CONF/$n".finalized "$CONF/$n".iranip "$CONF/$n".repaste \
         "$RUN/$n.autoprune" "$RUN/$n.autoprune.done" "$RUN/$n.autowiden" "$RUN/$n.autowiden.down" "$RUN/$n.abandoned"
   for p in ${n_fw[@]+"${n_fw[@]}"}; do
     [ -z "$(tunnel_using_listen "${p%/*}" "$n")" ] && fw_close "$p"
@@ -9949,7 +9956,7 @@ settings_menu() {
 # ======================================================================================
 need_tunnel() { [ -f "$CONF/$1.yml" ] || { err "No tunnel named '$1'. See: $SELF status"; return 1; }; }
 main_menu() {
-  local num d rest
+  local num d rest rp
   while :; do
     local tn; tn=$(tunnels | wc -l); page_full "Tunnels" "$tn total"
     auto_migrate_all 1
@@ -9957,6 +9964,9 @@ main_menu() {
     local st; st=$(stale_tunnels)
     [ -n "$st" ] && printf '\n  %s!%s old binary running on %s — open and press %s to load v%s\n' \
       "$YEL" "$RST" "${st% }" "$(key_label r)" "$VER"
+    st=''; for rp in "$CONF"/*.repaste; do [ -e "$rp" ] && { rp=${rp##*/}; st="$st${rp%.repaste} "; }; done
+    [ -n "$st" ] && printf '\n  %s!%s new token on %s — open, press %s and paste it on Iran\n' \
+      "$YEL" "$RST" "${st% }" "$(key_label t)"
     dash_actions
     while :; do
       printf '\r%s  %s▸%s %s%s%s' "$EL" "$CYN" "$RST" "$YEL" "$PMSG" "$RST"; PMSG=''
