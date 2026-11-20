@@ -342,3 +342,40 @@ Tests: `go test -count=1 ./cmd/...` ok; **full `go test -count=1 -timeout 15m ./
 gofmt empty, vet clean. New: repair_test.go, repair_codec_test.go, BenchmarkRepairCodec; kill tests now run
 both modes.
 Commit: (this commit)
+
+## 2026-11-21 01:20 · implementer · B — Phantom (`ptcp`) carrier built, wired, unit+loopback tested
+**Built** (`wat/ptcp_linux.go` ~520 lines, `wat/ptcp_other.go` stub): the fieldprobe's proven shape as a
+carrier. Client (PacketIO): raw SYN with Linux-shaped options (MSS 1460, SACK-permitted, timestamps, wscale
+7) → SYN-ACK → ACK → the mimic ClientHello (`wat.FakeClientHello`, -sni shapes it) as the first data
+segment → engine datagrams as PSH|ACK segments with moving seq/ack and timestamps. A new flow (fresh source
+port 61000-64999, fresh ISN, full handshake) every -ptcp-hop..1.5x packets (default 12, under the measured
+~30-packet cut); the retired flow gets FIN|ACK and stays readable hopGrace (500 ms) for in-flight downlink.
+Server (RawIO): answers SYNs from any source with SYN-ACKs, swallows each flow's ClientHello flight, delivers
+the rest as datagrams (src = ip:sport so SendTo replies down the same flow), pure ACK every 4th segment.
+Both ends ACK every 4 segments of the other direction. Profile{MTU: 1340, InitBps: 8e6, Spread: true}
+(one datagram per segment; Spread: each flow takes a fresh port, like Wraith).
+- **Kernel RSTs**: the fieldprobe way — at startup an iptables OUTPUT rule drops our RSTs for the carrier's
+  ports (client: the source-port range; server: the listen port) plus an INPUT ACCEPT; each rule is deleted
+  before insertion (a crashed run's stale rule is cleaned by the next start) and deleted at exit. A crash
+  leaves the rule behind: it matches only our own RSTs on those ports, harmless to other traffic, and the
+  next start removes it. No iptables → a warning, the carrier still runs (RSTs leak).
+- **Reverse mode refused, deliberately**: the 2026-11-14 field run measured Kharej->Iran cuts nothing, so the
+  reverse direction gains nothing over a plain tcp carrier; -reverse fails loudly like gre/ipip. This is a
+  scope cut against the plan's bullet 2 "reverse mode", with the field evidence as the reason.
+- IPv4 only (the pair's IPv6 is dead — PLAN-carriers.md); not in the auto test set (per plan).
+
+**Wiring**: engine dispatch `case "ptcp"` in cmd/wattun (client `-peer host[:port]` default port 443, server
+`-listen`), flag `-ptcp-hop` (12). Manager: carrier accepted in bash `carrier_ok` + `carrier_min_ver`
+(3.4.3), MGR_VERSION → 2026112101; Go mgr `carrierMinVer`, the "more transports" picker (own gates: 3.4.3 +
+Linux), VCarrierList/`carrier_ok` messages list ptcp. `repair`/`ptcp-hop` declared CFG_FILE_ONLY in the bash
+manager (the wizards do not write them yet — known gap, logged). TECHNICAL.md: carriers table row, peer row,
+flag row, root-carrier list. CI: TestPTCP joined the root `icmp` job's regex.
+**Tests** (`wat/ptcp_linux_test.go`): segment codec (checksum verifies on SYN/data, options MSS/SACK/TS/wscale
+present and placed, seq/ack/flags/payload round-trip, TSecr echo) — runs on any Linux;
+`TestPTCPLoopback` (root, joins the CI root job): 30 uplink datagrams with hop=4 → all 30 delivered, 10
+downlink via SendTo delivered, ≥4 flows used, max packets per flow < 30 (the hop rule the plan asked for).
+Cannot execute here (Windows checkout); `GOOS=linux go build/vet ./...` clean, so compile is proven, the
+run is CI's (the same position as the gomgr job). No wire change to existing carriers; nothing default.
+Tests: `go test -count=1 ./cmd/...` ok; `bash test-manager.sh` ALL OK (after the CFG_FILE_ONLY fix the
+coverage check demanded); gofmt empty; vet clean both GOOS.
+Commit: (this commit)

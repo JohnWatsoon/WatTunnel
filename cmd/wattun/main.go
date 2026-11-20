@@ -125,6 +125,7 @@ func main() {
 	tcpMimic := flag.Bool("tcp-mimic", true, "tcp carrier: open every connection with a TLS ClientHello-shaped hello (SNI -fake-sni, default www.cloudflare.com) that carries the authentication, and mask the 2-byte frame lengths, so the stream starts like TLS and has no plain structure (3.0.0; both ends; an older peer is detected and answered with the plain 8-byte pool id after a few seconds; false sends the plain id)")
 	udpDNS := flag.Bool("udp-dns", false, "udp carrier: start every datagram with a DNS message header and question, so a filter that lets only DNS-looking UDP through (measured: UDP to port 53 passes, everything else is cut after 3 datagrams) passes the tunnel; use with port 53 on the server. Both ends must set it; an older peer cannot read it (3.0.0)")
 	udpHop := flag.Int("udp-hop", 0, "udp carrier, client only (Wraith, 3.3.9): send from a new UDP source port every N to 1.5N packets (0 = off; 12 suits a path that cuts each flow after ~30 packets). Any udp server connects (it follows the newest source port); a 3.3.9 server also detects the hopping and paces the downlink for it")
+	ptcpHop := flag.Int("ptcp-hop", 12, "ptcp carrier, client only (Phantom, 3.4.3): open a new fake-TCP flow (fresh source port, SYN, ClientHello) every N to 1.5N packets (the 2026-11-14 field run measured a ~30-packet cut per 5-tuple; 12 keeps a margin)")
 	udpDNSEdns := flag.Bool("udp-dns-edns", false, "udp carrier with udp-dns: make the frames structurally complete DNS (3.3.8; both ends) - queries add an EDNS0 OPT record (ARCOUNT=1, size 1232) and the server replies as real answers that echo the query's id and question and carry the tunnel packet as TXT RDATA, instead of ANCOUNT=0 ciphertext after the question. A legacy query still gets the legacy reply, so the server can enable this while clients upgrade; a legacy server cannot parse the OPT")
 	probeGuard := flag.Bool("probe-guard", false, "ws|wss|h2|h2c|grpc carriers: the server answers a tunnel request only when it carries the key-derived X-Request-Id token, so an active prober gets the decoy/nginx pages instead of a real 101/200 (3.3.8; both ends; default off keeps older peers interoperable)")
 	shape := flag.Bool("shape", true, "randomize idle traffic: pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval around -ping-every (3.0.0; wire-compatible with older peers)")
@@ -610,6 +611,35 @@ func main() {
 				log.Fatalf("%s socket: %v", carrier, err)
 			}
 			pio, raw = r, r
+		case "ptcp":
+			// Phantom (3.4.3): the engine's datagrams as fake-TCP segments on a raw socket, hopping the source
+			// port and handshake every -ptcp-hop packets. Linux + root, IPv4, both ends 3.4.3. Not reverse: the
+			// field run (2026-11-14) showed Kharej->Iran cuts nothing, so the reverse direction gains nothing
+			// over a plain tcp carrier. Not field-measured as a carrier yet; only the probe shape is.
+			if *reverse {
+				log.Fatalf("ptcp carrier: -reverse is not supported (the Kharej->Iran direction is unfiltered; use tcp there)")
+			}
+			if server {
+				lp, err := net.LookupPort("tcp", listen)
+				if err != nil || lp < 1 {
+					log.Fatalf("ptcp carrier: -listen %q is not a TCP port", listen)
+				}
+				r, err := wat.NewPTCPServer(lp)
+				if err != nil {
+					log.Fatalf("ptcp socket: %v", err)
+				}
+				raw = r
+			} else {
+				if peer == "" {
+					log.Fatalf("ptcp carrier: -peer is empty (want the server's IP[:port], default port 443)")
+				}
+				r, err := wat.NewPTCPClient(peer, src, *fakeSNI, *ptcpHop)
+				if err != nil {
+					log.Fatalf("ptcp socket: %v", err)
+				}
+				pio = r
+			}
+			log.Printf("ptcp carrier: Phantom fake-TCP shape (probe-proven 2026-11-14, not field-measured as a carrier); both ends need 3.4.3")
 		case "sit", "6to4", "xfrm-ipsec", "etherip", "l2tpv3":
 			// F19 phase 1 (3.3.0): raw-tier shaped carriers. wattun-internal wire shapes between two 3.3.0 peers
 			// (both ends need the same carrier name), not real 6in4/IPsec/EtherIP/L2TPv3; raw sockets are Linux+root.

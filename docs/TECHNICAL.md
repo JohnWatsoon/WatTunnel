@@ -601,7 +601,7 @@ If the route cuts TCP in both directions, only ICMP (and reverse ICMP) will work
 ## Carriers
 
 All carriers carry the same encrypted session. Pick one with `carrier:` (or `-carrier`). Only the raw-socket carriers
-need root: `icmp`, `gre`, `ipip` and the shaped raw tier (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`); the
+need root: `icmp`, `gre`, `ipip`, `ptcp` and the shaped raw tier (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`); the
 other carriers, including the shaped UDP tier, run as an ordinary user. The shaped carriers are described below.
 
 | Carrier | Use it when | Default datagram size | Needs root | Notes |
@@ -1410,6 +1410,7 @@ be CPU-bound on small Iran hosts, below reverse tcp where reverse works. The man
 | `tcp`, `tls`, `ws`, `wss`, `h2`, `h2c`, `grpc` | yes | yes | direct: 1.3.0; reverse: 1.8.0 |
 | `gre`, `ipip` | yes | no | 3.2.0 (Linux + root) |
 | shaped raw tier (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`) | yes | no | 3.3.0 (Linux + root) |
+| `ptcp` (Phantom) | yes (Linux + root, IPv4) | no (`-reverse` refused: the Kharej->Iran direction is unfiltered, a plain `tcp` carrier passes there) | 3.4.3. Fake-TCP segments on a raw socket: Linux-shaped SYN/SYN-ACK/ACK handshake with timestamps, the mimic ClientHello as the first flight, datagrams as PSH+ACK data. The client hops to a fresh source port and handshake every `-ptcp-hop`..1.5x packets (default 12; the 2026-11-14 field run measured a ~30-packet cut per 5-tuple). Server: `-listen` is the fake TCP port (default 443 when `-peer host[:port]` omits it). The engine's own RSTs for the carrier's ports are dropped with an iptables rule written at startup and removed at exit (a crash leaves the rule; the next start cleans it). Not in the auto-test set. The probe shape is field-proven; the carrier itself is NOT field-measured yet. |
 | shaped UDP tier (`fou-gre`, `gue-ipip`, `vxlan`, `geneve`, `dnscrypt-udp`, `ntp-direct`, `openvpn-dco`, `srtp-direct`) | yes | no | 3.3.0 |
 
 The reverse pool carriers are in the first release of this repository's history (1.8.0). An earlier release may
@@ -1705,7 +1706,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `key-file` | | both | File with the key (whitespace trimmed). Same on both ends. |
 | `carrier` | `icmp` | both | One of the carriers above (including the 3.3.0 [shaped carriers](#shaped-carriers-330)), or several joined with `+` (see Bonding). A shaped carrier must be alone: a `+` list that contains one stops startup. A bonded leg may carry a `:up` / `:down` suffix (3.3.9): `udp:up` carries only the uplink, `udp:down` only the downlink (`:down` is udp-only; both ends 3.3.9). See [Directional bond legs](#directional-bond-legs-updown). |
 | `peer-NAME`, `listen-NAME` | = `peer`, `listen` | client / server | Bonded carriers only: per-carrier address (`peer-udp`, `listen-tcp`, ...). A shaped raw-tier carrier has no `listen-NAME`. |
-| `peer` | | client (server with `reverse`) | icmp, udp: server IP. Pool carriers: `host:port`. Shaped raw tier: the server's bare IP (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`). Shaped UDP tier: `host[:port]`, a bare host using the protocol's conventional port. Reverse pool carriers: Kharej sets Iran's `IP:port`. Reverse icmp: Kharej sets Iran's IP, Iran keeps Kharej's. |
+| `peer` | | client (server with `reverse`) | icmp, udp: server IP. Pool carriers: `host:port`. Shaped raw tier: the server's bare IP (`sit`, `6to4`, `xfrm-ipsec`, `etherip`, `l2tpv3`). Shaped UDP tier: `host[:port]`, a bare host using the protocol's conventional port. `ptcp`: `host[:port]` (default port 443). Reverse pool carriers: Kharej sets Iran's `IP:port`. Reverse icmp: Kharej sets Iran's IP, Iran keeps Kharej's. |
 | `listen` | `:4443` | server (client with `reverse`) | Address for non-ICMP carriers. With `reverse` Iran listens here and Kharej's `peer` must point to it. A shaped UDP-tier carrier defaults to the protocol's conventional port instead of `:4443`; the shaped raw tier has no `listen`. |
 | `reverse` | false | both | Swap who listens and who dials. With `icmp` (2.0.0): Kharej sends the requests, Iran replies. With `udp` (3.0.0): Iran binds `listen` and only answers, Kharej punches to `peer`. Not supported on the 3.3.0 shaped carriers (or `gre`/`ipip`). |
 | `hdr-mask` | true | both | Mask the session id and packet number at the start of every packet (3.0.0). An older peer is detected and answered plain; `false` sends the plain header. |
@@ -1736,6 +1737,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `max-conns` | 4096 | client | Connections the public TCP listeners hold at once in total, 1 to 1000000 (3.3.5; fixed at 4096 before). One source IP holds at most 1024, or this value when it is lower. File-only in the manager. |
 | `icmp-type` | `echo` | both | ICMP carrier: `echo` or `timestamp` (Linux does not answer `info`/`mask`). Both ends must match. |
 | `loss-ceiling` | false | both | Opt-in loss-aware ceiling for the pacer (see "ICMP path limits and pacing"). Off = delay only. |
+| `ptcp-hop` | 12 | client (3.4.3) | `ptcp` only: open a new fake-TCP flow (fresh source port, SYN, ClientHello) every N to 1.5N packets. 12 keeps every 5-tuple under the ~30-packet cut the 2026-11-14 field run measured. |
 | `slack-ms` | 8 | both | RTT growth tolerated before slowing down. |
 | `hedge` | false | both | Send small young packets twice. Helps lossy tails, costs packets. |
 | `fec` | off | both | `off` or `auto`: adaptive XOR parity for small transfers (see FEC). Needs 1.7.0 and `auto` on both ends. Since 3.3.0 parity is also loss-gated: it is sent only while the sender's measured loss is above `fec-on-loss`. |

@@ -86,6 +86,8 @@ var (
 func pickShapedCarrier(head func(io.Writer)) string {
 	var opts []string
 	var items []Item
+	opts = append(opts, "ptcp")
+	items = append(items, Item{Label: "ptcp", Desc: "Phantom: fake TCP segments on a raw socket, source port hops every few packets (3.4.3 both ends, Linux + root; probe-proven, not field-measured)"})
 	for _, c := range p2ShapedRawList {
 		opts = append(opts, c)
 		items = append(items, Item{Label: c, Desc: "raw tier, IP protocol " + shapedRawProto(c)})
@@ -99,6 +101,8 @@ func pickShapedCarrier(head func(io.Writer)) string {
 		fmt.Fprintf(w, "  %sMore transports%s\n", BOLD, RST)
 		hintLine(w, "wattun-internal wire shapes, NOT the real protocols. Both ends need wattun 3.3.0;")
 		hintLine(w, "single carrier only; the raw tier needs root or CAP_NET_RAW.")
+		hintLine(w, "ptcp (Phantom, 3.4.3): fake TCP on a raw socket, hops its source port every few packets;")
+		hintLine(w, "probe-proven on the live path, not field-measured as a carrier yet.")
 		fmt.Fprintln(w)
 	}
 	sel := 0
@@ -111,6 +115,17 @@ func pickShapedCarrier(head func(io.Writer)) string {
 			continue
 		}
 		c := opts[i]
+		if c == "ptcp" { // its own gate: version 3.4.3 and a Linux raw socket, not the 3.3.0 shaped-tier rules
+			if !carrierOkHere("ptcp") {
+				Err("ptcp needs wattun 3.4.3 on this server (found " + orStr(engineVer(), "unknown") + "); run: " + P.Self + " update")
+				continue
+			}
+			if runtime.GOOS != "linux" {
+				Err("ptcp needs Linux with root/CAP_NET_RAW on both ends (this server is not Linux).")
+				continue
+			}
+			return c
+		}
 		if !VCarrierList(c) || !shapedSupportedHere(c) {
 			return ""
 		}

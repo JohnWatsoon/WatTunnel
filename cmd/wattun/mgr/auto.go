@@ -91,6 +91,8 @@ func carrierMinVer(c string) string {
 	switch {
 	case strings.HasSuffix(c, ":up") || strings.HasSuffix(c, ":down"):
 		return "3.3.9"
+	case c == "ptcp":
+		return "3.4.3"
 	case c == "gre" || c == "ipip":
 		return "3.2.0"
 	case isShapedRaw(c) || isShapedUDP(c):
