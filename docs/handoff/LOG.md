@@ -213,3 +213,36 @@ Commit: see the next commit on gomgr-review
 New plan: `docs/handoff/PLAN-phase2.md` (Track A coded downlink, Track B Phantom/ptcp with hopping, Track C Split
 only if A and B are done). Same log, same rules. Start with Track A.
 Commit: none
+
+## 2026-11-20 19:35 · implementer · phase 2 / A1 — read pass + baseline kill numbers
+Read fec.go, the ACK path (wire.go frAck/appendAck, session.go ackEvery=6/2ms, late ACKs, pathAcked RTT
+samples) and cc.go's loss machinery (lossTime = rtt*1.25+3 ms, PTO = 3*srtt+4*rttvar min 120 ms, delay-based
+rate: loss never cuts the rate, only the opt-in loss-ceiling).
+
+**Why today's per-block XOR does not fix the target path's tail:**
+1. Coverage: `fecNoteSent` skips any packet whose plaintext > maxPlain-fecHdrMax — a full bulk packet is never
+   covered. At 640 B MTU nearly every bulk packet is full; at 1400 B the same. The kill scenario (interactive
+   stream next to bulk) is mostly uncovered: the parity only ever protects small packets.
+2. Gate: the default loss gate (on at 2 %, off at 0.5 %) is CLOSED at the target's 0.2-2 % random loss — at
+   1 % measured loss today's FEC sends no parity at all (that was F11's point: no overhead on a healthy path).
+3. Even when parity flows: one XOR per group of <= 16 small packets, sent after the burst ends; a second loss
+   in the group is unrepairable, and the parity packet itself is subject to the same loss with no recovery.
+4. The retransmit path it would have to beat: sender-side detection needs lossTime (~1.25xRTT+3 ms = ~53 ms at
+   40 ms RTT) of ACK silence after the send, then the resend costs another RTT — an echo whose downlink packet
+   was lost lands at >= ~93 ms + queueing, exactly where the measurements put p90.
+
+**Baseline kill numbers (today's code, new harness `wat/coded_test.go`, link model 20 ms one way, 10 MB/s,
+100 ms max queue, seeds fixed):**
+- Interactive 1-byte echo during a bulk download, 1 % loss, 40 ms RTT:
+  - MTU 640: p50=42.2 ms, p90=93.6 ms, p99=132.9 ms, max=185.2 ms (retrans 1743)
+  - MTU 1400: p50=42.1 ms, p90=91.9 ms, p99=122.0 ms, max=277.4 ms (retrans 1743)
+  - p50 sits on the RTT floor (42 ms); the tail is the loss-repair round trips: p90 ~= 2.3xRTT (one
+    loss+retransmit), p99 ~= 3xRTT (loss + lost retransmit or a lost ACK).
+- Bulk download 8 MB, MTU 1400: 5.3 MB/s at 0 %, 5.2 MB/s at 0.5/1/2 % loss (retrans 0/67/144/290) — the
+  delay-based CC holds the rate; loss costs only retransmits, so throughput headroom for a small repair
+  overhead exists.
+Kill criteria for the coded build: p99 clearly below ~120 ms at both MTUs without losing the 5.2-5.3 MB/s.
+Files: wat/coded_test.go (new, measuring tests, no gate), wat/version.go (3.4.3 per plan).
+Tests: `go test -count=1 -run TestKill -v ./wat/` → numbers above, both tests PASS (data intact);
+`go vet ./wat/` clean.
+Commit: (this commit)
