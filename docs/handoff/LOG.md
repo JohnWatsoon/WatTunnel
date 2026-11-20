@@ -54,3 +54,17 @@ testbench` (empty), `go vet ./...` (clean), `go test -count=1 ./cmd/...` → ok 
 Known gaps (logged, not fixed here): `iran --pick bond/rbond` paths untested beyond best; `--policy` parsed but
 only consumed by auto-retest (out of scope); kharej `default_listen` has no cdn_mode port preference yet.
 Commit: (this commit)
+
+## 2026-11-20 17:52 · implementer · task 2 — Kharej auto end to end
+`wizardKharejAuto` now runs against a temp conf in a test: `envRandOpenPort` stubbed to an incrementing port
+picker, `envPublicIP` to 203.0.113.10, `envSystemdRun`/`envFWOpen` recorded (the real `EnableNow` path just fails
+harmlessly without systemd), engine version pinned to 9.9.9. Options taken from the NI struct
+(Name=ci1, Addr=127.0.0.1, Ports=18999).
+Assertions: the yml (header, mode: server, `carrier: icmp+…`, `listen-udp/-tcp:` lines, `path: /api/…`,
+metrics, `ports:` block with the --ports entry), the `.key` (exactly 40 chars, not the dev fallback), the
+`.token` (parses with ReadToken, Carrier=auto, plan has `d=` and a separate `;r=`, peer and allow carried),
+the returned Units start with the parent, firewall rules were opened, token starts with `wat1:`.
+Files: cmd/wattun/mgr/auto_wizard_test.go (new).
+Tests: `go test -count=1 -run TestWizardKharejAutoEndToEnd ./cmd/wattun/mgr/` → ok; then gofmt (empty), vet
+(clean), full `go test -count=1 ./cmd/wattun/mgr/` → ok.
+Commit: (this commit)
