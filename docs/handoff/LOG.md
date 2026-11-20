@@ -379,3 +379,22 @@ run is CI's (the same position as the gomgr job). No wire change to existing car
 Tests: `go test -count=1 ./cmd/...` ok; `bash test-manager.sh` ALL OK (after the CFG_FILE_ONLY fix the
 coverage check demanded); gofmt empty; vet clean both GOOS.
 Commit: (this commit)
+
+## 2026-11-21 01:35 · implementer · C — Split: already covered by Bifrost ":up"/":down" legs (3.3.9); nothing to build
+Split was "a send-only bond leg: carries data one way, liveness from ACKs arriving on another path".
+`wat/bond.go` + `wat/paths.go` (3.3.9) already implement exactly that:
+- A `udp:down` leg is send-only from the server's side: the client never sends data on it (only the NAT
+  knock/announce; bond.go:172-190 guards it), the server pushes downlink to the port the client announced
+  with frEndpoint (0x0e). A `:up` leg is the mirror (client sends, the server never replies on it).
+- Liveness from other paths: the session ACKs name packet numbers, not paths — session.go pathAcked maps an
+  acked packet to the LANE it was sent on and feeds PathFeedback.OnAck/OnLoss for that lane, whatever path
+  the ACK itself arrived on. A `:down` leg is measured alive by ACKs returning on the other legs, which is
+  Split's definition.
+- Mixed-version degradation and the security invariant (the announced port binds to the authenticated
+  source) are documented at wire.go frEndpoint and covered by the Bifrost tests.
+The one gap vs a fully general Split is documented in paths.go:47: in 3.3.9 a ":down" leg is restricted to
+the udp carrier (a quiet bound socket). A ":down" leg of another carrier (e.g. icmp:down) would need that
+carrier's quiet-receive form — a separate, small feature if the owner ever wants it; nothing about Split's
+mechanism is missing.
+Per the plan's instruction ("if it is covered, write that and stop"): written, stopping.
+Commit: (this commit)
