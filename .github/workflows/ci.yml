@@ -94,8 +94,6 @@ jobs:
     timeout-minutes: 20
     env:
       WAT_PREFIX: wtci
-      WAT_CONF: ${{ runner.temp }}/conf
-      WAT_RUN: ${{ runner.temp }}/run
       WAT_GO_MGR: '1'
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +106,7 @@ jobs:
       # headroom for the Go runtime's address-space reservations).
       - name: Kharej auto wizard
         run: |
-          export WAT_BIN="$PWD/wattun"
+          export WAT_BIN="$PWD/wattun" WAT_CONF="$RUNNER_TEMP/conf" WAT_RUN="$RUNNER_TEMP/run"
           run_cap() {
             if sudo systemd-run --scope -p MemoryMax=300M true 2>/dev/null; then
               sudo env WAT_PREFIX="$WAT_PREFIX" WAT_CONF="$WAT_CONF" WAT_RUN="$WAT_RUN" WAT_BIN="$WAT_BIN" \
@@ -125,7 +123,7 @@ jobs:
           for f in ci1.yml ci1.key ci1.token; do test -f "$WAT_CONF/$f" || { echo "missing $f"; exit 1; }; done
       - name: keep the Kharej engine listening (systemd unit, else bare process)
         run: |
-          export WAT_BIN="$PWD/wattun"
+          export WAT_BIN="$PWD/wattun" WAT_CONF="$RUNNER_TEMP/conf" WAT_RUN="$RUNNER_TEMP/run"
           if sudo systemctl is-active --quiet wtci@ci1; then
             echo "kharej engine up via systemd"
           else
@@ -135,7 +133,7 @@ jobs:
           fi
       - name: Iran auto test against the token
         run: |
-          export WAT_BIN="$PWD/wattun"
+          export WAT_BIN="$PWD/wattun" WAT_CONF="$RUNNER_TEMP/conf" WAT_RUN="$RUNNER_TEMP/run"
           TOK=$(sed -n 's/^TOKEN=//p' "$RUNNER_TEMP/kharej.out")
           test -n "$TOK"
           run_cap() {
