@@ -1452,6 +1452,7 @@ var (
 func avAdd(label, car, kind, peer, port, sni, fp, ech, frag, fs, fm, extra string) {
 	av = append(av, variant{Label: label, Car: car, Kind: kind, Peer: peer, Port: port,
 		SNI: sni, FP: fp, ECH: ech, Frag: frag, FS: fs, FM: fm, X: extra})
+	ar = append(ar, result{}) // keeps AR_* as long as AV_* for variants added while testing
 }
 
 // auto_variants_anti — the anti-censor preset grid.
@@ -1534,7 +1535,11 @@ func autoVariants(tok Token) {
 				continue
 			}
 			if binVerOK("2.2.0") {
-				avAdd(c+" · chrome+ech", c, "c", tok.SNI+":"+p, "", tok.SNI, "chrome", "auto", "", "", "", "")
+				if e := csLast.Edges; len(e) > 0 { // the best Cloudflare edges, from autoTest's scan
+					avAdd(fmt.Sprintf("%s · chrome+ech · %d edges", c, len(e)), c, "c", cdnPeerList(e, p), "", tok.SNI, "chrome", "auto", "", "", "", "")
+				} else {
+					avAdd(c+" · chrome+ech", c, "c", tok.SNI+":"+p, "", tok.SNI, "chrome", "auto", "", "", "", "")
+				}
 			} else {
 				avAdd(c+" via CDN", c, "c", tok.SNI+":"+p, "", tok.SNI, "", "", "", "", "", "")
 			}
@@ -1840,11 +1845,25 @@ func autoCurrentKey(name string) string {
 // 3.3.8+ always-open lifecycle: NO auto-narrow/prune). Probing goes through the
 // spawnClient adapter; ranking is P3's atRank.
 func autoTest(tok Token) {
-	autoVariants(tok)
 	if kd, err := atPrep(tok.Key); err == nil { // the probes dial with the tunnel key
 		defer kd.cleanup()
 		atKeyFile, atTok = kd.dir+"/key", tok
+		defer func() { atKeyFile = "" }()
 	}
+	csLast, ctSNI, ctFull = cdnScanRes{}, tok.SNI, false
+	if tok.SNI != "" && cdnOK() { // one scan for all CDN carriers with a Cloudflare-proxyable port
+		d := planPart(tok.Auto, "d")
+		for _, c := range strings.Fields(autoVarCDN) {
+			if p := planPort(d, c); p != "" && cfPortOK(c, p) {
+				_ = spin("Cloudflare edges", func() error {
+					csLast, _ = cdnScan(tok.SNI, p, orStr(tok.Path, "/wat"), c)
+					return nil
+				})
+				break
+			}
+		}
+	}
+	autoVariants(tok)
 	n := len(av)
 	if atScreenSkipped != "" {
 		Warn("Skipped (needs newer wattun): " + atScreenSkipped)
@@ -1871,6 +1890,14 @@ func autoTest(tok Token) {
 			atMovedMB += 2 * atMB
 		}
 		bestRate = atBestRate(bestRate, i)
+		if !atQuiet {
+			atPrint(Stdout, i, av, ar, atMB)
+		}
+		// after the last chrome+ech row: the other TLS variants of each CDN carrier whose chrome+ech failed
+		// (cdnTry probes and prints them itself; they land after n, so this loop does not run them again)
+		if av[i].Kind == "c" && cdnOK() && (i+1 >= n || av[i+1].Kind != "c") {
+			cdnAutoExtras()
+		}
 		switch atAct {
 		case "group":
 			if avAnti(av[i]) {
@@ -1899,22 +1926,27 @@ func atProbe(i, waitSecs int) {
 	if atKeyFile != "" {
 		args = append(args, "-key-file", atKeyFile)
 	}
-	if atTok.Path != "" && hasHTTPLeg(av[i].Car) {
-		args = append(args, "-path", atTok.Path)
+	if hasHTTPLeg(av[i].Car) {
+		args = append(args, "-path", orStr(atTok.Path, "/wat"))
 	}
 	if atTok.Icmp != "" && strings.Contains("+"+av[i].Car+"+", "+icmp+") {
 		args = append(args, "-icmp-type", atTok.Icmp)
 	}
-	if av[i].SNI != "" {
-		args = append(args, "-sni", av[i].SNI, "-host", av[i].SNI)
+	args = append(args, probeArgs(av[i])...)
+	mp := envFreeMetricsPort()
+	dmap, ok := atFreePort(mp+1, map[int]bool{mp: true})
+	if !ok {
+		ar[i].Why = "no free test port"
+		return
 	}
+	// the engine refuses a client without any -map: a loopback-only dummy mapping publishes nothing
+	args = append(args, "-map", fmt.Sprintf("%d:1@127.0.0.1", dmap))
 	if av[i].Kind == "r" {
 		args = append(args, "-reverse")
 		if IsPool(av[i].Car) && av[i].Port != "" {
 			args = append(args, "-listen", ":"+av[i].Port)
 		}
 	}
-	mp := envFreeMetricsPort()
 	proc, err := envSpawnClient(append(args, "-metrics", "127.0.0.1:"+strconv.Itoa(mp)), "")
 	if err != nil {
 		ar[i].Why = "no free test port"
@@ -2335,7 +2367,6 @@ func atTune(sel []int) (tune string, keys []string, mb int) {
 				av[target].SNI, av[target].FP, av[target].ECH, av[target].Frag, av[target].FS, av[target].FM,
 				strings.Join(append(append([]string{}, extra...), "-"+k+"="+v), " "))
 			i := len(av) - 1
-			ar = append(ar, result{})
 			atProbe(i, 8)
 			mb += 2 * atMB
 			if ar[i].OK && atScore(i) > best*1.1 {
@@ -2386,6 +2417,7 @@ func autoTestCmd(name string) error {
 	}
 	atPreset = preset
 	autoTest(tok)
+	atProbeLiveTunnel(name, 8)
 	rank := autoRefine(atRank(av, ar, ""))
 	if len(rank) == 0 {
 		atNone()
@@ -2415,6 +2447,10 @@ func autoTestCmd(name string) error {
 // or an SLA breach triggered it. 3.3.8+ lifecycle: no auto-narrow/prune.
 func autoRetest(name string) error {
 	if !fileExists(filepath.Join(P.Conf, name+".auto")) {
+		if cdnTunnelP(name) { // not an auto tunnel: a plain CDN tunnel only gets a fresh edge scan
+			cdnRefreshEdges(name)
+			return nil
+		}
 		return fmt.Errorf("not an auto tunnel")
 	}
 	tok, err := readAutoTok(name)
@@ -2427,6 +2463,7 @@ func autoRetest(name string) error {
 	atSkip = atSkipReverseKeys(name)
 	atPreset = "normal"
 	autoTest(tok)
+	atProbeLiveTunnel(name, atScreenMBStart)
 	rank := atRank(av, ar, "")
 	if len(rank) == 0 {
 		envLogger("wattun-heal", "retest of "+name+": no connection type works right now")
@@ -2437,6 +2474,9 @@ func autoRetest(name string) error {
 	if avKey(av[winner]) == cur {
 		envLogger("wattun-heal", "retest of "+name+": current variant "+cur+" is already the top-ranked carrier, no switch")
 		os.Remove(filepath.Join(P.Run, name+".sla_triggered"))
+		if cur == Cfg(name, "carrier")+"/c" { // same carrier through the CDN: replace dead edge IPs
+			cdnRefreshEdges(name)
+		}
 		return nil
 	}
 	// If off-peak optimization or SLA breach triggered this, always upgrade to the winner!
@@ -2445,6 +2485,9 @@ func autoRetest(name string) error {
 		for _, best := range rank {
 			if avKey(av[best]) == cur {
 				envLogger("wattun-heal", "retest of "+name+": current variant "+cur+" still works, no switch")
+				if cur == Cfg(name, "carrier")+"/c" {
+					cdnRefreshEdges(name)
+				}
 				return nil
 			}
 		}
@@ -2567,4 +2610,66 @@ func autoMenu(name string) {
 var p1FetchStats = func(addr string) string {
 	raw, _ := FetchStatsRaw(addr)
 	return raw
+}
+
+// probeArgs: the per-variant TLS / desync / tuning flags of a throw-away client (bash at_start).
+func probeArgs(v variant) []string {
+	var a []string
+	if v.SNI != "" {
+		a = append(a, "-sni", v.SNI, "-host", v.SNI)
+	}
+	if v.FP != "" {
+		a = append(a, "-fp", v.FP)
+	}
+	if v.ECH != "" {
+		a = append(a, "-ech", v.ECH)
+	}
+	if v.Frag != "" && v.Frag != "0" {
+		a = append(a, "-tls-frag", v.Frag)
+	}
+	if v.FS != "" {
+		a = append(a, "-fake-sni", v.FS)
+		if v.FM != "" {
+			a = append(a, "-fake-mode", v.FM)
+		}
+	}
+	return append(a, strings.Fields(v.X)...) // auto tuning: -key=value words
+}
+
+// atProbeLiveTunnel measures a running reverse tunnel through its own /speedtest, since its
+// port was skipped in the screening (bash at_probe_live_tunnel). Without it the current
+// variant never ranks and every retest switches away from it.
+func atProbeLiveTunnel(n string, mb int) {
+	if !IsReverse(n) {
+		return
+	}
+	_, mp := SplitHP(Cfg(n, "metrics"))
+	if !isDigits(mp) {
+		return
+	}
+	if s, err := statsOf(n); err != nil || get(s, "alive") != "true" {
+		return
+	}
+	cur, idx := autoCurrentKey(n), -1
+	if cur == "bond/r" {
+		avAdd("reverse bond "+Cfg(n, "carrier")+" (current)", Cfg(n, "carrier"), "r", atAddr, "", "", "", "", "", "", "", "")
+		idx = len(av) - 1
+	} else {
+		for i := range av {
+			if avKey(av[i]) == cur {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	save := atMB
+	atMB = mb
+	atMeasure(idx, atoi(mp))
+	atMB = save
+	if !atQuiet {
+		atPrint(Stdout, idx, av, ar, atMB)
+	}
 }

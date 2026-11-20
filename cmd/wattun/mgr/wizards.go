@@ -631,6 +631,11 @@ func wizardIran() bool {
 			Hint("Reverse: Kharej sends pings, Iran replies")
 		}
 	}
+	// CDN carrier + domain: automatic edge / TLS tuning (wattun >= 2.2.0), silent otherwise
+	cdnV, cdnTuned := cdnWizardTune(t)
+	if cdnTuned {
+		t.Peer, t.SNI = cdnV.Peer, cdnV.SNI
+	}
 
 	// port mappings: pre-fill from the token allowlist (bash 3436-3462)
 	pe := &portEditor{Role: "Iran", Tunnel: name, Allow: allowToArray(t.Ports)}
@@ -810,6 +815,9 @@ func wizardIran() bool {
 	}
 	if sni != "" {
 		p.SNI = sni
+	}
+	if cdnTuned {
+		p.Extra = append(p.Extra, cdnExtra(name, cdnV, &p.ECH)...)
 	}
 	atomicWrite(filepath.Join(P.Conf, name+".key"), []byte(t.Key+"\n"), 0o600)
 	atomicWrite(filepath.Join(P.Conf, name+".yml"), []byte(iranYML(p)), 0o600)
