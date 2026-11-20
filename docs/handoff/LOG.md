@@ -186,3 +186,25 @@ What the reviewing agent should know:
   Owner: please push `main` (or a branch) so `.github/workflows/ci.yml` runs; the `gomgr` job is the sign-off
   test. If it fails, its output is the next work item.
 Commit: 5ad809c (head)
+
+## 2026-11-20 · reviewer · review of tasks 1-8
+Checked: all 8 commits are by JohnWatsoon with no AI trailer; `wat/`, `install.sh` and the default in
+`manager_unix.go` are untouched; the `autoTune*` grids match bash `AUTO_TUNE_*` exactly; local gofmt/vet/
+`go test ./cmd/...` (256) pass; `bash test-manager.sh` ALL OK.
+CI on branch `gomgr-review`:
+- The first push failed at load: `${{ runner.temp }}` is not allowed in job-level `env`. WAT_CONF/WAT_RUN now
+  come from `$RUNNER_TEMP` inside each step.
+- The second run reached the wizards. Kharej auto printed TUNNEL=/TOKEN= with no OOM, but the file checks failed:
+  the sandbox conf is root-only (0700), so they now use `sudo test`/`sudo grep`.
+- That run also exposed a real bug in both managers. `show_token` -> `refresh_token` treated an auto Kharej
+  (`carrier: icmp+udp+...`) as an arm-blackout fortress bond and rewrote NAME.token into a bond token, dropping the
+  auto plan. The Go wizard printed that wrong token first. In bash, opening a tunnel's token page (key t) did the
+  same. This is the likely cause of the "token gone / auto test all red" reports. Fix: the fortress branch runs
+  only when the token is not auto, or when called as `refresh_token NAME fortress`, which only arm-blackout does
+  (bash + Go). Tests: `TestRefreshTokenKeepsAutoPlan` and two test-manager checks.
+- Third run: `gomgr` PASSED (the Kharej auto -> token -> Iran auto test round trip on Linux under the 300 MB cap).
+  `build` failed only on my new test-manager check, because `role()` is stubbed to Iran at that point. Fixed by
+  setting role to Kharej around the check. Local ALL OK.
+Verdict: the plan is done. The Go manager meets the sign-off gate. Flipping the default is the owner's call, with
+a version bump and release notes. Nothing is field-tested on a real server.
+Commit: see the next commit on gomgr-review
