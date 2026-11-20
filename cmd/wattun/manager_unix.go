@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"github.com/JohnWatsoon/WatTunnel/cmd/wattun/mgr"
 )
 
 // runManager makes `wattun` the one command users need: with no arguments, or a first argument that is not a flag
@@ -15,6 +17,9 @@ import (
 func runManager() {
 	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "-") {
 		return
+	}
+	if os.Getenv("WAT_GO_MGR") == "1" { // opt-in preview of the Go manager; bash stays the default until sign-off
+		os.Exit(mgr.Run(os.Args[1:]))
 	}
 	p, err := exec.LookPath("wattun-manager")
 	if err != nil {
