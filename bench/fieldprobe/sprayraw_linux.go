@@ -88,7 +88,7 @@ type mmsghdr struct {
 // sendmmsgRaw sends the batch and returns how many messages the kernel accepted (a partial batch
 // is possible under ENOBUFS-style backpressure — the caller must count sent, not attempted, or the
 // reply ratio and MB/s lie; 2026-11-20 review F8).
-func sendmmsgRaw(fd int, pkts [][]byte, sa *unix.SockaddrInet4) (int, error) {
+func sendmmsgRaw(fd int, pkts [][]byte, sa *unix.RawSockaddrInet4) (int, error) {
 	iovs := make([]unix.Iovec, len(pkts))
 	hdrs := make([]mmsghdr, len(pkts))
 	for i, p := range pkts {
@@ -97,6 +97,7 @@ func sendmmsgRaw(fd int, pkts [][]byte, sa *unix.SockaddrInet4) (int, error) {
 		hdrs[i].hdr.Name = (*byte)(unsafe.Pointer(sa))
 		hdrs[i].hdr.Namelen = unix.SizeofSockaddrInet4
 		hdrs[i].hdr.Iov = &iovs[i]
+		hdrs[i].hdr.SetIovlen(1) // without it every message carried zero bytes (20-byte bare IP headers)
 	}
 	sent := 0
 	for done := 0; done < len(pkts); {
@@ -171,7 +172,9 @@ func (s *sender) sprayRaw(ctx context.Context, id byte) string {
 	// replies come back from the receiver's ordinary socket on -port
 	f.add("iptables", "INPUT", "-p", "udp", "--sport", fmt.Sprint(*port), "-j", "ACCEPT")
 
-	sa := &unix.SockaddrInet4{}
+	// msg_name must be the kernel sockaddr_in; Go's SockaddrInet4 has another layout (family read as 0,
+	// the address from the wrong offset), which made every send "succeed" without reaching the peer.
+	sa := &unix.RawSockaddrInet4{Family: unix.AF_INET}
 	copy(sa.Addr[:], s.peer.To4())
 	bufs := make([][]byte, 20) // one buffer per packet of the largest burst, reused every burst
 	for i := range bufs {

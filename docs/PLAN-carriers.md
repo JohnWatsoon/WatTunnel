@@ -64,6 +64,27 @@ fake-TCP segments on receive (GRO: 9834 reads carried all 50 MB), which is good 
 IPv6: dead on this pair. iran2 has a v6 address but no route out (ping6 to Google fails with errors); nothing
 arrived over v6 either way.
 
+### Results, 2026-11-20: `spray-raw` (raw UDP, sendmmsg, 12-20 packets per tuple), Iran -> Kharej, v4
+
+The first run sent nothing: `sendmmsgRaw` passed Go's `unix.SockaddrInet4` as `msg_name` (not the kernel
+`sockaddr_in` layout) and never set `Iovlen`, so every call "succeeded" with packets going nowhere, then as bare
+20-byte IP headers. Both fixed in the probe; the numbers below are from the fixed build.
+
+| Target MB/s | Sent MB/s | Delivered | Receiver per second (MB/s) | Max packets per tuple | Tuples/s |
+|---|---|---|---|---|---|
+| 5 | 4.97 | 98.8 % | 4.9, 4.9, 4.8 | 20 | 222 |
+| 30 | 27.2 | 98.8 % | 17.7, 26.4, 34.6, 27.2, 28.5 | 20 | 1218 |
+| 60 | 21.8 | 98.6 % | 26.8, 22.0, 14.7, 23.4, 20.2 | 20 | 969 |
+| 100 | 17.4 | 98.7 % | 25.9, 21.7, 10.3, 15.9, 12.2 | 20 | 773 |
+
+- Rotation passes: about 98.7 % at every rate, no tuple over 20 packets, no new block (15k tuples over the run;
+  production rgrpc1 stayed alive with 500-690 streams and normal RTT throughout).
+- The ceiling is the sender, not the path: output fell as the target rose and tuples/s never reached the 5000/s
+  cap. iran2 has 2 cores shared with production (33 % softirq at 60 MB/s), and a real carrier would add AEAD on top.
+- Decision: **Wraith is not built.** On this pair it tops out near 27 MB/s upload, below reverse tcp (43-53 MB/s
+  up, 47-64 down, 2026-11-20). Reopen only for a pair where reverse cannot work (Kharej cannot dial Iran) or on an
+  Iran host with spare cores, and re-measure the sender ceiling there first.
+
 ## Phase 1: engine fixes
 
 1. **Done (3.3.7): seal outside `s.mu`.** `build()` frames the packet (`Session.frame`); the send loop seals the
