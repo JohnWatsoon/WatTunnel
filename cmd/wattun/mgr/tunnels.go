@@ -1599,16 +1599,49 @@ func tunnelPage(n string) {
 			return
 		case "?", "/":
 			tunnelMenuKeys(n, d)
-		default:
-			// l d v m c b z o a h — owned by other passes; route through the
-			// registry under the bash flow name so whoever ported them runs.
-			bashFlow := map[string]string{
-				"l": "logs_menu", "d": "test_tunnel", "v": "speed_test", "m": "live_monitor",
-				"c": "change_type", "b": "bonding_menu", "z": "anticensor_menu",
-				"o": "adv_menu", "a": "auto_menu", "h": "change_peer",
+		case "l":
+			Page("Logs", n)
+			runFlow("logs_menu", n)
+			Pause()
+		case "d":
+			Page("Diagnose", n)
+			runFlow("test_tunnel", n)
+			Pause()
+		case "v":
+			Page("Speed test", n)
+			runFlow("speed_test", n)
+			Pause()
+		case "m":
+			runFlow("live_monitor", n)
+		case "c":
+			Page("Connection type", n)
+			runFlow("change_type", n)
+			Pause()
+		case "b":
+			runFlow("bonding_menu", n)
+		case "z":
+			runFlow("anticensor_menu", n)
+		case "o":
+			runFlow("adv_menu", n)
+		case "a":
+			if r == "Iran" {
+				runFlow("auto_menu", n)
 			}
-			if flow, ok := bashFlow[k]; ok && registered(flow) {
-				runFlow(flow, n)
+		case "h":
+			title := ""
+			switch {
+			case r == "Kharej" && IsReverse(n) && CompanionOf(n) == "":
+				title = "Iran address"
+			case r == "Iran" && IsReverse(n) && Cfg(n, "carrier") != "icmp":
+				title = "Carrier listen port"
+			case r == "Iran" && !IsReverse(n):
+				title = "Kharej address"
+			}
+			if title != "" {
+				Page(title, n)
+				fmt.Fprintln(Stdout)
+				runFlow("change_peer", n)
+				Pause()
 			}
 		}
 	}
