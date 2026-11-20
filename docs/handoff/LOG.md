@@ -85,3 +85,15 @@ Files: cmd/wattun/mgr/status.go, status_auto_test.go (new).
 Tests: `go test -count=1 -run 'TestTinfoAutoKharej|TestStatsFlatOf' ./cmd/wattun/mgr/` → ok (aggregation sums,
 best RTT, live pick, row prefixes, unknown/stopped states, flat+JSON forms); full mgr suite + gofmt + vet → ok.
 Commit: (this commit)
+
+## 2026-11-20 18:10 · implementer · task 5 — matrix apply
+`applyMatrixVariant` (matrix.go:652) was already implemented through the real config writer (`SetValue`/
+`UnsetValue`) plus a `p1Systemctl("restart", …)`; the TODO comment at matrix.go:617 was stale, so I dropped the
+TODO and added the missing test (none existed). The test runs against a temp conf: apply replaces fake-sni,
+writes the variant's fake-mode (fmDefault: an empty mode becomes `seq`, matching the engine default — my first
+assertion expected `rst` for an empty mode and was wrong, the code is right), removes fake-ttl, keeps ech, and
+restarts `wattun@t1`; the empty (baseline-won) variant clears the disguise keys; an ech-less variant does not
+clobber an existing ech.
+Files: cmd/wattun/mgr/matrix.go (comment only), matrix_apply_test.go (new).
+Tests: `go test -count=1 -run TestApplyMatrixVariant ./cmd/wattun/mgr/` → ok; gofmt/vet/full mgr suite → ok.
+Commit: (this commit)
