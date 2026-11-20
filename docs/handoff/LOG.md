@@ -152,3 +152,37 @@ Files: cmd/wattun/mgr/matrix.go, wizards.go, mgr.go.
 Tests: gofmt (empty), go vet (clean), `go test -count=1 ./cmd/...` → ok (wattun 13.8s, mgr 0.55s, wprobe 0.04s),
 `bash test-manager.sh` → ALL OK (bash manager untouched, gate still green).
 Commit: (this commit)
+
+## 2026-11-20 18:55 · implementer · READY FOR REVIEW
+All 8 plan tasks are implemented, logged above with test output, and committed (one commit each, in task order):
+- 85a1c33 task 1 — Iran auto tokens (autoIranFront wired in, ni_parse plumbing, portEditor NI, kharej NI,
+  Iran NI epilogue; autoTune panic bug fixed)
+- 95a902b task 2 — wizardKharejAuto end-to-end test
+- e3591e0 tasks 3+4 — dashboard 1-9 opens the deck; auto Kharej stats aggregation (tinfoAutoKharej, statsFlatOf)
+- 6d62da6 task 5 — applyMatrixVariant test
+- cfa3c40 task 6 — five small TODOs (serverSide, registry bootstrap, shared BinVersion, honest seam comments)
+- b27561b task 7 — ci.yml `gomgr` sign-off job (auto round trip on Linux under a 300 MB cgroup cap)
+- 5ad809c task 8 — sweep: dead fallback removed, stale comments cleared
+
+Final gate status (local, Windows checkout):
+- `gofmt -l cmd wat testbench` → empty
+- `go vet ./...` → clean
+- `go test -count=1 ./cmd/...` → ok (wattun 13.7s, mgr 0.57s, wprobe 0.04s)
+- `bash test-manager.sh` → ALL OK
+- NOT run here: `-race` (needs CI/Ubuntu), the `wat/` suite (engine untouched this pass), and the new `gomgr` CI
+  job itself — it can only run on Linux CI.
+
+What the reviewing agent should know:
+- The engine (`wat/`) was not touched; the bash manager was not touched; `manager_unix.go` default still bash.
+  Nothing to release yet — the version badge/release notes are yours if you sign off on flipping the default.
+- Beyond the plan's literal tasks, the NI (unattended) surface for kharej/iran had to be ported for the gate to
+  be drivable (task 1's commit) — flag set, validators and consumption mirror bash ni_parse + wizard branches.
+  Known NI gaps, logged deliberately: `--policy` parses but is only consumed by auto-retest (as in bash);
+  kharej `default_listen` has no cdn_mode port preference; `iran --pick bond/rbond` and the failed-variants
+  (`f` key) path are unit-untested beyond best.
+- The task-1 test exposed a real shipped bug: atTune's knob constants were version strings, so `auto-test`
+  panicked for every non-icmp choice. Fixed with the bash grids.
+- CI is NOT green yet for one reason only: the branch is not pushed (no push/tag/release without the owner).
+  Owner: please push `main` (or a branch) so `.github/workflows/ci.yml` runs; the `gomgr` job is the sign-off
+  test. If it fails, its output is the next work item.
+Commit: 5ad809c (head)
