@@ -11,8 +11,9 @@ import (
 // screenRegistry is the P2/P3/P4 hook table: every bash function that became a
 // screen registers under its bash name (dash_table, tunnel_page, wizard_kharej,
 // heal, ...). Run and MainMenu dispatch through it, so interactive screens and
-// direct commands share one route. A missing entry falls back to the stub
-// handler that says the screen is not ported yet (P1 ships alone).
+// direct commands share one route. A missing entry falls back to dispatch's
+// generic "unavailable" error — a programming slip, never a menu path (every
+// dispatched name is registered at init).
 var screenRegistry = map[string]func(args ...string) int{}
 
 // Register installs a screen under its bash function name (P2/P3/P4 call this

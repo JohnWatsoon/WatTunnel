@@ -137,3 +137,18 @@ non-interactive plumbing it drives was added in task 1's commit and is unit-test
 Files: .github/workflows/ci.yml, cmd/wattun/mgr/ops.go.
 Tests: YAML parsed (6 jobs); gofmt/vet/mgr suite ok locally.
 Commit: (this commit)
+
+## 2026-11-20 18:47 · implementer · task 8 — sweep
+`grep -rn "not ported|not available in this build|TODO" cmd/wattun/mgr --include=*.go` (tests skipped), before → after:
+- matrix.go:608 comment "(set_value is TODO(P1): conf writer)" — stale (the writer is used); reworded.
+- wizards.go:279 "The auto carrier needs the auto-plan writer (not ported yet)" — the fallback when
+  `wizard_kharej_auto` is not registered. It is always registered (ops.go init, same package), so the branch was
+  dead; removed and wizardKharej routes `auto` straight to the dispatch.
+- mgr.go:15 comment describing the fallback — reworded (no sweep string).
+Final list: `mgr.go:28` — dispatch's runtime "not available in this build" error stays. It is a programming-slip
+safety net, not a menu path: every name runCommand/tunnels/decks dispatch is verified registered at init
+(checked the full dispatch list this pass). No user-reachable screen is unported.
+Files: cmd/wattun/mgr/matrix.go, wizards.go, mgr.go.
+Tests: gofmt (empty), go vet (clean), `go test -count=1 ./cmd/...` → ok (wattun 13.8s, mgr 0.55s, wprobe 0.04s),
+`bash test-manager.sh` → ALL OK (bash manager untouched, gate still green).
+Commit: (this commit)

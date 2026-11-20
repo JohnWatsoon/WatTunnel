@@ -605,7 +605,7 @@ func MatrixCmd(name string, w io.Writer, startProbes bool) bool {
 		return true
 	}
 	if p1Confirm(fmt.Sprintf("Apply '%s' to '%s'? (restarts the tunnel, open connections drop)", vs[best].Label, n), true) {
-		// ac_matrix_apply: write the desync keys and restart (set_value is TODO(P1): conf writer)
+		// ac_matrix_apply: the desync keys go through the config writer, the unit restarts
 		applyMatrixVariant(n, vs[best])
 		if strings.Contains(cr, "+") {
 			hintLine(w, fmt.Sprintf("The fake-SNI and mode now apply to every pool leg of '%s'.", cr))

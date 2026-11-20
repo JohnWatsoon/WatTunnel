@@ -273,14 +273,7 @@ func wizardKharej() bool {
 	}
 	if cr == "auto" {
 		// wizard_kharej_auto (bash 4056) is the auto pass's screen; route to it.
-		if registered("wizard_kharej_auto") {
-			return dispatch("wizard_kharej_auto", name) == 0
-		}
-		Warn("The auto carrier needs the auto-plan writer (not ported yet); pick a fixed type.")
-		cr = pickCarrier(false, kHead)
-		if cr == "" {
-			return false
-		}
+		return dispatch("wizard_kharej_auto", name) == 0
 	}
 	wizStep("Kharej", 1, kharejSteps)
 	Ok("Carrier  " + cr)
