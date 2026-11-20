@@ -246,3 +246,46 @@ Files: wat/coded_test.go (new, measuring tests, no gate), wat/version.go (3.4.3 
 Tests: `go test -count=1 -run TestKill -v ./wat/` → numbers above, both tests PASS (data intact);
 `go vet ./wat/` clean.
 Commit: (this commit)
+
+## 2026-11-20 19:52 · implementer · A2 — sliding-window repair design (logged before coding)
+New `wat/repair.go`, opt-in (`Config.Repair`, flag `-repair`, config `repair: true`; both ends 3.4.3+).
+Separate from fec.go, which keeps its small-packet role unchanged.
+
+**Sender** keeps a ring of the last W=32 data-packet plaintexts (pn + bytes; the copy is accepted because the
+feature is opt-in). Every D data packets it sends ONE repair packet carrying r=1..2 symbols, INTERLEAVED with
+the data (not after the burst — that is the latency difference from fecDue): a loss becomes repairable ~D
+packets after it happened (milliseconds at bulk rate) instead of after lossTime+RTT (~93 ms).
+- Symbol k (global monotone index, agreed implicitly) = XOR of the zero-padded plaintexts of every window
+  packet pn with cover(pn,k) = high bit of (pn*0x9E3779B97F4A7C15 ^ k*0xC2B2AE3D27D4EB4F) — a deterministic
+  pseudo-random half-subset; ~W/2 members per symbol, no coefficient table on the wire.
+- Frame frRepair 0x0f, ALONE in its packet (an old peer stops at the type byte, like frFec/frEndpoint):
+  base(uv) r(uv) L(uv) k0(uv) n(uv) then n×(pnOff uv, len uv) member headers, then r×L parity bytes. The
+  lengths ride along because the symbol is zero-padded to L=max member length and the true length of a LOST
+  packet is unknowable from the parity alone; n headers cost ~4 B/packet amortized.
+- Repair packets are paced and counted (cc.tokens, stats) but never tracked in s.sent: never acked, never
+  retransmitted, like frFec.
+- D adapts to measured loss: overhead target o = clamp(2×lossEWMA + 0.5 %, 0.5 %, 10 %), D = 1/o; lossEWMA
+  from the same onAck/onLoss-class signals fec uses (EWMA over lost/sent from the loss-marking path).
+  At 0 % loss D=200: one repair packet per 200 data packets (~0.5 %) — the 0 %-loss throughput criterion.
+
+**Receiver** keeps the mirrored ring while any hole < W old. On frRepair: for each symbol, XOR out the arrived
+members (zero-padded), leaving equations over the holes only; solve the GF(2) system (r equations × e
+unknowns, Gaussian elimination, e ≤ 32 — trivial CPU); when rank = e, reconstruct each lost plaintext, trim to
+its header length, and deliver exactly the way onFec delivers a rebuilt packet (rxRing replay marking,
+rxRanges.add — so the next ACK reports it and the sender never retransmits it — then parse()).
+Rank < e (unrecoverable): fall through, the normal retransmit path still owns the hole. Correctness never
+depends on repair.
+
+**Negotiation**: frRepairCap 0x10 (one byte, alone in its packet or last — old peers ignore it). Each end sends
+it ~1/s with ACK/ping traffic while repair is enabled; a end sends repair symbols ONLY after seeing the peer's
+frRepairCap. Mixed pair both ways: no cap seen → no repair sent → byte-for-byte today's behavior (the frame
+never appears on the wire). This is the same degradation shape as frEndpoint.
+
+**ACK cadence unchanged in v1** (the plan's "a few status packets per second" goal): repair already removes the
+retransmit pressure; cutting ackEvery too needs feedback-starvation analysis. Logged as a deliberate scope cut.
+
+CPU: one symbol = XOR of ~16×1400 B ≈ 22 KB ≈ ~3 µs, one per D=25..200 packets — noise. GF(256) rejected: no
+need at these loss rates, XOR+GF(2) solve is sufficient and table-free.
+Stats: RepairSent / RepairRecovered added to Stats.
+Kill criteria: p99 < ~120 ms at both MTUs (baseline 133/122), bulk stays 5.2-5.3 MB/s at 0-2 %.
+Commit: none yet (design only)
