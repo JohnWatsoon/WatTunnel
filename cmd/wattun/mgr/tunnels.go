@@ -9,12 +9,14 @@ package mgr
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func init() {
@@ -1193,132 +1195,6 @@ type deckRow struct {
 
 type deck struct{ L, R []deckRow }
 
-var deckSel string
-
-func (d *deck) find(k string) (side string, idx int, ok bool) {
-	for i, r := range d.L {
-		if r.Type == "I" && r.Key == k {
-			return "L", i, true
-		}
-	}
-	for i, r := range d.R {
-		if r.Type == "I" && r.Key == k {
-			return "R", i, true
-		}
-	}
-	return "", -1, false
-}
-
-func (d *deck) first() {
-	for _, rows := range [][]deckRow{d.L, d.R} {
-		for _, r := range rows {
-			if r.Type == "I" {
-				deckSel = r.Key
-				return
-			}
-		}
-	}
-}
-
-func (d *deck) move(dir string) {
-	side, idx, ok := d.find(deckSel)
-	if !ok {
-		d.first()
-		return
-	}
-	rows := &d.L
-	if side == "R" {
-		rows = &d.R
-	}
-	switch dir {
-	case "up", "down":
-		n := 1
-		if dir == "up" {
-			n = -1
-		}
-		i := idx + n
-		for i >= 0 && i < len(*rows) {
-			if (*rows)[i].Type == "I" {
-				deckSel = (*rows)[i].Key
-				return
-			}
-			i += n
-		}
-	default: // left/right: nearest action in the other column
-		other := &d.R
-		if side == "R" {
-			other = &d.L
-		}
-		best, bestd := "", 999
-		for i, r := range *other {
-			if r.Type != "I" {
-				continue
-			}
-			dd := i - idx
-			if dd < 0 {
-				dd = -dd
-			}
-			if dd < bestd {
-				bestd, best = dd, r.Key
-			}
-		}
-		if best != "" {
-			deckSel = best
-		}
-	}
-}
-
-func (d *deck) cell(side string, i int) string {
-	rows := d.L
-	if side == "R" {
-		rows = d.R
-	}
-	if i >= len(rows) {
-		return ""
-	}
-	r := rows[i]
-	switch r.Type {
-	case "H":
-		return BOLD + r.Lab + RST
-	case "I":
-		if r.Key == deckSel {
-			return fmt.Sprintf("%s▸%s %s %s%-14s%s %s%s%s", CYN, RST, KeyLabel(r.Key), BOLD, r.Lab, RST, GRY, r.Desc, RST)
-		}
-		return fmt.Sprintf("  %s %-14s %s%s%s", KeyLabel(r.Key), r.Lab, GRY, r.Desc, RST)
-	}
-	return ""
-}
-
-// tunnel_menu_render (bash 9251): two columns at >=74 cols, stacked below.
-func (d *deck) render() {
-	if TermCols() < 74 {
-		for i := range d.L {
-			fmt.Fprintln(Stdout, "  "+d.cell("L", i))
-		}
-		fmt.Fprintln(Stdout)
-		for i := range d.R {
-			fmt.Fprintln(Stdout, "  "+d.cell("R", i))
-		}
-		return
-	}
-	rows := len(d.L)
-	if len(d.R) > rows {
-		rows = len(d.R)
-	}
-	for i := 0; i < rows; i++ {
-		l, r := d.cell("L", i), d.cell("R", i)
-		if r == "" {
-			fmt.Fprintln(Stdout, "  "+l)
-			continue
-		}
-		pad := TM_CW - Vlen(l)
-		if pad < 0 {
-			pad = 0
-		}
-		fmt.Fprintf(Stdout, "  %s%s  %s\n", l, Rep(" ", pad), r)
-	}
-}
-
 // tunnel_menu_build (bash 9117): the actual key list of the bash deck.
 func buildDeck(n, r, run, car string) *deck {
 	d := &deck{}
@@ -1410,16 +1286,6 @@ func p2trunc(s string, n int) string {
 	return s
 }
 
-// tunnel_menu_footer (bash 9277)
-func tunnelMenuFooter() {
-	nav := GRY + "↑↓" + RST + " move  " + GRY + "tab" + RST + " col  " + GRY + "enter" + RST + " open  " + GRY + "0" + RST + " back  " + GRY + "?" + RST + " keys"
-	pad := UI_W - Vlen(nav) - 10
-	if pad < 2 {
-		pad = 2
-	}
-	fmt.Fprintf(Stdout, "  %s%s%s[x] delete%s\n", nav, Rep(" ", pad), RED, RST)
-}
-
 // tunnel_menu_keys (bash 9283): the full key map, for "?".
 func tunnelMenuKeys(n string, d *deck) {
 	Page("Keys", n)
@@ -1469,10 +1335,72 @@ func p2TunnelHeader(n, r string) {
 	fmt.Fprintln(Stdout)
 }
 
-// tunnel_page (bash 9332): status header + card + two-column deck.
+// tunnelHead: the top of the tunnel page — name and state, a traffic graph,
+// then only the /stats numbers this tunnel really reports.
+func tunnelHead(w io.Writer, n, r, car string, ti *tunnelInfo) {
+	col, dot, txt := stateCell(r, ti.State)
+	Title(w, n, r+" · "+car+"  "+col+dot+" "+txt+RST)
+	if ti.State == "stopped" {
+		hintLine(w, "Not running. Start it below, or read its logs.")
+		fmt.Fprintln(w)
+		return
+	}
+	if ti.Why != "" && ti.State != "up" {
+		warnLine(w, ti.Why)
+		fmt.Fprintln(w)
+	}
+	down, up := sampleTunnel(n, ti)
+	if s := samples[n]; s != nil {
+		gw := uiW() - 10
+		if gw > 72 {
+			gw = 72
+		}
+		Graph(w, s.down, gw, 4, CYN, Rate)
+	}
+	fmt.Fprintf(w, "  %s↓%s %-14s %s↑%s %s\n\n", CYN, RST, Rate(down), YEL, RST, Rate(up))
+	health := fmt.Sprintf("%.0f ms · %.1f %% loss", ti.RTT, ti.Loss)
+	if ti.CarCount > 1 {
+		health += fmt.Sprintf(" · %d/%d paths", ti.CarAlive, ti.CarCount)
+	}
+	users := fmt.Sprintf("%d streams · %d sessions", ti.Streams, ti.Sess)
+	if ti.DgramFlows > 0 {
+		users += fmt.Sprintf(" · %d udp flows", ti.DgramFlows)
+	}
+	fmt.Fprintln(w, "  "+kv("Health", health))
+	fmt.Fprintln(w, "  "+kv("Users", users))
+	fmt.Fprintln(w, "  "+kv("Usage", Human(ti.In)+" in · "+Human(ti.Out)+" out"))
+	fmt.Fprintln(w, "  "+kv("Ports", PortsSummary(n, uiW()-16)))
+	eng := BinVersion()
+	if u := UptimeOf(n); u != "" {
+		eng += " · up " + u
+	}
+	if eng != "" {
+		fmt.Fprintln(w, "  "+kv("Engine", strings.TrimPrefix(eng, " · ")))
+	}
+	fmt.Fprintln(w)
+}
+
+// deckItems flattens the deck into one Choose list (section order kept) plus Delete.
+func deckItems(d *deck) []Item {
+	var items []Item
+	for _, rows := range [][]deckRow{d.L, d.R} {
+		for _, r := range rows {
+			if r.Type != "I" {
+				continue
+			}
+			lab := r.Lab
+			if r.Val != "" {
+				lab += "  " + GRY + r.Val + RST
+			}
+			items = append(items, Item{Key: r.Key, Label: lab, Desc: r.Desc})
+		}
+	}
+	return append(items, Item{Key: "x", Label: RED + "Delete" + RST, Desc: "Remove tunnel and all files (confirms first)"})
+}
+
+// tunnel_page (bash 9332): live head + one action list; keys match the bash deck.
 func tunnelPage(n string) {
-	deckSel = ""
-	first := true
+	sel, first := 0, true
 	for {
 		if !cfgFileExists(n) {
 			return
@@ -1483,64 +1411,34 @@ func tunnelPage(n string) {
 			run = "active"
 		}
 		car := Cfg(n, "carrier")
-		ClearScreen()
-		fmt.Fprintln(Stdout)
-		p2TunnelHeader(n, r)
-		fmt.Fprintln(Stdout)
 		d := buildDeck(n, r, run, car)
-		if first {
+		items := deckItems(d)
+		ti := tinfo(n)
+		if first { // land on what this state most likely needs
 			first = false
-			term := "stopped"
-			if IsActive(Unit(n)) {
-				if st, err := ParseStats(StatsRaw(n)); err == nil && st.Alive {
-					term = "up"
-				} else {
-					term = "down"
-				}
-			}
-			switch term {
+			want := "l"
+			switch ti.State {
 			case "stopped":
-				deckSel = "s"
+				want = "s"
 			case "down", "degraded":
-				deckSel = "d"
-			default:
-				deckSel = "l"
+				want = "d"
 			}
-		}
-		if _, _, ok := d.find(deckSel); !ok {
-			d.first()
-		}
-		d.render()
-		// tunnel_menu_help_line (bash 9270)
-		if _, _, ok := d.find(deckSel); ok {
-			var row deckRow
-			for _, rows := range [][]deckRow{d.L, d.R} {
-				for _, rr := range rows {
-					if rr.Type == "I" && rr.Key == deckSel {
-						row = rr
-					}
+			for i, it := range items {
+				if it.Key == want {
+					sel = i
 				}
 			}
-			fmt.Fprintf(Stdout, "\n  %s▸%s %s%s%s  %s%s%s\n", CYN, RST, BOLD, row.Lab, RST, GRY, row.Desc, RST)
 		}
-		fmt.Fprintln(Stdout)
-		tunnelMenuFooter()
-		k, _, _ := KeyRead(0)
-		switch k {
-		case "up", "down", "left", "right", "tab", "\t":
-			dir := k
-			if k == "tab" || k == "\t" {
-				dir = "right"
-			}
-			d.move(dir)
+		i, k := Choose(func(w io.Writer) { tunnelHead(w, n, r, car, ti) }, items, &sel,
+			[]string{"⏎", "open", "letter", "jump", "?", "keys", "esc", "back"}, time.Second)
+		switch {
+		case i >= 0:
+			k = items[i].Key
+		case k == "tick" || k == "move":
 			continue
-		case "enter", " ":
-			if deckSel == "" {
-				continue
-			}
-			k = deckSel
+		case k == "eof":
+			return
 		}
-		k = strings.ToLower(k)
 		switch k {
 		case "p":
 			runFlow("edit_ports", n)

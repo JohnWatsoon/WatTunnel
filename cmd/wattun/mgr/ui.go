@@ -223,14 +223,22 @@ func Choose(head func(w io.Writer), items []Item, sel *int, keys []string, tick 
 	case timedOut:
 		return -1, "tick"
 	}
-	switch k {
-	case "up", "k":
+	claimed := false // vi keys j/k move, unless an item uses the letter as its hotkey
+	for _, it := range items {
+		if it.Key != "" && strings.EqualFold(it.Key, k) {
+			claimed = true
+		}
+	}
+	switch {
+	case claimed:
+	case k == "up" || k == "k":
 		*sel = (*sel - 1 + len(items)) % len(items)
 		return -1, "move"
-	case "down", "j":
+	case k == "down" || k == "j":
 		*sel = (*sel + 1) % len(items)
 		return -1, "move"
-	case "enter":
+	}
+	if k == "enter" {
 		if len(items) == 0 {
 			return -1, k
 		}

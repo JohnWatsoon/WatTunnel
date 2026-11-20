@@ -90,3 +90,25 @@ func TestBox(t *testing.T) {
 		t.Errorf("box =\n%s\nwant\n%s", out, want)
 	}
 }
+
+// j/k move the cursor unless an item uses the letter (the tunnel page's k = New key).
+func TestChooseViKeysYieldToHotkeys(t *testing.T) {
+	InitColor(false, 8)
+	for _, c := range []struct {
+		items    []Item
+		in       string
+		idx, sel int
+	}{
+		{[]Item{{Label: "A"}, {Label: "B"}}, "j", -1, 1},
+		{[]Item{{Label: "A"}, {Label: "New key", Key: "k"}}, "k", 1, 1},
+	} {
+		restore := feed(c.in)
+		sel := 0
+		var idx int
+		capture(t, func() { idx, _ = Choose(func(io.Writer) {}, c.items, &sel, nil, 0) })
+		restore()
+		if idx != c.idx || sel != c.sel {
+			t.Errorf("%q: got idx=%d sel=%d, want %d %d", c.in, idx, sel, c.idx, c.sel)
+		}
+	}
+}
