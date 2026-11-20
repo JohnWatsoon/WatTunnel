@@ -10,6 +10,7 @@ import (
 func TestScreenRegistryDispatch(t *testing.T) {
 	InitColor(false, 8)
 	setTempConf(t)
+	saveRegistry(t)
 	calls := []string{}
 	Register("status_all", func(args ...string) int { calls = append(calls, "status_all"); return 0 })
 	Register("restart_all", func(args ...string) int { calls = append(calls, "restart_all"); return 0 })
@@ -17,7 +18,6 @@ func TestScreenRegistryDispatch(t *testing.T) {
 	Register("preset_cmd", func(args ...string) int { calls = append(calls, "preset_cmd:"+args[0]+":"+args[1]); return 0 })
 	Register("mgr_lock", func(args ...string) int { calls = append(calls, "mgr_lock"); return 0 })
 	Register("heal", func(args ...string) int { calls = append(calls, "heal"); return 0 })
-	defer func() { screenRegistry = map[string]func(args ...string) int{} }()
 
 	if rc := runCommand("status", nil); rc != 0 {
 		t.Errorf("status rc = %d", rc)
@@ -73,8 +73,8 @@ func contains(list []string, s string) bool {
 func TestUnregisteredScreen(t *testing.T) {
 	InitColor(false, 8)
 	setTempConf(t)
+	saveRegistry(t)
 	screenRegistry = map[string]func(args ...string) int{}
-	defer func() { screenRegistry = map[string]func(args ...string) int{} }()
 	out := capture(t, func() {
 		if rc := runCommand("monitor", nil); rc != 1 {
 			t.Errorf("monitor rc = %d", rc)
@@ -175,4 +175,14 @@ func TestUsagePrintsSelf(t *testing.T) {
 	if !strings.Contains(out, "Usage: wattun [command]") {
 		t.Errorf("$SELF not substituted: %q", out[:80])
 	}
+}
+
+// saveRegistry restores the real route table after a test swaps entries.
+func saveRegistry(t *testing.T) {
+	t.Helper()
+	saved := map[string]func(args ...string) int{}
+	for k, v := range screenRegistry {
+		saved[k] = v
+	}
+	t.Cleanup(func() { screenRegistry = saved })
 }

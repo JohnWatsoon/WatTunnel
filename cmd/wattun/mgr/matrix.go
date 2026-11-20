@@ -416,7 +416,8 @@ func (m *matrixRun) atStart(i int, vs []variant, mp, dmap int, tPath, tIcmp stri
 	}
 	a = append(a, "-map", fmt.Sprintf("%d:1@127.0.0.1", dmap))
 	cmd := exec.Command(wattunBin(), a...)
-	cmd.Stdout, _ = os.Open(m.dir + fmt.Sprintf("/client.%d.log", i))
+	cmd.Stdout, _ = os.Create(m.dir + fmt.Sprintf("/client.%d.log", i))
+	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {
 		return err
 	}

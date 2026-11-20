@@ -15,7 +15,6 @@ package mgr
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -647,17 +646,6 @@ func autoHelpers(parent string) []string {
 }
 
 // state_files — every state file the engine can leave for a tunnel.
-func stateFiles(name string) []string {
-	base := strings.TrimSuffix(name, filepath.Ext(name))
-	dir := Cfg(name, "state-dir")
-	if dir == "" {
-		dir = P.Conf
-	}
-	return []string{
-		filepath.Join(dir, base+".totals"),
-		filepath.Join(dir, base+".quota"),
-	}
-}
 
 func newKey() string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -864,7 +852,7 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 		res.Units = append(res.Units, autoExtNames(name)...)
 	}
 	startWatcher(name)
-	ensureHealTimerGo()
+	ensureHealTimer()
 	res.Units = append(res.Units, autoHelpers(name)...)
 	return res
 }
@@ -1012,7 +1000,7 @@ func autoIP(name, ip string) error {
 		return err
 	}
 	_ = Systemctl("stop", P.Prefix+"-autowatch-"+name+".service")
-	ensureHealTimerGo()
+	ensureHealTimer()
 	Ok(fmt.Sprintf("Reverse side for '%s' is set for Iran %s. Run the test again on Iran.", name, ip))
 	return nil
 }
@@ -1398,7 +1386,7 @@ func autoReopen(n string) error {
 			startWatcher(n)
 		}
 	}
-	ensureHealTimerGo()
+	ensureHealTimer()
 	envLogger("wattun-auto", "migrated auto tunnel "+n+" to always-open carriers")
 	return nil
 }
@@ -1848,6 +1836,10 @@ func autoCurrentKey(name string) string {
 // spawnClient adapter; ranking is P3's atRank.
 func autoTest(tok Token) {
 	autoVariants(tok)
+	if kd, err := atPrep(tok.Key); err == nil { // the probes dial with the tunnel key
+		defer kd.cleanup()
+		atKeyFile, atTok = kd.dir+"/key", tok
+	}
 	n := len(av)
 	if atScreenSkipped != "" {
 		Warn("Skipped (needs newer wattun): " + atScreenSkipped)
@@ -1899,6 +1891,15 @@ func atProbe(i, waitSecs int) {
 		return
 	}
 	args := []string{"-mode", "client", "-carrier", av[i].Car, "-peer", av[i].Peer}
+	if atKeyFile != "" {
+		args = append(args, "-key-file", atKeyFile)
+	}
+	if atTok.Path != "" && hasHTTPLeg(av[i].Car) {
+		args = append(args, "-path", atTok.Path)
+	}
+	if atTok.Icmp != "" && strings.Contains("+"+av[i].Car+"+", "+icmp+") {
+		args = append(args, "-icmp-type", atTok.Icmp)
+	}
 	if av[i].SNI != "" {
 		args = append(args, "-sni", av[i].SNI, "-host", av[i].SNI)
 	}
@@ -1934,6 +1935,12 @@ func atWaitAlive(mp, secs int) bool {
 }
 
 var timeSleep = func(ms int) {}
+
+// atKeyFile and atTok: the key file and token the auto-test probes dial with.
+var (
+	atKeyFile string
+	atTok     Token
+)
 
 // TODO(P1): the speedtest GET/POST belongs to the stats client; local default is a stub.
 var p1Speedtest = func(mp int, dir string) (ok bool, mbps float64) { return false, 0 }
@@ -2549,34 +2556,6 @@ func autoMenu(name string) {
 			return
 		}
 	}
-}
-
-// ensureHealTimerGo is the Go port of the bash ensure_heal_timer: write + enable the heal timer unit
-// (no-op when systemd is unavailable, like the bash's non-systemd path).
-func ensureHealTimerGo() {
-	if _, err := os.Stat("/run/systemd/system"); err != nil {
-		return // no systemd: the bash skips too
-	}
-	unit := P.Heal + ".timer"
-	path := "/etc/systemd/system/" + unit
-	if _, err := os.Stat(path); err == nil {
-		return // already installed
-	}
-	body := `[Unit]
-Description=WatTun heal timer (` + P.Prefix + `)
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-
-[Install]
-WantedBy=timers.target
-`
-	if err := writeFile0600(path, body); err != nil {
-		return
-	}
-	exec.Command("systemctl", "daemon-reload").Run()
-	exec.Command("systemctl", "enable", "--now", unit).Run()
 }
 
 // p1FetchStats adapter: P4 uses the raw string fetch (grep-style access).

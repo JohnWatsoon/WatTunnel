@@ -54,6 +54,9 @@ func wireSystem() {
 	p2ShapedSupported = shapedSupportedLive
 	envSystemdRun = systemdRun
 	envLogger = func(tag, msg string) { _ = exec.Command("logger", "-t", tag, msg).Run() }
+	envSpawnClient, p1Speedtest = spawnClient, speedtestLive
+	timeSleep = func(ms int) { time.Sleep(time.Duration(ms) * time.Millisecond) }
+	p1AutoHelpers = autoHelpers
 }
 
 func randPathLive() string {
@@ -443,4 +446,49 @@ func shapedSupportedLive(list string) (bool, string) {
 func systemdRun(unit string, maxSec int, args ...string) error {
 	a := append([]string{"--unit=" + unit, "--quiet", "--collect", fmt.Sprintf("--property=RuntimeMaxSec=%d", maxSec)}, args...)
 	return exec.Command("systemd-run", a...).Run()
+}
+
+// hasHTTPLeg: the carrier list has a leg that sends a URL path (ws, wss, h2, h2c, grpc).
+func hasHTTPLeg(list string) bool {
+	for _, c := range strings.Split(list, "+") {
+		switch CarrierLegBase(c) {
+		case "ws", "wss", "h2", "h2c", "grpc":
+			return true
+		}
+	}
+	return false
+}
+
+type execProc struct{ c *exec.Cmd }
+
+func (p execProc) Kill() error {
+	if p.c.Process == nil {
+		return nil
+	}
+	err := p.c.Process.Kill()
+	_, _ = p.c.Process.Wait()
+	return err
+}
+
+// spawnClient starts a throw-away probe client of the installed binary.
+func spawnClient(args []string, logFile string) (clientProc, error) {
+	c := exec.Command(P.Bin, args...)
+	if logFile != "" {
+		if f, err := os.Create(logFile); err == nil {
+			c.Stdout, c.Stderr = f, f
+		}
+	}
+	if err := c.Start(); err != nil {
+		return nil, err
+	}
+	return execProc{c}, nil
+}
+
+// speedtestLive runs one direction of the built-in speed test on a probe client.
+func speedtestLive(mp int, dir string) (bool, float64) {
+	r, err := fetchSpeedtest(fmt.Sprintf("127.0.0.1:%d", mp), dir, atMB)
+	if err != nil || !r.OK {
+		return false, 0
+	}
+	return true, r.MBPerS
 }
