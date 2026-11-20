@@ -717,7 +717,7 @@ func runEnvArgs() []string {
 	if os.Getenv("WAT_BIN") != "" || P.Sandbox {
 		a = append(a, "--setenv=WAT_BIN="+P.Bin)
 	}
-	for _, k := range []string{"WAT_AUTO_RUN", "WAT_GO_MGR"} {
+	for _, k := range []string{"WAT_AUTO_RUN"} {
 		if v := os.Getenv(k); v != "" {
 			a = append(a, "--setenv="+k+"="+v)
 		}

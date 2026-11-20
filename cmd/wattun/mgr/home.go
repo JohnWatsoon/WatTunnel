@@ -914,7 +914,7 @@ func unitEnvLines() string {
 	if P.Sandbox {
 		fmt.Fprintf(&b, "Environment=\"WAT_PREFIX=%s\"\n", P.Prefix)
 	}
-	for _, k := range []string{"WAT_CONF", "WAT_BIN", "WAT_RUN", "WAT_AUTO_RUN", "WAT_GO_MGR"} {
+	for _, k := range []string{"WAT_CONF", "WAT_BIN", "WAT_RUN", "WAT_AUTO_RUN"} {
 		if v := os.Getenv(k); v != "" {
 			fmt.Fprintf(&b, "Environment=\"%s=%s\"\n", k, v)
 		}

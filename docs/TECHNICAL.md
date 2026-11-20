@@ -408,8 +408,10 @@ To check your own tunnel, compare `bytes_out` in `/stats` with the user traffic 
 
 Use the installer and the `wattun` menu described in the main [README](../README.md). Running `wattun` with no
 flags (or with a first argument that does not start with `-`, such as `wattun auto-test NAME`, `token NAME`, `update`,
-`status` or `auto-ip NAME IP`) hands over to `/usr/local/bin/wattun-manager`, which still works by its own name.
-Engine usage (flags starting with `-`) is unchanged.
+`status` or `auto-ip NAME IP`) opens the manager built into the binary (written in Go, the default since 3.4.1; same
+commands, keys and config files as before). `WAT_BASH_MGR=1 wattun` opens the bash `/usr/local/bin/wattun-manager`
+instead, which also still works by its own name. The background units (the `wattun-heal` timer and bond retests) keep
+calling `wattun-manager`. Engine usage (flags starting with `-`) is unchanged.
 
 **Trust model and offline install (3.3.8).** `install.sh` checks the release binary and `wattun-manager` against the
 RSA-signed `SHA256SUMS`; the public key is baked into the script, and a missing or invalid signature aborts the
@@ -3027,6 +3029,7 @@ tunnel, ships in `dist/` as `wattun-wprobe-<os>-<arch>`, and needs Linux + CAP_N
 Update **both** servers for every release, unless an entry says otherwise. Versions 2.4.9 to 2.4.16 were steps
 toward one fix for CDN tunnels that got slower over time. If you are on any of them, go straight to 2.4.17 or later.
 
+- **3.4.1: the `wattun` command opens the Go manager.** Manager only on the engine side: the wire format is unchanged, so updating one end is fine. `wattun` with no flags now runs the manager built into the binary instead of handing over to the bash `wattun-manager`; `WAT_BASH_MGR=1 wattun` opens the bash one. Details: `docs/release-notes/v3.4.1.md`.
 - **3.4.0: `udp-hop`, the token repaste notice, and everything from the unpublished 3.3.8 and 3.3.9.** Update both ends; old and new peers interoperate. 3.3.8 and 3.3.9 were never tagged, so a feature this document marks "3.3.8" or "3.3.9" first ships in 3.4.0. Details: `docs/release-notes/v3.4.0.md`.
   - **Source-port hopping (`udp-hop`, Wraith).** The udp client sends from a new source port every N to 1.5N packets, for routes that cut each flow after ~30 packets (iran2: a fixed flow dies at ~30, rotating ports passed 99.7 %; udp-hop 12 uploaded 8.9-10.4 MB/s where plain udp died). Any udp server connects; a 3.4.0 server also detects the hopping and paces its downlink for the RTT spread. The Iran auto test adds a `udp hop` row.
   - **Repaste notice.** When Kharej rebuilds an auto token that a 3.3.3-3.3.7 finalize deleted, the carriers move to new ports; Kharej's dashboard and tunnel page say to paste the new token on Iran until it is shown (`t`).
