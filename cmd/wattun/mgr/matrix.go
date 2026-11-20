@@ -70,18 +70,9 @@ func verParts(v string) [3]int {
 	return p
 }
 
-// binVer: `wattun -version` (empty when unknown). TODO(P1): share with the update surface.
-var binVer = func() string {
-	out, err := exec.Command(wattunBin(), "-version").Output()
-	if err != nil {
-		return ""
-	}
-	f := strings.Fields(string(out))
-	if len(f) >= 2 {
-		return f[1]
-	}
-	return ""
-}
+// binVer: `wattun -version` (empty when unknown) — one shared helper lives in
+// BinVersion (sysd.go); this var stays so tests can pin the version.
+var binVer = func() string { return BinVersion() }
 
 // wattunBin: the engine binary path from P1's path set ($WAT_BIN honoured there).
 func wattunBin() string {

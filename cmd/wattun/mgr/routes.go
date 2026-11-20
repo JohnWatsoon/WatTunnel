@@ -39,6 +39,7 @@ func init() {
 	Register("unmute_cmd", func(a ...string) int { return b2i(carrierToggle("unmute", arg(a, 0), arg(a, 1))) })
 	Register("reset_traffic", func(a ...string) int { resetTraffic(arg(a, 0)); return 0 })
 	Register("mgr_lock", func(a ...string) int { return b2i(mgrLock()) })
+	registerStatusScreens() // the P1 tag is dropped; the status screens join the registry
 }
 
 func errRC(err error) int {

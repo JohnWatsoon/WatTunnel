@@ -41,8 +41,8 @@ var (
 
 type clientProc interface{ Kill() error }
 
-// engineVer mirrors bin_ver(): $BIN -version. TODO(P1): share with sysd.BinVersion —
-// kept a var so tests can pin the version.
+// engineVer mirrors bin_ver(): $BIN -version (BinVersion in sysd.go); a var so
+// tests can pin the version.
 var engineVer = func() string { return BinVersion() }
 
 // bin_ver_ok + carrier_ok_here: version gating the plan builders and auto_apply use (B2).
@@ -2010,7 +2010,8 @@ var (
 	atTok     Token
 )
 
-// TODO(P1): the speedtest GET/POST belongs to the stats client; local default is a stub.
+// p1Speedtest: one direction of a probe client's built-in speed test; the live
+// form is speedtestLive (sysd.go wiring), the var default keeps tests inert.
 var p1Speedtest = func(mp int, dir string) (ok bool, mbps float64) { return false, 0 }
 
 // at_measure — speed test on a running client (down then up).

@@ -97,3 +97,21 @@ clobber an existing ech.
 Files: cmd/wattun/mgr/matrix.go (comment only), matrix_apply_test.go (new).
 Tests: `go test -count=1 -run TestApplyMatrixVariant ./cmd/wattun/mgr/` → ok; gofmt/vet/full mgr suite → ok.
 Commit: (this commit)
+
+## 2026-11-20 18:20 · implementer · task 6 — smaller TODOs
+All five sites from the plan:
+- status.go:629 (server side): now `p1ServerSide` → the real `serverSide()` (home.go:108, the port of bash
+  server_side 6375: saved `.manager.conf` role first, else inferred from the tunnels' roles). The old
+  `p1Cfg(".manager", "side")` read a tunnel conf that does not exist, so the side was always "".
+- status.go:1398 (registerStatusScreens never called): called from routes.go's init() bootstrap — the "P1 tag"
+  condition is met, status.go compiles untagged. Its four keys (status/logs/doctor/monitor) were dead aliases
+  before; now they resolve. Nothing else in the tree dispatches those keys, so behaviour is unchanged; they are
+  available for the tty menu paths.
+- auto.go:44: `engineVer` already delegates to `BinVersion` (sysd.go); stale "share it" TODO dropped.
+- matrix.go:73: `binVer` was a second copy of the `-version` parsing; it now delegates to `BinVersion`.
+  `wattunBin()` stays (still used by atStart).
+- auto.go:2009: `p1Speedtest`'s live form is already wired (sysd.go:57 → speedtestLive → fetchSpeedtest); the
+  comment said it was only a stub. Comment corrected to describe the seam honestly.
+Files: cmd/wattun/mgr/routes.go, status.go, auto.go, matrix.go.
+Tests: gofmt -l cmd wat testbench → empty; go vet ./... → clean; `go test -count=1 ./cmd/wattun/mgr/` → ok.
+Commit: (this commit)

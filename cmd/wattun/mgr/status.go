@@ -56,7 +56,8 @@ var (
 		}
 		return m, nil
 	}
-	p1Register = func(key, title string, fn func(string)) { Register(key, func(args ...string) int { fn(""); return 0 }) }
+	p1Register   = func(key, title string, fn func(string)) { Register(key, func(args ...string) int { fn(""); return 0 }) }
+	p1ServerSide = func() string { return serverSide() } // bash server_side() 6375
 
 	p1Systemctl = func(action, unit string) error { return Systemctl(action, unit) }
 	p1IsActive  = func(unit string) bool { return IsActive(unit) }
@@ -785,7 +786,7 @@ func dashTable(w io.Writer) {
 	dashN = append([]string(nil), p1Tunnels()...)
 	if len(dashN) == 0 {
 		fmt.Fprintf(w, "  No tunnels configured. Press %s to create one", keyLabel("n"))
-		switch p1Cfg(".manager", "side") { // TODO(P1): conf server_side
+		switch p1ServerSide() { // bash server_side(): saved role first, else the tunnels' roles
 		case "kharej":
 			fmt.Fprint(w, " (Kharej).\n")
 		case "iran":
@@ -1553,8 +1554,8 @@ func LiveMonitor(out io.Writer) {
 	}
 }
 
-// registerScreens wires this surface into the P1 screen registry.
-// TODO(P1): call from the registry bootstrap once the tag is dropped.
+// registerStatusScreens wires this surface into the screen registry (called
+// from routes.go's bootstrap — the bash names status/logs/doctor/monitor).
 func registerStatusScreens() {
 	p1Register("status", "Status", func(name string) {
 		TunnelStatus(name, os.Stdout)
