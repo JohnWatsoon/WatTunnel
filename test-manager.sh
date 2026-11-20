@@ -1188,7 +1188,7 @@ cfg_coverage_missing() { # [extra names...] -> engine flags with no manager path
   local f miss=''
   for f in $(cfg_flag_names) "$@"; do
     case "$f" in
-      config|mode|key|key-file|map|udp|ports|listen|peer|host|path|sni|metrics|version|ui) continue ;;
+      config|mode|key|key-file|map|udp|ports|listen|peer|host|path|sni|metrics|version) continue ;;
       listen-*|peer-*|src-ip-*) continue ;;
     esac
     case " $CFG_FILE_ONLY $CFG_PORTS_UI " in *" $f "*) continue ;; esac

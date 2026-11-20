@@ -35,7 +35,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/JohnWatsoon/WatTunnel/cmd/wattun/ui"
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
 
@@ -109,7 +108,6 @@ func main() {
 	allowClientsFile := flag.String("allow-clients-file", "", "server: file with the -allow-clients list (comma/space/newline separated), read at startup; replaces -allow-clients (3.3.0)")
 	debug := flag.Bool("debug", false, "log every stream open/close")
 	version := flag.Bool("version", false, "print the version and exit")
-	uiMode := flag.Bool("ui", false, "interactive TUI: a live dashboard of every tunnel config in /etc/wattun (WAT_CONF_DIR moves the dir; -metrics is the fallback stats address for tunnels without their own)")
 	fecMode := flag.String("fec", "off", "off|auto: adaptive XOR parity after bursts of small packets, sent only while the measured loss is above -fec-on-loss (cuts tail latency on lossy links; both ends need 1.7.0 and -fec auto; loss gate since 3.3.0)")
 	fecOnLoss := flag.Float64("fec-on-loss", 2, "fec auto: start sending parity once the sender's measured loss is above this percent (0.01 = 1 %, at most 50; must be above -fec-off-loss; 3.3.0)")
 	fecOffLoss := flag.Float64("fec-off-loss", 0.5, "fec auto: stop sending parity once the measured loss falls below this percent (0 = once open it never closes; below -fec-on-loss; 3.3.0)")
@@ -188,16 +186,6 @@ func main() {
 	flag.Parse()
 	if *version {
 		fmt.Println("wattun " + wat.Version)
-		return
-	}
-	// -ui (3.3.9): the interactive TUI runs inside wattun itself — runManager has already declined the manager
-	// handoff (argv[1] starts with '-', and -ui is a flag). It branches before the config parse and the
-	// -mode/-key validation so no tunnel flags are required; each tunnel's own /stats address comes from its
-	// config file (harness.ReadTunnels), with -metrics as the fallback.
-	if *uiMode {
-		if err := ui.Run(*metrics); err != nil {
-			log.Fatal(err)
-		}
 		return
 	}
 	var fileCfg *fileConfig
