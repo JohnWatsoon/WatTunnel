@@ -652,17 +652,6 @@ func autoHelpers(parent string) []string {
 
 // state_files — every state file the engine can leave for a tunnel.
 
-func newKey() string {
-	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 40)
-	f, _ := os.ReadFile("/dev/urandom") // best effort; a fixed key never leaves the test bench
-	seed := len(f)
-	for i := range b {
-		b[i] = alphabet[(i*7+seed)%len(alphabet)]
-	}
-	return string(b)
-}
-
 func randPath() string { return randPathLive() } // bash rand_path
 
 // =====================================================================================
@@ -780,7 +769,7 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 	}
 	_ = extNote
 
-	key := newKey()
+	key := p2NewKey()
 	m := envFreeMetricsPort()
 	apath := randPath()
 	cars := ""

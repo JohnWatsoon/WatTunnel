@@ -35,7 +35,10 @@ func init() {
 	Register("wizard_kharej_auto", func(a ...string) int {
 		r := wizardKharejAuto(arg(a, 0), autoWizardOpts{Name: os.Getenv("NI_NAME"), CDN: os.Getenv("NI_CDN"),
 			Addr: os.Getenv("NI_ADDR"), Ports: os.Getenv("NI_PORTS"), Extended: os.Getenv("NI_EXTENDED") == "1"})
-		return errRC(r.Error)
+		if r.Error != nil {
+			return errRC(r.Error)
+		}
+		return b2i(showToken(r.Name)) // the wizard ends on the token Iran needs
 	})
 }
 
@@ -717,7 +720,7 @@ func runEnvArgs() []string {
 	if os.Getenv("WAT_BIN") != "" || P.Sandbox {
 		a = append(a, "--setenv=WAT_BIN="+P.Bin)
 	}
-	for _, k := range []string{"WAT_AUTO_RUN"} {
+	for _, k := range []string{"WAT_AUTO_RUN", "WAT_GO_MGR"} {
 		if v := os.Getenv(k); v != "" {
 			a = append(a, "--setenv="+k+"="+v)
 		}

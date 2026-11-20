@@ -47,7 +47,17 @@ func TestChooseDrawsSelection(t *testing.T) {
 	out := capture(t, func() {
 		Choose(func(w io.Writer) {}, []Item{{Label: "A", Desc: "first"}, {Label: "Bee", Desc: "second"}}, &sel, []string{"⏎", "open"}, 0)
 	})
-	if !strings.Contains(out, "  ❯ Bee   second") || !strings.Contains(out, "    A     first") || !strings.Contains(out, "⏎ open") {
+	// the drawn key is the one Choose acts on: hotkey, else number unless a hotkey owns it
+	its := []Item{{Label: "a"}, {Label: "b", Key: "x"}, {Label: "c", Key: "1"}, {Label: "d"}, {Label: "e", Key: "esc"}}
+	for i, want := range []string{"", "x", "1", "4", ""} {
+		if got := itemKey(its, i); got != want {
+			t.Errorf("itemKey(%d) = %q, want %q", i, got, want)
+		}
+	}
+	if a, b := p2NewKey(), p2NewKey(); len(a) != 40 || a == b {
+		t.Errorf("p2NewKey not a fresh 40-char key: %q %q", a, b)
+	}
+	if !strings.Contains(out, "  ❯ 2  Bee   second") || !strings.Contains(out, "    1  A     first") || !strings.Contains(out, "⏎ open") {
 		t.Errorf("selection drawing wrong:\n%s", out)
 	}
 }

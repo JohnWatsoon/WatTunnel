@@ -41,7 +41,13 @@ func colorTierFromEnv() int {
 	if ct == "truecolor" || ct == "24bit" {
 		return 24
 	}
-	if strings.Contains(os.Getenv("TERM"), "256color") {
+	if v := os.Getenv("WAT_COLORS"); v == "24" || v == "256" || v == "8" {
+		return atoi(v)
+	}
+	// SSH drops COLORTERM, and PuTTY/Termius send plain TERM=xterm yet draw 256 colours;
+	// only the Linux console and unknown terminals stay on 8.
+	if t := os.Getenv("TERM"); strings.Contains(t, "256color") || strings.HasPrefix(t, "xterm") ||
+		strings.HasPrefix(t, "screen") || strings.HasPrefix(t, "tmux") || strings.HasPrefix(t, "rxvt") {
 		return 256
 	}
 	return 8
@@ -269,8 +275,12 @@ func drawItems(w io.Writer, items []Item, sel int) {
 	width := uiW()
 	for i, it := range items {
 		pad := rep(" ", lw-rlen(it.Label)+3)
+		hk := ""
+		if k := itemKey(items, i); k != "" {
+			hk = k + "  "
+		}
 		if i == sel {
-			row := " " + CYN + "❯" + RST + " " + BOLD + CYN + it.Label + RST + pad + GRY + it.Desc + RST
+			row := " " + CYN + "❯" + RST + " " + CYN + hk + RST + BOLD + CYN + it.Label + RST + pad + GRY + it.Desc + RST
 			if n := width - rlen(row); n > 0 {
 				row += rep(" ", n)
 			}
@@ -284,8 +294,29 @@ func drawItems(w io.Writer, items []Item, sel int) {
 		if it.Off {
 			lab = GRY + it.Label + RST
 		}
-		fmt.Fprintf(w, "    %s%s%s%s%s\n", lab, pad, GRY, it.Desc, RST)
+		fmt.Fprintf(w, "    %s%s%s%s%s%s%s%s\n", GRY, hk, RST, lab, pad, GRY, it.Desc, RST)
 	}
+}
+
+// itemKey is the key that picks items[i] in Choose: its one-key hotkey, else its
+// number (1-9) unless another item claims that digit; "" when neither.
+func itemKey(items []Item, i int) string {
+	if k := items[i].Key; k != "" {
+		if rlen(k) == 1 {
+			return k
+		}
+		return ""
+	}
+	if i >= 9 {
+		return ""
+	}
+	d := string(rune('1' + i))
+	for _, it := range items {
+		if it.Key == d {
+			return ""
+		}
+	}
+	return d
 }
 
 // ---- boxes, graphs, numbers ----

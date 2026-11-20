@@ -56,6 +56,9 @@ func InitPaths() error {
 	} else {
 		P.Self = "wattun"
 	}
+	if os.Getenv("WAT_GO_MGR") == "1" { // without it, the command we print opens the bash manager
+		P.Self = "WAT_GO_MGR=1 " + P.Self
+	}
 	return nil
 }
 

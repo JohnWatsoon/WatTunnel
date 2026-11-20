@@ -271,7 +271,7 @@ func MainMenu() int {
 			{Label: "Settings", Desc: "auto-heal, animations, update proxy, server role"},
 			{Label: "Exit", Off: true},
 		}
-		i, k := Choose(head, items, &sel, []string{"↑↓", "move", "⏎", "open", "1-7", "jump", "q", "quit"}, 2*time.Second)
+		i, k := Choose(head, items, &sel, []string{"↑↓", "move", "⏎", "open", "1-6", "jump", "q", "quit"}, 2*time.Second)
 		switch k {
 		case "eof":
 			return 0
@@ -914,7 +914,7 @@ func unitEnvLines() string {
 	if P.Sandbox {
 		fmt.Fprintf(&b, "Environment=\"WAT_PREFIX=%s\"\n", P.Prefix)
 	}
-	for _, k := range []string{"WAT_CONF", "WAT_BIN", "WAT_RUN", "WAT_AUTO_RUN"} {
+	for _, k := range []string{"WAT_CONF", "WAT_BIN", "WAT_RUN", "WAT_AUTO_RUN", "WAT_GO_MGR"} {
 		if v := os.Getenv(k); v != "" {
 			fmt.Fprintf(&b, "Environment=\"%s=%s\"\n", k, v)
 		}
