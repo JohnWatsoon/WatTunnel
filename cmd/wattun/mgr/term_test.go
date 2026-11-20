@@ -1,6 +1,7 @@
 package mgr
 
 import (
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -75,10 +76,27 @@ func TestKeyReadNonInteractive(t *testing.T) {
 }
 
 func TestKeyReadTimeout(t *testing.T) {
-	defer feed("")() // nothing arrives
+	r, w := io.Pipe() // open but silent, like an idle terminal
+	old := In
+	In = r
+	defer func() { In = old; w.Close() }()
+	NonInteractive = false
 	k, to, ok := KeyRead(30 * time.Millisecond)
 	if !ok || !to || k != "" {
 		t.Errorf("timeout: key=%q timeout=%v ok=%v", k, to, ok)
+	}
+	// a key typed after a timed-out read must reach the next read (tick screens lost it)
+	go w.Write([]byte("x"))
+	if k, _, ok := KeyRead(time.Second); !ok || k != "x" {
+		t.Errorf("after timeout: key=%q ok=%v", k, ok)
+	}
+}
+
+func TestKeyReadEOFWithTick(t *testing.T) {
+	defer feed("")()
+	NonInteractive = false
+	if _, to, ok := KeyRead(30 * time.Millisecond); ok || to {
+		t.Errorf("EOF with a tick: timeout=%v ok=%v, want false false", to, ok)
 	}
 }
 

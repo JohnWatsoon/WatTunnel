@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -55,34 +56,51 @@ func CurShow() {
 	}
 }
 
-// keyByte reads one byte from In; ok=false on EOF or error.
-func keyByte() (byte, bool) {
-	var b [1]byte
-	if n, _ := In.Read(b[:]); n == 1 {
-		return b[0], true
-	}
-	return 0, false
+type keyRes struct {
+	b  byte
+	ok bool
 }
 
-// keyByteTimeout reads one byte with a deadline; ok=false on timeout.
-// shortcut: a goroutine per timed read; a timed-out read leaks its goroutine
-// until the next byte arrives. Matches the bash read -t semantics; upgrade to
-// poll/PeekNamedPipe if that ever matters.
-func keyByteTimeout(d time.Duration) (byte, bool) {
-	type res struct {
-		b  byte
-		ok bool
+var (
+	keyMu  sync.Mutex
+	keySrc io.Reader
+	keyCh  chan keyRes
+)
+
+// keyChan is fed by one long-lived reader of In (a new one only when In is
+// swapped, as tests do). A goroutine per timed read used to stay blocked after
+// its timeout and then swallow the next keypress, so tick screens lost keys.
+func keyChan() chan keyRes {
+	keyMu.Lock()
+	defer keyMu.Unlock()
+	if keyCh == nil || keySrc != In {
+		src, ch := In, make(chan keyRes)
+		keySrc, keyCh = src, ch
+		go func() {
+			for { // at EOF it keeps answering !ok, so every later read returns
+				var b [1]byte
+				n, _ := src.Read(b[:])
+				ch <- keyRes{b[0], n == 1}
+			}
+		}()
 	}
-	ch := make(chan res, 1)
-	go func() {
-		b, ok := keyByte()
-		ch <- res{b, ok}
-	}()
+	return keyCh
+}
+
+// keyByte reads one byte from In; ok=false on EOF or error.
+func keyByte() (byte, bool) {
+	r := <-keyChan()
+	return r.b, r.ok
+}
+
+// keyByteTimeout reads one byte with a deadline; ok=false on EOF or timeout,
+// timedOut tells the two apart.
+func keyByteTimeout(d time.Duration) (b byte, ok, timedOut bool) {
 	select {
-	case r := <-ch:
-		return r.b, r.ok
+	case r := <-keyChan():
+		return r.b, r.ok, false
 	case <-time.After(d):
-		return 0, false
+		return 0, false, true
 	}
 }
 
@@ -96,10 +114,10 @@ func KeyRead(timeout time.Duration) (key string, timedOut, ok bool) {
 	for {
 		var b byte
 		if timeout > 0 {
-			var got bool
-			b, got = keyByteTimeout(timeout)
+			var got, late bool
+			b, got, late = keyByteTimeout(timeout)
 			if !got {
-				return "", true, true
+				return "", late, late // EOF: ok=false, so tick screens stop instead of spinning
 			}
 		} else {
 			var got bool
@@ -112,7 +130,7 @@ func KeyRead(timeout time.Duration) (key string, timedOut, ok bool) {
 			// ESC followed by more bytes is an escape sequence (arrows, Home,
 			// F-keys): swallowed and read again, except arrows on a deck page
 			// (KeyNav). A lone ESC stays "esc".
-			k2, more := keyByteTimeout(50 * time.Millisecond)
+			k2, more, _ := keyByteTimeout(50 * time.Millisecond)
 			if !more {
 				return "esc", false, true
 			}
@@ -120,7 +138,7 @@ func KeyRead(timeout time.Duration) (key string, timedOut, ok bool) {
 				c := byte(0)
 				for i := 0; i < 8; i++ {
 					var got bool
-					c, got = keyByteTimeout(50 * time.Millisecond)
+					c, got, _ = keyByteTimeout(50 * time.Millisecond)
 					if !got {
 						break
 					}
@@ -159,7 +177,7 @@ func ReadLine(timeout time.Duration) (string, bool) {
 		var b byte
 		if timeout > 0 {
 			var got bool
-			b, got = keyByteTimeout(timeout)
+			b, got, _ = keyByteTimeout(timeout)
 			if !got {
 				if sb.Len() == 0 {
 					return "", false
