@@ -907,9 +907,11 @@ func newTunnelScreen() {
 		switch {
 		case i == 0:
 			runFlow("wizard_kharej")
+			Pause() // keep the token on screen
 			return
 		case i == 1:
 			runFlow("wizard_iran")
+			Pause()
 			return
 		case k == "0" || k == "esc" || k == "q" || k == "eof":
 			return

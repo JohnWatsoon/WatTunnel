@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -1558,11 +1559,18 @@ func orStr(s, def string) string {
 	return def
 }
 
-// start_unit (bash 2360, feedback part)
+// start_unit (bash 2366): the sandbox template, enable + wait for active, the
+// hidden auto helpers, and the last log lines when it fails.
 func p2StartUnit(n string) {
-	if err := p2Systemctl("enable", "--now", Unit(n)); err != nil {
-		Err("Tunnel '" + n + "' failed to start.")
+	if step("Starting "+Unit(n), func() bool { return unitUp(n) }) {
+		if IsAutoKharej(n) {
+			for _, u := range autoHelpers(n) {
+				unitUp(u)
+			}
+		}
 		return
 	}
-	Ok("Started " + Unit(n) + ".")
+	Err("Tunnel '" + n + "' failed to start. Last log lines:")
+	out, _ := exec.Command("journalctl", "-u", Unit(n), "-n", "15", "--no-pager", "-o", "cat").Output()
+	Stdout.Write(out)
 }
