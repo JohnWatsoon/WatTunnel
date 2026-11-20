@@ -208,3 +208,8 @@ CI on branch `gomgr-review`:
 Verdict: the plan is done. The Go manager meets the sign-off gate. Flipping the default is the owner's call, with
 a version bump and release notes. Nothing is field-tested on a real server.
 Commit: see the next commit on gomgr-review
+
+## 2026-11-20 · reviewer · kickoff handoff 2
+New plan: `docs/handoff/PLAN-phase2.md` (Track A coded downlink, Track B Phantom/ptcp with hopping, Track C Split
+only if A and B are done). Same log, same rules. Start with Track A.
+Commit: none
