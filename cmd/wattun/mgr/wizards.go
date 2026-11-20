@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,106 +52,117 @@ func shapedSupportedHere(c string) bool {
 	return true
 }
 
-// pick_shaped_carrier (bash 2616): numbered shaped list -> carrier; "" = cancelled.
-func pickShapedCarrier() string {
-	opts := append(append([]string{}, p2ShapedRawList...), p2ShapedUDPList...)
-	fmt.Fprintln(Stdout)
-	Say("  " + BOLD + "More transports" + RST + " " + GRY + "(advanced; wattun-internal wire shapes, NOT the real protocols)" + RST)
-	Say("  " + GRY + "Both ends need wattun 3.3.0; single carrier only; raw tier needs root/CAP_NET_RAW." + RST)
-	i := 0
-	for _, c := range p2ShapedRawList {
-		i++
-		Say("   " + KeyLabel(strconv.Itoa(i)) + " " + c + "  " + GRY + "raw tier, IP protocol " + shapedRawProto(c) + RST)
+// wizHead: the wizard's title and step bar (done ✓, current bold, later dim).
+func wizHead(w io.Writer, role string, cur int, steps []string) {
+	Title(w, "New tunnel", role)
+	var parts []string
+	for i, s := range steps {
+		switch {
+		case i < cur:
+			parts = append(parts, GRN+"✓ "+s+RST)
+		case i == cur:
+			parts = append(parts, BOLD+CYN+s+RST)
+		default:
+			parts = append(parts, GRY+s+RST)
+		}
 	}
-	for _, c := range p2ShapedUDPList {
-		i++
-		Say("   " + KeyLabel(strconv.Itoa(i)) + " " + c + "  " + GRY + "UDP shape, random open port" + RST)
-	}
-	fmt.Fprintln(Stdout)
-	r := Ask(fmt.Sprintf("Number 1-%d (Enter = cancel)", i), "")
-	if r == "" {
-		return ""
-	}
-	n, err := strconv.Atoi(r)
-	if err != nil || n < 1 || n > len(opts) {
-		Err("No shaped carrier number '" + r + "'.")
-		return ""
-	}
-	c := opts[n-1]
-	if !VCarrierList(c) {
-		return ""
-	}
-	if !shapedSupportedHere(c) {
-		return ""
-	}
-	p2ShapedWarn(c)
-	return c
+	fmt.Fprintf(w, "  %s\n\n", strings.Join(parts, GRY+"  ›  "+RST))
 }
 
-// pick_carrier (bash 2633): key-driven picker; "" = cancelled.
-func pickCarrier(auto bool) string {
-	var opts, descs []string
-	if auto {
-		opts = append(opts, "auto")
-		descs = append(descs, BOLD+"Auto (recommended)"+RST+": this server accepts every type; the Iran server tests them all and\n        keeps the best. Later, on the Iran server, you can switch to another type or join several (tunnel page, m).")
+// wizStep clears the screen and draws the head for a step that prompts line by line.
+func wizStep(role string, cur int, steps []string) {
+	ClearScreen()
+	wizHead(Stdout, role, cur, steps)
+}
+
+var (
+	kharejSteps = []string{"Carrier", "Address", "Settings", "Create"}
+	iranSteps   = []string{"Token", "Ports", "Settings", "Create"}
+)
+
+// pick_shaped_carrier (bash 2616): the 13 wire shapes; "" = cancelled.
+func pickShapedCarrier(head func(io.Writer)) string {
+	var opts []string
+	var items []Item
+	for _, c := range p2ShapedRawList {
+		opts = append(opts, c)
+		items = append(items, Item{Label: c, Desc: "raw tier, IP protocol " + shapedRawProto(c)})
 	}
-	opts = append(opts, "icmp", "udp", "tcp", "tls", "wss", "ws", "grpc", "h2", "gre", "ipip")
-	descs = append(descs,
-		"icmp  ping packets; works when everything else is blocked (the usual case on filtered routes)",
-		"udp   fastest and lowest latency, if UDP passes",
-		"tcp   plain TCP, if TCP passes",
-		"tls   TCP that looks like a normal HTTPS site",
-		"wss   WebSocket over TLS; works behind Cloudflare or another CDN",
-		"ws    WebSocket without TLS (CDN on port 80, or a proxy that adds TLS)",
-		"grpc  gRPC, for CDNs that allow it",
-		"h2    HTTP/2",
-		"gre   GRE (IP protocol 47); raw-IP like icmp, root and Linux only",
-		"ipip  IP-in-IP (protocol 4); raw-IP like icmp, root and Linux only")
-	n := len(opts)
-	Say("  " + BOLD + "Connection type" + RST + ": how the two servers talk to each other")
-	for i := 0; i < n; i++ {
-		switch opts[i] {
-		case "icmp":
-			if opts[0] == "auto" {
-				Say("  " + GRY + "Or choose one type yourself (fixed; to change it later, make a new tunnel):" + RST)
+	for _, c := range p2ShapedUDPList {
+		opts = append(opts, c)
+		items = append(items, Item{Label: c, Desc: "UDP shape, random open port"})
+	}
+	h := func(w io.Writer) {
+		head(w)
+		fmt.Fprintf(w, "  %sMore transports%s\n", BOLD, RST)
+		hintLine(w, "wattun-internal wire shapes, NOT the real protocols. Both ends need wattun 3.3.0;")
+		hintLine(w, "single carrier only; the raw tier needs root or CAP_NET_RAW.")
+		fmt.Fprintln(w)
+	}
+	sel := 0
+	for {
+		i, k := Choose(h, items, &sel, []string{"⏎", "pick", "esc", "back"}, 0)
+		if i < 0 {
+			if k == "esc" || k == "q" || k == "eof" || k == "0" {
+				return ""
 			}
-			Say("   " + GRY + "Gets through the strictest filters" + RST)
-		case "udp":
-			Say("   " + GRY + "Fast and simple, if your route lets them through" + RST)
-		case "tls":
-			Say("   " + GRY + "Looks like web traffic: harder to block, and the only kind a CDN carries" + RST)
+			continue
 		}
-		Say("    " + CYN + strconv.Itoa(i+1) + RST + " " + descs[i])
+		c := opts[i]
+		if !VCarrierList(c) || !shapedSupportedHere(c) {
+			return ""
+		}
+		p2ShapedWarn(c)
+		return c
 	}
-	Say("    " + CYN + "0" + RST + " h2c  HTTP/2 without TLS (a CDN or proxy that terminates TLS)")
-	Say("    " + CYN + "m" + RST + " More transports (advanced) … 13 shaped carriers, both ends 3.3.0, single only")
-	for t := 0; t < 3; t++ {
-		k, _, _ := KeyRead(0)
+}
+
+// pick_carrier (bash 2633): the connection-type list; "" = cancelled.
+// Numbers 1-9 still pick the first nine rows, 0 is h2c and m opens the shapes.
+func pickCarrier(auto bool, head func(io.Writer)) string {
+	var vals []string
+	var items []Item
+	add := func(key, v, desc string) {
+		vals = append(vals, v)
+		items = append(items, Item{Key: key, Label: v, Desc: desc})
+	}
+	if auto {
+		add("", "auto", "recommended · accepts every type; the Iran server tests them and keeps the best")
+	}
+	add("", "icmp", "ping packets; gets through the strictest filters")
+	add("", "udp", "fastest and lowest latency, if UDP passes")
+	add("", "tcp", "plain TCP, if TCP passes")
+	add("", "tls", "TCP that looks like a normal HTTPS site")
+	add("", "wss", "WebSocket over TLS; works behind Cloudflare or another CDN")
+	add("", "ws", "WebSocket without TLS (CDN on port 80, or a proxy that adds TLS)")
+	add("", "grpc", "gRPC, for CDNs that allow it")
+	add("", "h2", "HTTP/2")
+	add("", "gre", "GRE (IP protocol 47); raw IP like icmp, root and Linux only")
+	add("", "ipip", "IP-in-IP (protocol 4); raw IP like icmp, root and Linux only")
+	add("0", "h2c", "HTTP/2 without TLS (a CDN or proxy that ends TLS)")
+	add("m", "more…", "13 shaped carriers · both ends 3.3.0 · single carrier only")
+	h := func(w io.Writer) {
+		head(w)
+		fmt.Fprintf(w, "  %sConnection type%s  %show the two servers talk to each other%s\n", BOLD, RST, GRY, RST)
+		if auto {
+			hintLine(w, "A fixed type stays until you make a new tunnel; auto can be switched later on Iran.")
+		}
+		fmt.Fprintln(w)
+	}
+	sel := 0
+	for {
+		i, k := Choose(h, items, &sel, []string{"⏎", "pick", "1-9", "quick pick", "esc", "cancel"}, 0)
 		switch {
-		case k == "enter":
-			return opts[0]
-		case k == "0":
-			return "h2c"
-		case k == "m" || k == "M":
-			if c := pickShapedCarrier(); c != "" {
+		case i >= 0 && vals[i] == "more…":
+			if c := pickShapedCarrier(head); c != "" {
 				return c
 			}
-		case k >= "1" && k <= "9":
-			i, _ := strconv.Atoi(k)
-			if i <= n {
-				return opts[i-1]
-			}
-			fmt.Fprintln(Stdout)
-			Warn(fmt.Sprintf("Press 1-%d, 0 for h2c, or m for the shaped carriers.", n))
-		case k == "esc" || k == "q":
-			fmt.Fprintln(Stdout)
+		case i >= 0:
+			return vals[i]
+		case k == "esc" || k == "q" || k == "eof":
 			return ""
-		default:
-			fmt.Fprintln(Stdout)
-			Warn(fmt.Sprintf("Press 1-%d, 0 for h2c, or m for the shaped carriers.", n))
 		}
 	}
-	return ""
 }
 
 // ======================================================================================
@@ -227,15 +239,15 @@ func kharejYML(p kharejParams) string {
 	return b.String()
 }
 
-// summary_line (bash 2682)
-func summaryLine(l, v string) {
-	fmt.Fprintf(Stdout, "    %s%-14s%s %s\n", GRY, l, RST, v)
-}
+// wizSummary collects the summary rows the wizards show in a box before creating.
+type wizSummary []string
+
+func (s *wizSummary) add(l, v string) { *s = append(*s, kv(l, v)) }
 
 func wizardKharej() bool {
-	Page("New tunnel", "Kharej")
+	kHead := func(w io.Writer) { wizHead(w, "Kharej", 0, kharejSteps) }
 	name := suggestName("kharej")
-	cr := pickCarrier(true)
+	cr := pickCarrier(true, kHead)
 	if cr == "" {
 		return false
 	}
@@ -245,11 +257,13 @@ func wizardKharej() bool {
 			return dispatch("wizard_kharej_auto", name) == 0
 		}
 		Warn("The auto carrier needs the auto-plan writer (not ported yet); pick a fixed type.")
-		cr = pickCarrier(false)
+		cr = pickCarrier(false, kHead)
 		if cr == "" {
 			return false
 		}
 	}
+	wizStep("Kharej", 1, kharejSteps)
+	Ok("Carrier  " + cr)
 	if isShapedList(cr) {
 		if !shapedSupportedHere(cr) {
 			return false
@@ -297,7 +311,7 @@ func wizardKharej() bool {
 	}
 
 	// advanced (bash 2761-2793)
-	fmt.Fprintln(Stdout)
+	wizStep("Kharej", 2, kharejSteps)
 	def := name + " · " + addr
 	if listen != "" {
 		def += ":" + listen
@@ -380,8 +394,9 @@ func wizardKharej() bool {
 	}
 
 	// summary (bash 2798-2811)
-	fmt.Fprintln(Stdout)
-	summaryLine("Name", name+" (Kharej)")
+	wizStep("Kharej", 3, kharejSteps)
+	var sum wizSummary
+	sum.add("Name", name+" (Kharej)")
 	car := cr
 	if itype != "" {
 		car += " (" + itype + ")"
@@ -395,22 +410,23 @@ func wizardKharej() bool {
 	if udpdns {
 		car += " (DNS-shaped)"
 	}
-	summaryLine("Carrier", car)
-	summaryLine("Address", addr)
+	sum.add("Carrier", car)
+	sum.add("Address", addr)
 	if rev {
 		if cr == "icmp" {
-			summaryLine("Direction", "reverse → "+iranip)
+			sum.add("Direction", "reverse → "+iranip)
 		} else {
-			summaryLine("Direction", "reverse → "+JoinHP(iranip, listen))
+			sum.add("Direction", "reverse → "+JoinHP(iranip, listen))
 		}
 	}
-	summaryLine("Allow ports", orStr(allow, "any"))
+	sum.add("Allow ports", orStr(allow, "any"))
 	if mbps != "" {
-		summaryLine("Speed limit", mbps+" MB/s")
+		sum.add("Speed limit", mbps+" MB/s")
 	}
 	if fec == "auto" {
-		summaryLine("FEC", "auto")
+		sum.add("FEC", "auto")
 	}
+	Box(Stdout, "Summary", sum...)
 	fmt.Fprintln(Stdout)
 	if !Confirm("Create tunnel '"+name+"'?", true) {
 		Warn("Cancelled.")
@@ -444,11 +460,14 @@ func wizardKharej() bool {
 		Hint("Cloud firewall: allow ICMP.")
 	}
 	fmt.Fprintln(Stdout)
-	fmt.Fprintf(Stdout, "  %s◆%s %s%s%s\n", GRN, RST, BOLD, "Kharej tunnel '"+name+"' ready", RST)
-	fmt.Fprintln(Stdout)
+	fmt.Fprintf(Stdout, "  %s✓%s %sKharej tunnel '%s' is ready%s\n\n", GRN, RST, BOLD, name, RST)
+	fmt.Fprintf(Stdout, "  %sToken%s  %scontains the secret key; share it privately%s\n", BOLD, RST, GRY, RST)
 	fmt.Fprintf(Stdout, "  %s%s%s\n\n", BOLD+YEL, tok, RST)
-	Say("  Next on Iran: run " + CYN + P.Self + RST + " → " + KeyLabel("n") + " → paste token")
-	Hint("Token contains secret key — share privately (" + P.Self + " token " + name + ")")
+	fmt.Fprintf(Stdout, "  %sNext, on the Iran server%s\n", BOLD, RST)
+	fmt.Fprintf(Stdout, "  %s1%s  run %s%s%s\n", CYN, RST, CYN, P.Self, RST)
+	fmt.Fprintf(Stdout, "  %s2%s  New tunnel › Iran\n", CYN, RST)
+	fmt.Fprintf(Stdout, "  %s3%s  paste the token\n", CYN, RST)
+	Hint("Show it again any time: " + P.Self + " token " + name)
 	return true
 }
 
@@ -591,9 +610,8 @@ func iranYML(p iranParams) string {
 }
 
 func wizardIran() bool {
-	Page("New tunnel", "Iran")
+	wizStep("Iran", 0, iranSteps)
 	name := suggestName("iran")
-	fmt.Fprintln(Stdout)
 	if !AskOK("Token from Kharej (wat1:...)", "", vToken) {
 		return false
 	}
@@ -638,7 +656,8 @@ func wizardIran() bool {
 	}
 
 	// port mappings: pre-fill from the token allowlist (bash 3436-3462)
-	pe := &portEditor{Role: "Iran", Tunnel: name, Allow: allowToArray(t.Ports)}
+	pe := &portEditor{Role: "Iran", Tunnel: name, Allow: allowToArray(t.Ports),
+		Head: func(w io.Writer) { wizHead(w, "Iran", 1, iranSteps) }}
 	if len(pe.Allow) > 0 {
 		pe.Msg = append(pe.Msg, GRN+"✓"+RST+" Pre-filled from token (Enter keeps, e # edits)")
 		skipped := 0
@@ -667,7 +686,7 @@ func wizardIran() bool {
 	}
 
 	// advanced (bash 3464-3475)
-	fmt.Fprintln(Stdout)
+	wizStep("Iran", 2, iranSteps)
 	var bind, mbps, fec, sni, path, itype string
 	if Confirm("Change advanced settings?", false) {
 		if !AskOK("Tunnel name", name, vName) {
@@ -708,27 +727,37 @@ func wizardIran() bool {
 	var fakesni, fakemode, poolrot, poolbytes, ech, governor string
 	if t.Rev != "1" {
 		if IsPoolList(t.Carrier) {
-			fmt.Fprintln(Stdout)
-			Say("  Anti-censor profile            " + GRY + "sni          mode  churn          ech" + RST)
-			Say("  " + KeyLabel("1") + " MCI whitelist              " + GRY + "mci.ir       rst   30m / 500MB    ladder" + RST)
-			Say("  " + KeyLabel("2") + " Irancell whitelist         " + GRY + "irancell.ir  seq   20m / 300MB    ladder" + RST)
-			Say("  " + KeyLabel("3") + " Blackout                   " + GRY + "mci.ir       rst   90s / 100MB    ladder" + RST)
-			Say("  " + KeyLabel("4") + " Low churn                  " + GRY + "mci.ir       seq   4h / 4GB       auto" + RST)
-			Say("  " + KeyLabel("5") + " Custom                     " + GRY + "pick each value" + RST)
-			Say("  " + KeyLabel("6") + " Skip                       " + GRY + "no disguise" + RST)
-			Hint("2 and 4 (seq mode) only help against SNI-allowlist filters.")
-			fmt.Fprintf(Stdout, "  %s?%s Profile %s[1]%s ", CYN, RST, GRY, RST)
-			k, _, _ := KeyRead(0)
-			switch k {
-			case "1", "enter":
-				fakesni, fakemode, poolrot, poolbytes, ech, governor = "mci.ir", "rst", "30m", "500MB", "ladder", "true"
-			case "2":
-				fakesni, fakemode, poolrot, poolbytes, ech, governor = "irancell.ir", "seq", "20m", "300MB", "ladder", "true"
-			case "3":
-				fakesni, fakemode, poolrot, poolbytes, ech, governor = "mci.ir", "rst", "90s", "100MB", "ladder", "true"
-			case "4":
-				fakesni, fakemode, poolrot, poolbytes, ech, governor = "mci.ir", "seq", "4h", "4GB", "auto", "true"
-			case "6", "esc", "q":
+			profs := [][6]string{ // sni, mode, rotate, bytes, ech, governor; "" row = no disguise
+				{"mci.ir", "rst", "30m", "500MB", "ladder", "true"},
+				{"irancell.ir", "seq", "20m", "300MB", "ladder", "true"},
+				{"mci.ir", "rst", "90s", "100MB", "ladder", "true"},
+				{"mci.ir", "seq", "4h", "4GB", "auto", "true"},
+				{}, {},
+			}
+			items := []Item{
+				{Label: "MCI whitelist", Desc: "mci.ir       rst   30m / 500MB   ladder"},
+				{Label: "Irancell whitelist", Desc: "irancell.ir  seq   20m / 300MB   ladder"},
+				{Label: "Blackout", Desc: "mci.ir       rst   90s / 100MB   ladder"},
+				{Label: "Low churn", Desc: "mci.ir       seq   4h / 4GB      auto"},
+				{Label: "Custom", Desc: "pick each value later on the tunnel page (z)"},
+				{Label: "Skip", Desc: "no disguise"},
+			}
+			head := func(w io.Writer) {
+				wizHead(w, "Iran", 2, iranSteps)
+				fmt.Fprintf(w, "  %sAnti-censor profile%s  %ssni · mode · churn · ech%s\n", BOLD, RST, GRY, RST)
+				hintLine(w, "Irancell and Low churn (seq mode) only help against SNI-allowlist filters.")
+				fmt.Fprintln(w)
+			}
+			sel, i := 0, -1
+			for i < 0 {
+				var k string
+				i, k = Choose(head, items, &sel, []string{"⏎", "pick", "esc", "skip"}, 0)
+				if i < 0 && (k == "esc" || k == "q" || k == "eof") {
+					i = 5
+				}
+			}
+			if p := profs[i]; p[0] != "" {
+				fakesni, fakemode, poolrot, poolbytes, ech, governor = p[0], p[1], p[2], p[3], p[4], p[5]
 			}
 		} else if t.Carrier == "icmp" {
 			fmt.Fprintln(Stdout)
@@ -748,50 +777,52 @@ func wizardIran() bool {
 	}
 
 	// summary (bash 3594-3641)
-	fmt.Fprintln(Stdout)
+	wizStep("Iran", 3, iranSteps)
+	var sum wizSummary
 	var note []string
 	for _, m := range pe.Maps {
 		note = append(note, SpecHuman(m))
 	}
-	summaryLine("Name", name)
-	summaryLine("Carrier", t.Carrier+p2OptPar(itype))
-	summaryLine("Kharej", t.Peer)
+	sum.add("Name", name)
+	sum.add("Carrier", t.Carrier+p2OptPar(itype))
+	sum.add("Kharej", t.Peer)
 	if fakesni != "" {
-		summaryLine("Fake SNI", fakesni+" ("+orStr(fakemode, "seq")+" mode)")
+		sum.add("Fake SNI", fakesni+" ("+orStr(fakemode, "seq")+" mode)")
 	}
 	if poolrot != "" && poolrot != "0" && poolrot != "off" {
 		s := poolrot
 		if poolbytes != "" {
 			s += " / " + poolbytes
 		}
-		summaryLine("Pool rotate", s)
+		sum.add("Pool rotate", s)
 	}
 	if ech != "" && ech != "off" {
-		summaryLine("ECH", ech)
+		sum.add("ECH", ech)
 	}
 	if governor == "true" {
-		summaryLine("Governor", "on")
+		sum.add("Governor", "on")
 	}
 	if t.Rev == "1" {
 		if rp := p2LastPort(t.Peer); rp != "" {
-			summaryLine("Direction", "reverse (Kharej dials :"+rp+")")
+			sum.add("Direction", "reverse (Kharej dials :"+rp+")")
 		} else {
-			summaryLine("Direction", "reverse (Kharej sends pings)")
+			sum.add("Direction", "reverse (Kharej sends pings)")
 		}
 	}
-	summaryLine("Publishes", strings.Join(note, " "))
+	sum.add("Publishes", strings.Join(note, " "))
 	if bind != "" && bind != "0.0.0.0" {
-		summaryLine("Bind", bind)
+		sum.add("Bind", bind)
 	}
 	if mbps != "" {
-		summaryLine("Speed limit", mbps+" MB/s")
+		sum.add("Speed limit", mbps+" MB/s")
 	}
 	if fec == "auto" {
-		summaryLine("FEC", "auto")
+		sum.add("FEC", "auto")
 	}
 	if udl := UndisguisedLegs(t.Carrier); udl != "" && (fakesni+poolrot+poolbytes) != "" {
 		Warn("Bond leg(s) '" + udl + "' stay undisguised (only TCP/TLS/HTTP legs use fake-SNI).")
 	}
+	Box(Stdout, "Summary", sum...)
 	fmt.Fprintln(Stdout)
 	if !Confirm("Create this tunnel?", true) {
 		Warn("Nothing was created.")
@@ -858,19 +889,29 @@ func p2LastPort(peer string) string {
 
 // newTunnelScreen: the dashboard's n menu (bash main_menu case n).
 func newTunnelScreen() {
-	Say("  " + BOLD + "New tunnel" + RST)
-	fmt.Fprintln(Stdout)
-	MenuLine(Stdout, "k", "Kharej (server)", "i", "Iran (client, paste token)", "0", "back")
+	items := []Item{
+		{Key: "k", Label: "Kharej", Desc: "server outside Iran · makes the token"},
+		{Key: "i", Label: "Iran", Desc: "server users connect to · paste the Kharej token"},
+	}
+	sel := 0
+	if serverSide() == "iran" {
+		sel = 1
+	}
+	head := func(w io.Writer) {
+		Title(w, "New tunnel", "which side is this server?")
+		hintLine(w, "Set up Kharej first; its token sets up Iran.")
+		fmt.Fprintln(w)
+	}
 	for {
-		k, _, _ := KeyRead(0)
-		switch k {
-		case "k":
+		i, k := Choose(head, items, &sel, []string{"⏎", "pick", "esc", "back"}, 0)
+		switch {
+		case i == 0:
 			runFlow("wizard_kharej")
 			return
-		case "i":
+		case i == 1:
 			runFlow("wizard_iran")
 			return
-		case "0", "esc", "q":
+		case k == "0" || k == "esc" || k == "q" || k == "eof":
 			return
 		}
 	}

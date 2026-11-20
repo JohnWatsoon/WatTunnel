@@ -366,6 +366,7 @@ type portEditor struct {
 	Allow  []string
 	Owned  []string
 	Msg    []string
+	Head   func(io.Writer) // a wizard step bar in place of the Ports page title
 }
 
 func (pe *portEditor) msg(s string) { pe.Msg = append(pe.Msg, s) }
@@ -452,7 +453,12 @@ func (pe *portEditor) draw() {
 	if tun == "" {
 		tun = "new tunnel"
 	}
-	Page("Ports", tun+" · "+pe.Role)
+	if pe.Head != nil {
+		ClearScreen()
+		pe.Head(Stdout)
+	} else {
+		Page("Ports", tun+" · "+pe.Role)
+	}
 	if pe.Role == "Iran" {
 		fmt.Fprintf(Stdout, "  %s%3s  %-19s      %-23s %s%s\n", GRY, "#", "Listen", "Target", "Proto", RST)
 	} else {
