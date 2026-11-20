@@ -24,6 +24,7 @@ type Profile struct {
 	MTU      int     // default datagram size when Config.MaxPayload == 0 (0 = MaxPayload, the ICMP-safe 640)
 	MaxMTU   int     // largest datagram the carrier frames (0 = MaxPayloadHi)
 	InitBps  float64 // default starting pace when Config.InitBps == 0 (0 = 1.5 MB/s)
+	Spread   bool    // packets take many paths of different delay (udp-hop, 3.3.9): judge delay by the tick's fastest sample and detect loss by age, not by packet count
 }
 
 // Profiled is the optional interface of PacketIO / RawIO carriers that carry a Profile.

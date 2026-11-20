@@ -7542,7 +7542,7 @@ adv_menu() { # name : max-mbps, fec, bind, icmp-type, direction, state files, FE
          if [ "$REPLY_V" = echo ]; then unset_value "$n" icmp-type; else set_value "$n" icmp-type "$REPLY_V"; fi; changed=1 ;;
       h) hop_ok "$n" || continue
          [ -n "$(bin_ver_ok 3.3.9)" ] || { err "udp hop needs wattun 3.3.9+ on this server (run: $SELF update)."; sleep 1; continue; }
-         echo; hint "Sends from a new UDP source port every N-1.5N packets: passes a filter that cuts each flow after ~30 packets. 12 = field setting. Kharej needs no change."
+         echo; hint "Sends from a new UDP source port every N-1.5N packets: passes a filter that cuts each flow after ~30 packets. 12 = field setting. Any Kharej connects; Kharej 3.3.9+ downloads at full speed."
          ask_ok "Packets per source port (0 = off)" "$(cfg "$n" udp-hop)" v_udp_hop || continue
          case "$REPLY_V" in ''|-|default|0) unset_value "$n" udp-hop ;; *) set_value "$n" udp-hop "$REPLY_V" ;; esac; changed=1 ;;
       y) case "$cr" in icmp|udp) ;; *) continue ;; esac

@@ -226,6 +226,8 @@ type Session struct {
 	ackPend    int
 	ackSince   time.Time
 	lastRecv   time.Time // cleared after 30 s of silence (the session then counts as dead)
+	srcPort    int       // server: last UDP source port of the peer, for udp-hop detection (3.3.9)
+	srcHops    int       // server: how often that port changed
 	lastAuth   time.Time // same, never cleared: what LastRecv reports
 
 	streams       map[uint64]*Stream
@@ -318,7 +320,8 @@ type pathCC struct {
 	largest      uint64
 	have         bool
 	reliable     bool
-	ackOnly      int // ack-only packets since the last PING on this path
+	spread       bool // Profile.Spread: the path reorders by design, loss by age only
+	ackOnly      int  // ack-only packets since the last PING on this path
 }
 
 func NewSession(cfg Config, pio PacketIO) (*Session, error) {
@@ -408,6 +411,7 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 		s.masked.Store(!cfg.Server)
 	}
 	s.cc.reliable = prof.Reliable
+	s.cc.spread = prof.Spread
 	s.cc.direct = prof.Reliable && cfg.Direct && !noDirect
 	s.pin = s.cc.direct && !noPin && !isChooser(pio)                      // a chooser routes by its own lanes; PinLaneBase means another path there
 	if prof.Reliable && cfg.MinBps == 2e5 && cfg.InitBps > s.cc.minRate { // default floor: never pace a TCP pool below its start rate
@@ -444,6 +448,8 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 		for i := range s.pcc {
 			pp := ch.PathProfile(i)
 			s.pcc[i].reliable = pp.Reliable
+			s.pcc[i].spread = pp.Spread
+			s.cc.spread = s.cc.spread || pp.Spread
 			if pp.MaxMTU > maxHi {
 				maxHi = pp.MaxMTU
 			}
@@ -1371,7 +1377,7 @@ func (s *Session) pathLost(sp *sentPkt, delay, lt time.Duration, now time.Time) 
 		// triggered this check came over another path, which may simply be faster. Leave it to the path's PTO.
 		return false
 	}
-	if !pc.reliable && pc.largest-sp.pn >= 4 {
+	if !pc.reliable && !pc.spread && pc.largest-sp.pn >= 4 {
 		return true
 	}
 	if pc.srtt == 0 && lt < unsampledRTT {
@@ -1851,6 +1857,7 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 	s.stats.PktsIn++
 	s.stats.BytesIn += uint64(len(raw))
 	if s.cfg.Server {
+		s.noteSrcPort(src)
 		s.io.SetPeer(src)
 		if _, ok := s.laneSeen[lane]; !ok {
 			s.laneSeen[lane] = now
@@ -2139,6 +2146,24 @@ func (s *Session) ackOne(sp *sentPkt, largest uint64, delay time.Duration, now t
 	}
 }
 
+// noteSrcPort: a udp-hop client (3.3.9) sends from a new source port every few packets, so its packets and acks take
+// paths of different delay; after spreadHops changes the server judges delay and loss like the client does
+// (Profile.Spread). A NAT rebinding changes the port once or twice and never gets there.
+func (s *Session) noteSrcPort(src net.Addr) {
+	ua, ok := src.(*net.UDPAddr)
+	if !ok || s.cc.spread {
+		return
+	}
+	if s.srcPort != 0 && ua.Port != s.srcPort {
+		if s.srcHops++; s.srcHops >= spreadHops {
+			s.cc.spread = true
+		}
+	}
+	s.srcPort = ua.Port
+}
+
+const spreadHops = 8
+
 // afterAck feeds the pacer and declares losses once an ack's packets are marked.
 func (s *Session) afterAck(largest uint64, delay time.Duration, newly int, rtt time.Duration, now time.Time) {
 	s.cc.inflight = s.inflight // post-ack, so the PROBE_RTT drain-floor guard in sample() sees the current queue
@@ -2162,7 +2187,7 @@ func (s *Session) afterAck(largest uint64, delay time.Duration, newly int, rtt t
 			}
 			continue
 		}
-		if (largest-sp.pn >= 4 && !s.cc.reliable) || now.Sub(sp.at) > lt+delay {
+		if (largest-sp.pn >= 4 && !s.cc.reliable && !s.cc.spread) || now.Sub(sp.at) > lt+delay {
 			s.lose(sp)
 		} else if s.cc.reliable {
 			break // reliable loss is by age only, and s.sent is in send order: everything after is younger

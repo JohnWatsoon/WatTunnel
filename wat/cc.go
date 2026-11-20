@@ -41,6 +41,7 @@ type cc struct {
 	// on the bench link: 56 % of all packets were spurious retransmits).
 	reliable bool
 	anyRel   bool // bond: at least one live path is TCP-based, so judge delay by tickMin even alongside udp (3.3.8)
+	spread   bool // Profile.Spread: path spread is not our queue, judge delay by tickMin (udp-hop, 3.3.9)
 	tickMin  time.Duration
 
 	pathRTT    time.Duration // bond: the slowest recently used path's smoothed RTT
@@ -509,7 +510,7 @@ func (c *cc) tick(now time.Time) {
 	}
 	if c.rttN > 0 && c.minRTT > 0 {
 		avg := c.rttSum / time.Duration(c.rttN)
-		if c.reliable || c.anyRel {
+		if c.reliable || c.anyRel || c.spread {
 			avg = c.tickMin
 		}
 		slack := c.slack

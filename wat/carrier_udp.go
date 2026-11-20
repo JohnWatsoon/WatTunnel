@@ -33,6 +33,9 @@ type UDPClient struct {
 // (field 2026-11-14: rotating only the source port passed 99.7 %). The server is a plain udp server: it already keys
 // sessions by session id and replies to the newest authenticated source (Session.SetPeer), so no wire or server
 // change and any udp server works. An old socket stays open hopGrace to catch replies already in flight.
+// Each source port can take its own path, so delay spreads and packets reorder with no queue of ours: Profile.Spread
+// makes the session judge delay by the fastest sample and loss by age; a 3.3.9 server sets the same on its side once
+// it sees the port keep changing (Session.noteSrcPort), an older server keeps cutting its downlink rate on the spread.
 type udpHop struct {
 	n     int
 	peer  *net.UDPAddr
@@ -233,7 +236,11 @@ func (u *UDPClient) SendBatch(ps [][]byte, lanes []int) error {
 }
 
 func (u *UDPClient) SetPeer(net.Addr) {}
-func (u *UDPClient) Profile() Profile { return udpProfile }
+func (u *UDPClient) Profile() Profile {
+	p := udpProfile
+	p.Spread = u.hop != nil // each source port may take its own path through the filter's network
+	return p
+}
 func (u *UDPClient) Close() error {
 	if u.hop != nil {
 		return u.hop.close()

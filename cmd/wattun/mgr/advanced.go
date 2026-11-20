@@ -443,7 +443,7 @@ func advMenu(n string) {
 			hopKey = "9"
 		}
 		add(k339 && r == "Iran" && !rev && strings.Contains("+"+cr+"+", "+udp+"), advRow{hopKey, "UDP hop", Cfg(n, "udp-hop"), "off", "pkts/port", g, func() bool {
-			Hint("Sends from a new UDP source port every N-1.5N packets: passes a filter that cuts each flow after ~30 packets. 12 = field setting. Kharej needs no change.")
+			Hint("Sends from a new UDP source port every N-1.5N packets: passes a filter that cuts each flow after ~30 packets. 12 = field setting. Any Kharej connects; Kharej 3.3.9+ downloads at full speed.")
 			return ask("udp-hop", "Packets per source port (0 = off)", Cfg(n, "udp-hop"), vUDPHop, unsetWord)
 		}})
 		add(binVerOK("3.0.3"), advRow{"e", "Window max", Cfg(n, "win-max"), "auto", "MB", g, func() bool {

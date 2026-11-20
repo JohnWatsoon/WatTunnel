@@ -1373,7 +1373,7 @@ flows), and a raw-socket sender rotating every 12-20 packets delivered ~98.7 % a
 `udp-hop: N` (client only, carrier `udp`) sends from a fresh UDP socket, so a new source port, every N to 1.5N packets
 (jittered). The destination port stays fixed. An old socket stays open 0.5 s to catch replies already in flight. The
 server needs nothing: it already keys sessions by session id and replies to the newest authenticated source address,
-so any `udp` server works, of any version, and the wire format is unchanged. With `N = 12` no flow carries more than 18
+so any `udp` server connects, of any version, and the wire format is unchanged. With `N = 12` no flow carries more than 18
 packets uplink, under the ~30 cut.
 
 ```yaml
@@ -1383,6 +1383,14 @@ carrier: udp                               carrier: udp
 listen: ":4443"                            peer: "KHAREJ_IP:4443"
                                            udp-hop: 12
 ```
+
+Each source port can take its own path inside the filtered network, so RTT spreads (77-110 ms on iran2, min 77) and
+packets reorder although nothing queues. A plain delay pacer reads that spread as congestion and sits at its floor, and
+a packet-count loss rule resends what was only reordered (field, first build: 98.8 % delivered, yet 35 % declared lost
+and 1-4 MB/s up). So the hopping client judges delay by the fastest sample of each 50 ms tick and declares loss by
+age only. The server cannot see the client's setting: a 3.3.9 server switches to the same rules once a session's
+source port has changed 8 times (a NAT rebinding changes it once or twice). An older server still connects but keeps
+cutting its downlink on the spread: update Kharej to 3.3.9 for full download speed.
 
 It works in a bond (`udp+tcp`: only the udp leg hops) and with `udp-dns`; it is off on `reverse` (Iran does not send
 first there). Cost: one new socket per N packets (about 1200 per second at 20 MB/s with `N = 12`) and sendmmsg/recvmmsg
@@ -1900,7 +1908,7 @@ Every flag can also be a config key. Flags win over the file.
 | `-keep-slow on\|off` | empty | Pool carriers: `on` never retires a connection for delivering below its share, `off` always checks; empty = on for reverse and direct tcp/tls, off for the HTTP carriers (3.0.0). |
 | `-hdr-mask` | true | Mask the packet header (3.0.0). |
 | `-udp-dns` | false | udp carrier: DNS-shaped datagrams, for port 53 (3.0.0). Ignored on a shaped carrier. |
-| `-udp-hop N` | 0 | udp carrier, client: new source port every N to 1.5N packets (Wraith, 3.3.9). Server unchanged. |
+| `-udp-hop N` | 0 | udp carrier, client: new source port every N to 1.5N packets (Wraith, 3.3.9). Any server connects; a 3.3.9 server detects the hopping and paces downlink for it. |
 | `-tcp-mimic` | true | tcp carrier: ClientHello-shaped hello and masked frame lengths (3.0.0). |
 | `-shape` | true | Pad small packets and jitter the keepalive (3.0.0). |
 | `-shape-data PCT` | 0 (off) | Both ends (3.3.0): pad data-carrying packets to randomized realistic sizes, spending at most PCT (0-25) percent of the stream bytes sent; ignored on bonded carriers. See "Stream padding and idle noise". |
