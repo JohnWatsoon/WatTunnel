@@ -50,11 +50,15 @@ var engineVer = func() string { return BinVersion() }
 // NL: the newline string spelled via const to avoid quoting hazards in generated calls).
 const NL = "\n"
 
-const autoTuneUDP = "3.3.0"
-const autoTuneBondDGRAM = "3.3.0"
-const autoTuneBondPool = "3.3.0"
-const autoTuneReverse = "3.3.0"
-const autoTunePool = "3.3.0"
+// The tuning grids of at_tune (bash AUTO_TUNE_*, wattun-manager 4982-4987):
+// "key:value,value ..." in test order. The old placeholder values here were
+// version strings, which made atTune's knob split panic — caught by the
+// wizardIran auto-token test (2026-11-20).
+const autoTuneUDP = "sessions:1,2,4"
+const autoTuneBondDGRAM = "conns:4,8,32,64"
+const autoTuneBondPool = "conns:4,8,32,64"
+const autoTuneReverse = "conns:4,8,32" // -sessions is refused in reverse mode
+const autoTunePool = "sessions:1,2,4,8,16 conns:4,8,32,64"
 
 const autoVarDirect = "icmp udp tcp tls ws h2c gre ipip"
 const autoVarCDN = "wss grpc"
@@ -2089,7 +2093,7 @@ func autoIranFront(tok Token) (atChoice, error) {
 	if tok.Auto == "" {
 		return c, fmt.Errorf("This auto token has no test plan. Make a new token on Kharej (wattun 2.1.0 or newer).")
 	}
-	preset, err := atPresetAsk(false, "")
+	preset, err := atPresetAsk(NonInteractive, NI.Test)
 	if err != nil {
 		return c, fmt.Errorf("Cancelled.")
 	}
@@ -2104,7 +2108,7 @@ func autoIranFront(tok Token) (atChoice, error) {
 		return c, fmt.Errorf("no carrier worked")
 	}
 	atTable(Stdout, av, ar, rank, atMB, atSecs)
-	sel, err := atChoose(rank, false, "")
+	sel, err := atChoose(rank, NonInteractive, NI.Pick)
 	if err != nil {
 		return c, fmt.Errorf("Cancelled.")
 	}

@@ -11,7 +11,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -120,6 +122,21 @@ func pickShapedCarrier(head func(io.Writer)) string {
 // pick_carrier (bash 2633): the connection-type list; "" = cancelled.
 // Numbers 1-9 still pick the first nine rows, 0 is h2c and m opens the shapes.
 func pickCarrier(auto bool, head func(io.Writer)) string {
+	if NonInteractive { // bash pick_carrier NI: --carrier or the list's first entry
+		c := NI.Carrier
+		if c == "" {
+			if auto {
+				c = "auto"
+			} else {
+				c = "icmp"
+			}
+		}
+		if c != "auto" && !VCarrierList(c) {
+			return ""
+		}
+		Say("  carrier: " + c)
+		return c
+	}
 	var vals []string
 	var items []Item
 	add := func(key, v, desc string) {
@@ -247,6 +264,9 @@ func (s *wizSummary) add(l, v string) { *s = append(*s, kv(l, v)) }
 func wizardKharej() bool {
 	kHead := func(w io.Writer) { wizHead(w, "Kharej", 0, kharejSteps) }
 	name := suggestName("kharej")
+	if NI.Name != "" {
+		name = NI.Name
+	}
 	cr := pickCarrier(true, kHead)
 	if cr == "" {
 		return false
@@ -270,23 +290,69 @@ func wizardKharej() bool {
 		}
 		p2ShapedWarn(cr)
 	}
-	var path, listen, sni, itype, mbps, fec, iranip, addr, allow, lisip string
+	var path, listen, sni, itype, fec, iranip, addr, allow, lisip string
+	sni, mbps := NI.SNI, NI.Mbps // a flag for an advanced setting opens that block (bash 2704)
 	var rev, udpdns bool
 	switch cr {
 	case "ws", "wss", "grpc", "h2", "h2c":
 		path = p2RandPath()
+		if NI.Path != "" {
+			path = NI.Path
+		}
 	}
 	if cr == "udp" {
-		fmt.Fprintln(Stdout)
-		Hint("Some routes cut UDP flows but pass DNS-looking UDP on port 53. Needs wattun 3.0.0+ on both ends.")
-		if Confirm("Use DNS-shaped UDP on port 53? (only if plain udp does not work on your route)", false) {
+		if NI.UDPDNS { // DNS-shaped udp, unattended (bash 2714-2731)
+			if !binVerOK("3.0.0") {
+				Err("DNS-shaped udp needs wattun 3.0.0 or newer on this server (run: " + P.Self + " update).")
+				return false
+			}
 			udpdns = true
 			listen = "53"
 			lisip = p2PublicIP() // port 53 is often held by the local resolver on 127.0.0.53 only
+		} else if !NonInteractive {
+			fmt.Fprintln(Stdout)
+			Hint("Some routes cut UDP flows but pass DNS-looking UDP on port 53. Needs wattun 3.0.0+ on both ends.")
+			if Confirm("Use DNS-shaped UDP on port 53? (only if plain udp does not work on your route)", false) {
+				udpdns = true
+				listen = "53"
+				lisip = p2PublicIP()
+			}
 		}
 	}
+	if NI.Ports != "" { // bash ni_kharej_ports: --ports "18999,2000,53/udp" -> the allow list
+		var maps []string
+		for _, tok := range strings.FieldsFunc(NI.Ports, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
+			items, err := NormSpec(tok)
+			if err != nil {
+				Err("--ports '" + NI.Ports + "' was rejected: " + err.Error())
+				return false
+			}
+			maps = append(maps, items...)
+		}
+		allow = MapsAllowStr(maps)
+	}
+	if NI.CDN != "" && sni == "" { // bash 2719: cdn_mode=1, sni defaults to the domain
+		sni = NI.CDN
+	}
 	// address Iran connects to (bash 2728-2749)
-	addr = p2PublicIP()
+	addr = NI.Addr
+	if addr == "" {
+		addr = NI.CDN
+	}
+	if addr == "" {
+		addr = p2PublicIP()
+	}
+	if NI.Addr == "" && NI.CDN == "" && addr != "" && ipPrivateStr(addr) {
+		Warn(addr + " is a private address; Iran cannot reach it.")
+		if !Confirm("Use "+addr+" anyway?", false) {
+			addr = ""
+		}
+	} else if addr == "" {
+		Warn("Could not detect public IP.")
+		if NonInteractive {
+			Hint("Give it with --addr HOST")
+		}
+	}
 	if addr == "" {
 		if !AskOK("Public IP or domain", "", vHost) {
 			return false
@@ -301,6 +367,13 @@ func wizardKharej() bool {
 			return false
 		}
 		addr = ReplyV
+	}
+	if carrierWriteListen(cr) && NI.Listen != "" {
+		if listenBlocked(p2Rproto(cr), atoi(NI.Listen)) {
+			Err("Port " + NI.Listen + " is already used by " + listenConflictDesc(p2Rproto(cr), NI.Listen) + ".")
+			return false
+		}
+		listen = NI.Listen
 	}
 	if carrierWriteListen(cr) && listen == "" {
 		listen = p2DefaultListen(cr)
@@ -320,7 +393,7 @@ func wizardKharej() bool {
 		def += " " + path
 	}
 	Hint("Defaults: " + def + " · unlimited · FEC off")
-	if Confirm("Edit advanced settings?", false) {
+	if Confirm("Edit advanced settings?", NI.Listen != "" || NI.Path != "" || NI.SNI != "" || NI.Mbps != "") {
 		if !AskOK("Tunnel name", name, vName) {
 			return false
 		}
@@ -459,6 +532,9 @@ func wizardKharej() bool {
 	} else if rev || cr == "icmp" {
 		Hint("Cloud firewall: allow ICMP.")
 	}
+	if cr == "icmp" && kreplyWanted(name) { // normal ICMP: the kernel here would echo every request from Iran (3.0.0)
+		kreplyOffer()
+	}
 	fmt.Fprintln(Stdout)
 	fmt.Fprintf(Stdout, "  %s✓%s %sKharej tunnel '%s' is ready%s\n\n", GRN, RST, BOLD, name, RST)
 	fmt.Fprintf(Stdout, "  %sToken%s  %scontains the secret key; share it privately%s\n", BOLD, RST, GRY, RST)
@@ -468,6 +544,10 @@ func wizardKharej() bool {
 	fmt.Fprintf(Stdout, "  %s2%s  New tunnel › Iran\n", CYN, RST)
 	fmt.Fprintf(Stdout, "  %s3%s  paste the token\n", CYN, RST)
 	Hint("Show it again any time: " + P.Self + " token " + name)
+	if NonInteractive {
+		Say("TUNNEL=" + name)
+		Say("TOKEN=" + tok)
+	}
 	return true
 }
 
@@ -526,6 +606,7 @@ type iranParams struct {
 	ListenPort               string
 	Extra                    []string // auto-plan extra lines (AT_EXTRA)
 	Bind, Mbps, FEC          string
+	Sessions, Conns, MTU     int // --sessions/--conns/--mtu (0 = unset)
 	MetricsPort              int
 	Maps                     []string
 }
@@ -602,6 +683,34 @@ func iranYML(p iranParams) string {
 	if p.FEC == "auto" {
 		b.WriteString("fec: auto\n")
 	}
+	// sessions/conns/mtu_line (bash 3750-3774): no default — the engine's auto
+	// value fits the host; a forced value is written only when this engine
+	// accepts it (2.3.0+) and the carrier allows it.
+	if p.Sessions > 0 {
+		if !binVerOK("2.3.0") {
+			Warn(fmt.Sprintf("--sessions %d ignored: it needs wattun 2.3.0 or newer (this is %s); run: %s update", p.Sessions, orStr(BinVersion(), "unknown"), P.Self))
+		} else if p.Rev {
+			Warn("--sessions ignored: not supported in reverse mode")
+		} else if !sessionsCarrierOK(p.Carrier) {
+			Warn("--sessions ignored: not supported with carrier '" + p.Carrier + "' (needs one udp/tcp/tls/ws/wss/h2/h2c/grpc carrier)")
+		} else {
+			n := p.Sessions
+			if n > engMaxSessions {
+				n = engMaxSessions
+			}
+			b.WriteString("sessions: " + strconv.Itoa(n) + "\n")
+		}
+	}
+	if p.Conns > 0 {
+		b.WriteString("conns: " + strconv.Itoa(p.Conns) + "\n")
+	}
+	if p.MTU > 0 {
+		if p.MTU > mtuMaxFor(p.Carrier) {
+			Warn(fmt.Sprintf("--mtu %d ignored: carrier '%s' caps the datagram at %d (the engine would clamp it silently).", p.MTU, p.Carrier, mtuMaxFor(p.Carrier)))
+		} else {
+			b.WriteString("mtu: " + strconv.Itoa(p.MTU) + "\n")
+		}
+	}
 	if p.MetricsPort > 0 {
 		b.WriteString("metrics: 127.0.0.1:" + strconv.Itoa(p.MetricsPort) + "\n")
 	}
@@ -612,36 +721,60 @@ func iranYML(p iranParams) string {
 func wizardIran() bool {
 	wizStep("Iran", 0, iranSteps)
 	name := suggestName("iran")
-	if !AskOK("Token from Kharej (wat1:...)", "", vToken) {
+	if NI.Name != "" {
+		name = NI.Name
+	}
+	if !AskOK("Token from Kharej (wat1:...)", NI.Token, vToken) {
 		return false
 	}
-	t, err := ReadToken(ReplyV)
+	tok := ReplyV
+	t, err := ReadToken(tok)
 	if err != nil {
 		return false
 	}
+	// autoExtra carries the auto choice's AT_EXTRA lines (peer-*, disguise, tune,
+	// listen-<car> for a reverse bond) into the config; autoTok is the token kept
+	// in NAME.auto so auto-test / auto-heal can re-test later (bash AUTO_TOKEN).
+	var autoExtra []string
+	var autoTok string
 	if t.Carrier == "auto" {
-		// TODO(P4): auto_iran_front — the auto token front-end is the auto pass's.
-		Err("Auto tokens are not ported in this build yet; ask Kharej for a fixed type.")
-		return false
-	}
-	if !VCarrierList(t.Carrier) { // D7: refuses shaped carriers in a hand-made bond
-		return false
-	}
-	if err := t.TokenBondLegs(); err != nil { // M1: split a bond token's endpoints
-		Err(err.Error())
-		return false
-	}
-	if isShapedList(t.Carrier) {
-		if !shapedSupportedHere(t.Carrier) {
+		peer0 := t.Peer
+		if i := strings.IndexAny(peer0, ",:"); i >= 0 {
+			peer0 = peer0[:i]
+		}
+		Ok("auto token · " + peer0 + " · allows " + orStr(t.Ports, "any port"))
+		ch, err := autoIranFront(t)
+		if err != nil {
 			return false
 		}
-		p2ShapedWarn(t.Carrier)
+		// at_to_t: the chosen variant replaces the token's fields; the choice was
+		// already bond-split (peer-<car> lines) and validated (VCarrierList in
+		// atToT), so the fixed-token checks below do not run here (bash wizard_iran).
+		t.Carrier, t.Peer, t.Path, t.SNI, t.Rev = ch.Carrier, ch.Peer, ch.Path, ch.SNI, ch.Rev
+		if ch.Extra != "" {
+			autoExtra = strings.Split(ch.Extra, "\n")
+		}
+		autoTok = tok
+	} else {
+		if !VCarrierList(t.Carrier) { // D7: refuses shaped carriers in a hand-made bond
+			return false
+		}
+		if err := t.TokenBondLegs(); err != nil { // M1: split a bond token's endpoints
+			Err(err.Error())
+			return false
+		}
+		if isShapedList(t.Carrier) {
+			if !shapedSupportedHere(t.Carrier) {
+				return false
+			}
+			p2ShapedWarn(t.Carrier)
+		}
+		peer0 := t.Peer
+		if i := strings.IndexAny(peer0, ",:"); i >= 0 {
+			peer0 = peer0[:i]
+		}
+		Ok("Token · " + t.Carrier + p2OptPar(t.Icmp) + " · " + peer0 + " · allows " + orStr(t.Ports, "any port"))
 	}
-	peer0 := t.Peer
-	if i := strings.IndexAny(peer0, ",:"); i >= 0 {
-		peer0 = peer0[:i]
-	}
-	Ok("Token · " + t.Carrier + p2OptPar(t.Icmp) + " · " + peer0 + " · allows " + orStr(t.Ports, "any port"))
 	if t.Rev == "1" {
 		if IsRpool(t.Carrier) {
 			Hint("Reverse: Kharej dials Iran :" + p2LastPort(t.Peer))
@@ -653,6 +786,28 @@ func wizardIran() bool {
 	cdnV, cdnTuned := cdnWizardTune(t)
 	if cdnTuned {
 		t.Peer, t.SNI = cdnV.Peer, cdnV.SNI
+	}
+
+	// reverse carrier ports: a single rpool leg dials the token peer's port; a
+	// reverse bond writes one listen-<car> line per leg (bash 3431-3446)
+	var rports []string
+	if t.Rev == "1" && !strings.Contains(t.Carrier, "+") && IsRpool(t.Carrier) {
+		rp := p2LastPort(t.Peer)
+		if n, e := strconv.Atoi(rp); e != nil || n < 1 || n > 65535 {
+			Err("The Kharej address has no valid carrier port, so reverse cannot be set up.")
+			return false
+		}
+		rports = append(rports, rp+"/"+p2Rproto(t.Carrier))
+	} else if t.Rev == "1" && strings.Contains(t.Carrier, "+") {
+		for _, l := range autoExtra {
+			k, v, ok := strings.Cut(l, ": ")
+			if !ok || !strings.HasPrefix(k, "listen-") {
+				continue
+			}
+			if _, port := SplitHP(strings.TrimSpace(v)); port != "" {
+				rports = append(rports, port+"/"+p2Rproto(strings.TrimPrefix(k, "listen-")))
+			}
+		}
 	}
 
 	// port mappings: pre-fill from the token allowlist (bash 3436-3462)
@@ -674,21 +829,27 @@ func wizardIran() bool {
 		Warn("Cancelled.")
 		return false
 	}
-	// the reverse carrier port must differ from a published row (bash 3455-3460)
-	if t.Rev == "1" && !strings.Contains(t.Carrier, "+") && IsRpool(t.Carrier) {
-		rp := p2LastPort(t.Peer)
+	// reverse needs its carrier ports free and unpublished (bash 3447-3462)
+	for _, it := range rports {
+		lv, lproto, _ := strings.Cut(it, "/")
+		if listenBlocked(lproto, atoi(lv)) {
+			Err("Port " + lv + "/" + lproto + " is already in use here by " + listenConflictDesc(lproto, lv) + ". Reverse needs it free: pick another carrier port on Kharej and make a new token.")
+			return false
+		}
 		for _, m := range pe.Maps {
-			if SpecL(m) == rp && SpecP(m) == p2Rproto(t.Carrier) {
-				Err("Port " + rp + "/" + p2Rproto(t.Carrier) + " is also a port you publish here. The carrier port must differ: pick another one on Kharej and make a new token.")
+			if SpecL(m) == lv && SpecP(m) == lproto {
+				Err("Port " + lv + "/" + lproto + " is also a port you publish here. The carrier port must differ: pick another one on Kharej and make a new token.")
 				return false
 			}
 		}
 	}
 
-	// advanced (bash 3464-3475)
+	// advanced (bash 3464-3475); a --max-mbps flag opens the block unattended
+	// (bash 3399: advdef=y when a flag is set)
 	wizStep("Iran", 2, iranSteps)
-	var bind, mbps, fec, sni, path, itype string
-	if Confirm("Change advanced settings?", false) {
+	var bind, fec, sni, path, itype string
+	mbps := NI.Mbps
+	if Confirm("Change advanced settings?", mbps != "") {
 		if !AskOK("Tunnel name", name, vName) {
 			return false
 		}
@@ -723,52 +884,140 @@ func wizardIran() bool {
 			path = ReplyV
 		}
 	}
-	// anti-censor profile (bash 3521-3567): one explicit ask, pool carriers only
-	var fakesni, fakemode, poolrot, poolbytes, ech, governor string
-	if t.Rev != "1" {
-		if IsPoolList(t.Carrier) {
-			profs := [][6]string{ // sni, mode, rotate, bytes, ech, governor; "" row = no disguise
-				{"mci.ir", "rst", "30m", "500MB", "ladder", "true"},
-				{"irancell.ir", "seq", "20m", "300MB", "ladder", "true"},
-				{"mci.ir", "rst", "90s", "100MB", "ladder", "true"},
-				{"mci.ir", "seq", "4h", "4GB", "auto", "true"},
-				{}, {},
+	// anti-censor profile (bash 3518-3567): one explicit ask, pool carriers only;
+	// an auto token already carries its disguise through the chosen variant
+	var fakesni, fakemode, fakettl, poolrot, poolbytes, ech, governor, dnslisten, srcip string
+	if t.Rev != "1" && t.Auto == "" {
+		if NonInteractive && runtime.GOOS == "linux" {
+			// unattended: a preset IS the ask, the flags prefill the knobs (bash 3523-3560)
+			if NI.Preset != "" && !IsPoolList(t.Carrier) {
+				Err("Preset '" + NI.Preset + "' needs a tcp/tls/ws/wss/h2/h2c/grpc tunnel: '" + t.Carrier + "' has no SNI to disguise.")
+				return false
 			}
-			items := []Item{
-				{Label: "MCI whitelist", Desc: "mci.ir       rst   30m / 500MB   ladder"},
-				{Label: "Irancell whitelist", Desc: "irancell.ir  seq   20m / 300MB   ladder"},
-				{Label: "Blackout", Desc: "mci.ir       rst   90s / 100MB   ladder"},
-				{Label: "Low churn", Desc: "mci.ir       seq   4h / 4GB      auto"},
-				{Label: "Custom", Desc: "pick each value later on the tunnel page (z)"},
-				{Label: "Skip", Desc: "no disguise"},
+			if NI.FakeSNI+NI.FakeMode+NI.FakeTTL+NI.PoolRot+NI.PoolBytes+NI.ECH != "" && !IsPoolList(t.Carrier) {
+				Err("--fake-sni, --pool-rotate and --ech need a tcp/tls/ws/wss/h2/h2c/grpc tunnel (got '" + t.Carrier + "').")
+				return false
 			}
-			head := func(w io.Writer) {
-				wizHead(w, "Iran", 2, iranSteps)
-				fmt.Fprintf(w, "  %sAnti-censor profile%s  %ssni · mode · churn · ech%s\n", BOLD, RST, GRY, RST)
-				hintLine(w, "Irancell and Low churn (seq mode) only help against SNI-allowlist filters.")
-				fmt.Fprintln(w)
-			}
-			sel, i := 0, -1
-			for i < 0 {
-				var k string
-				i, k = Choose(head, items, &sel, []string{"⏎", "pick", "esc", "skip"}, 0)
-				if i < 0 && (k == "esc" || k == "q" || k == "eof") {
-					i = 5
+			switch NI.Preset { // the wizard's preset table (bash 3505-3512); cloudflare sets nothing here
+			case "rst-fast":
+				fakesni, fakemode, poolrot = "www.cloudflare.com", "rst", "30m"
+				if NI.Sessions == 0 {
+					NI.Sessions = 4
 				}
+				if NI.Conns == 0 {
+					NI.Conns = 4
+				}
+			case "mci":
+				fakesni, fakemode, poolrot, poolbytes, ech, governor = "mci.ir", "rst", "30m", "500MB", "ladder", "true"
+			case "irancell":
+				fakesni, fakemode, poolrot, poolbytes, ech, governor = "irancell.ir", "seq", "20m", "300MB", "ladder", "true"
+			case "blackout":
+				fakesni, fakemode, poolrot, poolbytes, ech, governor = "mci.ir", "rst", "90s", "100MB", "ladder", "true"
+			case "conservative":
+				fakesni, fakemode, poolrot, poolbytes, ech, governor = "mci.ir", "seq", "4h", "4GB", "auto", "true"
 			}
-			if p := profs[i]; p[0] != "" {
-				fakesni, fakemode, poolrot, poolbytes, ech, governor = p[0], p[1], p[2], p[3], p[4], p[5]
+			if NI.ECH != "" {
+				ech = NI.ECH
 			}
-		} else if t.Carrier == "icmp" {
-			fmt.Fprintln(Stdout)
-			Say("  " + BOLD + "ICMP resilience" + RST + ": the volume governor, not an SNI profile.")
-			if Confirm("Enable the ICMP volume governor (prevents reroute blackouts)?", true) {
-				governor = "true"
+			if NI.Governor != "" {
+				governor = NI.Governor
+			}
+			if NI.DNSListen != "" {
+				dnslisten = NI.DNSListen
+			}
+			if NI.SrcIP != "" {
+				srcip = NI.SrcIP
+			}
+			if fakesni == "" {
+				Hint("No disguise: a busy direct tunnel can be filtered within an hour. Turn it on later with z on the tunnel page.")
+			}
+		} else if !NonInteractive {
+			if IsPoolList(t.Carrier) {
+				profs := [][6]string{ // sni, mode, rotate, bytes, ech, governor; "" row = no disguise
+					{"mci.ir", "rst", "30m", "500MB", "ladder", "true"},
+					{"irancell.ir", "seq", "20m", "300MB", "ladder", "true"},
+					{"mci.ir", "rst", "90s", "100MB", "ladder", "true"},
+					{"mci.ir", "seq", "4h", "4GB", "auto", "true"},
+					{}, {},
+				}
+				items := []Item{
+					{Label: "MCI whitelist", Desc: "mci.ir       rst   30m / 500MB   ladder"},
+					{Label: "Irancell whitelist", Desc: "irancell.ir  seq   20m / 300MB   ladder"},
+					{Label: "Blackout", Desc: "mci.ir       rst   90s / 100MB   ladder"},
+					{Label: "Low churn", Desc: "mci.ir       seq   4h / 4GB      auto"},
+					{Label: "Custom", Desc: "pick each value later on the tunnel page (z)"},
+					{Label: "Skip", Desc: "no disguise"},
+				}
+				head := func(w io.Writer) {
+					wizHead(w, "Iran", 2, iranSteps)
+					fmt.Fprintf(w, "  %sAnti-censor profile%s  %ssni · mode · churn · ech%s\n", BOLD, RST, GRY, RST)
+					hintLine(w, "Irancell and Low churn (seq mode) only help against SNI-allowlist filters.")
+					fmt.Fprintln(w)
+				}
+				sel, i := 0, -1
+				for i < 0 {
+					var k string
+					i, k = Choose(head, items, &sel, []string{"⏎", "pick", "esc", "skip"}, 0)
+					if i < 0 && (k == "esc" || k == "q" || k == "eof") {
+						i = 5
+					}
+				}
+				if p := profs[i]; p[0] != "" {
+					fakesni, fakemode, poolrot, poolbytes, ech, governor = p[0], p[1], p[2], p[3], p[4], p[5]
+				}
+			} else if t.Carrier == "icmp" {
+				fmt.Fprintln(Stdout)
+				Say("  " + BOLD + "ICMP resilience" + RST + ": the volume governor, not an SNI profile.")
+				if Confirm("Enable the ICMP volume governor (prevents reroute blackouts)?", true) {
+					governor = "true"
+				} else {
+					governor = "false"
+				}
 			} else {
-				governor = "false"
+				Hint("Anti-censorship profiles apply to tcp/tls/ws/wss/h2/h2c/grpc; '" + t.Carrier + "' has no SNI to disguise. Skipping.")
 			}
-		} else {
-			Hint("Anti-censorship profiles apply to tcp/tls/ws/wss/h2/h2c/grpc; '" + t.Carrier + "' has no SNI to disguise. Skipping.")
+		}
+		// flag fallbacks + validation (bash 3570-3592)
+		if NI.FakeSNI != "" && fakesni == "" {
+			fakesni = NI.FakeSNI
+		}
+		if fakesni == "off" || fakesni == "0" {
+			fakesni = ""
+		}
+		if fakesni != "" {
+			if !vSNIName(fakesni) {
+				return false
+			}
+			if !binVerOK("2.7.0") {
+				Err("fake-sni needs wattun 2.7.0 or newer on this server (run: " + P.Self + " update).")
+			}
+			if NI.FakeMode != "" {
+				fakemode = NI.FakeMode
+			}
+			if fakemode == "" {
+				fakemode = "rst"
+			}
+			if !vFakeMode(fakemode) {
+				return false
+			}
+			fakettl = orStr(NI.FakeTTL, fakettl)
+			if fakemode == "ttl" && fakettl != "" && !vFakeTTL(fakettl) {
+				return false
+			}
+		}
+		if NI.PoolRot != "" {
+			poolrot = NI.PoolRot
+		}
+		if NI.PoolBytes != "" {
+			poolbytes = NI.PoolBytes
+		}
+		if poolrot != "" && poolrot != "0" && poolrot != "off" && !binVerOK("2.8.0") {
+			Err("pool-rotate needs wattun 2.8.0 or newer on this server (run: " + P.Self + " update).")
+			return false
+		}
+		if poolbytes != "" && poolbytes != "0" && poolbytes != "off" && !binVerOK("2.8.1") {
+			Err("pool-rotate-bytes needs wattun 2.8.1 or newer on this server (run: " + P.Self + " update).")
+			return false
 		}
 	}
 	if !vName(name) {
@@ -836,10 +1085,12 @@ func wizardIran() bool {
 	}
 	p := iranParams{
 		Name: name, Carrier: t.Carrier, Peer: t.Peer, Key: t.Key, LegC: t.LegC, LegP: t.LegP,
-		Path: t.Path, SNI: t.SNI, FakeSNI: fakesni, FakeMode: fakemode,
+		Path: t.Path, SNI: t.SNI, FakeSNI: fakesni, FakeMode: fakemode, FakeTTL: fakettl,
 		PoolRot: poolrot, PoolBytes: poolbytes, ECH: ech, Governor: governor,
+		DNSListen: dnslisten, SrcIP: srcip,
 		IcmpType: orStr(itype, t.Icmp), Rev: t.Rev == "1", ListenPort: rport,
-		Bind: bind, Mbps: mbps, FEC: fec, MetricsPort: mp, Maps: pe.Maps,
+		Bind: bind, Mbps: mbps, FEC: fec, Sessions: NI.Sessions, Conns: NI.Conns,
+		MTU: NI.MTU, MetricsPort: mp, Maps: pe.Maps,
 	}
 	if path != "" {
 		p.Path = path
@@ -850,24 +1101,67 @@ func wizardIran() bool {
 	if cdnTuned {
 		p.Extra = append(p.Extra, cdnExtra(name, cdnV, &p.ECH)...)
 	}
+	p.Extra = append(p.Extra, autoExtra...)
 	atomicWrite(filepath.Join(P.Conf, name+".key"), []byte(t.Key+"\n"), 0o600)
 	atomicWrite(filepath.Join(P.Conf, name+".yml"), []byte(iranYML(p)), 0o600)
+	if autoTok != "" { // kept so auto-test / auto-heal can test again later (bash 3704)
+		atomicWrite(filepath.Join(P.Conf, name+".auto"), []byte(autoTok+"\n"), 0o600)
+	}
 	p2StartUnit(name)
+	if t.Carrier == "icmp" && t.Rev == "1" {
+		kreplyOffer()
+	}
+	// the reverse ports open before the link check: Kharej cannot dial until they do
+	if len(rports) > 0 {
+		p2FWOpen(rports...)
+	}
 	var newPub []string
 	for _, m := range pe.Maps {
 		newPub = append(newPub, SpecL(m)+"/"+SpecP(m))
 	}
 	p2FWOpen(newPub...)
+	if !healOn() && healEnable() && NonInteractive {
+		Ok("Auto-heal on (Settings, h)")
+	}
+	linkok := true
 	fmt.Fprintln(Stdout)
 	if p2WaitLink(name, 25) {
 		Ok("Connected")
 	} else {
+		linkok = false
 		Err("Not connected yet — running doctor")
 		if registered("test_tunnel") {
 			runFlow("test_tunnel", name)
 		}
 	}
+	if NonInteractive && linkok && IsPoolList(t.Carrier) && runtime.GOOS == "linux" &&
+		fakesni+poolrot+poolbytes == "" && !extraHas(autoExtra, "fake-sni") {
+		if t.Rev == "1" {
+			Hint("If a censor blocks it: anti-censor is set on Kharej (the side that dials), tunnel page, z.")
+		} else {
+			Hint("If a censor blocks it: tunnel page, z.")
+		}
+	}
+	if NonInteractive {
+		if linkok {
+			Say("LINK=up")
+		} else {
+			Say("LINK=down")
+		}
+		Say("TUNNEL=" + name)
+		return linkok
+	}
 	return true
+}
+
+// extraHas: does the AT_EXTRA line set carry key k ("fake-sni", "sessions", ...)?
+func extraHas(extra []string, k string) bool {
+	for _, l := range extra {
+		if c, _, ok := strings.Cut(l, ":"); ok && strings.TrimSpace(c) == k {
+			return true
+		}
+	}
+	return false
 }
 
 func p2OptPar(s string) string {
@@ -875,6 +1169,27 @@ func p2OptPar(s string) string {
 		return ""
 	}
 	return " (" + s + ")"
+}
+
+// ipPrivateStr mirrors ip_is_private on an address string (loopback counts).
+func ipPrivateStr(s string) bool {
+	host, _ := SplitHP(s)
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	ip := net.ParseIP(host)
+	return ip != nil && ipPrivate(ip)
+}
+
+// sessions_carrier_ok: the engine accepts -sessions > 1 only for one
+// udp/tcp/tls/ws/wss/h2/h2c/grpc carrier (not a bond).
+func sessionsCarrierOK(c string) bool {
+	if strings.Contains(c, "+") {
+		return false
+	}
+	switch c {
+	case "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc":
+		return true
+	}
+	return false
 }
 
 // p2LastPort: the port of the token peer's first endpoint.

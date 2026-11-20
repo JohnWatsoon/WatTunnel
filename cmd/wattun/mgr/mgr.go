@@ -67,6 +67,12 @@ func Run(args []string) int {
 	if cmd == "auto-retest" && len(args) > 1 && args[1] == "--yes" {
 		NonInteractive = true
 	}
+	// unattended kharej/iran flags (bash 10201: ni_parse "${@:2}" || exit 1)
+	if cmd == "kharej" || cmd == "iran" {
+		if err := niParse(args[1:]); err != nil {
+			return 1
+		}
+	}
 
 	// colour / animation / tty gates (bash L146-161, L173-176)
 	InitTerm(os.Stdout)

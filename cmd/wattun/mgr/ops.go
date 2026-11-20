@@ -33,8 +33,8 @@ func init() {
 	Register("bundle_cmd", func(a ...string) int { return b2i(bundleCmd(arg(a, 0), arg(a, 1))) })
 	Register("heal", func(a ...string) int { heal(); return 0 })
 	Register("wizard_kharej_auto", func(a ...string) int {
-		r := wizardKharejAuto(arg(a, 0), autoWizardOpts{Name: os.Getenv("NI_NAME"), CDN: os.Getenv("NI_CDN"),
-			Addr: os.Getenv("NI_ADDR"), Ports: os.Getenv("NI_PORTS"), Extended: os.Getenv("NI_EXTENDED") == "1"})
+		r := wizardKharejAuto(arg(a, 0), autoWizardOpts{Name: NI.Name, CDN: NI.CDN,
+			Addr: NI.Addr, Ports: NI.Ports, Extended: NI.Extended})
 		if r.Error != nil {
 			return errRC(r.Error)
 		}

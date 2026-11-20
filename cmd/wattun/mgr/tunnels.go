@@ -241,6 +241,18 @@ func vPath(s string) bool {
 	return false
 }
 
+// vDomainOpt mirrors v_domain_opt: empty = skip, else a dotted domain.
+func vDomainOpt(s string) bool {
+	if s == "" {
+		return true
+	}
+	if regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$`).MatchString(s) && strings.Contains(s, ".") {
+		return true
+	}
+	Err("Enter a domain name such as vpn.example.com (or press Enter to skip).")
+	return false
+}
+
 func vToken(s string) bool {
 	if _, err := ReadToken(s); err == nil {
 		return true
@@ -630,6 +642,30 @@ func (pe *portEditor) remove(arg string) {
 
 // port_editor: true = done (Maps ready), false = cancelled.
 func (pe *portEditor) run() bool {
+	if NonInteractive { // bash port_editor NI: --map replaces the prefill; otherwise the prefill stays
+		if NI.Map != "" {
+			pe.Maps = nil
+			pe.Msg = nil
+			pe.bulk(NI.Map)
+		}
+		bad := false
+		for _, m := range pe.Msg {
+			if strings.Contains(m, "✗") {
+				bad = true
+			}
+			fmt.Fprintln(Stdout, "  "+m)
+		}
+		pe.Msg = nil
+		if bad {
+			Err("Some ports were rejected (see above). Fix them with --map LISTEN:TARGET[,..]")
+			return false
+		}
+		if pe.Role == "Iran" && len(pe.Maps) == 0 {
+			Err("No ports to publish: give --map LISTEN:TARGET[,..] (example: --map 8443:443)")
+			return false
+		}
+		return true
+	}
 	for {
 		pe.draw()
 		fmt.Fprintf(Stdout, "  %s▸%s ", CYN, RST)
