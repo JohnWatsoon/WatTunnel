@@ -187,6 +187,37 @@ func TestRefreshToken(t *testing.T) {
 	}
 }
 
+// 3.4.3: an auto Kharej's yml lists every carrier; refreshing (showing) its token keeps the auto plan, and only
+// arm-blackout's fortress refresh turns it into a bond token.
+func TestRefreshTokenKeepsAutoPlan(t *testing.T) {
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ak.yml"), []byte("mode: server\ncarrier: icmp+udp+tcp\nlisten-udp: \":26501\"\nlisten-tcp: \":26502\"\n"), 0o600)
+	plan := "d=udp:26501,tcp:26502;r=tcp:26503"
+	os.WriteFile(filepath.Join(dir, "ak.token"), []byte(MakeToken("auto", "203.0.113.11", "k", "/api/x", "", "", "", "", plan)), 0o600)
+	read := func() Token {
+		tok, err := ReadToken(strings.TrimSpace(mustRead(filepath.Join(dir, "ak.token"))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	if err := RefreshToken("ak"); err != nil {
+		t.Fatal(err)
+	}
+	if tok := read(); tok.Carrier != "auto" || tok.Auto != plan {
+		t.Errorf("refresh rewrote the auto token: carrier=%q plan=%q", tok.Carrier, tok.Auto)
+	}
+	if err := refreshToken("ak", true); err != nil {
+		t.Fatal(err)
+	}
+	if tok := read(); tok.Carrier != "icmp+udp+tcp" || tok.Auto != "" {
+		t.Errorf("fortress refresh: carrier=%q plan=%q, want the bond token", tok.Carrier, tok.Auto)
+	}
+}
+
 // A 3.3.3-3.3.7 finalize removed NAME.token: the rebuild gives an auto token that keeps the live carrier's port,
 // leaves NAME.repaste, and showToken clears the marker.
 func TestRebuildKharejTokenRepaste(t *testing.T) {

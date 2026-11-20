@@ -453,6 +453,16 @@ printf 'k_legacy' >"$WAT_CONF/t_kh_single.key"
 refresh_token t_kh_single
 read_token "$(cat "$WAT_CONF/t_kh_single.token")"
 chk "legacy token: refresh leaves a single-carrier token alone" "$T_CARRIER/$T_PEER/$T_KEY/$T_PATH" "tcp/203.0.113.10:26443/k_legacy//wat"
+# 3.4.3: an auto Kharej lists every carrier too; showing its token must not turn the auto plan into a bond token
+printf 'mode: server\nkey-file: %s/t_kh_auto.key\ncarrier: icmp+udp+tcp\nlisten-udp: ":26501"\nlisten-tcp: ":26502"\n' "$WAT_CONF" >"$WAT_CONF/t_kh_auto.yml"
+( umask 077; make_token auto '203.0.113.11' 'k_auto' '/api/x' '' '' '' '' 'd=udp:26501,tcp:26502;r=tcp:26503' >"$WAT_CONF/t_kh_auto.token" )
+refresh_token t_kh_auto
+read_token "$(cat "$WAT_CONF/t_kh_auto.token")"
+chk "auto token: refresh keeps the auto plan" "$T_CARRIER/$T_AUTO" "auto/d=udp:26501,tcp:26502;r=tcp:26503"
+refresh_token t_kh_auto fortress
+read_token "$(cat "$WAT_CONF/t_kh_auto.token")"
+chk "auto token: arm-blackout (fortress) turns it into the bond token" "$T_CARRIER/$T_AUTO" "icmp+udp+tcp/"
+rm -f "$WAT_CONF"/t_kh_auto.yml "$WAT_CONF"/t_kh_auto.token
 rm -f "$WAT_CONF"/t_iran_legacy.yml "$WAT_CONF"/t_iran_legacy.key "$WAT_CONF"/t_iran_legacy.token "$WAT_CONF"/t_iran_legacy.ech
 ( free_metrics_port() { echo 19999; }; wait_link() { return 1; }; test_tunnel() { :; }
   NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''

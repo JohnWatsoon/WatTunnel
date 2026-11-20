@@ -138,7 +138,11 @@ func listenPortOf(v string) string {
 // the allowed ports always, and for a bonded Kharej config also the finalized
 // carrier list, one endpoint per leg and the path, so the emergency token never
 // carries the single-carrier tunnel that was armed over.
-func RefreshToken(name string) error {
+func RefreshToken(name string) error { return refreshToken(name, false) }
+
+// refreshToken: fortress (arm-blackout only) lets an auto Kharej's token become the bond token. Without it an
+// auto token stays the auto plan: its yml lists every carrier too, and showing the token used to rewrite it.
+func refreshToken(name string, fortress bool) error {
 	f := filepath.Join(P.Conf, name+".token")
 	raw, err := os.ReadFile(f)
 	if err != nil {
@@ -156,7 +160,7 @@ func RefreshToken(name string) error {
 	}
 	cr, bp := tok.Carrier, tok.Peer
 	changed := allow != tok.Ports
-	if Role(name) == "Kharej" && tok.Rev != "1" {
+	if Role(name) == "Kharej" && tok.Rev != "1" && (tok.Carrier != "auto" || fortress) {
 		cc := Cfg(name, "carrier")
 		if strings.Contains(cc, "+") {
 			cr = cc

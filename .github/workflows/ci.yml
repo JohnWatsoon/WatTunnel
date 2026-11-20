@@ -120,7 +120,7 @@ jobs:
             | tee "$RUNNER_TEMP/kharej.out"
           grep -q 'TUNNEL=ci1' "$RUNNER_TEMP/kharej.out"
           grep -q 'TOKEN=wat1:' "$RUNNER_TEMP/kharej.out"
-          for f in ci1.yml ci1.key ci1.token; do test -f "$WAT_CONF/$f" || { echo "missing $f"; exit 1; }; done
+          for f in ci1.yml ci1.key ci1.token; do sudo test -f "$WAT_CONF/$f" || { echo "missing $f"; exit 1; }; done
       - name: keep the Kharej engine listening (systemd unit, else bare process)
         run: |
           export WAT_BIN="$PWD/wattun" WAT_CONF="$RUNNER_TEMP/conf" WAT_RUN="$RUNNER_TEMP/run"
@@ -158,8 +158,8 @@ jobs:
             echo "the auto token was refused"; exit 1
           fi
           grep -q '✓' "$RUNNER_TEMP/iran.out" || { echo "no carrier connected in the auto test"; exit 1; }
-          test -f "$WAT_CONF/ci1-iran.yml" || { echo "no iran yml written"; exit 1; }
-          test -f "$WAT_CONF/ci1-iran.key"
-          test -f "$WAT_CONF/ci1-iran.auto"
-          grep -q '^carrier: ' "$WAT_CONF/ci1-iran.yml"
+          sudo test -f "$WAT_CONF/ci1-iran.yml" || { echo "no iran yml written"; exit 1; }
+          sudo test -f "$WAT_CONF/ci1-iran.key"
+          sudo test -f "$WAT_CONF/ci1-iran.auto"
+          sudo grep -q '^carrier: ' "$WAT_CONF/ci1-iran.yml"
           grep -q 'TUNNEL=ci1-iran' "$RUNNER_TEMP/iran.out"

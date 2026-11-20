@@ -984,7 +984,7 @@ kreply_offer() {
     && hint "Undo: remove $KREPLY_CONF and run: sysctl --system (it is also undone when the last reverse Iran tunnel is deleted)."
   return 0
 }
-refresh_token() { # name : keep NAME.token in step with NAME.yml — the allowed ports always, and for a bonded
+refresh_token() { # name [fortress] : keep NAME.token in step with NAME.yml — the allowed ports always, and for a bonded
   # Kharej config (arm-blackout Fortress mode, M1 2026-11-18) also the finalized carrier list, one endpoint per
   # leg and the path, so the emergency token never carries the single-carrier tunnel that was armed over.
   local f="$CONF/$1.token" allow cr bp changed=0 tmp
@@ -993,7 +993,9 @@ refresh_token() { # name : keep NAME.token in step with NAME.yml — the allowed
   [ -f "$CONF/$1-r.yml" ] && is_auto_kharej "$1" && write_ports "$1-r" # the auto reverse companion allows the same ports
   cr=$T_CARRIER; bp=$T_PEER
   [ "$allow" = "$T_PORTS" ] || changed=1
-  if [ "$(role "$1")" = Kharej ] && [ "$T_REV" != 1 ]; then
+  # an auto Kharej also lists every carrier (icmp+udp+...), but its token is the auto plan Iran tests: only
+  # arm-blackout (second arg "fortress") turns it into a bond token (3.4.3; before, opening the token page did)
+  if [ "$(role "$1")" = Kharej ] && [ "$T_REV" != 1 ] && { [ "$T_CARRIER" != auto ] || [ "${2:-}" = fortress ]; }; then
     local cc; cc=$(cfg "$1" carrier)
     if [[ "$cc" == *+* ]]; then
       cr=$cc
@@ -8021,6 +8023,7 @@ arm_blackout_cmd() { # name
     systemctl restart "${WAT_PREFIX}@$n" >/dev/null 2>&1 || true
     ok "Kharej '$n' armed in Fortress Mode (ICMP, TCP:$ptcp, TLS:$ptls, WSS:$pwss, UDP:$pudp)."
     say "  Emergency blackout token for Iran distribution:"
+    refresh_token "$n" fortress
     show_token "$n"
   else
     say "  ${BOLD}Arming Iran '$n' for Autonomous Blackout Failover${RST}"

@@ -949,6 +949,7 @@ func armBlackoutCmd(n string) bool {
 	_ = Restart(Unit(n))
 	Ok(fmt.Sprintf("Kharej '%s' armed in fortress mode (ICMP, TCP:%s, TLS:%s, WSS:%s, UDP:%s).", n, ptcp, ptls, pwss, pudp))
 	Say("  Emergency blackout token for Iran:")
+	_ = refreshToken(n, true)
 	showToken(n)
 	return true
 }
