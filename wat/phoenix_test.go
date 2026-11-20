@@ -15,7 +15,7 @@ import (
 // pinning the two behaviors an operator would notice: a short link blip must NOT kill a leg (hysteresis), and a
 // muted leg must carry nothing even while alive (override wins over health).
 
-// TestPhoenixBlipDoesNotKillLeg: a 200 ms link failure is shorter than the Silence floor (300 ms with the rig's
+// TestPhoenixBlipDoesNotKillLeg: a 100 ms link failure is shorter than the Silence floor (300 ms with the rig's
 // fastTimings), so the leg must NOT be declared dead - no probe cycle, no share loss beyond the blip itself - and
 // the download rides on as if nothing happened.
 func TestPhoenixBlipDoesNotKillLeg(t *testing.T) {
@@ -28,16 +28,19 @@ func TestPhoenixBlipDoesNotKillLeg(t *testing.T) {
 
 	sent0 := rig.cli.CarrierStats()[0].Sent
 	links[0].blocked.Store(true)
-	time.Sleep(200 * time.Millisecond) // < Silence (300 ms): a blip, not an outage
+	// < Silence (300 ms): a blip, not an outage. 100 ms, not 200: a blip during this download loses 12+ packets, and
+	// lossRun >= 12 with 400 ms of silence is a real death rule (paths.go), so 200 ms left only ~200 ms of scheduler
+	// slack and failed 10-30 % on loaded CI runners (v3.4.0 release run).
+	time.Sleep(100 * time.Millisecond)
 	links[0].blocked.Store(false)
 	time.Sleep(300 * time.Millisecond)
 
 	cs := rig.cli.CarrierStats()
 	if !cs[0].Alive {
-		t.Fatal("a 200 ms blip declared the leg dead (Silence floor must hysteresis it out)")
+		t.Fatal("a 100 ms blip declared the leg dead (Silence floor must hysteresis it out)")
 	}
 	if cs[0].Sent <= sent0+50 {
-		t.Fatalf("the leg stopped carrying after a 200 ms blip: Sent %d -> %d", sent0, cs[0].Sent)
+		t.Fatalf("the leg stopped carrying after a 100 ms blip: Sent %d -> %d", sent0, cs[0].Sent)
 	}
 
 	select {
