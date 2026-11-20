@@ -398,3 +398,29 @@ carrier's quiet-receive form — a separate, small feature if the owner ever wan
 mechanism is missing.
 Per the plan's instruction ("if it is covered, write that and stop"): written, stopping.
 Commit: (this commit)
+
+## 2026-11-21 01:45 · implementer · READY FOR REVIEW (handoff 2)
+All three tracks done, one commit each in order:
+- f23b3f7 A1 — kill harness + baseline numbers (version bumped to 3.4.3)
+- efdfc90 A2 — sliding-window repair design (logged before coding, per plan)
+- cf870b1 A2–A5 — repair implemented, measured (p99 163.8→102.1 ms at 1400 MTU / 1 % loss; 0 % throughput
+  unchanged; mixed-version zero-frame both ways; CPU 6.3 µs/packet), wired (-repair, /stats keys,
+  TECHNICAL.md). OFF BY DEFAULT — the honest verdict (clear win at 1400, inside noise at 640) is in the log;
+  promotion is the reviewer's call.
+- ef3cdd4 B — Phantom (ptcp) raw-TCP carrier with built-in hopping, RST-drop iptables handling, both
+  managers' lists (MGR_VERSION 2026112101), CI root-job tests. Reverse refused with the field reason. Not
+  field-measured (docs say so); not in the auto set.
+- 5915b4a C — Split: already covered by Bifrost :up/:down (written, stopped, per plan).
+
+Final local gate status (Windows checkout):
+- gofmt -l cmd wat testbench → empty; go vet ./... and GOOS=linux go vet → clean
+- go test -count=1 ./cmd/... → ok; FULL `go test -count=1 -timeout 15m ./wat/` → ok (539.8 s, includes the
+  repair suite and both kill modes); bash test-manager.sh → ALL OK
+- NOT runnable here: the ptcp loopback test and the Linux CI jobs (gomgr, icmp+TestPTCP) — GOOS=linux
+  build/vet is clean; the runs are CI's once pushed. No push/tag/release (owner pushes).
+
+Known gaps, all deliberate and logged above: repair's 640 MTU result is noise-level; `repair`/`ptcp-hop` are
+file-only keys (no wizard prompt yet); a general (non-udp) ":down" leg would be new work if ever wanted;
+ptcp carrier not field-measured; the plan's ACK-rate reduction goal for Track A was cut in v1 (logged in the
+A2 entry).
+Commit: 5915b4a (head)
