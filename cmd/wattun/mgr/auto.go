@@ -161,6 +161,11 @@ func writeFile0600(p, s string) error {
 func path2(p string) string { return p } // keep rename target explicit
 
 // readTokFile — NAME.token -> Token (error when missing/unreadable, like the bash).
+// readAutoTok reads NAME.auto, the auto plan token an auto Iran tunnel keeps.
+func readAutoTok(name string) (Token, error) {
+	return ReadToken(strings.TrimSpace(mustRead(filepath.Join(P.Conf, name+".auto"))))
+}
+
 func readTokFile(name string) (Token, error) {
 	return ReadToken(strings.TrimSpace(mustRead(filepath.Join(P.Conf, name+".token"))))
 }
@@ -2365,7 +2370,7 @@ func autoTestCmd(name string) error {
 	if Role(name) != "Iran" || !fileExists(filepath.Join(P.Conf, name+".auto")) {
 		return fmt.Errorf("'%s' is not an auto Iran tunnel (it has no %s.auto). Create it with the token from an auto Kharej tunnel.", name, name)
 	}
-	tok, err := readTokFile(name + ".auto")
+	tok, err := readAutoTok(name)
 	if err != nil || tok.Auto == "" {
 		return fmt.Errorf("%s.auto is not a valid auto token.", filepath.Join(P.Conf, name+".auto"))
 	}
@@ -2412,7 +2417,7 @@ func autoRetest(name string) error {
 	if !fileExists(filepath.Join(P.Conf, name+".auto")) {
 		return fmt.Errorf("not an auto tunnel")
 	}
-	tok, err := readTokFile(name + ".auto")
+	tok, err := readAutoTok(name)
 	if err != nil || tok.Auto == "" {
 		return fmt.Errorf("not an auto tunnel")
 	}
@@ -2485,7 +2490,7 @@ func autoRetest(name string) error {
 // autoMenu — the Auto mode screen (policy / SLA / daily retest / retest now).
 func autoMenu(name string) {
 	isAuto := false
-	if tok, err := readTokFile(name + ".auto"); err == nil && tok.Auto != "" {
+	if tok, err := readAutoTok(name); err == nil && tok.Auto != "" {
 		isAuto = true
 	}
 	for {
