@@ -111,6 +111,7 @@ func main() {
 	fecMode := flag.String("fec", "off", "off|auto: adaptive XOR parity after bursts of small packets, sent only while the measured loss is above -fec-on-loss (cuts tail latency on lossy links; both ends need 1.7.0 and -fec auto; loss gate since 3.3.0)")
 	fecOnLoss := flag.Float64("fec-on-loss", 2, "fec auto: start sending parity once the sender's measured loss is above this percent (0.01 = 1 %, at most 50; must be above -fec-off-loss; 3.3.0)")
 	fecOffLoss := flag.Float64("fec-off-loss", 0.5, "fec auto: stop sending parity once the measured loss falls below this percent (0 = once open it never closes; below -fec-on-loss; 3.3.0)")
+	repair := flag.Bool("repair", false, "sliding-window coded repair: a repair symbol every few data packets so the receiver rebuilds lost packets locally instead of waiting for the sender's loss timer and a retransmit round trip (cuts the loss-tail latency of a lossy downlink; both ends need 3.4.3 with -repair; off by default)")
 	shapeData := flag.Float64("shape-data", 0, "pad packets that carry stream data to randomized realistic sizes, spending at most this percent of the stream bytes sent (0 = off, at most 25; 3.3.0)")
 	noiseMode := flag.String("noise", "off", "idle traffic, off|low|med|custom: while the session has no user data for ~2 keepalives, send non-ack-eliciting filler packets at the matching byte budget (low 128 B/s, med 1024 B/s; custom uses -noise-bps; 3.3.0)")
 	noiseBps := flag.Int("noise-bps", 0, "noise, with -noise custom: filler byte budget in bytes/second (64..1000000; 3.3.0)")
@@ -883,7 +884,7 @@ func main() {
 		Server: server, Key: k, Paths: *lanes, MaxBps: *maxMB * 1e6, Slack: time.Duration(*slackMs) * time.Millisecond,
 		PingEvery: time.Duration(*pingEvery) * time.Second, NoMask: !*hdrMask, NoShape: !*shape,
 		LegacyMaskFlip: *legacyMaskFlip,
-		Logf:           log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", FECOnLoss: fecOn, FECOffLoss: fecOff,
+		Logf:           log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", FECOnLoss: fecOn, FECOffLoss: fecOff, Repair: *repair,
 		MaxPayload: maxPayload, Bond: tm, AllowClients: allowClientPrefixes,
 		ShapeData: shapeFrac, NoiseBps: noiseBpsVal, NoiseFrom: noiseFrom, NoiseTo: noiseTo,
 		WinMax: uint64(*winMax) << 20,
@@ -1094,7 +1095,7 @@ func main() {
 				out := map[string]any{
 					"bytes_in_total": inTot, "bytes_out_total": outTot,
 					"pkts_out": st.PktsOut, "pkts_in": st.PktsIn, "bytes_out": st.BytesOut, "bytes_in": st.BytesIn,
-					"fec_sent": st.FecSent, "fec_recovered": st.FecRecovered, "fec_state": st.FecState, "shape_data_bytes": st.PadBytes, "noise_sent": st.NoiseSent, "noise_bytes": st.NoiseBytes, "retrans": st.Retrans, "send_errors": st.Dropped, "ack_late": st.AckLate, "dup_recv": st.RxDup, "rx_too_old": st.RxTooOld, "rate_bps": st.RateBps,
+					"fec_sent": st.FecSent, "fec_recovered": st.FecRecovered, "fec_state": st.FecState, "repair_sent": st.RepairSent, "repair_recovered": st.RepairRecovered, "shape_data_bytes": st.PadBytes, "noise_sent": st.NoiseSent, "noise_bytes": st.NoiseBytes, "retrans": st.Retrans, "send_errors": st.Dropped, "ack_late": st.AckLate, "dup_recv": st.RxDup, "rx_too_old": st.RxTooOld, "rate_bps": st.RateBps,
 					"ceiling_bps": st.CeilingBps, "loss_pct": st.LossPct,
 					"srtt_ms": float64(st.SRTT) / 1e6, "min_rtt_ms": float64(st.MinRTT) / 1e6,
 					"streams": st.Streams, "inflight": st.Inflight, "alive": alive(), "last_rx_age_ms": rxAge(), "version": wat.Version, "draining": srv != nil && srv.Draining(),

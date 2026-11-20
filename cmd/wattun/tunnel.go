@@ -142,6 +142,8 @@ func (t *tunnel) stats() wat.Stats {
 		tot.DgramDropRx += st.DgramDropRx
 		tot.FecSent += st.FecSent
 		tot.FecRecovered += st.FecRecovered
+		tot.RepairSent += st.RepairSent
+		tot.RepairRecovered += st.RepairRecovered
 		if st.FecState == "on" {
 			tot.FecState = "on"
 		}

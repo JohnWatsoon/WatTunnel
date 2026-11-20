@@ -43,9 +43,9 @@ func newPairCap(t testing.TB, loss float64, delay time.Duration, bps float64, mt
 
 // killLatency runs a bulk download on one stream and measures small echo latencies on other streams while
 // it runs. It returns the sorted latencies plus the sender's stats snapshot.
-func killLatency(t testing.TB, loss float64, mtu int, samples int, warmup, gap time.Duration) (lat []time.Duration, st Stats) {
+func killLatency(t testing.TB, loss float64, mtu int, samples int, warmup, gap time.Duration, cfg Config) (lat []time.Duration, st Stats) {
 	t.Helper()
-	cli, srv := newPairCap(t, loss, 20*time.Millisecond, 10e6, mtu, Config{})
+	cli, srv := newPairCap(t, loss, 20*time.Millisecond, 10e6, mtu, cfg)
 	bulkData := pattern(96<<20, 5)
 	go func() {
 		for {
@@ -97,29 +97,41 @@ func TestKillInteractiveP99(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, mtu := range []int{640, 1400} {
-		lat, st := killLatency(t, 0.01, mtu, 120, 3*time.Second, 50*time.Millisecond)
-		q := func(p float64) time.Duration { return lat[int(float64(len(lat)-1)*p)] }
-		t.Logf("KILL p99 mtu=%d loss=1%%: p50=%v p90=%v p99=%v max=%v (retrans=%d, srtt=%v, min=%v)",
-			mtu, q(0.5), q(0.9), q(0.99), lat[len(lat)-1], st.Retrans, st.SRTT, st.MinRTT)
+	for _, cfg := range []Config{{}, {Repair: true}} {
+		mode := "today"
+		if cfg.Repair {
+			mode = "repair"
+		}
+		for _, mtu := range []int{640, 1400} {
+			lat, st := killLatency(t, 0.01, mtu, 120, 3*time.Second, 50*time.Millisecond, cfg)
+			q := func(p float64) time.Duration { return lat[int(float64(len(lat)-1)*p)] }
+			t.Logf("KILL p99 %s mtu=%d loss=1%%: p50=%v p90=%v p99=%v max=%v (retrans=%d, srtt=%v, min=%v)",
+				mode, mtu, q(0.5), q(0.9), q(0.99), lat[len(lat)-1], st.Retrans, st.SRTT, st.MinRTT)
+		}
 	}
 }
 
-// TestKillBulkThroughput: download MB/s at 0, 0.5, 1 and 2 % loss, 1400 MTU. Coded repair must not cost
-// throughput at 0 % (no overhead) and should recover some of the loss-induced rate at 0.5-2 %.
+// TestKillBulkThroughput: download MB/s at 0, 0.5, 1 and 2 % loss, 1400 MTU, today vs repair. Coded repair
+// must not cost throughput at 0 % (no overhead) and should recover some of the loss-induced rate at 0.5-2 %.
 func TestKillBulkThroughput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, loss := range []float64{0, 0.005, 0.01, 0.02} {
-		mb, retrans := bulkOnce(t, loss, 8<<20)
-		t.Logf("KILL throughput loss=%.1f%%: %.1f MB/s (8 MB, retrans=%d)", loss*100, mb, retrans)
+	for _, cfg := range []Config{{}, {Repair: true}} {
+		mode := "today"
+		if cfg.Repair {
+			mode = "repair"
+		}
+		for _, loss := range []float64{0, 0.005, 0.01, 0.02} {
+			mb, retrans := bulkOnce(t, loss, 8<<20, cfg)
+			t.Logf("KILL throughput %s loss=%.1f%%: %.1f MB/s (8 MB, retrans=%d)", mode, loss*100, mb, retrans)
+		}
 	}
 }
 
-func bulkOnce(t testing.TB, loss float64, size int) (mbps float64, retrans uint64) {
+func bulkOnce(t testing.TB, loss float64, size int, cfg Config) (mbps float64, retrans uint64) {
 	t.Helper()
-	cli, srv := newPairCap(t, loss, 20*time.Millisecond, 10e6, 1400, Config{})
+	cli, srv := newPairCap(t, loss, 20*time.Millisecond, 10e6, 1400, cfg)
 	data := pattern(size, 21)
 	go func() {
 		st, err := srv.Accept()
@@ -147,4 +159,33 @@ func bulkOnce(t testing.TB, loss float64, size int) (mbps float64, retrans uint6
 		t.Fatal("timeout")
 	}
 	return 0, 0
+}
+
+// BenchmarkRepairCodec: the CPU price of repair per data packet — one symbol per 16 packets (the mid
+// adaptive rate), full-size members, build + solve, no transport.
+func BenchmarkRepairCodec(b *testing.B) {
+	tx := bareRepairSession(1)
+	tx.maxPlain = 1340
+	rx := bareRepairSession(1)
+	p := padPacket(1340, 'q')
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		pn := uint64(i)
+		tx.repairNoteSent(pn, p)
+		rx.rxRing[pn%rx.replayWin] = pn + 1
+		if !rx.rxAny || pn > rx.rxLargest {
+			rx.rxLargest, rx.rxAny, rx.rxAt = pn, true, time.Now()
+		}
+		rx.rxRanges.add(pn, pn+1)
+		rx.repairKeep(pn, p)
+		if i%16 == 15 {
+			tx.repair.buildChunks(tx)
+			for _, q := range tx.repair.queue {
+				r := &reader{b: q}
+				r.byte()
+				rx.onRepair(r, time.Now(), nil)
+			}
+			tx.repair.queue = nil
+		}
+	}
 }

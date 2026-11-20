@@ -77,8 +77,13 @@ type Config struct {
 	// dwell between flips. The zero value keeps the 1.7.0-3.2.x behavior (no gate, parity for every burst);
 	// cmd/wattun passes -fec-on-loss/-fec-off-loss (2 % / 0.5 %).
 	FECOnLoss, FECOffLoss float64
-	NoKex                 bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
-	Bond                  PathTimings // multipath health/probe timings (server side; zero = production values)
+	// Repair (3.4.3) turns on the sliding-window coded repair (repair.go): a repair symbol every few data
+	// packets so the receiver rebuilds lost packets locally instead of waiting for the sender's loss timer
+	// and a retransmit round trip. Off by default; both ends need 3.4.3+ (a mixed pair exchanges no repair:
+	// symbols flow only after each side sees the peer's frRepairCap).
+	Repair bool
+	NoKex  bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
+	Bond   PathTimings // multipath health/probe timings (server side; zero = production values)
 	// AllowClients (W10, 3.3.0) is the server-side client allowlist: a new session is admitted only from a source IP
 	// inside one of these prefixes. The check runs before admit on the unauthenticated packet, so even a valid packet
 	// from a non-allowed source is dropped. Empty = every source (the pre-3.3.0 behavior). Only a carrier that reports
@@ -140,6 +145,7 @@ type Stats struct {
 	DgramFragmented, DgramReassembled          uint64 // datagrams sent in pieces / rebuilt from pieces (2.5.0)
 	FecSent, FecRecovered                      uint64
 	FecState                                   string  // F11 loss gate: "on" while this end sends parity, else "off"
+	RepairSent, RepairRecovered                uint64  // sliding-window coded repair symbols sent / holes rebuilt (3.4.3)
 	PadBytes                                   uint64  // W7 data-shaping padding added (frame + filler), 3.3.0
 	NoiseSent, NoiseBytes                      uint64  // F13 idle-noise packets sent and their wire bytes, 3.3.0
 	CeilingBps, LossPct                        float64 // loss-aware soft ceiling (0 = none); last judged interval loss in percent
@@ -278,12 +284,13 @@ type Session struct {
 	spFree        []*sentPkt
 	ackRs         []rng // parsed ACK ranges, valid for one parse
 
-	fec      *fecState   // nil unless Config.FEC
-	padAllow float64     // W7: banked padding budget (bytes), refilled by stream bytes sent
-	noise    *noiseState // F13: idle-noise budget, nil unless Config.NoiseBps > 0
-	noiseBuf []byte      // F13: packet assembly scratch for a noise packet
-	lastUser time.Time   // last packet carrying user data (stream/datagram), either direction: the idle clock
-	hedgeTok float64     // bytes of hedging allowed: ~8% of what was sent
+	fec      *fecState    // nil unless Config.FEC
+	repair   *repairState // nil unless Config.Repair (3.4.3 coded downlink)
+	padAllow float64      // W7: banked padding budget (bytes), refilled by stream bytes sent
+	noise    *noiseState  // F13: idle-noise budget, nil unless Config.NoiseBps > 0
+	noiseBuf []byte       // F13: packet assembly scratch for a noise packet
+	lastUser time.Time    // last packet carrying user data (stream/datagram), either direction: the idle clock
+	hedgeTok float64      // bytes of hedging allowed: ~8% of what was sent
 	bootAt   time.Time
 	peerBoot uint64
 	wake     chan struct{}
@@ -477,6 +484,9 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 	if cfg.FEC {
 		s.fec = newFec()
 		s.fec.gate.onLoss, s.fec.gate.offLoss = cfg.FECOnLoss, cfg.FECOffLoss // F11: zero = no gate (3.3.0)
+	}
+	if cfg.Repair {
+		s.repair = newRepair()
 	}
 	if cfg.NoiseBps > 0 {
 		// L2: the idle clock exists only for -noise; with noise off the session does no lastUser bookkeeping at all.
@@ -881,6 +891,11 @@ func (s *Session) pump() {
 				batch = append(batch, o)
 			}
 		}
+		if s.repair != nil {
+			if o, ok := s.repairDue(now); ok {
+				batch = append(batch, o)
+			}
+		}
 		if s.noise != nil {
 			if o, ok := s.noiseDue(now); ok {
 				batch = append(batch, o)
@@ -1206,6 +1221,9 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		lane = PinLaneBase + pinSlot
 	}
 	p = s.appendKex(p, now)
+	if len(p) > 0 && s.repair != nil {
+		p = s.repairCapDue(p, now) // frRepairCap before frEndpoint: an old peer stops here, losing only what it ignores anyway
+	}
 	if len(p) > 0 {
 		p = s.appendEndpoint(p, now) // Bifrost frEndpoint (3.3.9): LAST frames of an uplink packet, after frKex
 	}
@@ -1231,6 +1249,9 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 	if len(sp.frames) > 0 || len(sp.ctrl) > 0 || sp.dgram {
 		if s.fec != nil && (len(sp.frames) > 0 || sp.dgram) {
 			s.fecNoteSent(pn, p)
+		}
+		if s.repair != nil && (len(sp.frames) > 0 || sp.dgram) {
+			s.repairNoteSent(pn, p)
 		}
 		sp.pn, sp.at, sp.size, sp.lane = pn, now, size, lane
 		s.sent = append(s.sent, sp)
@@ -1698,6 +1719,9 @@ func (s *Session) lose(sp *sentPkt) {
 	if s.fec != nil && len(sp.frames) > 0 {
 		s.fec.onLoss()
 	}
+	if s.repair != nil && len(sp.frames) > 0 {
+		s.repair.onLoss()
+	}
 	if len(sp.frames) > 0 || len(sp.ctrl) > 0 { // a lost datagram-only packet repairs nothing: it only frees its bytes
 		s.stats.Retrans++
 	}
@@ -1853,6 +1877,9 @@ func (s *Session) handle(raw []byte, lane int, src net.Addr) {
 	if s.fec != nil {
 		s.fecKeep(pn, plain, now)
 	}
+	if s.repair != nil {
+		s.repairKeep(pn, plain)
+	}
 	s.lastRecv, s.lastAuth = now, now
 	s.stats.PktsIn++
 	s.stats.BytesIn += uint64(len(raw))
@@ -1966,6 +1993,7 @@ func (s *Session) parse(b []byte, now time.Time, src net.Addr) (eliciting bool) 
 				s.rxRanges = s.rxRanges[:0]
 				s.rxLate = s.rxLate[:0]
 				s.rxSince = s.rxSince[:0]
+				s.repairReset() // the old run's repair symbols describe a dead pn space (3.4.3)
 				s.ackPend = 0
 				s.ackSince = time.Time{}
 				// Re-record the current packet so the new server run's first packet stays ACKed and guarded against replay.
@@ -2004,6 +2032,19 @@ func (s *Session) parse(b []byte, now time.Time, src net.Addr) (eliciting bool) 
 		case frFec:
 			if s.onFec(r, now, src) {
 				eliciting = true
+			}
+		case frRepair:
+			if s.onRepair(r, now, src) {
+				eliciting = true
+			}
+		case frRepairCap:
+			// 3.4.3 coded repair: the peer announces it understands frRepair. Parsing CONTINUES — only
+			// frames an old sender never puts after it (frEndpoint/frPad) may follow.
+			if v := r.byte(); r.err != nil || v != 1 {
+				return
+			}
+			if s.repair != nil {
+				s.repair.peerOK = true
 			}
 		case frKex:
 			pub := r.take(32)
@@ -2129,6 +2170,9 @@ func (s *Session) ackOne(sp *sentPkt, largest uint64, delay time.Duration, now t
 		sp.done = true
 		if s.fec != nil && len(sp.frames) > 0 {
 			s.fec.onAck()
+		}
+		if s.repair != nil && len(sp.frames) > 0 {
+			s.repair.onAck()
 		}
 		if s.chooser != nil {
 			*acked = append(*acked, sp)

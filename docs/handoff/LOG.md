@@ -289,3 +289,56 @@ need at these loss rates, XOR+GF(2) solve is sufficient and table-free.
 Stats: RepairSent / RepairRecovered added to Stats.
 Kill criteria: p99 < ~120 ms at both MTUs (baseline 133/122), bulk stays 5.2-5.3 MB/s at 0-2 %.
 Commit: none yet (design only)
+
+## 2026-11-21 00:15 · implementer · A2–A5 — sliding-window coded repair implemented, measured, wired (off by default)
+**Built** (`wat/repair.go`, ~430 lines): exactly the logged design, plus two deviations the implementation
+forced, both logged here:
+1. **Chunked symbols**: a symbol's parity (L = window max plaintext ≈ 1350 B) + member table exceeds one
+   datagram on a full bulk window, so each repair packet carries the shared header + a parity OFFSET
+   (`base L k n members poff parity-to-end`) and the receiver stitches chunks by k. The frame layout in the
+   A2 entry is superseded by this one (frRepair 0x0f still alone in its packet).
+2. **Solve restructure**: the unknown set is collected while rows are built (a covered member that is neither
+   in the receive ring nor deliverable is an unknown; members older than the 256-entry receive ring are
+   refused), and Gauss-Jordan full-rank solves; a rank deficit leaves the hole to the retransmit path.
+   The receiver keeps the last 8 symbols and solves jointly (two losses need two covering equations).
+Adaptive spacing: `every = W/(1+3×lossEWMA×W)` from the same onAck/onLoss EWMA shape fec uses — one symbol
+per 400 data packets on a clean link (~0.25 % bytes), per ~4 at 2 % loss.
+Negotiation as designed: frRepairCap 0x10 sent ~1/s while repair is on (before frEndpoint), repair flows only
+after seeing the peer's cap; boot change drops the decoder state. Stats RepairSent/RepairRecovered
+(`/stats` `repair_sent`/`repair_recovered`); flag `-repair` / config key `repair` (keys are flag names).
+
+**Bugs found and fixed on the way** (all caught by the new tests, worth remembering):
+- The window clamp used `int64(lo) < 0`, which is TRUE for every server pn (server pns start at
+  `dirServerBit = 1<<63`) — the window scan looped from 0 to ~9.2e18 and hung the pump with s.mu held.
+- Holes were computed from the newest frame's member list only; older kept symbols' holes were invisible and
+  their rows "invalid". Now the unknown set spans all kept symbols.
+- A pn newer than rxLargest (tail loss) was refused by the rxLargest-pn underflow guard; guarded by
+  `pn < rxLargest` now.
+
+**A3 kill test** (`go test -count=1 -run TestKill -v ./wat/`, same harness/seeds, 120 samples/point,
+link 20 ms one way, 10 MB/s, 40 ms RTT):
+- Interactive p99 during bulk, 1 % loss:
+  - MTU 1400: today p50=42.1 p90=101.2 p99=163.8 max=274.4 (retrans 3082) → repair p50=42.4 p90=87.6
+    **p99=102.1** max=263.8 (retrans 1732). Clear win: −62 ms p99, retrans −44 %.
+  - MTU 640: today p99=98.9 (this run; 132.9 in the baseline run — run noise ±30 ms) → repair p99=102.9.
+    Within noise: no clear win at the legacy MTU.
+- Bulk 8 MB, MTU 1400: today 5.3/5.2/5.2/5.2 MB/s at 0/0.5/1/2 % → repair 5.3/5.2/5.1/5.0. 0 % identical
+  (criterion met); the 1-2 % cost is the parity's bytes on the fixed pipe (≤4 %).
+- CPU (BenchmarkRepairCodec, 1340 B members, one symbol/16 packets): 6.3 µs per data packet amortized
+  (ring copy + symbol + solve attempt) ≈ 2.5 % of one core at 5 MB/s.
+**Verdict (honest, per the plan's rule): coded wins clearly at 1400 B MTU — the route's MTU since
+2026-10-12 — and is inside run noise at 640 B; 0 %-loss throughput unchanged. Kept OFF by default; the
+reviewer decides promotion.**
+
+**A4 mixed versions** (`TestRepairMixedVersions`): new client/old server and old client/new server (old =
+repair off, exactly a pre-3.4.3 peer's behavior with the new frames): both transfer 2 MB intact at 1 % loss
+with ZERO repair frames sent (RepairSent=RepairRecovered=0). Wire compat: frRepair alone in its packet;
+frRepairCap followed only by frames an old peer ignores (frEndpoint/frPad); parse stops at unknown types.
+
+**A5 docs**: `docs/TECHNICAL.md` flag table row for `repair` (3.4.3 both ends, sim numbers labelled sim,
+"not field-measured yet").
+
+Tests: `go test -count=1 ./cmd/...` ok; **full `go test -count=1 -timeout 15m ./wat/` ok (539.8 s)**;
+gofmt empty, vet clean. New: repair_test.go, repair_codec_test.go, BenchmarkRepairCodec; kill tests now run
+both modes.
+Commit: (this commit)

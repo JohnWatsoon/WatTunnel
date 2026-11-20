@@ -29,6 +29,13 @@ const (
 	// on the wire — the server binds the announced port to the packet's authenticated source address (see
 	// PathEndpointSignaler), so a hostile peer cannot aim the downlink anywhere but its own proven source.
 	frEndpoint = 0x0e
+	// frRepair (3.4.3, coded downlink): sliding-window repair symbol, alone in its packet (repair.go). The
+	// frame after the header is nothing but parity bytes, so a peer that knows the type reads it to the end
+	// and an older peer stops at the type byte and loses nothing else — it is never sent to one (the sender
+	// waits for frRepairCap). frRepairCap announces the capability (1-byte version) and is followed in its
+	// packet only by frames an old peer ignores anyway (frEndpoint/frPad), so both are safe to send blind.
+	frRepair    = 0x0f
+	frRepairCap = 0x10
 )
 
 var errBadFrame = errors.New("wat: malformed frame")
