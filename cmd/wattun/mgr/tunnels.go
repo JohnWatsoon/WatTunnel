@@ -57,7 +57,7 @@ var (
 	p2ShapedWarn        = func(c string) {}                                 // bash shaped_warn
 	// bash systemctl: every systemctl call the tunnel screens make routes through
 	// this var so tests can record the sequence.
-	p2Systemctl = Systemctl
+	p2Systemctl = systemctlQ
 )
 
 // bash rproto(): transport of the carrier port, for firewall and busy-port checks.

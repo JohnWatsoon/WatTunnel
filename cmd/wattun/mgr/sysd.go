@@ -27,6 +27,9 @@ func systemctlOK(args ...string) bool {
 	return exec.Command("systemctl", args...).Run() == nil
 }
 
+// systemctlQ is Systemctl with its output dropped (the bash's >/dev/null 2>&1).
+func systemctlQ(args ...string) error { return exec.Command("systemctl", args...).Run() }
+
 // IsActive mirrors `systemctl is-active -q unit`.
 func IsActive(unit string) bool { return systemctlOK("is-active", "-q", unit) }
 

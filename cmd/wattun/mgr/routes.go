@@ -323,7 +323,13 @@ func stateFile(n, kind string) string {
 	return d + "/" + n + ".yml." + kind + ".json"
 }
 
-func stateFiles(n string) []string { return []string{stateFile(n, "totals"), stateFile(n, "quota")} }
+// stateFiles: every file the engine can leave for a tunnel (bash state_files),
+// for delete/reset cleanup.
+func stateFiles(n string) []string {
+	b := strings.TrimSuffix(stateFile(n, "totals"), ".totals.json")
+	return []string{b + ".totals.json", b + ".totals.json.host", b + ".totals.json.tmp",
+		b + ".quota.json", b + ".quota.json.tmp", b + ".pn", b + ".pn.tmp"}
+}
 
 func stateDirRelativeWarn(n string) {
 	d := strings.TrimSuffix(Cfg(n, "state-dir"), "/")

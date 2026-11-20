@@ -674,11 +674,11 @@ func autoForEachUnit(parent, act string) bool {
 				err = fmt.Errorf("start")
 			}
 		case "stop":
-			_ = Systemctl("stop", Unit(u))
+			_ = systemctlQ("stop", Unit(u))
 		case "restart":
-			err = Systemctl("restart", Unit(u))
+			err = systemctlQ("restart", Unit(u))
 		case "enable", "disable":
-			_ = Systemctl(act, Unit(u))
+			_ = systemctlQ(act, Unit(u))
 		}
 		if err != nil && u == parent {
 			return false
@@ -686,8 +686,8 @@ func autoForEachUnit(parent, act string) bool {
 	}
 	if act == "stop" && IsAutoKharej(parent) {
 		w := P.Prefix + "-autowatch-" + parent + ".service"
-		_ = Systemctl("stop", w)
-		_ = Systemctl("reset-failed", w)
+		_ = systemctlQ("stop", w)
+		_ = systemctlQ("reset-failed", w)
 	}
 	return true
 }
