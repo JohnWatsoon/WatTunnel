@@ -127,6 +127,9 @@ func avKey(v variant) string {
 		return "bond"
 	}
 	k := v.Car + "/" + v.Kind
+	if avHop(v) != "" {
+		k += "/hop"
+	}
 	if avAnti(v) {
 		k += "/" + v.FS + "-" + v.FM + "-" + v.FP + "-" + v.ECH + "-" + v.Frag
 	}

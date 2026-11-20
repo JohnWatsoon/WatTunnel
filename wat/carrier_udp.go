@@ -1,6 +1,8 @@
 package wat
 
 import (
+	"errors"
+	"math/rand/v2"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -23,6 +25,115 @@ type UDPClient struct {
 	bx      *udpBatch // recvmmsg / sendmmsg (Linux), nil elsewhere
 	dns     bool      // DNS-shaped datagrams (dnsshape.go)
 	dnsEdns bool      // 3.3.8 opt-in: structurally complete DNS (EDNS0 OPT on the queries)
+	hop     *udpHop   // Wraith (3.3.9): source-port rotation, nil = one socket
+}
+
+// udpHop is Wraith: the client sends from a fresh UDP socket (a new source port) every N..1.5N packets, so no 5-tuple
+// carries more than ~1.5N packets uplink. Built for an Iran -> Kharej path that cuts each flow after ~30 packets
+// (field 2026-11-14: rotating only the source port passed 99.7 %). The server is a plain udp server: it already keys
+// sessions by session id and replies to the newest authenticated source (Session.SetPeer), so no wire or server
+// change and any udp server works. An old socket stays open hopGrace to catch replies already in flight.
+type udpHop struct {
+	n     int
+	peer  *net.UDPAddr
+	laddr *net.UDPAddr
+	mu    sync.Mutex // guards c, left
+	c     *net.UDPConn
+	left  int
+	rx    chan []byte
+	done  chan struct{}
+	once  sync.Once
+	prev  []byte
+	pool  sync.Pool
+}
+
+const hopGrace = 500 * time.Millisecond // > the path RTT (~40-100 ms): replies to the old port still land
+
+// SetHop turns Wraith on: rotate the source socket every n..1.5n packets (n >= 2; 0 = off). Call before the first Send.
+func (u *UDPClient) SetHop(n int) error {
+	if n <= 0 {
+		return nil
+	}
+	n = max(n, 2)
+	ra, _ := u.c.RemoteAddr().(*net.UDPAddr)
+	var la *net.UDPAddr
+	if a, ok := u.c.LocalAddr().(*net.UDPAddr); ok && a.IP != nil && !a.IP.IsUnspecified() {
+		la = &net.UDPAddr{IP: a.IP} // keep a -src-ip binding, never the port
+	}
+	h := &udpHop{n: n, peer: ra, laddr: la, rx: make(chan []byte, 256), done: make(chan struct{})}
+	h.pool.New = func() any { return make([]byte, 4096) } // > udpProfile MTU plus DNS framing
+	// sendmmsg/recvmmsg are per socket; a hop socket lives for a few packets
+	u.bx = nil
+	h.c = u.c // left 0: the first Send moves to a fresh plain socket (u.c may carry WAT_GSO's UDP_GRO) and retires this one
+	u.hop = h
+	return nil
+}
+
+func (h *udpHop) quota() int { return h.n + rand.IntN(h.n/2+1) }
+
+// read feeds one socket's datagrams to rx until the socket closes.
+func (h *udpHop) read(c *net.UDPConn) {
+	for {
+		b := h.pool.Get().([]byte)
+		n, err := c.Read(b)
+		if err != nil {
+			h.pool.Put(b)
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue // ICMP port unreachable and similar: keep reading
+		}
+		select {
+		case h.rx <- b[:n]:
+		case <-h.done:
+			return
+		}
+	}
+}
+
+// conn returns the socket for the next packet, rotating to a fresh one when the current one used its quota.
+func (h *udpHop) conn() (*net.UDPConn, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.left <= 0 {
+		c, err := net.DialUDP("udp", h.laddr, h.peer)
+		if err != nil {
+			return h.c, err // fd exhaustion and the like: keep sending on the old socket rather than drop
+		}
+		old := h.c
+		h.c, h.left = c, h.quota()
+		go h.read(c)
+		time.AfterFunc(hopGrace, func() { old.Close() })
+	}
+	h.left--
+	return h.c, nil
+}
+
+func (h *udpHop) write(p []byte) error {
+	c, _ := h.conn()
+	_, err := c.Write(p)
+	return err
+}
+
+func (h *udpHop) recv() ([]byte, error) {
+	if h.prev != nil {
+		h.pool.Put(h.prev[:cap(h.prev)])
+		h.prev = nil
+	}
+	select {
+	case b := <-h.rx:
+		h.prev = b
+		return b, nil
+	case <-h.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (h *udpHop) close() error {
+	h.once.Do(func() { close(h.done) })
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.c.Close()
 }
 
 // SetDNS turns the DNS framing on or off; call it before the first Send. Both ends must agree.
@@ -58,6 +169,9 @@ func (u *UDPClient) Send(p []byte, path int) error {
 		defer done()
 		p = fs[0]
 	}
+	if u.hop != nil {
+		return u.hop.write(p)
+	}
 	_, err := u.c.Write(p)
 	return err
 }
@@ -65,7 +179,12 @@ func (u *UDPClient) Send(p []byte, path int) error {
 func (u *UDPClient) Recv() ([]byte, int, net.Addr, error) {
 	for {
 		var p []byte
-		if u.bx != nil {
+		if u.hop != nil {
+			var err error
+			if p, err = u.hop.recv(); err != nil {
+				return nil, 0, nil, err
+			}
+		} else if u.bx != nil {
 			var err error
 			if p, _, err = u.bx.recv(); err != nil {
 				return nil, 0, nil, err
@@ -100,6 +219,12 @@ func (u *UDPClient) SendBatch(ps [][]byte, lanes []int) error {
 	}
 	var first error
 	for _, p := range ps {
+		if u.hop != nil {
+			if err := u.hop.write(p); err != nil && first == nil {
+				first = err
+			}
+			continue
+		}
 		if _, err := u.c.Write(p); err != nil && first == nil {
 			first = err
 		}
@@ -109,13 +234,24 @@ func (u *UDPClient) SendBatch(ps [][]byte, lanes []int) error {
 
 func (u *UDPClient) SetPeer(net.Addr) {}
 func (u *UDPClient) Profile() Profile { return udpProfile }
-func (u *UDPClient) Close() error     { return u.c.Close() }
+func (u *UDPClient) Close() error {
+	if u.hop != nil {
+		return u.hop.close()
+	}
+	return u.c.Close()
+}
 
 // PathLocalPort reports the local UDP port the socket sends from and receives on (Bifrost frEndpoint, 3.3.9):
 // the client announces a ":down" leg's port so the server knows where to push downlink — the leg's socket never
 // sends, so the server cannot learn the address from traffic. 0 when the socket has no port yet.
 func (u *UDPClient) PathLocalPort() int {
-	if la, ok := u.c.LocalAddr().(*net.UDPAddr); ok {
+	c := u.c
+	if u.hop != nil {
+		u.hop.mu.Lock()
+		c = u.hop.c
+		u.hop.mu.Unlock()
+	}
+	if la, ok := c.LocalAddr().(*net.UDPAddr); ok {
 		return la.Port
 	}
 	return 0

@@ -84,6 +84,9 @@ The first run sent nothing: `sendmmsgRaw` passed Go's `unix.SockaddrInet4` as `m
 - Decision: **Wraith is not built.** On this pair it tops out near 27 MB/s upload, below reverse tcp (43-53 MB/s
   up, 47-64 down, 2026-11-20). Reopen only for a pair where reverse cannot work (Kharej cannot dial Iran) or on an
   Iran host with spare cores, and re-measure the sender ceiling there first.
+- Update (owner, 2026-11-20): built anyway in its simplest form. No raw socket and no server change: the plain udp
+  client sends from a new `DialUDP` socket every N to 1.5N packets (`udp-hop`, 3.3.9), the same thing the 11-14
+  `spray` probe did (99.7 %). The server follows the newest source. Field throughput on iran2 still to be measured.
 
 ## Phase 1: engine fixes
 

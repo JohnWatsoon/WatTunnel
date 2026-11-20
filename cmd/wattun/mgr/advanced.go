@@ -122,6 +122,15 @@ func vMTU(s, car string) bool {
 	return false
 }
 
+// vUDPHop: packets per source port, 2-1000 (Wraith, 3.3.9).
+func vUDPHop(s string) bool {
+	if unsetWord(s) || intIn(s, 2, 1000) {
+		return true
+	}
+	Err("Use 2 to 1000 (0 = off).")
+	return false
+}
+
 func vWinMax(s string) bool {
 	if unsetWord(s) || intIn(s, 4, 64) {
 		return true
@@ -428,6 +437,14 @@ func advMenu(n string) {
 				Err("Use on, off or default.")
 				return false
 			}, func(s string) bool { return s != "on" && s != "off" })
+		}})
+		hopKey := "h" // the bash key; a udp+ws/h2 bond also shows Probe guard on h
+		if hasHTTPCarrier(cr) {
+			hopKey = "9"
+		}
+		add(k339 && r == "Iran" && !rev && strings.Contains("+"+cr+"+", "+udp+"), advRow{hopKey, "UDP hop", Cfg(n, "udp-hop"), "off", "pkts/port", g, func() bool {
+			Hint("Sends from a new UDP source port every N-1.5N packets: passes a filter that cuts each flow after ~30 packets. 12 = field setting. Kharej needs no change.")
+			return ask("udp-hop", "Packets per source port (0 = off)", Cfg(n, "udp-hop"), vUDPHop, unsetWord)
 		}})
 		add(binVerOK("3.0.3"), advRow{"e", "Window max", Cfg(n, "win-max"), "auto", "MB", g, func() bool {
 			return ask("win-max", "Stream receive window cap in MB (4-64; 0/- = auto)", orStr(Cfg(n, "win-max"), "0"), vWinMax, unsetWord)

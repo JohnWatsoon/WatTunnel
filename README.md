@@ -136,7 +136,7 @@ forwards any TCP or UDP port between them. One static binary, no dependencies.
   shrink the payload while an ISP drops large packets but small ones pass (off by default, set per end, invisible
   to the other side), and `wattun mute NAME PATH` / `wattun unmute NAME PATH` to take one leg out of a bond or put
   it back without a restart.
-- **Gets past filters:** fake-SNI desync, `udp-dns`, `tcp-mimic`, connection rotation with `pool-rotate`, and `wattun matrix NAME` to
+- **Gets past filters:** fake-SNI desync, `udp-dns`, `udp-hop` (a new UDP source port every few packets, for routes that cut each flow after ~30 packets), `tcp-mimic`, connection rotation with `pool-rotate`, and `wattun matrix NAME` to
   try the combinations and apply the best. `wattun blackout NAME` turns the whole kit on.
 - **Hard to classify:** no constant byte in a packet header, idle packets at random sizes, HTTP carriers that answer like
   nginx (or pass probes on to a real site with `decoy`), and 13 shaped carriers such as `vxlan` and `ntp-direct`. Opt-in `shape-data` and `noise` cost bandwidth.

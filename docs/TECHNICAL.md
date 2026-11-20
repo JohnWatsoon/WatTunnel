@@ -1139,6 +1139,7 @@ and field caveats stay in the sections each row links to.
 | Drops large ClientHellos (the hello stalls in `Send-Q`) | `tls-small-ch: true` (~250 B instead of ~1.5 KB). |
 | Flags "first bytes are not TLS" or a fixed header structure | `tcp-mimic` and `hdr-mask` (both on by default), or move to a real-TLS carrier (`tls`/`wss`). |
 | Cuts every UDP flow after a few datagrams, but passes DNS on 53 | `udp-dns: true` on both ends, carrier `udp`, server on port 53. |
+| Cuts each UDP flow after ~30 packets, whatever the port | `udp-hop: 12` on the Iran (client) side, carrier `udp`. Kharej stays a plain `udp` server. See [Source-port hopping](#source-port-hopping-udp-hop-wraith-339). |
 | Keeps per-flow state and reclassifies or clears it on RST | `fake-mode: rst` or `synrst`; `pool-rotate` for long-lived flows. |
 | Watches connection lifetime or bytes per flow | `pool-rotate` and/or `pool-rotate-bytes`. |
 | Reroutes or rate-limits sustained ICMP volume | `governor` plus a total `max-mbps` of about 30 or less per ICMP path; raise `mtu` only after proving the path passes it. |
@@ -1361,6 +1362,33 @@ carries `dns` in its path field; the Iran wizard then writes `udp-dns: true`). U
 cannot read the frame and a framed peer never connects to it. Measured on the pair above (one run, 1 vCPU each, 82 ms):
 21 MB/s down, 19 MB/s up; with `sessions: 4`, 32 and 24; a 400 MB transfer held 36 and 29 with no cut. This is
 what a DNS-only whitelist lets through; it does not hide that a very busy UDP 53 flow is not ordinary DNS.
+
+### Source-port hopping (`udp-hop`, Wraith, 3.3.9)
+
+Some routes cut each UDP flow (one 5-tuple) after a fixed number of packets. Measured on iran2/kharej (2026-11-14):
+from Iran, a flow dies after ~29-34 packets, at 300 B and at 1400 B alike, on any port; Kharej to Iran is not cut.
+Sending the same traffic from a new source port every few packets passed 99.7 % (spray probe, 39k datagrams over 19.5k
+flows), and a raw-socket sender rotating every 12-20 packets delivered ~98.7 % at every rate tried (2026-11-20).
+
+`udp-hop: N` (client only, carrier `udp`) sends from a fresh UDP socket, so a new source port, every N to 1.5N packets
+(jittered). The destination port stays fixed. An old socket stays open 0.5 s to catch replies already in flight. The
+server needs nothing: it already keys sessions by session id and replies to the newest authenticated source address,
+so any `udp` server works, of any version, and the wire format is unchanged. With `N = 12` no flow carries more than 18
+packets uplink, under the ~30 cut.
+
+```yaml
+# Kharej (unchanged)                       # Iran
+mode: server                               mode: client
+carrier: udp                               carrier: udp
+listen: ":4443"                            peer: "KHAREJ_IP:4443"
+                                           udp-hop: 12
+```
+
+It works in a bond (`udp+tcp`: only the udp leg hops) and with `udp-dns`; it is off on `reverse` (Iran does not send
+first there). Cost: one new socket per N packets (about 1200 per second at 20 MB/s with `N = 12`) and sendmmsg/recvmmsg
+batching is off on a hopping socket. On the 2-core iran2 a raw-socket sprayer topped out near 27 MB/s, so expect this to
+be CPU-bound on small Iran hosts, below reverse tcp where reverse works. The manager offers it under Advanced settings
+(`h`, Iran udp tunnels), and the Iran auto test adds a `udp hop` row after `udp` when the engine is 3.3.9 or newer.
 
 ### Carrier matrix
 
@@ -1672,6 +1700,7 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `hdr-mask` | true | both | Mask the session id and packet number at the start of every packet (3.0.0). An older peer is detected and answered plain; `false` sends the plain header. |
 | `tcp-mimic` | true | both | tcp carrier: open each connection with a TLS ClientHello-shaped hello (SNI `fake-sni`) that carries the auth, and mask the 2-byte lengths (3.0.0). An older peer is detected after 6 s and answered with the plain pool id; `false` sends the plain id. |
 | `udp-dns` | false | both | udp carrier: start every datagram with a DNS header and question (3.0.0), for routes that pass only DNS-looking UDP on port 53. Both ends must set it. Ignored on a shaped carrier (the shape owns the datagram prefix). See "DNS-shaped udp". |
+| `udp-hop` | 0 (off) | client (3.3.9) | udp carrier: send from a new source port every N to 1.5N packets (2-1000), for routes that cut each UDP flow after a packet count. Client only; the server can be any version. Ignored on `reverse`. See "Source-port hopping". |
 | `shape` | true | both | Pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval (3.0.0). Compatible with older peers. |
 | `shape-data` | 0 (off) | both (3.3.0) | Pad packets that carry stream data to randomized realistic sizes, spending at most this percent (0-25) of the stream bytes sent (plus a 4 KB bank). Spends real bandwidth; ignored on bonded carriers. See "Stream padding and idle noise". |
 | `noise` | off | both (3.3.0) | Idle filler traffic, **per session**: `off`, `low` (128 B/s, ~11 MB/day), `med` (1024 B/s, ~88 MB/day) or `custom` with `noise-bps`. Sent only while the session has no user data for about two keepalives, jittered, never acked. `-sessions 2` doubles it; each Kharej client's session sends its own. See "Stream padding and idle noise". |
@@ -1871,6 +1900,7 @@ Every flag can also be a config key. Flags win over the file.
 | `-keep-slow on\|off` | empty | Pool carriers: `on` never retires a connection for delivering below its share, `off` always checks; empty = on for reverse and direct tcp/tls, off for the HTTP carriers (3.0.0). |
 | `-hdr-mask` | true | Mask the packet header (3.0.0). |
 | `-udp-dns` | false | udp carrier: DNS-shaped datagrams, for port 53 (3.0.0). Ignored on a shaped carrier. |
+| `-udp-hop N` | 0 | udp carrier, client: new source port every N to 1.5N packets (Wraith, 3.3.9). Server unchanged. |
 | `-tcp-mimic` | true | tcp carrier: ClientHello-shaped hello and masked frame lengths (3.0.0). |
 | `-shape` | true | Pad small packets and jitter the keepalive (3.0.0). |
 | `-shape-data PCT` | 0 (off) | Both ends (3.3.0): pad data-carrying packets to randomized realistic sizes, spending at most PCT (0-25) percent of the stream bytes sent; ignored on bonded carriers. See "Stream padding and idle noise". |
@@ -2990,6 +3020,7 @@ toward one fix for CDN tunnels that got slower over time. If you are on any of t
 - **3.3.9: security seals, the emergency-token round trip fixed, directional bond legs, `-mtu-adapt`, and `wattun mute`/`unmute`.** Old peers interoperate: the only new frame (`frEndpoint`, 0x0e) rides last in a packet and is ignored by older peers, and a mixed pair just keeps both directions on its ordinary legs.
   - **Security seals.** `-no-pq` is now a classic-curve allowlist (future post-quantum groups cannot bloat the ClientHello again); the automatic masked→plain header downgrade is removed (`-legacy-mask-flip` restores it for pre-3.0 peers — a filter that dropped packets for ~3 s used to expose the header); `-probe-guard` makes the ws/wss/h2/h2c/grpc tunnel answer only token-carrying requests (an active prober gets the decoy/nginx pages, never a real 101/200); `udp-dns-edns` makes the udp-dns frames structurally complete DNS (EDNS0 OPT, real TXT answers echoing the query's id and question); `ntp-direct` and `srtp-direct` frames are protocol-valid (stratum 2, NTP-epoch timestamps with originate echo and an NTS-cookie extension field; directional SSRCs and a wrapping RTP clock); the `tls` carrier resumes sessions instead of a full ECDHE per reconnect.
   - **Emergency-token round trip fixed (M1).** `arm-blackout` finalized a multi-carrier bond but the printed token still described the pre-arming single carrier; `refresh_token` now regenerates the token from the finalized config (carrier list, one endpoint per leg, path), bond tokens carry one endpoint per leg, and the Iran import writes `peer-<carrier>:` per leg. Proven by a sandbox case: export → import into an empty config reproduces the finalized server state exactly.
+  - **Source-port hopping (`udp-hop`, Wraith).** The udp client sends from a new source port every N to 1.5N packets, for routes that cut each flow after ~30 packets (iran2: a fixed flow dies at ~30, rotating ports passed 99.7 %). Client only, no wire change: any udp server follows the newest port. The Iran auto test adds a `udp hop` row.
   - **Directional bond legs (`:up`/`:down`).** A bond leg may carry one direction only (`carrier: tcp:up+udp:down`); the server learns a client's `:down` udp leg from the new `frEndpoint` frame (leg index + bound port; the IP always comes from the authenticated packet source, never the wire). Each carrier appears at most once per bond; both ends need 3.3.9, a mixed pair degrades to bidirectional legs with the uplink intact.
   - **`-mtu-adapt` (per end, off by default).** 8 consecutive lost packets beyond 512 B clamp that path's payload to 640 B for 30 s (re-fires while the signature persists; any ack resets it). No wire signal — single-ended, invisible to the peer, safe with mixed versions. Models the measured size-selective loss signature.
   - **`wattun mute NAME PATH` / `wattun unmute NAME PATH`.** Take one bonded leg out of service by hand (or put it back) over the running tunnel's metrics endpoint, without a restart; `/stats` shows `muted` so an override is distinguishable from a dead leg.

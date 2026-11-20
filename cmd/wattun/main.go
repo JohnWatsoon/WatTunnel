@@ -123,6 +123,7 @@ func main() {
 	legacyMaskFlip := flag.Bool("legacy-mask-flip", false, "client: restore the pre-3.0 masked/plain guessing - flip the header form after 3 s of silence (and again on a mid-session reset) so an old peer that only speaks plain can be joined. 3.3.8: default OFF; the automatic flip was a cleartext downgrade (a filter only had to drop packets for ~3 s at flow start), so joining a peer older than 3.0.0 is an explicit opt-in now")
 	tcpMimic := flag.Bool("tcp-mimic", true, "tcp carrier: open every connection with a TLS ClientHello-shaped hello (SNI -fake-sni, default www.cloudflare.com) that carries the authentication, and mask the 2-byte frame lengths, so the stream starts like TLS and has no plain structure (3.0.0; both ends; an older peer is detected and answered with the plain 8-byte pool id after a few seconds; false sends the plain id)")
 	udpDNS := flag.Bool("udp-dns", false, "udp carrier: start every datagram with a DNS message header and question, so a filter that lets only DNS-looking UDP through (measured: UDP to port 53 passes, everything else is cut after 3 datagrams) passes the tunnel; use with port 53 on the server. Both ends must set it; an older peer cannot read it (3.0.0)")
+	udpHop := flag.Int("udp-hop", 0, "udp carrier, client only (Wraith, 3.3.9): send from a new UDP source port every N to 1.5N packets (0 = off; 12 suits a path that cuts each flow after ~30 packets). The server is a plain udp server of any version: it follows the newest source port")
 	udpDNSEdns := flag.Bool("udp-dns-edns", false, "udp carrier with udp-dns: make the frames structurally complete DNS (3.3.8; both ends) - queries add an EDNS0 OPT record (ARCOUNT=1, size 1232) and the server replies as real answers that echo the query's id and question and carry the tunnel packet as TXT RDATA, instead of ANCOUNT=0 ciphertext after the question. A legacy query still gets the legacy reply, so the server can enable this while clients upgrade; a legacy server cannot parse the OPT")
 	probeGuard := flag.Bool("probe-guard", false, "ws|wss|h2|h2c|grpc carriers: the server answers a tunnel request only when it carries the key-derived X-Request-Id token, so an active prober gets the decoy/nginx pages instead of a real 101/200 (3.3.8; both ends; default off keeps older peers interoperable)")
 	shape := flag.Bool("shape", true, "randomize idle traffic: pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval around -ping-every (3.0.0; wire-compatible with older peers)")
@@ -638,6 +639,9 @@ func main() {
 			if err != nil {
 				log.Fatalf("udp socket: %v", err)
 			}
+			if uc, ok := pio.(*wat.UDPClient); ok {
+				uc.SetHop(*udpHop)
+			}
 			if *udpDNS {
 				for _, x := range []any{pio, raw} {
 					if d, ok := x.(interface{ SetDNS(bool) }); ok {
@@ -916,6 +920,7 @@ func main() {
 				if err == nil {
 					uc.SetDNS(*udpDNS)
 					uc.SetDNSEdns(*udpDNSEdns)
+					uc.SetHop(*udpHop)
 					p = uc
 				}
 			default:

@@ -1527,6 +1527,10 @@ func autoVariants(tok Token) {
 			avAdd(name+" (shape only)", name, "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "")
 		case p != "":
 			avAdd(name, name, "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "")
+			// Wraith (3.3.9, Iran side only): the same udp port from a new source port every 12-18 packets
+			if name == "udp" && binVerOK("3.3.9") {
+				avAdd("udp hop", "udp", "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "-udp-hop="+atHop)
+			}
 		default:
 			avAdd(name, name, "d", atAddr, "", "", "", "", "", "", "", "")
 		}
@@ -1672,6 +1676,7 @@ func atToT(sel []int) (atChoice, error) {
 			c.Extra = joinNonEmpty(c.Extra, "\n", atCdnLines(cdn))
 		}
 		c.Carrier, c.Peer, c.Path = carrier, atAddr, atPath
+		c.Extra = joinNonEmpty(c.Extra, "\n", atHopLine(sel))
 		c.Label, c.Key = "bond "+carrier, "bond"
 		return c, nil
 	}
@@ -1699,8 +1704,32 @@ func atToT(sel []int) (atChoice, error) {
 	if av[i].Kind == "r" {
 		c.Rev = "1"
 	}
+	c.Extra = joinNonEmpty(c.Extra, "\n", atHopLine(sel))
 	c.Label, c.Key = av[i].Label, avKey(av[i])
 	return c, nil
+}
+
+// atHop: Wraith packets per source port in the auto test (field cut ~30 per flow; 12-18 leaves a margin).
+const atHop = "12"
+
+// avHop: a variant's -udp-hop value, "" = none.
+func avHop(v variant) string {
+	for _, w := range strings.Fields(v.X) {
+		if h, ok := strings.CutPrefix(w, "-udp-hop="); ok {
+			return h
+		}
+	}
+	return ""
+}
+
+// atHopLine: "udp-hop: N" when a chosen row hops.
+func atHopLine(sel []int) string {
+	for _, i := range sel {
+		if h := avHop(av[i]); h != "" {
+			return "udp-hop: " + h
+		}
+	}
+	return ""
 }
 
 // at_cdn_lines — the fp / ech / tls-frag config lines of variant i.
@@ -1843,6 +1872,9 @@ func autoCurrentKey(name string) string {
 	}
 	if Cfg(name, "sni") != "" {
 		return c + "/c"
+	}
+	if Cfg(name, "udp-hop") != "" {
+		return c + "/d/hop"
 	}
 	return c + "/d"
 }
@@ -2239,7 +2271,7 @@ func autoApply(name string, ch atChoice, tuneKeys []string) error {
 	// strip the variant keys, then write the new ones
 	drop := map[string]bool{"carrier": true, "peer": true, "path": true, "sni": true,
 		"host": true, "reverse": true, "listen": true, "fp": true, "ech": true,
-		"ech-cache": true, "tls-frag": true}
+		"ech-cache": true, "tls-frag": true, "udp-hop": true}
 	var out []string
 	for _, l := range strings.Split(mustRead(f), "\n") {
 		k := yamlKey(l)

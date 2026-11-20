@@ -1254,6 +1254,8 @@ chk "bond_budget_fit: a 1 MB budget still probes one" "$(bond_budget_fit 5 1)" "
 # (sessions ≤ 16 and never on a bond/reverse, conns ≤ 64, mtu per carrier, win-max 16/32/64) and the installed version.
 FULL_PLAN='d=udp:4443,tcp:4443,tls:8443,ws:2052,wss:2053,h2:2087,h2c:2082,grpc:2083;r=tcp:24431,tls:24432,ws:24433,wss:24434,h2:24435,h2c:24436,grpc:24437'
 _T_AUTO=$T_AUTO; _T_PEER=$T_PEER; _T_PATH=$T_PATH; _T_SNI=$T_SNI; _AT_PRESET=$AT_PRESET
+eval "_bvo() $(declare -f bin_ver_ok | tail -n +2)"
+bin_ver_ok() { ver_ge 3.3.8 "$1" && echo 1; return 0; } # these counts are for a pre-Wraith engine
 T_AUTO=$FULL_PLAN; T_PEER='203.0.113.10'; T_PATH='/wat'; T_SNI=''; AT_PRESET=normal
 auto_variants
 chk "auto variants: the full plan has 17 rows" "${#AV_LABEL[@]}" "17"
@@ -1290,6 +1292,22 @@ T_AUTO='d=udp:4443,tcp:4443;r=tcp:24431'; auto_variants
 chk "auto variants: a shortened reverse plan is honoured (B1)" "${#AV_LABEL[@]}" "5"
 T_AUTO=$FULL_PLAN; auto_variants
 chk "auto variants: restored with the full plan (B1)" "${#AV_LABEL[@]}" "17"
+# Wraith (3.3.9): a 3.3.9 engine adds a "udp hop" row right after udp; choosing it writes udp-hop into the config
+bin_ver_ok() { echo 1; }
+T_AUTO='d=udp:4443,tcp:4443;r=icmp'; auto_variants
+chk "wraith: udp hop row follows udp" "${AV_LABEL[2]}|${AV_CAR[2]}|${AV_PEER[2]}|${AV_X[2]}" "udp hop|udp|203.0.113.10:4443|-udp-hop=12"
+chk "wraith: hop row has its own key" "$(av_key 1)/$(av_key 2)" "udp/d/udp/d/hop"
+AT_SEL=(2); at_to_t
+chk "wraith: at_to_t writes udp-hop" "$T_CARRIER|$T_PEER|$AT_EXTRA" "udp|203.0.113.10:4443|udp-hop: 12"
+AT_SEL=(2 3); at_to_t
+chk "wraith: a bond with the hop row keeps udp-hop" "$T_CARRIER|$(grep -c '^udp-hop: 12$' <<<"$AT_EXTRA")" "udp+tcp|1"
+AT_SEL=(1); at_to_t
+chk "wraith: plain udp row writes no udp-hop" "$(grep -c udp-hop <<<"$AT_EXTRA" || true)" "0"
+bin_ver_ok() { ver_ge 3.3.8 "$1" && echo 1; return 0; }
+T_AUTO=$FULL_PLAN; auto_variants
+chk "wraith: no hop row without a 3.3.9 engine" "${#AV_LABEL[@]}" "17"
+chk "wraith: v_udp_hop range" "$(v_udp_hop 12 && v_udp_hop 0 && ! v_udp_hop 1 2>/dev/null && ! v_udp_hop 1001 2>/dev/null && ! v_udp_hop x 2>/dev/null && echo y)" "y"
+eval "bin_ver_ok() $(declare -f _bvo | tail -n +2)"
 T_AUTO=$_T_AUTO; T_PEER=$_T_PEER; T_PATH=$_T_PATH; T_SNI=$_T_SNI; AT_PRESET=$_AT_PRESET
 # B1: auto_rplan_build with a base uses sequential ports; without a base it picks random (auto_pick_rplan)
 AUTO_RPLAN=$(auto_rplan_build 24431) # build with known base for deterministic test
