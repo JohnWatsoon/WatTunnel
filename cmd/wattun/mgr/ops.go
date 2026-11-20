@@ -38,7 +38,12 @@ func init() {
 		if r.Error != nil {
 			return errRC(r.Error)
 		}
-		return b2i(showToken(r.Name)) // the wizard ends on the token Iran needs
+		ok := showToken(r.Name) // the wizard ends on the token Iran needs
+		if ok && NonInteractive {
+			Say("TUNNEL=" + r.Name) // bash 4164: the unattended epilogue
+			Say("TOKEN=" + r.Token)
+		}
+		return b2i(ok)
 	})
 }
 

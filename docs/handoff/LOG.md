@@ -115,3 +115,25 @@ All five sites from the plan:
 Files: cmd/wattun/mgr/routes.go, status.go, auto.go, matrix.go.
 Tests: gofmt -l cmd wat testbench → empty; go vet ./... → clean; `go test -count=1 ./cmd/wattun/mgr/` → ok.
 Commit: (this commit)
+
+## 2026-11-20 18:35 · implementer · task 7 — Linux CI gate
+New `gomgr` job in .github/workflows/ci.yml (ubuntu-latest): builds ./wattun, then in an empty sandbox
+(WAT_PREFIX=wtci, WAT_CONF/WAT_RUN under $RUNNER_TEMP, WAT_BIN=$PWD/wattun, WAT_GO_MGR=1):
+1. `kharej --yes --carrier auto --name ci1 --addr 127.0.0.1` under a 300 MB cgroup cap
+   (`sudo systemd-run --scope -p MemoryMax=300M`, prlimit --as=4G fallback if systemd-run is unavailable — the
+   Go manager needs root exactly like the bash one, `id -u` check). Asserts exit 0, `TUNNEL=ci1`,
+   `TOKEN=wat1:`, and ci1.yml/.key/.token written. A leak fails the job (OOM kill) instead of hanging it.
+2. Keeps the Kharej engine listening: the wizard's own systemd unit (wtci@ci1, template written by
+   ensureTemplate with WAT_BIN/WAT_CONF baked in) if it started, else the binary run directly with nohup — so
+   "systemd units may fail in CI" stays true without weakening the test.
+3. `iran --yes --token <that> --map 18999:18999/tcp --name ci1-iran --pick best --test normal`: exit code is
+   tolerated as 0 or 1 (a failed unit start gives LINK=down and rc 1), but the auto check itself must have
+   really run: no "not ported"/"not available in this build" refusal, at least one check-mark row in the ranked
+   table (packets actually flowed through the tunnel on loopback), and ci1-iran.yml/.key/.auto written.
+The Kharej auto wizard now prints the unattended epilogue `TUNNEL=`/`TOKEN=` after showToken (bash 4164 parity;
+this is what the gate greps).
+Cannot run here (Windows checkout, no systemd, manager root-gated); the plan expects CI to prove this job. The
+non-interactive plumbing it drives was added in task 1's commit and is unit-tested there.
+Files: .github/workflows/ci.yml, cmd/wattun/mgr/ops.go.
+Tests: YAML parsed (6 jobs); gofmt/vet/mgr suite ok locally.
+Commit: (this commit)

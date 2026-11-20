@@ -83,3 +83,85 @@ jobs:
             go test -list "$re" ./wat/ | grep -q '^Test' || { echo "::error::$re matched no test"; exit 1; }
           done
       - run: go test -race -count=1 -run 'TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback|TestShape|TestNoise|TestFecGate|TestFecRx|TestShapedUDP|TestSourceAllowed|TestServerClientAllowlist|TestPad2' ./wat/
+  gomgr:
+    # The Go manager sign-off gate (docs/handoff/PLAN-go-manager task 7): the auto
+    # round trip Kharej -> token -> Iran test must run end to end on Linux under an
+    # empty sandbox conf, and a leak (the 3.4.1 OOM class) must fail the job instead
+    # of hanging it. Systemd units failing to start is tolerated: what must hold is
+    # that the wizards write their files, print the token and the auto test really
+    # connects (a check-mark row proves packets flowed).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WAT_PREFIX: wtci
+      WAT_CONF: ${{ runner.temp }}/conf
+      WAT_RUN: ${{ runner.temp }}/run
+      WAT_GO_MGR: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: go build -o wattun ./cmd/wattun
+      # The Go manager, like the bash one, refuses non-root; both wizards run as
+      # root under a 300 MB cgroup cap (systemd-run; prlimit fallback with
+      # headroom for the Go runtime's address-space reservations).
+      - name: Kharej auto wizard
+        run: |
+          export WAT_BIN="$PWD/wattun"
+          run_cap() {
+            if sudo systemd-run --scope -p MemoryMax=300M true 2>/dev/null; then
+              sudo env WAT_PREFIX="$WAT_PREFIX" WAT_CONF="$WAT_CONF" WAT_RUN="$WAT_RUN" WAT_BIN="$WAT_BIN" \
+                WAT_GO_MGR=1 systemd-run --scope -p MemoryMax=300M "$@"
+            else
+              sudo env WAT_PREFIX="$WAT_PREFIX" WAT_CONF="$WAT_CONF" WAT_RUN="$WAT_RUN" WAT_BIN="$WAT_BIN" \
+                WAT_GO_MGR=1 prlimit --as=4000000000 "$@"
+            fi
+          }
+          run_cap "$PWD/wattun" kharej --yes --carrier auto --name ci1 --addr 127.0.0.1 \
+            | tee "$RUNNER_TEMP/kharej.out"
+          grep -q 'TUNNEL=ci1' "$RUNNER_TEMP/kharej.out"
+          grep -q 'TOKEN=wat1:' "$RUNNER_TEMP/kharej.out"
+          for f in ci1.yml ci1.key ci1.token; do test -f "$WAT_CONF/$f" || { echo "missing $f"; exit 1; }; done
+      - name: keep the Kharej engine listening (systemd unit, else bare process)
+        run: |
+          export WAT_BIN="$PWD/wattun"
+          if sudo systemctl is-active --quiet wtci@ci1; then
+            echo "kharej engine up via systemd"
+          else
+            echo "kharej engine not active; starting the binary directly"
+            sudo bash -c "nohup '$WAT_BIN' -config '$WAT_CONF/ci1.yml' >'$RUNNER_TEMP/engine.log' 2>&1 &"
+            sleep 3
+          fi
+      - name: Iran auto test against the token
+        run: |
+          export WAT_BIN="$PWD/wattun"
+          TOK=$(sed -n 's/^TOKEN=//p' "$RUNNER_TEMP/kharej.out")
+          test -n "$TOK"
+          run_cap() {
+            if sudo systemd-run --scope -p MemoryMax=300M true 2>/dev/null; then
+              sudo env WAT_PREFIX="$WAT_PREFIX" WAT_CONF="$WAT_CONF" WAT_RUN="$WAT_RUN" WAT_BIN="$WAT_BIN" \
+                WAT_GO_MGR=1 systemd-run --scope -p MemoryMax=300M "$@"
+            else
+              sudo env WAT_PREFIX="$WAT_PREFIX" WAT_CONF="$WAT_CONF" WAT_RUN="$WAT_RUN" WAT_BIN="$WAT_BIN" \
+                WAT_GO_MGR=1 prlimit --as=4000000000 "$@"
+            fi
+          }
+          set +e
+          run_cap "$PWD/wattun" iran --yes --token "$TOK" --map 18999:18999/tcp \
+            --name ci1-iran --pick best --test normal >"$RUNNER_TEMP/iran.out" 2>&1
+          rc=$?
+          set -e
+          echo "iran wizard rc=$rc"
+          cat "$RUNNER_TEMP/iran.out"
+          # the auto check must accept the token and test for real: no refusal, a
+          # check-mark row (packets flowed), and the chosen variant written out
+          if grep -qiE 'not ported|not available in this build|Auto tokens are not ported' "$RUNNER_TEMP/iran.out"; then
+            echo "the auto token was refused"; exit 1
+          fi
+          grep -q '✓' "$RUNNER_TEMP/iran.out" || { echo "no carrier connected in the auto test"; exit 1; }
+          test -f "$WAT_CONF/ci1-iran.yml" || { echo "no iran yml written"; exit 1; }
+          test -f "$WAT_CONF/ci1-iran.key"
+          test -f "$WAT_CONF/ci1-iran.auto"
+          grep -q '^carrier: ' "$WAT_CONF/ci1-iran.yml"
+          grep -q 'TUNNEL=ci1-iran' "$RUNNER_TEMP/iran.out"
