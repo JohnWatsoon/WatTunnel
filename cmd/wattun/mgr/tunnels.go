@@ -69,9 +69,9 @@ func p2Rproto(c string) string {
 	return "tcp"
 }
 
-// bash new_key: 40 base64 chars from 32 random bytes, no /+=
+// bash new_key: 40 base64 chars, no /+=; 48 bytes (64 chars) so stripping /+ never leaves fewer than 40
 func p2NewKey() string {
-	b := make([]byte, 32)
+	b := make([]byte, 48)
 	if _, err := cryptoRead(b); err != nil {
 		return "wattun-devkey-wattun-devkey-wattun"
 	}
