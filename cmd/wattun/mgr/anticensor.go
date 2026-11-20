@@ -215,7 +215,11 @@ func pickFakeMode(def string) string {
 	for i, m := range modes {
 		opts[i] = acOpt{m, fakeModeDesc(m)}
 	}
-	return pickValue("Desync mode", "how the decoy hello is made unusable for the real server", opts, def, "NI_FAKEMODE", "", vFakeMode)
+	v := pickValue("Desync mode", "how the decoy hello is made unusable for the real server", opts, def, "NI_FAKEMODE", "", nil)
+	if v != "" && !vFakeMode(v) {
+		return ""
+	}
+	return v
 }
 
 func pickPoolRotate(def string) string {
@@ -635,7 +639,9 @@ func anticensorMenu(n string) {
 			} else if v := Ask("Value for "+key+" (- = remove)", Cfg(n, key)); v == "" || v == "-" {
 				set(key, "", key+" removed.")
 			} else if reACValue.MatchString(v) {
-				set(key, v, key+" set to "+v+".")
+				SetValue(n, key, v)
+				Ok(key + " set to " + v + ".")
+				changed = true
 			} else {
 				Err("Value may only hold letters, digits and . _ : / @ + -")
 			}
@@ -793,7 +799,7 @@ func anticensorTest(n string) bool {
 	Ok(fmt.Sprintf("Connected · RTT %s ms · %s in / %s out", Ms(getFFlat(m, "rtt_ms", "srtt_ms")),
 		orStr(get(m, "pkts_in"), "0"), orStr(get(m, "pkts_out"), "0")))
 	if fp, ok := m["filter_profile"]; ok && fp != nil {
-		Say("  " + kv("filter", strings.TrimPrefix(fmt.Sprint(fp), "map")))
+		Say("  " + kv("filter", flatMap(fp)))
 	}
 	if e := get(m, "ech"); e != "" {
 		Say("  " + kv("ech", e))
@@ -1029,4 +1035,21 @@ func auditBlackoutCmd(n string) {
 		Say(fmt.Sprintf("  %s%s%s partly ready%s  %d passed, %d warnings", YEL, BOLD, MarkWarn, RST, pass, fail))
 	}
 	fmt.Fprintln(Stdout)
+}
+
+// flatMap shows a /stats object as "k v · k v" (sorted keys); anything else as is.
+func flatMap(v any) string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return fmt.Sprint(v)
+	}
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	slices.Sort(ks)
+	for i, k := range ks {
+		ks[i] = k + " " + fmt.Sprint(m[k])
+	}
+	return strings.Join(ks, " · ")
 }
