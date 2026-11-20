@@ -70,7 +70,8 @@ var (
 	// auto/companion namespace (conf.go / token.go side of P1)
 	p1IsAutoKharej = func(name string) bool { return IsAutoKharej(name) }
 	p1CompanionOf  = func(name string) string { return CompanionOf(name) }
-	p1AutoHelpers  = func(name string) []string { return nil } // TODO(P2): auto_helpers (token plan, $parent-r/$parent-e-*)
+	p1AutoHelpers  = func(name string) []string { return autoHelpers(name) } // bash auto_helpers 577
+	p1StatsFlat    = statsFlatOf                                             // bash stats_flat 589
 	p1YmlMaps      = func(name string) []string { return YmlMaps(name) }
 	p1CarrierLabel = func(name string) string { // carrier_label(): auto / auto-r / carrier
 		if p1IsAutoKharej(name) {
@@ -276,8 +277,6 @@ func parseCarriers(m map[string]any) []carInfo {
 }
 
 // tinfo(): state: up | degraded | down | standby | unknown | stopped.
-// TODO(P1): the auto-Kharej aggregation branch sums parent + hidden helpers
-// (auto_helpers units, stats_flat): port it once conf exposes the token plan.
 type tunnelInfo struct {
 	State, Why, Raw    string
 	stats              map[string]any
@@ -293,6 +292,35 @@ type tunnelInfo struct {
 }
 
 func statsOf(name string) (map[string]any, error) { return p1Stats(name) }
+
+// statsFlatOf mirrors stats_flat(): /stats?flat=1 (3.3.6), one key=value line
+// per top-level value, for readers of aggregates only (the auto-Kharej -e-*
+// helpers); an older binary answers with the JSON and both forms feed get().
+func statsFlatOf(name string) (map[string]any, error) {
+	addr := p1Cfg(name, "metrics")
+	if addr == "" {
+		return nil, fmt.Errorf("no metrics address")
+	}
+	blob, err := FetchStatsFlat(addr)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]any{}
+	if strings.HasPrefix(blob, "{") {
+		dec := json.NewDecoder(strings.NewReader(blob))
+		dec.UseNumber()
+		if err := dec.Decode(&m); err != nil {
+			return nil, err
+		}
+		return m, nil
+	}
+	for _, line := range strings.Split(blob, "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			m[k] = v
+		}
+	}
+	return m, nil
+}
 
 func tinfo(name string) *tunnelInfo {
 	ti := &tunnelInfo{State: "stopped", Live: p1Cfg(name, "carrier")}
@@ -318,8 +346,9 @@ func tinfo(name string) *tunnelInfo {
 		fillTI(ti, ti.stats)
 		return ti
 	}
-	// TODO(P1): is_auto_kharej branch (sum over parent + -r + -e-* helpers) — same
-	// aggregation the bash does; until tokens are readable it degrades to the plain path.
+	if p1IsAutoKharej(name) {
+		return tinfoAutoKharej(name)
+	}
 	on := p1IsActive(Unit(name))
 	var other string
 	if p := p1CompanionOf(name + "-r"); p == name {
@@ -362,6 +391,136 @@ func tinfo(name string) *tunnelInfo {
 	}
 	fillTI(ti, ti.stats)
 	return ti
+}
+
+// tinfoAutoKharej (bash tinfo's is_auto_kharej branch, 1929-2032): the parent
+// plus its hidden helpers (-r and -e-*) are summed — bytes, rate, sessions,
+// streams, dgram flows; the best RTT/loss over the helpers that are alive or
+// carry sessions; the state is up when any helper is alive, unknown when an
+// active helper's stats did not answer, else down. Carrier rows: the parent's
+// live/muted carriers, the companion's prefixed r:, each extended shape as one
+// synthetic alive row from its flat stats. TI_AUTO=1: never downgraded to
+// degraded (the bash guards the downgrade on TI_AUTO=0).
+func tinfoAutoKharej(name string) *tunnelInfo {
+	ti := &tunnelInfo{State: "stopped", Live: p1Cfg(name, "carrier"), Auto: true}
+	units := append([]string{name}, p1AutoHelpers(name)...)
+	on, miss, anyUp := false, 0, false
+	var sumIn, sumOut, sumRate float64
+	sumSess, sumStreams, sumDF := 0, 0, 0
+	var bestRTT, bestMin, bestLoss float64
+	bestSet := false
+	var live []string
+	var cars []carInfo
+	var primary map[string]any
+	for _, u := range units {
+		if !p1IsActive(Unit(u)) {
+			continue
+		}
+		on = true
+		var m map[string]any
+		var err error
+		if u == name || u == name+"-r" {
+			m, err = statsOf(u)
+		} else {
+			m, err = p1StatsFlat(u) // the extended shapes: flat aggregate stats
+		}
+		if err != nil || m == nil {
+			miss++
+			continue
+		}
+		if primary == nil {
+			primary = m
+		}
+		in, out := getF(m, "bytes_in_total"), getF(m, "bytes_out_total")
+		if get(m, "bytes_in_total") == "" { // before 2.4.19: since the last restart
+			in, out = getF(m, "bytes_in"), getF(m, "bytes_out")
+		}
+		sumIn += in
+		sumOut += out
+		sumRate += getF(m, "rate_bps")
+		sumSess += getI(m, "sessions")
+		sumStreams += getIFlat(m, "streams_total", "streams")
+		sumDF += getI(m, "dgram_flows")
+		alive := get(m, "alive") == "true"
+		if !alive && getI(m, "sessions") <= 0 {
+			continue
+		}
+		rtt := getF(m, "rtt_ms")
+		if rtt == 0 {
+			rtt = getF(m, "srtt_ms")
+		}
+		minRTT, loss := getF(m, "min_rtt_ms"), getF(m, "loss_pct")
+		if rtt < 0.5 { // a server between samples reports srtt 0
+			rtt = minRTT
+		}
+		if alive {
+			anyUp = true
+			primary = m
+		}
+		if !bestSet || (rtt > 0 && (bestRTT <= 0 || rtt < bestRTT)) {
+			bestRTT, bestMin, bestLoss = rtt, minRTT, loss
+			bestSet = true
+		}
+		switch {
+		case u == name: // the parent: live carriers for the pick, alive/muted rows for the deck
+			rowCars := parseCarriers(m)
+			for _, c := range rowCars {
+				if c.Alive == "true" && !strInList(live, c.Name) {
+					live = append(live, c.Name)
+				}
+				if c.Alive == "true" || c.Muted == "true" {
+					cars = append(cars, c)
+				}
+			}
+		case u == name+"-r": // the hidden reverse companion: rows and pick prefixed r:
+			for _, c := range parseCarriers(m) {
+				if c.Alive == "true" && !strInList(live, "r:"+c.Name) {
+					live = append(live, "r:"+c.Name)
+				}
+				if c.Alive == "true" || c.Muted == "true" {
+					c.Name = "r:" + c.Name
+					cars = append(cars, c)
+				}
+			}
+		default: // NAME-e-<shape>: one synthetic alive row, loss percent -> fraction
+			shape := strings.TrimPrefix(u, name+"-e-")
+			if !strInList(live, shape) {
+				live = append(live, shape)
+			}
+			cars = append(cars, carInfo{Name: shape, Alive: "true", RTT: fmt.Sprintf("%g", rtt),
+				Loss: fmt.Sprintf("%.4f", loss/100), Share: "1", Muted: "false"})
+		}
+	}
+	if !on {
+		return ti
+	}
+	switch {
+	case anyUp:
+		ti.State = "up"
+	case miss > 0:
+		ti.State, ti.Why = "unknown", "stats did not answer, status not known"
+		return ti
+	default:
+		ti.State = "down"
+	}
+	ti.stats = primary
+	ti.In, ti.Out, ti.Rate = sumIn, sumOut, sumRate
+	ti.Sess, ti.Streams, ti.DgramFlows = sumSess, sumStreams, sumDF
+	ti.RTT, ti.MinRTT, ti.Loss = bestRTT, bestMin, bestLoss
+	ti.LivePick = strings.Join(live, "+")
+	ti.Live = orStr(ti.LivePick, p1Cfg(name, "carrier"))
+	ti.Cars = cars
+	ti.CarCount = len(cars)
+	return ti
+}
+
+func strInList(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // fillTI(): the common field picks of tinfo's tail (rtt/streams/sessions/totals/carriers).
@@ -675,7 +834,7 @@ func RunDashboard(out io.Writer) {
 		case k >= "1" && k <= "9":
 			num, _ := strconv.Atoi(k)
 			if num >= 1 && num <= len(dashN) {
-				_ = num // TODO(P2): tunnel_page(dashN[num-1]) — the tunnel deck is P2's
+				tunnelPage(dashN[num-1]) // the deck redraws the dashboard when it returns
 			}
 		case k == "m" || k == "M":
 			if len(dashN) > 0 {

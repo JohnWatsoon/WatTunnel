@@ -68,3 +68,20 @@ Files: cmd/wattun/mgr/auto_wizard_test.go (new).
 Tests: `go test -count=1 -run TestWizardKharejAutoEndToEnd ./cmd/wattun/mgr/` → ok; then gofmt (empty), vet
 (clean), full `go test -count=1 ./cmd/wattun/mgr/` → ok.
 Commit: (this commit)
+
+## 2026-11-20 18:03 · implementer · tasks 3 + 4 — dashboard number jump, auto Kharej stats
+Task 3: the dashboard's 1-9 now calls `tunnelPage(dashN[num-1])` (status.go:678; the deck was never wired). The
+RunDashboard loop re-renders when the deck returns, which is the bash main_menu redraw.
+Task 4: the auto-Kharej branch of bash `tinfo` (1929-2032) is ported as `tinfoAutoKharej`: parent + hidden
+helpers (`p1AutoHelpers` → `autoHelpers`, wired at status.go:73) summed — bytes in/out (with the pre-2.4.19
+fallback), rate, sessions, streams, dgram flows; best (lowest) RTT and its min/loss over helpers that are alive
+or carry sessions; state up when any helper is alive, unknown when an active helper's stats did not answer, down
+otherwise, stopped when nothing is active; carrier rows: the parent's alive/muted carriers, the companion's
+prefixed `r:`, each `NAME-e-<shape>` as one synthetic alive row (loss percent → fraction, share 1, like the
+bash); `LivePick` = live carriers + `r:` picks + shapes, which `dashRow` already shows. The extended helpers read
+`/stats?flat=1` (`p1StatsFlat` → new `statsFlatOf`, the port of bash stats_flat 589, JSON fallback included).
+The degraded downgrade does not run in this branch (bash guards it on TI_AUTO=0).
+Files: cmd/wattun/mgr/status.go, status_auto_test.go (new).
+Tests: `go test -count=1 -run 'TestTinfoAutoKharej|TestStatsFlatOf' ./cmd/wattun/mgr/` → ok (aggregation sums,
+best RTT, live pick, row prefixes, unknown/stopped states, flat+JSON forms); full mgr suite + gofmt + vet → ok.
+Commit: (this commit)
