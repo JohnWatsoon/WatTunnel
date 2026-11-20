@@ -635,7 +635,7 @@ func wizardIran() bool {
 	// port mappings: pre-fill from the token allowlist (bash 3436-3462)
 	pe := &portEditor{Role: "Iran", Tunnel: name, Allow: allowToArray(t.Ports)}
 	if len(pe.Allow) > 0 {
-		pe.Msg = append(pe.Msg, GRN+"✔"+RST+" Pre-filled from token (Enter keeps, e # edits)")
+		pe.Msg = append(pe.Msg, GRN+"✓"+RST+" Pre-filled from token (Enter keeps, e # edits)")
 		skipped := 0
 		for _, it := range pe.Allow {
 			if !pe.tryAdd(SpecT(it)+":"+SpecT(it)+"/"+SpecP(it), -1) {

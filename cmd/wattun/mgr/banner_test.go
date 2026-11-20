@@ -17,85 +17,48 @@ func capture(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-func TestBannerGlyphsSurvive(t *testing.T) {
+func TestBannerWordmark(t *testing.T) {
+	t.Setenv("COLUMNS", "100")
 	InitColor(false, 8)
 	out := capture(t, func() { Banner(false) })
-	// the ██ block mark and the ╱╲ kite are verbatim; do not substitute
-	if !strings.Contains(out, "██   ██  ▄██▄  ██████ ██████ ██  ██ ██▄  ██") ||
-		!strings.Contains(out, "██ █ ██ ██▄▄██   ██     ██   ██  ██ ██▀█▄██") ||
-		!strings.Contains(out, " ▀█▀█▀  ██  ██   ██     ██   ▀████▀ ██  ▀██") {
-		t.Errorf("banner mark corrupted:\n%s", out)
-	}
-	for _, k := range WATTUN_KITE {
-		if !strings.Contains(out, k) {
-			t.Errorf("kite line %q missing:\n%s", k, out)
+	for _, r := range Wordmark() {
+		if !strings.Contains(out, r) {
+			t.Errorf("wordmark row %q missing:\n%s", r, out)
 		}
 	}
-	if !strings.Contains(out, "github.com/JohnWatsoon") || !strings.Contains(out, "t.me/WatxDev") {
-		t.Errorf("meta line missing:\n%s", out)
-	}
-	// no colours: no escape bytes
 	if strings.Contains(out, "\x1b") {
 		t.Errorf("colour-off banner still has escapes:\n%q", out)
 	}
-}
-
-func TestBannerWideShowsMeta(t *testing.T) {
-	t.Setenv("COLUMNS", "100")
-	InitColor(false, 8)
-	out := capture(t, func() { Banner(false) })
-	if !strings.Contains(out, "WatTunnel") || !strings.Contains(out, "github.com/JohnWatsoon") {
-		t.Errorf("wide banner lost the side column:\n%s", out)
+	// every row is the same width so the gradient lines up
+	w := len([]rune(Wordmark()[0]))
+	for _, r := range Wordmark() {
+		if len([]rune(r)) != w {
+			t.Errorf("row %q is %d wide, want %d", r, len([]rune(r)), w)
+		}
 	}
-	// at >=78 cols the meta line is in the banner, not repeated below
-	if strings.Contains(out, "github.com/JohnWatsoon · t.me/") {
-		t.Errorf("narrow meta line repeated at width:\n%s", out)
+	if w+2 > wordmarkMinCols {
+		t.Errorf("wordmark (%d) does not fit the %d-column floor", w, wordmarkMinCols)
 	}
 }
 
-func TestBannerNarrow78MetaLine(t *testing.T) {
-	t.Setenv("COLUMNS", "70")
-	InitColor(false, 8)
-	out := capture(t, func() { Banner(false) })
-	// <78: the meta collapses to one grey line below the mark
-	if !strings.Contains(out, "github.com/JohnWatsoon · t.me/WatxDev") {
-		t.Errorf("narrow meta line missing:\n%s", out)
-	}
-}
-
-func TestBannerTinyFallback(t *testing.T) {
+func TestBannerNarrowFallback(t *testing.T) {
 	t.Setenv("COLUMNS", "40")
 	InitColor(false, 8)
-	Ver = "9.9.9"
-	defer func() { Ver = "" }()
 	out := capture(t, func() { Banner(false) })
-	if !strings.Contains(out, "◈ WatTunnel") || !strings.Contains(out, "v9.9.9") {
-		t.Errorf("tiny fallback wrong:\n%s", out)
-	}
-	if strings.Contains(out, "██") {
-		t.Errorf("tiny fallback must drop the mark:\n%s", out)
-	}
-}
-
-func TestBannerVersionOnMark(t *testing.T) {
-	t.Setenv("COLUMNS", "100")
-	InitColor(false, 8)
-	Ver = "3.3.9"
-	defer func() { Ver = "" }()
-	out := capture(t, func() { Banner(false) })
-	if !strings.Contains(out, "WatTunnel · v3.3.9") {
-		t.Errorf("version missing from the side column:\n%s", out)
+	if !strings.Contains(out, "◆ WatTunnel") || strings.Contains(out, "██") {
+		t.Errorf("narrow fallback wrong:\n%s", out)
 	}
 }
 
 func TestRenderHeader(t *testing.T) {
 	t.Setenv("COLUMNS", "100")
 	InitColor(false, 8)
+	Ver = "3.4.0"
+	defer func() { Ver = "" }()
 	out := capture(t, func() { RenderHeader("Tunnels", "2 total", false) })
-	if !strings.Contains(out, "Tunnels") || !strings.Contains(out, "2 total") || !strings.Contains(out, "──") {
+	if !strings.Contains(out, "[3.4.0]  Tunnels") || !strings.Contains(out, "2 total") || !strings.Contains(out, "──") {
 		t.Errorf("header wrong:\n%s", out)
 	}
-	// non-interactive: plain "== title (subtitle) =="
 	NonInteractive = true
 	defer func() { NonInteractive = false }()
 	out = capture(t, func() { RenderHeader("Tunnels", "2 total", false) })
@@ -111,10 +74,8 @@ func TestRenderHeader(t *testing.T) {
 func TestRenderSubpageHeader(t *testing.T) {
 	t.Setenv("COLUMNS", "100")
 	InitColor(false, 8)
-	Ver = "3.3.9"
-	defer func() { Ver = "" }()
-	out := capture(t, func() { Page("Update", "") })
-	if !strings.Contains(out, "WatTunnel v3.3.9") || !strings.Contains(out, "Update") {
+	out := capture(t, func() { Page("Update", "from GitHub") })
+	if !strings.Contains(out, "  Update  · from GitHub") {
 		t.Errorf("subpage header wrong:\n%s", out)
 	}
 }
@@ -122,7 +83,7 @@ func TestRenderSubpageHeader(t *testing.T) {
 func TestPageFullAnimatesOnce(t *testing.T) {
 	t.Setenv("COLUMNS", "100")
 	InitColor(false, 8)
-	UseAnim = false // keep the test instant; the frame math is covered above
+	UseAnim = false
 	introDone = false
 	capture(t, func() { PageFull("Tunnels", "1 total") })
 	if !introDone {
@@ -133,25 +94,16 @@ func TestPageFullAnimatesOnce(t *testing.T) {
 func TestBannerAnimationFrames(t *testing.T) {
 	t.Setenv("COLUMNS", "100")
 	InitColor(false, 8)
-	UseAnim = true
-	defer func() { UseAnim = false }()
-	NonInteractive = false
-	IsTTY = true
-	EL = "\x1b[K"
-	defer func() { EL = ""; IsTTY = false }()
-	introDone = true
+	UseAnim, IsTTY, EL = true, true, "\x1b[K"
+	defer func() { UseAnim, IsTTY, EL = false, false, "" }()
 	out := capture(t, func() { Banner(true) })
-	// the 3 pulse frames and the final kite+meta reveal all print
-	for _, frag := range []string{"╺▸", "╺━▸", "╺━━╋▸", "┃"} {
-		if !strings.Contains(out, frag) {
-			t.Errorf("animation frame %q missing:\n%s", frag, out)
-		}
+	if n := strings.Count(out, "\r\x1b[5A"); n != 5 {
+		t.Errorf("expected 5 cursor-returns between 6 frames, got %d", n)
 	}
-	if strings.Count(out, "\r\x1b[3A") != 4 {
-		t.Errorf("expected 4 cursor-returns between 5 frames, got %d", strings.Count(out, "\r\x1b[3A"))
+	if !strings.Contains(out, Wordmark()[0]) {
+		t.Errorf("last frame must be the whole mark:\n%s", out)
 	}
 }
-
 func TestRepVlenStripANSI(t *testing.T) {
 	InitColor(false, 8)
 	if Rep("─", 5) != "─────" || Rep("x", 0) != "" {
@@ -168,15 +120,19 @@ func TestRepVlenStripANSI(t *testing.T) {
 
 func TestInitColorPalette(t *testing.T) {
 	InitColor(true, 256)
-	if CYN != "\x1b[38;5;45m" || GRY != "\x1b[90m" || RST != "\x1b[0m" || BOLD != "\x1b[1m" {
+	if CYN != "\x1b[38;5;37m" || GRY != "\x1b[90m" || RST != "\x1b[0m" || ColorTier != 256 {
 		t.Errorf("256-color palette wrong: CYN=%q GRY=%q", CYN, GRY)
 	}
+	InitColor(true, 24)
+	if CYN != "\x1b[38;2;46;196;182m" || ColorTier != 24 || ACCBG == "" {
+		t.Errorf("truecolor palette wrong: CYN=%q", CYN)
+	}
 	InitColor(true, 8)
-	if CYN != "\x1b[36m" {
+	if CYN != "\x1b[36m" || ACCBG != "" {
 		t.Errorf("8-color CYN = %q", CYN)
 	}
 	InitColor(false, 256)
-	if CYN != "" || GRY != "" {
+	if CYN != "" || GRY != "" || ColorTier != 0 {
 		t.Errorf("colour-off palette must be empty, got CYN=%q", CYN)
 	}
 }

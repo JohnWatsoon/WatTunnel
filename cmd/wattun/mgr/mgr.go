@@ -43,6 +43,7 @@ func Run(args []string) int {
 		fmt.Fprintf(Stderr, "%s\n", err)
 		return 1
 	}
+	wireSystem()
 	if runtime.GOOS != "linux" {
 		_ = os.Getenv("LC_ALL") // the bash forces C.UTF-8; Go handles UTF-8 natively
 	}
@@ -69,12 +70,9 @@ func Run(args []string) int {
 
 	// colour / animation / tty gates (bash L146-161, L173-176)
 	InitTerm(os.Stdout)
-	ncol := 8
+	ncol := colorTierFromEnv()
 	useColor := os.Getenv("WAT_FORCE_COLOR") == "1" ||
 		(IsTTY && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" && os.Getenv("TERM") != "")
-	if strings.Contains(os.Getenv("TERM"), "256color") {
-		ncol = 256
-	}
 	if NonInteractive {
 		useColor = false
 	}
@@ -399,3 +397,12 @@ func stdinIsTTY() bool {
 }
 
 func sleepMS(ms int) { sleep(time.Duration(ms) * time.Millisecond) }
+
+// arg returns args[i] or "": registry handlers get their arguments without the
+// command word, so they index directly (pos skips args[0]).
+func arg(args []string, i int) string {
+	if i < len(args) {
+		return args[i]
+	}
+	return ""
+}

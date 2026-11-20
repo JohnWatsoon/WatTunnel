@@ -18,11 +18,11 @@ import (
 )
 
 func init() {
-	Register("tunnel_page", func(args ...string) int { tunnelPage(pos(args, 0)); return 0 })
-	Register("edit_ports", func(args ...string) int { editPorts(pos(args, 0)); return 0 })
-	Register("limits_menu", func(args ...string) int { limitsMenu(pos(args, 0)); return 0 })
-	Register("delete_tunnel", func(args ...string) int { return b2i(runDelete(pos(args, 0))) })
-	Register("change_key", func(args ...string) int { changeKey(pos(args, 0)); return 0 })
+	Register("tunnel_page", func(args ...string) int { tunnelPage(arg(args, 0)); return 0 })
+	Register("edit_ports", func(args ...string) int { editPorts(arg(args, 0)); return 0 })
+	Register("limits_menu", func(args ...string) int { limitsMenu(arg(args, 0)); return 0 })
+	Register("delete_tunnel", func(args ...string) int { return b2i(runDelete(arg(args, 0))) })
+	Register("change_key", func(args ...string) int { changeKey(arg(args, 0)); return 0 })
 }
 
 func b2i(b bool) int {
@@ -381,7 +381,7 @@ func (pe *portEditor) ownedHas(o string) bool {
 func (pe *portEditor) tryAdd(item string, idx int) bool {
 	L, T, P := SpecL(item), SpecT(item), SpecP(item)
 	if pe.Role == "Kharej" && L != T {
-		pe.msg(RED + "✘" + RST + " " + SpecHuman(item) + ": on Kharej list only the port your service uses (like 443 or 53/udp).")
+		pe.msg(RED + "✗" + RST + " " + SpecHuman(item) + ": on Kharej list only the port your service uses (like 443 or 53/udp).")
 		return false
 	}
 	for i := range pe.Maps {
@@ -390,11 +390,11 @@ func (pe *portEditor) tryAdd(item string, idx int) bool {
 		}
 		if pe.Role == "Iran" {
 			if SpecL(pe.Maps[i]) == L && SpecP(pe.Maps[i]) == P {
-				pe.msg(RED + "✘" + RST + " Iran port " + L + "/" + P + " is already mapped (row " + strconv.Itoa(i+1) + ").")
+				pe.msg(RED + "✗" + RST + " Iran port " + L + "/" + P + " is already mapped (row " + strconv.Itoa(i+1) + ").")
 				return false
 			}
 		} else if SpecT(pe.Maps[i]) == T && SpecP(pe.Maps[i]) == P {
-			pe.msg(RED + "✘" + RST + " Port " + T + "/" + P + " is already in the list (row " + strconv.Itoa(i+1) + ").")
+			pe.msg(RED + "✗" + RST + " Port " + T + "/" + P + " is already in the list (row " + strconv.Itoa(i+1) + ").")
 			return false
 		}
 	}
@@ -406,11 +406,11 @@ func (pe *portEditor) tryAdd(item string, idx int) bool {
 			if u != "" {
 				ex = " by " + u
 			}
-			pe.msg(RED + "✘" + RST + " Port " + L + "/" + P + " is already in use on this server" + ex + ". Pick another Iran port.")
+			pe.msg(RED + "✗" + RST + " Port " + L + "/" + P + " is already in use on this server" + ex + ". Pick another Iran port.")
 			return false
 		}
 		if who := p2TunnelUsingPublic(L, P, pe.Tunnel); who != "" {
-			pe.msg(RED + "✘" + RST + " Port " + L + "/" + P + " is already published by tunnel '" + who + "'.")
+			pe.msg(RED + "✗" + RST + " Port " + L + "/" + P + " is already published by tunnel '" + who + "'.")
 			return false
 		}
 		if !allowedHas(pe.Allow, T, P) {
@@ -436,11 +436,11 @@ func (pe *portEditor) bulk(line string) {
 				pe.tryAdd(it, -1)
 			}
 		} else {
-			pe.msg(RED + "✘" + RST + " " + err.Error())
+			pe.msg(RED + "✗" + RST + " " + err.Error())
 		}
 	}
 	if len(pe.Maps) > before {
-		pe.msg(GRN + "✔" + RST + " Added " + strconv.Itoa(len(pe.Maps)-before) + ".")
+		pe.msg(GRN + "✓" + RST + " Added " + strconv.Itoa(len(pe.Maps)-before) + ".")
 	}
 }
 
@@ -532,7 +532,7 @@ func (pe *portEditor) guidedAdd() {
 			pe.tryAdd(it, -1)
 		}
 	} else {
-		pe.msg(RED + "✘" + RST + " " + err.Error())
+		pe.msg(RED + "✗" + RST + " " + err.Error())
 	}
 }
 
@@ -544,7 +544,7 @@ func (pe *portEditor) pickIndex(arg string) int {
 	if n, err := strconv.Atoi(strings.TrimSpace(arg)); err == nil && n >= 1 && n <= len(pe.Maps) {
 		return n - 1
 	}
-	pe.msg(RED + "✘" + RST + " No such row '" + arg + "'.")
+	pe.msg(RED + "✗" + RST + " No such row '" + arg + "'.")
 	return -1
 }
 
@@ -574,12 +574,12 @@ func (pe *portEditor) edit(arg string) {
 	}
 	p = strings.ToLower(Ask("Protocol: tcp or udp", p))
 	if p != "tcp" && p != "udp" {
-		pe.msg(RED + "✘" + RST + " Protocol must be tcp or udp here (to get both, add a second row).")
+		pe.msg(RED + "✗" + RST + " Protocol must be tcp or udp here (to get both, add a second row).")
 		return
 	}
 	if items, err := NormSpec(l + ":" + t + "/" + p); err == nil {
 		if pe.tryAdd(items[0], idx) {
-			pe.msg(GRN + "✔" + RST + " Row " + strconv.Itoa(idx+1) + " updated.")
+			pe.msg(GRN + "✓" + RST + " Row " + strconv.Itoa(idx+1) + " updated.")
 		}
 	}
 }
@@ -597,7 +597,7 @@ func (pe *portEditor) remove(arg string) {
 		if n, err := strconv.Atoi(strings.TrimSpace(x)); err == nil && n >= 1 && n <= len(pe.Maps) {
 			drop = append(drop, n)
 		} else {
-			pe.msg(RED + "✘" + RST + " No such row '" + x + "'.")
+			pe.msg(RED + "✗" + RST + " No such row '" + x + "'.")
 		}
 	}
 	if len(drop) == 0 {
@@ -616,7 +616,7 @@ func (pe *portEditor) remove(arg string) {
 		}
 	}
 	pe.Maps = out
-	pe.msg(GRN + "✔" + RST + " Removed.")
+	pe.msg(GRN + "✓" + RST + " Removed.")
 }
 
 // port_editor: true = done (Maps ready), false = cancelled.
@@ -698,13 +698,13 @@ func (pe *portEditor) copyFrom(n string) {
 			continue
 		}
 		if who := p2TunnelUsingPublic(SpecL(it), SpecP(it), pe.Tunnel); who != "" && who != n {
-			pe.msg(RED + "✘" + RST + " " + SpecL(it) + "/" + SpecP(it) + " is published by '" + who + "'.")
+			pe.msg(RED + "✗" + RST + " " + SpecL(it) + "/" + SpecP(it) + " is published by '" + who + "'.")
 			continue
 		}
 		pe.Maps = append(pe.Maps, it)
 		added++
 	}
-	pe.msg(GRN + "✔" + RST + " " + strconv.Itoa(added) + " port(s) copied from '" + n + "'.")
+	pe.msg(GRN + "✓" + RST + " " + strconv.Itoa(added) + " port(s) copied from '" + n + "'.")
 }
 
 // edit_ports (bash 7011): load, edit, save, hot-reload note, firewall for new rows.
@@ -835,7 +835,7 @@ func limitsMenu(n string) {
 					if atoi(ql) > 0 {
 						line := "    " + lp + "  " + Human(float64(atoi(qu))) + " of " + Human(float64(atoi(ql)))
 						if qe == "true" {
-							line += "  " + RED + "✘ used up" + RST
+							line += "  " + RED + "✗ used up" + RST
 						}
 						Say(line)
 					}

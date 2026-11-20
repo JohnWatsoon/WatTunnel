@@ -110,14 +110,14 @@ func SpeedTest(name string, mb int, w io.Writer) {
 		lbl := label(r.dir)
 		if r.ok {
 			if cols >= 74 {
-				fmt.Fprintf(w, "  %s✔%s %-9s %s%6.1f MB/s%s  %5.0f Mbps  %5.2f s  %s\n",
+				fmt.Fprintf(w, "  %s✓%s %-9s %s%6.1f MB/s%s  %5.0f Mbps  %5.2f s  %s\n",
 					GRN, RST, lbl, BOLD, r.mbs, RST, r.mbit, r.secs, tbarC(r.mbs, peak, 10))
 			} else {
-				fmt.Fprintf(w, "  %s✔%s %-9s %s%6.1f MB/s%s  %5.0f Mbps  %5.2f s\n",
+				fmt.Fprintf(w, "  %s✓%s %-9s %s%6.1f MB/s%s  %5.0f Mbps  %5.2f s\n",
 					GRN, RST, lbl, BOLD, r.mbs, RST, r.mbit, r.secs)
 			}
 		} else {
-			fmt.Fprintf(w, "  %s✘%s %-9s %sfailed%s  %s\n", RED, RST, lbl, RED, RST, r.err)
+			fmt.Fprintf(w, "  %s✗%s %-9s %sfailed%s  %s\n", RED, RST, lbl, RED, RST, r.err)
 			if containsStr(r.err, "1.8.1") {
 				warnLine(w, "Kharej runs older wattun — run: wattun-manager update")
 			}

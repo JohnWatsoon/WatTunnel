@@ -660,17 +660,17 @@ func applyMatrixVariant(n string, v variant) {
 	_ = p1Systemctl("restart", Unit(n))
 }
 
-// at_print(): one result line, ✔/✘ with the bash's columns.
+// at_print(): one result line, ✓/✗ with the bash's columns.
 func atPrint(w io.Writer, i int, vs []variant, rs []result, mb int) {
 	if rs[i].OK {
 		pk := rs[i].Down
 		if rs[i].Up > pk {
 			pk = rs[i].Up
 		}
-		fmt.Fprintf(w, "  %s✔%s %-24s %s%6.1f%s ↓  %6.1f ↑  %4.0f ms  %s\n",
+		fmt.Fprintf(w, "  %s✓%s %-24s %s%6.1f%s ↓  %6.1f ↑  %4.0f ms  %s\n",
 			GRN, RST, atLbl(vs[i].Label, 24), BOLD, rs[i].Down, RST, rs[i].Up, rs[i].RTT, tbar(pk, 10, 10))
 	} else {
-		fmt.Fprintf(w, "  %s✘%s %-24s %s%s%s\n", RED, RST, atLbl(vs[i].Label, 24), GRY, rs[i].Why, RST)
+		fmt.Fprintf(w, "  %s✗%s %-24s %s%s%s\n", RED, RST, atLbl(vs[i].Label, 24), GRY, rs[i].Why, RST)
 	}
 }
 
@@ -717,7 +717,7 @@ func atTable(w io.Writer, vs []variant, rs []result, rank []int, mb, secs int) {
 			if rs[i].OK || rs[i].Why == "skipped" {
 				continue
 			}
-			boxRow(w, fmt.Sprintf("  %s✘%s  %-22s %s%s%s", RED, RST, atLbl(vs[i].Label, 22), GRY, atLbl(rs[i].Why, boxW-30), RST))
+			boxRow(w, fmt.Sprintf("  %s✗%s  %-22s %s%s%s", RED, RST, atLbl(vs[i].Label, 22), GRY, atLbl(rs[i].Why, boxW-30), RST))
 		}
 	}
 	boxBot(w)

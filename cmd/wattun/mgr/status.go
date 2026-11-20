@@ -161,10 +161,10 @@ func getF(m map[string]any, key string) float64 {
 func getI(m map[string]any, key string) int { return int(getF(m, key)) }
 
 func okLine(w io.Writer, args ...any) {
-	fmt.Fprintf(w, "  %s✔%s %s\n", GRN, RST, strings.Trim(fmt.Sprint(args...), " "))
+	fmt.Fprintf(w, "  %s✓%s %s\n", GRN, RST, strings.Trim(fmt.Sprint(args...), " "))
 }
 func errLine(w io.Writer, args ...any) {
-	fmt.Fprintf(w, "  %s✘%s %s\n", RED, RST, strings.Trim(fmt.Sprint(args...), " "))
+	fmt.Fprintf(w, "  %s✗%s %s\n", RED, RST, strings.Trim(fmt.Sprint(args...), " "))
 }
 func warnLine(w io.Writer, s string) { fmt.Fprintf(w, "  %s!%s %s\n", YEL, RST, s) }
 func hintLine(w io.Writer, s string) { fmt.Fprintf(w, "  %s%s%s\n", GRY, s, RST) }
@@ -299,7 +299,7 @@ func tinfo(name string) *tunnelInfo {
 	par := p1CompanionOf(name)
 	if par != "" { // hidden reverse companion of an auto tunnel
 		ti.Auto = true
-		if !p1IsActive("wattun@" + name) {
+		if !p1IsActive(Unit(name)) {
 			return ti
 		}
 		m, err := statsOf(name)
@@ -320,14 +320,14 @@ func tinfo(name string) *tunnelInfo {
 	}
 	// TODO(P1): is_auto_kharej branch (sum over parent + -r + -e-* helpers) — same
 	// aggregation the bash does; until tokens are readable it degrades to the plain path.
-	on := p1IsActive("wattun@" + name)
+	on := p1IsActive(Unit(name))
 	var other string
 	if p := p1CompanionOf(name + "-r"); p == name {
 		other = name + "-r"
 	}
 	var om map[string]any
 	miss := false
-	if other != "" && p1IsActive("wattun@"+other) {
+	if other != "" && p1IsActive(Unit(other)) {
 		var err error
 		if om, err = statsOf(other); err != nil {
 			miss = true
@@ -757,7 +757,7 @@ func TunnelCard(w io.Writer, n string) {
 	ti := tinfo(n)
 	col, _, _ := stateCell(r, ti.State)
 	srvAct := "inactive"
-	if p1IsActive("wattun@" + n) {
+	if p1IsActive(Unit(n)) {
 		srvAct = "active"
 	}
 	srvUp := p1Uptime(n)
@@ -894,7 +894,7 @@ func LogsMenu(name string, out io.Writer) {
 	if err != nil {
 		return
 	}
-	unit := "wattun@" + name
+	unit := Unit(name)
 	switch key {
 	case "1", "enter":
 		s, _ := p1Journal(name, "-n", "100", "--no-pager", "-o", "short-iso")
@@ -988,7 +988,7 @@ func Doctor(name string, io_ *DoctorIO) {
 	r := roleName(n)
 	pageHeader(w, "Doctor", fmt.Sprintf("%s (%s · %s)", n, r, cr))
 	secHdr(w, "Checks")
-	if p1IsActive("wattun@" + n) {
+	if p1IsActive(Unit(n)) {
 		okLine(w, fmt.Sprintf("Service     running (wattun@%s)", n))
 	} else {
 		errLine(w, "Service     stopped")
@@ -1041,15 +1041,15 @@ func Doctor(name string, io_ *DoctorIO) {
 				switch {
 				case cp == "icmp":
 					if d.ping(chost) {
-						fmt.Fprintf(w, "%s✔ ping ok%s\n", GRN, RST)
+						fmt.Fprintf(w, "%s✓ ping ok%s\n", GRN, RST)
 					} else {
-						fmt.Fprintf(w, "%s✘ ping fails%s\n", RED, RST)
+						fmt.Fprintf(w, "%s✗ ping fails%s\n", RED, RST)
 					}
 				case IsPool(cp) && cport != "":
 					if d.tcp(chost, cport) {
-						fmt.Fprintf(w, "%s✔ tcp %s:%s open%s\n", GRN, chost, cport, RST)
+						fmt.Fprintf(w, "%s✓ tcp %s:%s open%s\n", GRN, chost, cport, RST)
 					} else {
-						fmt.Fprintf(w, "%s✘ tcp %s:%s closed/filtered%s\n", RED, chost, cport, RST)
+						fmt.Fprintf(w, "%s✗ tcp %s:%s closed/filtered%s\n", RED, chost, cport, RST)
 					}
 				default:
 					fmt.Fprintf(w, "%sconfigured%s\n", GRY, RST)

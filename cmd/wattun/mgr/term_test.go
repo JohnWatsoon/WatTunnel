@@ -176,7 +176,7 @@ func TestFlashAndMessageHelpers(t *testing.T) {
 		Err("broken")
 		Hint("note")
 	})
-	for _, want := range []string{"  ✔ done\n", "  ! careful\n", "  ✘ broken\n", "  note\n"} {
+	for _, want := range []string{"  ✓ done\n", "  ! careful\n", "  ✗ broken\n", "  note\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}

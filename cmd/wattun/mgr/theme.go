@@ -33,20 +33,29 @@ var (
 	Stderr io.Writer = os.Stderr
 )
 
-// InitColor sets the palette like the bash startup: useColor false empties every
-// var; a 256-color terminal gets CYN=38;5;45, an 8-color one CYN=36.
+// InitColor sets the palette for a colour tier: useColor false empties every
+// var; ncol is 8, 256 or 24 (truecolor). Palette A: turquoise accent (CYN),
+// saffron highlight (SAF), green/amber/red only for state.
 func InitColor(useColor bool, ncol int) {
 	UseColor = useColor
 	if !useColor {
-		RST, BOLD, RED, GRN, YEL, CYN, BLU, GRY = "", "", "", "", "", "", "", ""
+		ColorTier = 0
+		RST, BOLD, RED, GRN, YEL, CYN, BLU, GRY, ACCBG, SAF = "", "", "", "", "", "", "", "", "", ""
 		return
 	}
-	RST, BOLD = "\x1b[0m", "\x1b[1m"
-	RED, GRN, YEL, BLU, GRY = "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[90m"
-	if ncol >= 256 {
-		CYN = "\x1b[38;5;45m"
-	} else {
-		CYN = "\x1b[36m"
+	RST, BOLD, BLU = "\x1b[0m", "\x1b[1m", "\x1b[34m"
+	switch ncol {
+	case 24:
+		ColorTier = 24
+		CYN, GRN, YEL, RED = "\x1b[38;2;46;196;182m", "\x1b[38;2;62;207;142m", "\x1b[38;2;242;184;75m", "\x1b[38;2;239;93;93m"
+		GRY, SAF, ACCBG = "\x1b[38;2;107;117;134m", "\x1b[38;2;255;183;3m", "\x1b[48;2;18;48;50m"
+	case 256:
+		ColorTier = 256
+		CYN, GRN, YEL, RED = "\x1b[38;5;37m", "\x1b[38;5;78m", "\x1b[38;5;221m", "\x1b[38;5;203m"
+		GRY, SAF, ACCBG = "\x1b[90m", "\x1b[38;5;214m", "\x1b[48;5;23m"
+	default:
+		ColorTier = 8
+		CYN, GRN, YEL, RED, GRY, SAF, ACCBG = "\x1b[36m", "\x1b[32m", "\x1b[33m", "\x1b[31m", "\x1b[90m", "\x1b[33m", ""
 	}
 }
 
@@ -108,18 +117,18 @@ func ErrN() int { return errN }
 func ResetErrN() { errN = 0 }
 
 // Ok prints a green check line.
-func Ok(msg string) { fmt.Fprintf(Stdout, "  %s✔%s %s\n", GRN, RST, msg) }
+func Ok(msg string) { fmt.Fprintf(Stdout, "  %s✓%s %s\n", GRN, RST, msg) }
 
 // Warn prints a yellow ! line.
 func Warn(msg string) { fmt.Fprintf(Stdout, "  %s!%s %s\n", YEL, RST, msg) }
 
-// Err prints a red ✘ line (or plain "error:" on stderr when non-interactive).
+// Err prints a red ✗ line (or plain "error:" on stderr when non-interactive).
 func Err(msg string) {
 	errN++
 	if NonInteractive {
 		fmt.Fprintf(Stderr, "error: %s\n", msg)
 	} else {
-		fmt.Fprintf(Stdout, "  %s✘%s %s\n", RED, RST, msg)
+		fmt.Fprintf(Stdout, "  %s✗%s %s\n", RED, RST, msg)
 	}
 }
 

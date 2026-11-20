@@ -490,7 +490,7 @@ func TestAtTableAndPrint(t *testing.T) {
 		"Results · 1 working · 61 s",
 		"Carrier", "Down", "Up", "RTT",
 		"▸ 1  base (no desync)", "4.5", "3.0", "42ms",
-		"✘  a very long variant ..", "no link in 8 s",
+		"✗  a very long variant ..", "no link in 8 s",
 		"8 MB/probe · 61 s",
 	} {
 		if !strings.Contains(s, want) {

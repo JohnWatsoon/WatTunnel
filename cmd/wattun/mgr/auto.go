@@ -670,7 +670,7 @@ func newKey() string {
 	return string(b)
 }
 
-func randPath() string { return "/api/wat0" } // TODO(P1): the rng adapter (bash rand_path)
+func randPath() string { return randPathLive() } // bash rand_path
 
 // =====================================================================================
 // Kharej wizard: wizard_kharej_auto — the plan builders and unit creation
