@@ -984,9 +984,20 @@ func runDelete(n string) bool {
 		units = append(units, n+"-r")
 	}
 	units = append(units, extListenerNames(n)...)
+	// read before the configs go: the listen ports (firewall) and the state files (state-dir)
+	ports := listenPortsOf(n)
+	var states []string
+	for _, u := range units {
+		states = append(states, stateFiles(u)...)
+	}
 	for _, c := range deleteSequence(n) {
 		_ = p2Systemctl(c.Args...)
 	}
+	// H8: the unit is stopped first; the engine saves quota/totals on SIGTERM, so removing them earlier is undone
+	for _, f := range states {
+		os.Remove(f)
+	}
+	bondRetestDisable(n) // the bond-retest timer belongs to this tunnel
 	for _, u := range units {
 		for _, ext := range []string{".yml", ".ech", ".key", ".token", ".auto", ".autoext"} {
 			os.Remove(filepath.Join(P.Conf, u+ext))
@@ -998,10 +1009,15 @@ func runDelete(n string) bool {
 	for _, ext := range []string{".down", ".cycles", ".retest", ".sla_triggered", ".autoprune", ".autoprune.done", ".autowiden", ".autowiden.down", ".abandoned"} {
 		os.Remove(filepath.Join(P.Run, n+ext))
 	}
-	for _, p := range listenPortsOf(n) {
-		p2FWClose(p)
+	for _, p := range ports {
+		if tunnelUsingListen(strings.SplitN(p, "/", 2)[0], n) == "" {
+			p2FWClose(p)
+		}
 	}
 	Ok("Tunnel '" + n + "' deleted.")
+	if !kreplyUsersLeft() {
+		kreplyRestore()
+	}
 	return true
 }
 
