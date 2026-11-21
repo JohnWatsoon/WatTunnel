@@ -88,8 +88,14 @@ type Config struct {
 	// symbols, so ~half the holes were never covered; the ask closes that by naming the holes. Requires
 	// Repair (a no-op otherwise); experimental, gated on the kill-harness verdict, no flag yet.
 	RepairAsk bool
-	NoKex     bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
-	Bond      PathTimings // multipath health/probe timings (server side; zero = production values)
+	// FastRtx (3.4.3) is the fast-retransmit experiment: a packet the peer's ACKs have named as a gap
+	// (a larger pn acked while it is not) fastRtxGaps times in a row is declared lost immediately
+	// instead of waiting for the loss timer. Sender-local policy reading ACK info that already
+	// exists — no wire change, an old peer needs nothing. Inactive on reliable/direct carriers, where
+	// spurious retransmits were costly (cc.go relLossMul history). Off by default.
+	FastRtx bool
+	NoKex   bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
+	Bond    PathTimings // multipath health/probe timings (server side; zero = production values)
 	// AllowClients (W10, 3.3.0) is the server-side client allowlist: a new session is admitted only from a source IP
 	// inside one of these prefixes. The check runs before admit on the unauthenticated packet, so even a valid packet
 	// from a non-allowed source is dropped. Empty = every source (the pre-3.3.0 behavior). Only a carrier that reports
@@ -175,6 +181,7 @@ type sentPkt struct {
 	lane   int  // path it was sent on (the ICMP lane, or the bond path)
 	done   bool // acked or declared lost
 	lost   bool // declared lost (bond: a late ack still proves the path alive)
+	gaps   int  // consecutive ACKs that named a larger pn while this one was unacked (fast retransmit, 3.4.3); dies with done
 	rtx    bool // carries resent stream data (a pinned pool sends it on any connection, not the stream's own)
 }
 
@@ -2238,6 +2245,9 @@ func (s *Session) noteSrcPort(src net.Addr) {
 
 const spreadHops = 8
 
+// fastRtxGaps: how many consecutive ACKs must skip an unacked packet before -fast-rtx declares it lost early.
+const fastRtxGaps = 3
+
 // afterAck feeds the pacer and declares losses once an ack's packets are marked.
 func (s *Session) afterAck(largest uint64, delay time.Duration, newly int, rtt time.Duration, now time.Time) {
 	s.cc.inflight = s.inflight // post-ack, so the PROBE_RTT drain-floor guard in sample() sees the current queue
@@ -2253,6 +2263,15 @@ func (s *Session) afterAck(largest uint64, delay time.Duration, newly int, rtt t
 			break
 		}
 		if sp.done {
+			continue
+		}
+		sp.gaps++ // this ack names a larger pn while sp is unacked: sp is a gap in it
+		if s.cfg.FastRtx && !s.cc.reliable && sp.gaps >= fastRtxGaps {
+			// Fast retransmit (3.4.3, -fast-rtx): fastRtxGaps consecutive acks have skipped the oldest
+			// unacked packets, so the hole is real, not reorder — declare it lost now instead of waiting out
+			// lossTime. Sender-local policy over ack info that already exists, no wire change. Never on a
+			// reliable/direct carrier: spurious retransmits were costly there (cc.go relLossMul history).
+			s.lose(sp)
 			continue
 		}
 		if s.chooser != nil {

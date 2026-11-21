@@ -10,6 +10,7 @@ package wat
 
 import (
 	"crypto/sha256"
+	"fmt"
 	"io"
 	"sort"
 	"sync"
@@ -41,9 +42,37 @@ func newPairCap(t testing.TB, loss float64, delay time.Duration, bps float64, mt
 	return cli, srv
 }
 
+// killClass is one echo sample's loss diagnosis: which direction's retransmit/repair machinery moved
+// while the sample was in flight. If the CLEAN samples carry the same p99 as the whole run, the tail
+// is queueing/scheduling/pacing, not loss (the P3 tail diagnosis, 2026-11-21).
+type killClass int
+
+const (
+	kcClean killClass = iota // no counter moved: no retransmit or repair touched this sample
+	kcDown                   // downlink: the server retransmitted or the client's repair rebuilt a hole
+	kcUp                     // uplink: the client retransmitted (the echo request was lost)
+	kcOther                  // both directions moved in one sample
+)
+
+var killClassNames = [4]string{"clean", "down", "up", "other"}
+
+// classifyKill: up = the client's Retrans rose (the request packet), down = the server's Retrans rose
+// or the client's RepairRecovered rose (a downlink hole, retransmitted or rebuilt).
+func classifyKill(up, down bool) killClass {
+	switch {
+	case !up && !down:
+		return kcClean
+	case down && !up:
+		return kcDown
+	case up && !down:
+		return kcUp
+	}
+	return kcOther
+}
+
 // killLatency runs a bulk download on one stream and measures small echo latencies on other streams while
-// it runs. It returns the sorted latencies plus the sender's stats snapshot.
-func killLatency(t testing.TB, loss float64, mtu int, samples int, warmup, gap time.Duration, cfg Config) (lat []time.Duration, st Stats) {
+// it runs. It returns the sorted latencies, the per-sample loss classes, and the sender's stats snapshot.
+func killLatency(t testing.TB, loss float64, mtu int, samples int, warmup, gap time.Duration, cfg Config) (lat []time.Duration, cls []killClass, st Stats) {
 	t.Helper()
 	cli, srv := newPairCap(t, loss, 20*time.Millisecond, 10e6, mtu, cfg)
 	bulkData := pattern(96<<20, 5)
@@ -74,6 +103,7 @@ func killLatency(t testing.TB, loss float64, mtu int, samples int, warmup, gap t
 	go io.Copy(io.Discard, bs)
 	time.Sleep(warmup)
 	for i := 0; i < samples; i++ {
+		c0, s0 := cli.Stats(), srv.Stats()
 		t0 := time.Now()
 		st, _ := cli.OpenStream()
 		st.Write([]byte{'x'})
@@ -83,10 +113,22 @@ func killLatency(t testing.TB, loss float64, mtu int, samples int, warmup, gap t
 			t.Fatal(err)
 		}
 		lat = append(lat, time.Since(t0))
+		c1, s1 := cli.Stats(), srv.Stats()
+		cls = append(cls, classifyKill(
+			c1.Retrans > c0.Retrans,
+			s1.Retrans > s0.Retrans || c1.RepairRecovered > c0.RepairRecovered))
 		time.Sleep(gap)
 	}
 	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
-	return lat, srv.Stats()
+	return lat, cls, srv.Stats()
+}
+
+// killPct returns the p-percentile of a sorted slice (or 0 when empty, logged as n/a by the caller).
+func killPct(lat []time.Duration, p float64) time.Duration {
+	if len(lat) == 0 {
+		return 0
+	}
+	return lat[int(float64(len(lat)-1)*p)]
 }
 
 // TestKillInteractiveP99: p50/p90/p99/max of a 1-byte echo next to a bulk download, 1 % loss, 40 ms RTT,
@@ -97,19 +139,54 @@ func TestKillInteractiveP99(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, cfg := range []Config{{}, {Repair: true}, {Repair: true, RepairAsk: true}} {
+	for _, cfg := range []Config{{}, {FastRtx: true}, {Repair: true, RepairAsk: true, FastRtx: true}} {
 		mode := "today"
 		if cfg.Repair {
-			mode = "repair"
-		}
-		if cfg.RepairAsk {
 			mode = "repair+ask"
 		}
+		if cfg.FastRtx {
+			if cfg.Repair {
+				mode = "repair+ask+fast"
+			} else {
+				mode = "fast-rtx"
+			}
+		}
 		for _, mtu := range []int{640, 1400} {
-			lat, st := killLatency(t, 0.01, mtu, 120, 3*time.Second, 50*time.Millisecond, cfg)
-			q := func(p float64) time.Duration { return lat[int(float64(len(lat)-1)*p)] }
-			t.Logf("KILL p99 %s mtu=%d loss=1%%: p50=%v p90=%v p99=%v max=%v (retrans=%d, srtt=%v, min=%v)",
-				mode, mtu, q(0.5), q(0.9), q(0.99), lat[len(lat)-1], st.Retrans, st.SRTT, st.MinRTT)
+			lat, cls, st := killLatency(t, 0.01, mtu, 120, 3*time.Second, 50*time.Millisecond, cfg)
+			var clean []time.Duration
+			var cnt [4]int
+			for i, c := range cls {
+				cnt[c]++
+				if c == kcClean {
+					clean = append(clean, lat[i])
+				}
+			}
+			sort.Slice(clean, func(i, j int) bool { return clean[i] < clean[j] })
+			cleanP99 := "n/a"
+			if len(clean) > 0 {
+				cleanP99 = fmt.Sprintf("%v (n=%d, p50=%v, max=%v)", killPct(clean, 0.99), len(clean), killPct(clean, 0.5), clean[len(clean)-1])
+			}
+			t.Logf("KILL p99 %s mtu=%d loss=1%%: p50=%v p90=%v p99=%v max=%v cleanP99=%s classes clean=%d down=%d up=%d other=%d (retrans=%d, srtt=%v, min=%v)",
+				mode, mtu, killPct(lat, 0.5), killPct(lat, 0.9), killPct(lat, 0.99), lat[len(lat)-1],
+				cleanP99, cnt[kcClean], cnt[kcDown], cnt[kcUp], cnt[kcOther], st.Retrans, st.SRTT, st.MinRTT)
+		}
+	}
+}
+
+// The loss-classification rule behind the kill harness's tail diagnosis, pinned separately so the
+// harness numbers cannot drift on a refactor (P3, 2026-11-21).
+func TestKillClassify(t *testing.T) {
+	for _, tc := range []struct {
+		up, down bool
+		want     killClass
+	}{
+		{false, false, kcClean},
+		{false, true, kcDown},
+		{true, false, kcUp},
+		{true, true, kcOther},
+	} {
+		if got := classifyKill(tc.up, tc.down); got != tc.want {
+			t.Fatalf("classifyKill(up=%v, down=%v) = %v, want %v", tc.up, tc.down, got, tc.want)
 		}
 	}
 }
@@ -120,13 +197,12 @@ func TestKillBulkThroughput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, cfg := range []Config{{}, {Repair: true}, {Repair: true, RepairAsk: true}} {
+	for _, cfg := range []Config{{}, {FastRtx: true}, {Repair: true, RepairAsk: true, FastRtx: true}} {
 		mode := "today"
-		if cfg.Repair {
-			mode = "repair"
-		}
-		if cfg.RepairAsk {
-			mode = "repair+ask"
+		if cfg.FastRtx && !cfg.Repair {
+			mode = "fast-rtx"
+		} else if cfg.Repair {
+			mode = "repair+ask+fast"
 		}
 		for _, loss := range []float64{0, 0.005, 0.01, 0.02} {
 			mb, retrans := bulkOnce(t, loss, 8<<20, cfg)

@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112103   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112104   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -1202,7 +1202,7 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   probe-guard: demand a key-derived token on HTTP-family tunnel requests (3.3.8; both ends, opt-in)
 #   mtu-adapt: sender-side payload clamp for size-selective loss (3.3.8; single-ended, no wire signal, opt-in)
 #   max-sessions/max-conns: denial-of-service caps (server sessions, public connections); the defaults fit (3.3.5)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair ptcp-hop spray-hop'
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx ptcp-hop spray-hop'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'

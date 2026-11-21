@@ -560,3 +560,48 @@ retransmit-latency-bound — P3 carries a diagnosis mandate (clean-sample p99) a
 experiment, so the next null result at least names the real cause.
 Supervisor gates re-run: build/vet/gofmt clean both GOOS, repair+bifrost subsets ok, ./cmd/... ok.
 Commit: none (review only; this note rides with the P3 commit)
+
+## 2026-11-21 18:20 · implementer · P3 — fast retransmit (-fast-rtx) + the tail diagnosis: the p99 tail is NOT loss
+**Built (Part A)**: Config.FastRtx / flag `-fast-rtx` / config key `fast-rtx` (off by default, sender-local,
+no wire change — an old peer needs nothing, either end alone can enable it). In afterAck's loss scan
+(wat/session.go), every unacked packet below the acked largest is a gap in that ACK; sentPkt.gaps counts
+consecutive gap sightings and the 3rd consecutive one declares the packet lost at once (s.lose) instead of
+waiting out lossTime. Gated `!s.cc.reliable` (reliable/direct carriers keep age-only loss — spurious resends
+were costly there, cc.go relLossMul history). The counter dies with done (ack or loss), so no reset path
+exists. wattun-manager: `fast-rtx` declared CFG_FILE_ONLY, MGR_VERSION → 2026112104. Version stays 3.4.3
+(unreleased). TECHNICAL.md flag row added.
+Tests: wat/fastrtx_test.go — gap counter (2 acks no loss, 3rd loses all skipped packets; asserted via
+Retrans because compact()/freeSent recycle the records at once), off-by-default, reliable-carrier never
+fast-loses, sim transfer intact at 2 % loss.
+
+**Diagnosis (Part B)**: killLatency now snapshots both ends' Retrans (and the client's RepairRecovered)
+around each echo sample and classifies it clean / downlink-loss / uplink-loss / other
+(classifyKill, pinned by TestKillClassify); the harness logs p99 overall, p99 of the clean subset and the
+class counts. Modes today / fast-rtx / repair+ask+fast, 3 runs, 120 samples, 1 % loss, 40 ms RTT:
+
+- p99 ms (overall · clean subset), 640 MTU: today 101.5·102.0 / 166.4·194.3 / 104.5·109.2 · fast-rtx
+  101.1·101.6 / 103.1·103.6 / 135.6·139.3 · r+a+f 102.9·103.5 / 102.1·102.6 / 103.0·107.0
+- p99 ms, 1400 MTU: today 103.1·132.0 / 113.9·120.5 / 146.0·161.5 · fast-rtx 102.6·103.0 / 163.5·163.5 /
+  107.0·112.5 · r+a+f 102.2·163.1 / 103.7·105.8 / 131.9·175.0
+- classes per 120 samples (typical): clean 24-34, down 83-96, up 0-1, other 0-2.
+- bulk MB/s at 0/0.5/1/2 %: today 5.3/5.2/5.2/5.2, fast-rtx identical with byte-identical retrans
+  counters (67/144/290), r+a+f 5.3/5.2/5.1/5.0.
+
+**Findings:**
+1. **The clean subset carries the same tail.** Samples where NO retransmit or repair counter moved on
+   either end still sit at p50 ≈ 85-90 ms and p99 ≈ 102-194 ms — the same ~2.5xRTT shape as the whole run
+   (overall p50 42 ms). The tail is queueing/scheduling/pacing-bound (the echo queues behind bulk at the
+   pacer), not retransmit-latency-bound. Repair v1, repair v2 and fast-rtx were all correctly doomed:
+   they optimize a path the tail does not take. Caveat recorded: at 1 % loss a 50-100 ms sample window
+   usually contains an ambient BULK retransmit, so the "down" class measures link activity, not the echo's
+   own loss — the clean subset is the informative signal, and it is the slow one.
+2. **fast-rtx is a near-no-op on this path**: the existing `largest-pn >= 4` rule (unreliable, non-spread)
+   already fires as early as the ACKs allow; the deterministic bulk runs show identical retrans counts
+   (67/144/290). Its remaining scope is spread carriers (udp-hop/spray, where the 4-behind rule is off)
+   and slow-ACK paths.
+**Verdict (honest, per the kill rule): NO clear p99 win — fast-rtx ships OFF by default** (the flag exists
+for spread-carrier experiments); the diagnosis above is the deliverable. Next tail attack, if any, should
+target scheduler/pacer queueing of interactive echoes during bulk, not loss recovery.
+Tests: gofmt empty, vet clean, `go test -count=1 ./cmd/...` ok, full `go test -count=1 -timeout 15m ./wat/`
+ok, `bash -n wattun-manager` + `bash test-manager.sh` ALL OK.
+Commit: (this commit)

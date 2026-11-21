@@ -112,6 +112,7 @@ func main() {
 	fecOnLoss := flag.Float64("fec-on-loss", 2, "fec auto: start sending parity once the sender's measured loss is above this percent (0.01 = 1 %, at most 50; must be above -fec-off-loss; 3.3.0)")
 	fecOffLoss := flag.Float64("fec-off-loss", 0.5, "fec auto: stop sending parity once the measured loss falls below this percent (0 = once open it never closes; below -fec-on-loss; 3.3.0)")
 	repair := flag.Bool("repair", false, "sliding-window coded repair: a repair symbol every few data packets so the receiver rebuilds lost packets locally instead of waiting for the sender's loss timer and a retransmit round trip (cuts the loss-tail latency of a lossy downlink; both ends need 3.4.3 with -repair; off by default)")
+	fastRtx := flag.Bool("fast-rtx", false, "fast retransmit: a packet that 3 consecutive peer ACKs have skipped (a larger packet number acked while it is not) is resent at once instead of waiting out the loss timer (experimental loss-tail latency tool, 3.4.3; sender-local, an older peer needs nothing; inactive on reliable/direct carriers; off by default)")
 	shapeData := flag.Float64("shape-data", 0, "pad packets that carry stream data to randomized realistic sizes, spending at most this percent of the stream bytes sent (0 = off, at most 25; 3.3.0)")
 	noiseMode := flag.String("noise", "off", "idle traffic, off|low|med|custom: while the session has no user data for ~2 keepalives, send non-ack-eliciting filler packets at the matching byte budget (low 128 B/s, med 1024 B/s; custom uses -noise-bps; 3.3.0)")
 	noiseBps := flag.Int("noise-bps", 0, "noise, with -noise custom: filler byte budget in bytes/second (64..1000000; 3.3.0)")
@@ -942,7 +943,7 @@ func main() {
 		Server: server, Key: k, Paths: *lanes, MaxBps: *maxMB * 1e6, Slack: time.Duration(*slackMs) * time.Millisecond,
 		PingEvery: time.Duration(*pingEvery) * time.Second, NoMask: !*hdrMask, NoShape: !*shape,
 		LegacyMaskFlip: *legacyMaskFlip,
-		Logf:           log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", FECOnLoss: fecOn, FECOffLoss: fecOff, Repair: *repair,
+		Logf:           log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", FECOnLoss: fecOn, FECOffLoss: fecOff, Repair: *repair, FastRtx: *fastRtx,
 		MaxPayload: maxPayload, Bond: tm, AllowClients: allowClientPrefixes,
 		ShapeData: shapeFrac, NoiseBps: noiseBpsVal, NoiseFrom: noiseFrom, NoiseTo: noiseTo,
 		WinMax: uint64(*winMax) << 20,
