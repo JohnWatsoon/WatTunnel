@@ -104,9 +104,15 @@ func (r *repairState) onLoss() {
 	r.every = repairWin / per
 }
 
-// repairNoteSent remembers a data packet's plaintext for the next symbols (under s.mu, from build).
+// repairNoteSent remembers a data packet's plaintext for the next symbols (under s.mu, from build). The
+// copy waits for the peer's frRepairCap: a mixed pair never builds symbols, so it must not pay the
+// per-packet copy either (the receive ring stays warm from the first packet — the peer's symbols may start
+// arriving any time after OUR cap goes out).
 func (s *Session) repairNoteSent(pn uint64, p []byte) {
 	r := s.repair
+	if !r.peerOK {
+		return
+	}
 	e := &r.tx[pn%repairWin]
 	e.pn, e.buf = pn, append(e.buf[:0], p...)
 	if pn >= r.txNext {

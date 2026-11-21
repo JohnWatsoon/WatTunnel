@@ -424,3 +424,35 @@ file-only keys (no wizard prompt yet); a general (non-udp) ":down" leg would be 
 ptcp carrier not field-measured; the plan's ACK-rate reduction goal for Track A was cut in v1 (logged in the
 A2 entry).
 Commit: 5915b4a (head)
+
+## 2026-11-21 09:30 · implementer · post-review audit — what the review commit fixed, and what was still left
+Read the review commit `999ef51` end to end and re-audited both tracks with fresh eyes.
+
+**The review's two fixes are correct and verified here** (both real bugs in what I shipped):
+1. frRepairCap shared a packet with frEndpoint: a 3.3.9-3.4.2 peer (knows frEndpoint, not the cap) stopped
+   at the cap and never learned the ":down" leg's port — a wire-compat break of Bifrost on mixed pairs with
+   -repair on. The fix (cap and endpoint never share a packet; endpoint retries on the next build, which
+   appendEndpoint already supports without touching epAt) is right; `TestRepairCapNeverHidesEndpoint` passes.
+2. The ptcp client INPUT rule `--sport 443 -j ACCEPT` accepted from ANY host; now pinned to the peer and the
+   source-port range. Correct.
+
+**Leftover issues found in this audit (fixed / documented now):**
+- `repairNoteSent` copied every data packet's plaintext into the tx ring even when the peer never announced
+  frRepairCap — a mixed pair (old peer, -repair on) paid a per-packet copy for nothing, forever. The copy now
+  waits for peerOK (the receive ring still fills from the first packet: the peer's symbols may arrive any
+  time after OUR cap goes out). `TestRepairRoundTrip`/`Mixed`/`Kill` re-run green after the change.
+- The ptcp SERVER-side RST drop cannot be destination-pinned (many peers), so a real TCP service on the same
+  port would lose its legitimate RSTs. Documented as a caveat in the TECHNICAL.md ptcp row (pick a dedicated
+  -listen port); not a code fix — there is nothing safe to pin it to.
+- Cosmetic, logged not fixed: the ptcp client's ack field only advances when the every-4-segments ACK fires,
+  so outgoing segments can carry a stale ack between ACKs. The fake server ignores ack numbers; only a
+  middlebox reading acks could notice.
+
+**Kill-test verdict correction**: the reviewer's 3-run re-measurement (docs edit, previously uncommitted,
+committed with this entry) shows NO p99 gain — 101-104 ms both modes at both MTUs. My single-run
+"163.8 → 102.1 at 1400" was an outlier run (its today-side retrans=3082 was the anomaly I noted and
+dismissed). The honest state: repair is EXPERIMENTAL, no measured sim gain, off by default; the docs now say
+exactly that. My earlier A3 log entry's "clear win at 1400" claim is superseded by this one.
+
+Gates: gofmt empty; go vet + GOOS=linux go vet clean; `go test -count=1 -run 'TestRepair|TestBifrost|TestKillInteractiveP99|TestKillBulkThroughput' ./wat/` → ok.
+Commit: (this commit)
