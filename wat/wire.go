@@ -36,6 +36,13 @@ const (
 	// packet with frEndpoint (a 3.3.9-3.4.2 peer stops at the cap and would miss the endpoint), so both are safe.
 	frRepair    = 0x0f
 	frRepairCap = 0x10
+	// frRepairAsk (3.4.3, coded repair v2): the receiver's list of missing packet numbers — n(uvarint) then n
+	// absolute pns (uvarints), oldest first, n ≤ 8 (no base offset: 8 uvarints are smaller than the base+len
+	// dance frRepair needs). It is ALWAYS the LAST frame of its packet (an old peer stops at the type byte)
+	// and NEVER shares a packet with frEndpoint — the same rule the review commit 999ef51 imposed on
+	// frRepairCap, for the same reason: a 3.3.9-3.4.2 peer stops at the ask and would miss the endpoint.
+	// Only sent when the peer's frRepairCap has been seen, so a mixed pair never exchanges one.
+	frRepairAsk = 0x11
 )
 
 var errBadFrame = errors.New("wat: malformed frame")

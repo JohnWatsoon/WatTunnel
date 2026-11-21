@@ -77,21 +77,59 @@ func TestRepairRoundTrip(t *testing.T) {
 	}
 }
 
+// The v2 ask layer on top of the periodic one: with RepairAsk on both ends a lossy download must send
+// frRepairAsks, answer them with targeted symbols, and rebuild more holes than v1 alone.
+func TestRepairAskRoundTrip(t *testing.T) {
+	cli, srv := newPairMixed(t, 0.02, 1400, Config{Repair: true, RepairAsk: true}, Config{Repair: true, RepairAsk: true})
+	downloadOnce(t, cli, srv, 6<<20, 51)
+	ss, cs := srv.Stats(), cli.Stats()
+	t.Logf("repair+ask round trip: symbols sent=%d recovered=%d asks=%d askHit=%d askMiss=%d retrans=%d",
+		ss.RepairSent, cs.RepairRecovered, cli.repair.askSent, srv.repair.askHit, srv.repair.askMiss, ss.Retrans)
+	if ss.RepairSent == 0 {
+		t.Error("no repair symbols sent")
+	}
+	if cs.RepairRecovered == 0 {
+		t.Error("no holes rebuilt by repair")
+	}
+	if cli.repair == nil || cli.repair.askSent == 0 {
+		t.Error("no frRepairAsks sent")
+	}
+	if srv.repair.askHit == 0 {
+		t.Error("no ask answered with a targeted symbol")
+	}
+}
+
+// askCount: the internal ask counter, 0 for a session without the repair state (mixed-version checks).
+func askCount(s *Session) uint64 {
+	if s.repair != nil {
+		return s.repair.askSent
+	}
+	return 0
+}
+
 // Mixed pair, both directions (the "old" peer is one with repair off — it never sends frRepairCap, exactly
-// what a pre-3.4.3 binary does with the frame): no repair frames may flow, and the transfer must be correct.
+// what a pre-3.4.3 binary does with the frame): no repair frames of ANY kind may flow — symbols, caps that
+// engage, or asks (the new end has RepairAsk on, so this also pins the peerOK gate on the ask path) — and the
+// transfer must be correct.
 func TestRepairMixedVersions(t *testing.T) {
 	t.Run("new_client_old_server", func(t *testing.T) {
-		cli, srv := newPairMixed(t, 0.01, 1400, Config{Repair: true}, Config{})
+		cli, srv := newPairMixed(t, 0.01, 1400, Config{Repair: true, RepairAsk: true}, Config{})
 		downloadOnce(t, cli, srv, 2<<20, 41)
 		if s, r := srv.Stats().RepairSent, cli.Stats().RepairRecovered; s != 0 || r != 0 {
 			t.Errorf("sent=%d recovered=%d repair frames; a mixed pair must send none", s, r)
 		}
+		if a := askCount(cli) + askCount(srv); a != 0 {
+			t.Errorf("%d frRepairAsks; a mixed pair must exchange zero repair frames of any kind", a)
+		}
 	})
 	t.Run("old_client_new_server", func(t *testing.T) {
-		cli, srv := newPairMixed(t, 0.01, 1400, Config{}, Config{Repair: true})
+		cli, srv := newPairMixed(t, 0.01, 1400, Config{}, Config{Repair: true, RepairAsk: true})
 		downloadOnce(t, cli, srv, 2<<20, 42)
 		if s, r := srv.Stats().RepairSent, cli.Stats().RepairRecovered; s != 0 || r != 0 {
 			t.Errorf("sent=%d recovered=%d repair frames; a mixed pair must send none", s, r)
+		}
+		if a := askCount(cli) + askCount(srv); a != 0 {
+			t.Errorf("%d frRepairAsks; a mixed pair must exchange zero repair frames of any kind", a)
 		}
 	})
 }
@@ -120,5 +158,20 @@ func TestRepairCoverProperties(t *testing.T) {
 	}
 	if same > n*3/4 {
 		t.Errorf("neighbouring pns share coverage in %d of %d symbols; want ~half", same, n)
+	}
+	// 2026-11-21 v2 pin: two pns must be JOINTLY covered by some k (the v1 single-bit-of-XOR form collapsed
+	// to two fixed subsets and half of all pairs were never jointly covered — the real reason v1 measured no
+	// gain). Coverage must also vary across k per pn, not flip the whole set.
+	for _, pr := range [][2]uint64{{0, 1}, {5, 9}, {100, 101}, {1 << 63, 1<<63 + 1}} {
+		ok := false
+		for k := uint64(0); k < 64; k++ {
+			if repairCover(pr[0], k) && repairCover(pr[1], k) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			t.Errorf("pns %v never jointly covered within the ask search bound", pr)
+		}
 	}
 }

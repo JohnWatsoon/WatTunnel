@@ -97,10 +97,13 @@ func TestKillInteractiveP99(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, cfg := range []Config{{}, {Repair: true}} {
+	for _, cfg := range []Config{{}, {Repair: true}, {Repair: true, RepairAsk: true}} {
 		mode := "today"
 		if cfg.Repair {
 			mode = "repair"
+		}
+		if cfg.RepairAsk {
+			mode = "repair+ask"
 		}
 		for _, mtu := range []int{640, 1400} {
 			lat, st := killLatency(t, 0.01, mtu, 120, 3*time.Second, 50*time.Millisecond, cfg)
@@ -117,10 +120,13 @@ func TestKillBulkThroughput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, cfg := range []Config{{}, {Repair: true}} {
+	for _, cfg := range []Config{{}, {Repair: true}, {Repair: true, RepairAsk: true}} {
 		mode := "today"
 		if cfg.Repair {
 			mode = "repair"
+		}
+		if cfg.RepairAsk {
+			mode = "repair+ask"
 		}
 		for _, loss := range []float64{0, 0.005, 0.01, 0.02} {
 			mb, retrans := bulkOnce(t, loss, 8<<20, cfg)
@@ -179,7 +185,7 @@ func BenchmarkRepairCodec(b *testing.B) {
 		rx.rxRanges.add(pn, pn+1)
 		rx.repairKeep(pn, p)
 		if i%16 == 15 {
-			tx.repair.buildChunks(tx)
+			tx.repair.buildChunks(tx, uint64(i/16))
 			for _, q := range tx.repair.queue {
 				r := &reader{b: q}
 				r.byte()

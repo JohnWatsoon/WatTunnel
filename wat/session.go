@@ -82,8 +82,14 @@ type Config struct {
 	// and a retransmit round trip. Off by default; both ends need 3.4.3+ (a mixed pair exchanges no repair:
 	// symbols flow only after each side sees the peer's frRepairCap).
 	Repair bool
-	NoKex  bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
-	Bond   PathTimings // multipath health/probe timings (server side; zero = production values)
+	// RepairAsk (3.4.3, repair v2) adds the receiver-driven NACK layer on top of Repair: the receiver names
+	// its missing pns (frRepairAsk) and the sender answers with a targeted symbol covering exactly those pns.
+	// The v1 diagnosis was coverage thinness — at the adaptive spacing a 32-packet window sees ~1.3 covering
+	// symbols, so ~half the holes were never covered; the ask closes that by naming the holes. Requires
+	// Repair (a no-op otherwise); experimental, gated on the kill-harness verdict, no flag yet.
+	RepairAsk bool
+	NoKex     bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
+	Bond      PathTimings // multipath health/probe timings (server side; zero = production values)
 	// AllowClients (W10, 3.3.0) is the server-side client allowlist: a new session is admitted only from a source IP
 	// inside one of these prefixes. The check runs before admit on the unauthenticated packet, so even a valid packet
 	// from a non-allowed source is dropped. Empty = every source (the pre-3.3.0 behavior). Only a carrier that reports
@@ -1228,6 +1234,13 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		// a 3.3.9-3.4.2 peer stops parsing at frRepairCap and a new one stops after frEndpoint, so the two never
 		// share a packet: the endpoint waits for the next packet (it is not marked sent)
 		capped = len(p) > n
+		// frRepairAsk follows the SAME slot rule (review 999ef51): it is the last frame an old peer could
+		// stop at, so when an ask rides this packet the endpoint waits too. The ask may follow the cap in
+		// the same packet — an old peer has already stopped at the cap, a new peer reads through it — which
+		// is why the ask extends the cap's slot instead of taking its own turn first.
+		n = len(p)
+		p = s.repairAskDue(p, now)
+		capped = capped || len(p) > n
 	}
 	if len(p) > 0 && !capped {
 		p = s.appendEndpoint(p, now) // Bifrost frEndpoint (3.3.9): LAST frames of an uplink packet, after frKex
@@ -2051,6 +2064,18 @@ func (s *Session) parse(b []byte, now time.Time, src net.Addr) (eliciting bool) 
 			if s.repair != nil {
 				s.repair.peerOK = true
 			}
+		case frRepairAsk:
+			// 3.4.3 repair v2: the peer's missing pns, up to 8, oldest first. Always the LAST frame of its
+			// packet (build), so parsing stops here. Not ack-eliciting: the answer is a repair symbol, which
+			// like frRepair is never acked or retransmitted.
+			pns := parseRepairAsk(r)
+			if r.err != nil {
+				return
+			}
+			if s.repair != nil {
+				s.repairOnAsk(pns)
+			}
+			return
 		case frKex:
 			pub := r.take(32)
 			if r.err != nil {

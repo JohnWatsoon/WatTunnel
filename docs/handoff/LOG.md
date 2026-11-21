@@ -498,3 +498,46 @@ Commit: none (review only; the limitation note rides in this entry)
   ./cmd/...` ok, `bash -n` all three scripts, full `bash test-manager.sh` ALL OK (1003 ok). Not run: ./wat/ suite
   (no engine change) and the live presets (need a Linux Iran/Kharej pair; grid shapes are pinned by tests).
 - **Commit:** (this commit)
+
+## 2026-11-21 16:30 · implementer · repair v2 — receiver-driven NACK (frRepairAsk) built, kill-tested, verdict: keep OFF
+**What** (`wat/repair.go`, `wat/wire.go`, `wat/session.go`, tests): Config.RepairAsk (default OFF, no flag yet —
+promotion is the harness verdict's call) adds a NACK layer on top of the periodic coded repair:
+- frRepairAsk 0x11: up to 8 absolute missing pns, oldest first; LAST frame of its packet; NEVER shares a packet
+  with frEndpoint — the same slot rule the review (999ef51) imposed on frRepairCap, extended in build() (the ask
+  rides after the cap in the cap's slot or takes the slot itself; the endpoint waits either way).
+- Receiver: repairKeep rescans the rxRanges gaps each packet; holes >4 received packets old enter the ask queue;
+  one ask per 40 ms (repairAskEvery), each hole at most twice (askN), then the retransmit path owns it. No asks
+  when repair is off or peerOK is false (TestRepairMixedVersions extended: zero asks both directions).
+- Sender: repairOnAsk answers with ONE targeted symbol covering every asked pn (k searched upward from
+  max(r.k, kAsk), bound 64) plus the covered current window; the periodic schedule (pending/every/k counter) is
+  untouched. Chunked like periodic symbols; drains through the existing queue/pump.
+
+**Two real bugs found on the way, both fixed:**
+1. **repairCover was degenerate.** The v1 form took the TOP BIT of pn*C1^k*C2 — but any single bit of x^y is
+   bit(x)^bit(y), so cover(pn,k) = A(pn)^B(k): only TWO distinct subsets existed across all k, and two pns in
+   different halves were NEVER jointly covered (half of all loss pairs unrecoverable by construction — the v1
+   codec double-loss tests had happened to pick cross-half pairs). Fixed with a second multiply to spread the
+   bits; pinned by a new joint-coverage assertion in TestRepairCoverProperties. Not a wire change (cover is
+   computed, never sent); 3.4.3 unreleased so no deployed peer computes the old subsets.
+2. **The 32-packet tx window cannot answer an ask.** At bulk rate the window scrolls past a hole in ~9 ms; an
+   ask is ~60 ms stale (40 ms throttle + 20 ms flight). Measured: with v1 retention every ask missed (29/29,
+  TestRepairAskRoundTrip). Fix: a 1024-entry askTx retention ring (≈1.4 MB/direction/session, opt-in, only
+   while peerOK), targeted member offsets up to repairOffMax in onRepair, and the solver's reach bound moved
+   from the 128-entry rx ring to repairOffMax (a delivered-but-aged member now refuses its row instead).
+
+**Kill harness (coded_test.go, three modes: today / repair / repair+ask), 3 runs of TestKillInteractiveP99
+(120 samples, 1 % loss, 40 ms RTT) and TestKillBulkThroughput (8 MB, 1400 MTU), Windows checkout, 2026-11-21:
+- p99 (ms), 640 MTU: today 103.9/98.5/140.9 · repair 103.1/147.3/102.0 · repair+ask 177.7/103.0/104.1
+- p99 (ms), 1400 MTU: today 102.7/106.5/104.0 · repair 196.2/102.3/103.2 · repair+ask 105.9/101.9/100.8
+- bulk MB/s at 0/0.5/1/2 %: today 5.3/5.2/5.2/5.1 · repair 5.3/5.2/5.0/5.0 · repair+ask 5.3/5.2/5.1/5.0
+  (one earlier ask run printed 4.5 at 2 % — a single-run outlier, not reproduced).
+**Verdict (honest, per the plan's rule): NO clear p99 win at both MTUs.** All three modes sit at ~100-105 ms
+median p99 with ±40 ms run-to-run noise; the ~2.5×RTT tail is present mode-independent, i.e. it is set by
+something repair cannot touch (the interactive echo's own loss-detect+retransmit path, scheduling), not by
+coverage. 0 %-loss throughput is unchanged (5.3 across modes) — that criterion holds — but the kill rule needs
+the CLEAR p99 win too. **RepairAsk stays OFF (experimental, no flag, no promotion); the honest result is the
+valid finish the plan allowed.** The cover fix and the ask machinery land anyway: correct, tested, and the
+diagnosis (window-vs-latency, cover degeneracy) is now on record for any future attempt.
+Tests: codec (ask round-trip/codec/throttle/cover-search, bare sessions), sim TestRepairAskRoundTrip
+(asks=29, askHit=51, askMiss=3), extended mixed-version zero-frame/zero-ask both ways.
+Commit: (this commit)
