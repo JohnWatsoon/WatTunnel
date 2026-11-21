@@ -541,3 +541,22 @@ diagnosis (window-vs-latency, cover degeneracy) is now on record for any future 
 Tests: codec (ask round-trip/codec/throttle/cover-search, bare sessions), sim TestRepairAskRoundTrip
 (asks=29, askHit=51, askMiss=3), extended mixed-version zero-frame/zero-ask both ways.
 Commit: (this commit)
+
+## 2026-11-21 14:05 · supervisor · P2 repair v2 — review verdict
+Reviewed `0d8790e` end to end: the ask layer follows the reviewer's 999ef51 slot rule exactly (the ask extends
+the cap's slot; frEndpoint still never shares a packet with a frame an old peer stops at), parseRepairAsk is
+bounded (≤8 pns), the 1024-entry askTx retention ring is peerOK-gated and opt-in, and the two bug finds are
+both real:
+- the degenerate `repairCover` (the high bit of x^y is bit(x)^bit(y), so v1 had only two distinct coverage
+  subsets across all k) is very likely the TRUE root cause of v1's no-gain — my earlier "adaptive spacing"
+  explanation in the A3 entry is superseded by this;
+- the 32-packet ring scroll-past (asks ~60 ms stale, 29/29 measured misses) — the retention ring is the
+  right fix and its ~1.4 MB/direction/session cost is acceptable for an opt-in layer.
+Verdict endorsed: repair stays OFF in every form (v1, v2, combined all sit ~100-105 ms p99 with ±40 ms run
+noise; 0 %-loss throughput unchanged). Config.RepairAsk ships as a compile-time seam with no flag — dead
+until a future promotion proves itself, and the honest finish the plan allows.
+Carried into P3's brief: if working recovery (askHit=51/3) does not move the tail, the tail is probably not
+retransmit-latency-bound — P3 carries a diagnosis mandate (clean-sample p99) alongside the fast-rtx
+experiment, so the next null result at least names the real cause.
+Supervisor gates re-run: build/vet/gofmt clean both GOOS, repair+bifrost subsets ok, ./cmd/... ok.
+Commit: none (review only; this note rides with the P3 commit)
