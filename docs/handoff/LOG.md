@@ -853,3 +853,66 @@ Version target 3.5.0. Web panel is a later consumer; nothing serves HTTP on Khar
 follows the auto-helper precedent (owner requirement: invisible in user views). Names provisional (Scepter /
 pairing key / scepter latch) — owner may rename.
 Commit: none (plan doc is git-ignored; this entry is the record)
+
+## 2026-11-22 · supervisor · Handoff 3 Phase A dispatched — three parallel lanes
+Implementation swarm launched per PLAN-pairing.md Phase A, one agent per disjoint file-lane,
+supervisor reviews each diff and sequences commits:
+- Lane A (engine, commits its own files): wat/scepter.go, wat/session.go sid-0 reservation +
+  pairing hooks, cmd/wattun/main.go + config.go (-pair/-pair-to), wat/version.go → 3.5.0,
+  wat/scepter_test.go (sim-pair RPC, sid-0 pin, replay, journal idempotency, fuzz, caps,
+  rate limit, TTL, mixed-version).
+- Lane B (bash manager, delivers uncommitted): wattun-manager + test-manager.sh — watp1:
+  parsing, token field 10, .pairing store/rotate/revoke, Scepter console panel, CFG coverage,
+  MGR_VERSION 2026112108.
+- Lane C (Go manager, delivers uncommitted): cmd/wattun/mgr/ — paired badge, Scepter screen,
+  vScepterPair validator, capability formatter, tests.
+Lane D (latch + hidden-filter enforcement + CI root drill + docs) starts after Lane A's core
+lands. Owner instruction: subagents run on the supervisor's model this pass. No ssh to
+production. TestMultiPeerSkipsDeadAtOnce Windows caveat acknowledged (LOG 2026-11-21).
+Commit: none yet (dispatch record)
+
+## 2026-11-22 · supervisor · Phase A lane landings — engine committed (d354660), mgr committed (4ef462a), format reconciled
+- Lane A (engine) committed itself as d354660: wat/scepter.go (pairing credential, watp1: line
+  `watp1:<ver>|<uuid>|<b64 32B key>|<tier>`, JSONL codec 64 KiB cap + chunking, 8 read-only commands
+  with server-side cap checks, 512-event ring by state_seq, state doc, append-only journal tmp+rename
+  rotated 1 MiB with idempotent retries, intent TTL 600 s ±60 s skew, per-pair token bucket),
+  session.go sid-0 reservation + OpenScepter/Paired/Config.Pairing, main.go -pair/-pair-to + sid-0
+  routing, pairing.go/pairpath_{linux,other}.go (.pairing 0600 atomic), version 3.5.0,
+  scepter_test.go (11 tests). Its gates: gofmt/vet + GOOS=linux clean, ./cmd/... ok, FULL wat suite
+  exit 0 (MultiPeerSkipsDeadAtOnce even passed this run). Supervisor reviewed the parser/types:
+  format matches plan D5 text verbatim (unwrapped, single tier word).
+- Lane C (Go mgr) reviewed and committed by supervisor as 4ef462a (mgr/scepter.go + tests, badge,
+  screen, validator, refusing stub transport). Gates re-run: gofmt/vet/mgr tests ok.
+- CROSS-LANE DECISION (supervisor): the watp1: line is UNWRAPPED (no outer base64) — engine commit
+  + plan D5 literal text + Go mgr all agree; Lane B's first draft wrapped the payload in base64 and
+  was sent back for rework to the canonical form (the wat1: outer-wrap precedent loses 2:1 + plan text).
+- Edge logged for review wave 1: mgr ReadPairingLine accepts comma-list capabilities, engine parses
+  a single tier word — multi-token lines pass mgr validation but -pair rejects. Tighten to one form.
+- In flight: Lane B rework (unwrapped watp1), Lane D (latch + keyed proof, hidden-filter enforcement,
+  CI root drill, docs, install.sh pairing print).
+Commit: d354660, 4ef462a
+
+## 2026-11-22 · supervisor · Phase A lanes D+B committed (9fbe625, eae9c41) — PHASE A READY FOR REVIEW
+- Lane D reviewed and committed as 9fbe625: wat/latch.go + cmd/wattun/latch.go (latchMonitor
+  arm/disarm: 30 s all-units-inactive, 5 s poll, pairing AND -latch-port required; stand-down on
+  first authenticated contact via new TCPPoolServer.StopListen which keeps accepted conns), keyed
+  latch proof (latchKey = sha256("wat-scepter-latch:"+UUID+key) as PSK + HMAC, 10 min skew, denied
+  contact closes with nothing served), key-derived path, /scepter doctor endpoint on the loopback
+  metrics server only, /stats pinned by test to never mention scepter/pairing/latch, CI root-job
+  TestLatchDrill, TECHNICAL.md + both READMEs (native Farsi), install.sh mints+stores+prints
+  .pairing.pending (SIG_PUB verified byte-identical in diff; opt-in chain kept: pending -> explicit
+  activation -> -latch-port). Supervisor re-ran: gofmt empty, build+vet both platforms, ./cmd/...
+  ok, TestLatch ok.
+- ENVIRONMENTAL CAVEAT (same class as the 2026-11-21 MultiPeerSkipsDeadAtOnce one): full wat suite
+  on this checkout now also fails TestSlowReaderBuffersBounded (window_test.go churn ~7.5-10 GB vs
+  1 GB pin) in the full run, twice, AND at baseline with the lane's wat/ changes stashed, while it
+  passes standalone. Order/environment dependent, not code; test not loosened; Linux CI arbitrates.
+- Lane B rework verified (unwrapped watp1 = engine d354660 form) and committed as eae9c41 with the
+  supervisor's CFG_FILE_ONLY addition (latch-port latch-dial — the cross-lane config-coverage catch
+  was real and fixed): bash test-manager.sh ALL OK 1051 checks rc=0, re-run by supervisor.
+- Phase A commits: d354660 (engine channel) -> 4ef462a (Go mgr surface) -> 9fbe625 (latch, drill,
+  docs, installer pairing) -> eae9c41 (bash manager console, 2026112108).
+- Open items carried: mgr ReadPairingLine comma-list-vs-tier tightening (wave 1); mgr ScepterClient
+  stub transport becomes real in phase B; journalctl-backed tunnel.logs later.
+PHASE A READY FOR REVIEW. Proceeding to phase B (write intents).
+Commit: 9fbe625, eae9c41
