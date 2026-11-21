@@ -477,3 +477,24 @@ set) demux would need the encrypted session id, which the carrier cannot see. Do
 fixed.
 Gates re-run by the supervisor: build/vet/gofmt clean both GOOS, `go test -count=1 ./cmd/...` ok.
 Commit: none (review only; the limitation note rides in this entry)
+
+## 2026-11-21 14:40 · implementer · auto test presets: fast + reverse in both managers
+- **What:** two new test-mode presets next to normal/anti, identical in the bash wattun-manager and the Go
+  cmd/wattun/mgr port: `fast` = the anti grid cut to rst/synrst x {mci.ir, irancell.ir, cloudflare.com} on every
+  direct pool carrier (6 rows/carrier instead of ~28) on top of the plain direct/CDN rows; `reverse` = only the
+  plan's r= rows (direct/CDN/anti skipped entirely). Menu (at_preset_ask / atPresetAsk) now draws Enter/f/a/r/d/q
+  with per-preset time estimates; `--test` accepts exactly normal|anti|fast|reverse in both ni parsers.
+- **Why:** the owner-approved menu — the full anti grid costs 15-40 min, fast answers in ~4-6, and routes where
+  only reverse passes waste every direct probe.
+- **How:** grids are local test policy only — the fast rows are ordinary av_anti variants and the reverse rows the
+  existing r= rows, so the ranked table, the 8% rank margin, Enter-applies-best and at_to_t/atToT's
+  fake-sni/fake-mode lines all work unchanged (no new apply code; the "measured-apply default" is the existing
+  best-row Enter). Time estimates are static strings in one comment table (rows x ~20 s, rounded); MGR_VERSION →
+  2026112103. No engine (wat/) change, nothing on the wire, no new config keys. wat/version.go stays 3.4.3
+  (unreleased cycle).
+- **Tests:** Go atpreset_test.go pins the fast grid (only rst/synrst x the 3 SNIs, atToT writes the fake-* lines),
+  the reverse-only grid and the four --test values; test-manager.sh pins the same grids bash-side (19-row fast
+  count, r-only kinds) plus ni_parse accept/reject. Gates run here: go build/vet/gofmt clean, `go test -count=1
+  ./cmd/...` ok, `bash -n` all three scripts, full `bash test-manager.sh` ALL OK (1003 ok). Not run: ./wat/ suite
+  (no engine change) and the live presets (need a Linux Iran/Kharej pair; grid shapes are pinned by tests).
+- **Commit:** (this commit)

@@ -67,11 +67,14 @@ or NONINTERACTIVE=1). Plain output, errors on stderr, exit code 0 = done, 1 = fa
          old Iran ignores them, so their test ports stay open in the background for Iran to probe anytime. Raw tier needs CAP_NET_RAW
          and the cloud firewall to pass IP protocols 41/50/97/115.
          (--addr skips the public-IP detection; --cdn-domain is for auto; --listen/--path/--sni/--max-mbps for the others)
-  iran --token TOKEN --map 39901:18999[,8443:443] [--name NAME] [--pick best|bond|N|N,N...] [--test normal|anti] [--sessions N] [--max-mbps N] --yes
+  iran --token TOKEN --map 39901:18999[,8443:443] [--name NAME] [--pick best|bond|N|N,N...] [--test normal|anti|fast|reverse] [--sessions N] [--max-mbps N] --yes
          creates and starts the Iran tunnel. Auto token: runs the test, --pick chooses a row (default best, bond = all
          working direct carriers, 1,3 = join those rows). CDN token: automatic CDN tuning. Ends with LINK=up|down and TUNNEL=NAME; exit 1 if down.
          An extended auto token is tested too; carriers this engine cannot run are skipped with a hint and never written
          into the config.
+         --test picks the preset (default normal): normal = direct+CDN+reverse; fast = rst/synrst against
+         mci.ir/irancell.ir/cloudflare.com on every direct pool carrier (best row applied); anti = the full
+         fake-SNI/fp grid; reverse = only the plan's r= carriers.
          --sessions N writes "sessions: N", 1-16 (only with wattun 2.3.0 or newer and one udp/tcp/tls/ws/wss/h2/h2c/grpc
          carrier: the engine refuses it on icmp/gre/ipip, the F19 shapes, bonds and reverse; otherwise it is ignored with a warning)
          --preset rst-fast|mci|irancell|blackout|conservative applies an operator-tailored anti-censorship preset

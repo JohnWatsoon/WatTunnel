@@ -69,8 +69,13 @@ chk "unattended --governor false" "$NI_GOVERNOR" "false"
 ECH_B64="VGhpcy1pcy11cmxzYWZlX2Jhc2U2NF9lY2g="
 ni_parse --ech "$ECH_B64"
 chk "unattended --ech preserves base64 case" "$NI_ECH" "$ECH_B64"
+ni_parse --test fast
+chk "unattended --test fast" "$NI_TEST" "fast"
+ni_parse --test reverse
+chk "unattended --test reverse" "$NI_TEST" "reverse"
 
 expect_fail ni_parse --pool-rotate 30x
+expect_fail ni_parse --test quick
 expect_fail ni_parse --fake-mode gq
 expect_fail ni_parse --pool-rotate-bytes 20QQ
 expect_fail ni_parse --fake-ttl 999
@@ -1319,6 +1324,16 @@ bin_ver_ok() { ver_ge 3.3.8 "$1" && echo 1; return 0; }
 T_AUTO=$FULL_PLAN; auto_variants
 chk "wraith: no hop row without a 3.3.9 engine" "${#AV_LABEL[@]}" "17"
 chk "wraith: v_udp_hop range" "$(v_udp_hop 12 && v_udp_hop 0 && ! v_udp_hop 1 2>/dev/null && ! v_udp_hop 1001 2>/dev/null && ! v_udp_hop x 2>/dev/null && echo y)" "y"
+# Test presets (2026-11-21): fast = rst/synrst x the 3 fast SNIs on the plan's anti carriers (plain direct rows stay);
+# reverse = only the plan's r= rows. Both ride the normal at_to_t apply path (the fast rows are av_anti rows).
+T_AUTO='d=udp:4443,tcp:4443,tls:8443;r=tcp:24431,tls:24432'; AT_PRESET=fast; auto_variants
+chk "preset fast: icmp + 3 direct + 12 anti + icmp-rev + 2 r rows" "${#AV_LABEL[@]}" "19"
+chk "preset fast: only rst/synrst modes" "$(for ((i=0;i<${#AV_LABEL[@]};i++)); do av_anti "$i" && echo "${AV_FM[$i]}"; done | sort -u | tr '\n' ' ')" "rst synrst "
+chk "preset fast: only the 3 fast SNIs" "$(for ((i=0;i<${#AV_LABEL[@]};i++)); do av_anti "$i" && echo "${AV_FS[$i]}"; done | sort -u | tr '\n' ' ')" "cloudflare.com irancell.ir mci.ir "
+AT_PRESET=reverse; auto_variants
+chk "preset reverse: only r= rows" "$(for ((i=0;i<${#AV_LABEL[@]};i++)); do echo "${AV_KIND[$i]}"; done | sort -u | tr '\n' ' ')" "r "
+chk "preset reverse: icmp + the 2 pool legs" "${#AV_LABEL[@]}" "3"
+AT_PRESET=normal
 eval "bin_ver_ok() $(declare -f _bvo | tail -n +2)"
 T_AUTO=$_T_AUTO; T_PEER=$_T_PEER; T_PATH=$_T_PATH; T_SNI=$_T_SNI; AT_PRESET=$_AT_PRESET
 # B1: auto_rplan_build with a base uses sequential ports; without a base it picks random (auto_pick_rplan)

@@ -67,6 +67,23 @@ const autoVarAnti = "tcp tls wss h2 grpc ws h2c"
 const acAllModes = "rst synrst paws seq seqsum sum ttl split hlen0 fakeip ff all auto"
 const acSNIs = "mci.ir,irancell.ir,tci.ir,divar.ir"
 
+// The anti-censor fast preset's cut of the grid (2026-11-21): the two desync modes that clear a permit-list
+// filter in the field (rst, synrst — see the anti grid's field note) against the two operator allowlist SNIs
+// and the Cloudflare edge name — 6 rows per direct pool carrier instead of the full grid's ~28.
+const acFastModes = "rst synrst"
+const acFastSNIs = "mci.ir irancell.ir cloudflare.com"
+
+// at_preset time estimates shown in the Test mode menu (one table so they can be tuned without touching the
+// box rows): screening rows x ~20 s a row at the 8-16 MB probe sizes and the ~8 MB/s budget rate, rounded to
+// a range. normal ~14 rows -> ~1-3 min; fast ~14 + 7x6 rows -> ~4-6 min; anti ~200 rows -> ~15-40 min;
+// reverse ~8 rows -> ~1-2 min.
+const (
+	atEstNormal  = "~1-3 min"
+	atEstFast    = "~4-6 min"
+	atEstAnti    = "~15-40 min"
+	atEstReverse = "~1-2 min"
+)
+
 const atScreenMBStart = 8
 const atScreenCapMB = 16
 const atFinalMBMax = 40
@@ -1488,6 +1505,24 @@ func autoVariantsAnti(d string) {
 	}
 }
 
+// auto_variants_fast — the fast preset's cut of the anti grid: every direct pool carrier x acFastModes x
+// acFastSNIs. The rows are ordinary anti variants (avAnti sees the fake-sni/fake-mode pair), so the ranked
+// table, the 8 % rank margin and atToT's fake-sni/fake-mode lines all apply unchanged — no separate apply path.
+func autoVariantsFast(d string) {
+	for _, c := range strings.Fields(autoVarAnti) {
+		p := planPort(d, c)
+		if p == "" {
+			continue
+		}
+		hp := JoinHP(atAddr, p)
+		for _, fs := range strings.Fields(acFastSNIs) {
+			for _, fm := range strings.Fields(acFastModes) {
+				avAdd(c+" "+fm+" "+fs, c, "d", hp, "", "", "", "", "", fs, fm, "")
+			}
+		}
+	}
+}
+
 // auto_variants — T_* from the auto token -> AV_* (B1/B2/B4).
 func autoVariants(tok Token) {
 	av, ar = nil, nil
@@ -1499,54 +1534,60 @@ func autoVariants(tok Token) {
 	}
 	atScreenSkipped = ""
 	d, r := planPart(tok.Auto, "d"), planPart(tok.Auto, "r")
-	if isIPv4(atAddr) {
-		avAdd("icmp", "icmp", "d", atAddr, "", "", "", "", "", "", "", "")
-	}
-	for _, c := range strings.Split(d, ",") {
-		name := strings.SplitN(c, ":", 2)[0]
-		p := planEntryPort(c)
-		if name == "icmp" {
-			continue // the bare-IP icmp variant is the first row, added above
+	// reverse preset: only the plan's r= variants — for routes where nothing but reverse passes
+	if atPreset != "reverse" {
+		if isIPv4(atAddr) {
+			avAdd("icmp", "icmp", "d", atAddr, "", "", "", "", "", "", "", "")
 		}
-		if IsRawCarrier(name) && !isIPv4(atAddr) {
-			continue
-		}
-		if !carrierOkHere(name) { // B2: Iran skips what it cannot run
-			atScreenSkipped = joinNonEmpty(atScreenSkipped, ", ", name)
-			continue
-		}
-		switch {
-		case isShapedRaw(name):
-			avAdd(name+" (shape only)", name, "d", atAddr, "", "", "", "", "", "", "", "")
-		case isShapedUDP(name):
-			avAdd(name+" (shape only)", name, "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "")
-		case p != "":
-			avAdd(name, name, "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "")
-			// Wraith (3.3.9, Iran side only): the same udp port from a new source port every 12-18 packets
-			if name == "udp" && binVerOK("3.3.9") {
-				avAdd("udp hop", "udp", "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "-udp-hop="+atHop)
+		for _, c := range strings.Split(d, ",") {
+			name := strings.SplitN(c, ":", 2)[0]
+			p := planEntryPort(c)
+			if name == "icmp" {
+				continue // the bare-IP icmp variant is the first row, added above
 			}
-		default:
-			avAdd(name, name, "d", atAddr, "", "", "", "", "", "", "", "")
-		}
-	}
-	if atPreset == "anti" {
-		autoVariantsAnti(d)
-	}
-	if tok.SNI != "" {
-		for _, c := range strings.Fields(autoVarCDN) { // h2 never connects through Cloudflare
-			p := planPort(d, c)
-			if p == "" || !cfPortOK(c, p) {
+			if IsRawCarrier(name) && !isIPv4(atAddr) {
 				continue
 			}
-			if binVerOK("2.2.0") {
-				if e := csLast.Edges; len(e) > 0 { // the best Cloudflare edges, from autoTest's scan
-					avAdd(fmt.Sprintf("%s · chrome+ech · %d edges", c, len(e)), c, "c", cdnPeerList(e, p), "", tok.SNI, "chrome", "auto", "", "", "", "")
-				} else {
-					avAdd(c+" · chrome+ech", c, "c", tok.SNI+":"+p, "", tok.SNI, "chrome", "auto", "", "", "", "")
+			if !carrierOkHere(name) { // B2: Iran skips what it cannot run
+				atScreenSkipped = joinNonEmpty(atScreenSkipped, ", ", name)
+				continue
+			}
+			switch {
+			case isShapedRaw(name):
+				avAdd(name+" (shape only)", name, "d", atAddr, "", "", "", "", "", "", "", "")
+			case isShapedUDP(name):
+				avAdd(name+" (shape only)", name, "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "")
+			case p != "":
+				avAdd(name, name, "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "")
+				// Wraith (3.3.9, Iran side only): the same udp port from a new source port every 12-18 packets
+				if name == "udp" && binVerOK("3.3.9") {
+					avAdd("udp hop", "udp", "d", JoinHP(atAddr, p), "", "", "", "", "", "", "", "-udp-hop="+atHop)
 				}
-			} else {
-				avAdd(c+" via CDN", c, "c", tok.SNI+":"+p, "", tok.SNI, "", "", "", "", "", "")
+			default:
+				avAdd(name, name, "d", atAddr, "", "", "", "", "", "", "", "")
+			}
+		}
+		switch atPreset {
+		case "anti":
+			autoVariantsAnti(d)
+		case "fast":
+			autoVariantsFast(d)
+		}
+		if tok.SNI != "" {
+			for _, c := range strings.Fields(autoVarCDN) { // h2 never connects through Cloudflare
+				p := planPort(d, c)
+				if p == "" || !cfPortOK(c, p) {
+					continue
+				}
+				if binVerOK("2.2.0") {
+					if e := csLast.Edges; len(e) > 0 { // the best Cloudflare edges, from autoTest's scan
+						avAdd(fmt.Sprintf("%s · chrome+ech · %d edges", c, len(e)), c, "c", cdnPeerList(e, p), "", tok.SNI, "chrome", "auto", "", "", "", "")
+					} else {
+						avAdd(c+" · chrome+ech", c, "c", tok.SNI+":"+p, "", tok.SNI, "chrome", "auto", "", "", "", "")
+					}
+				} else {
+					avAdd(c+" via CDN", c, "c", tok.SNI+":"+p, "", tok.SNI, "", "", "", "", "", "")
+				}
 			}
 		}
 	}
@@ -2063,7 +2104,8 @@ func atNone() {
 	Hint(" · Retest after fixing:  paste the token again")
 }
 
-// at_preset_ask — normal | anti | CDN domain. Non-interactive path takes NI_TEST.
+// at_preset_ask — normal | fast | anti | reverse | CDN domain. Non-interactive path takes NI_TEST.
+// Time estimates per preset (one table, see atEst* above): rows x ~20 s, rounded to a range.
 func atPresetAsk(nonInteractive bool, niTest string) (string, error) {
 	if nonInteractive {
 		if niTest != "" {
@@ -2071,18 +2113,39 @@ func atPresetAsk(nonInteractive bool, niTest string) (string, error) {
 		}
 		return "normal", nil
 	}
-	// Interactive box (Test mode): [Enter] Standard / [a] + Anti-censor / [d] domain / [q] Cancel.
+	// Interactive box (Test mode): [Enter] Standard / [f] Anti-censor fast / [a] + Anti-censor /
+	// [r] Reverse only / [d] domain / [q] Cancel.
+	domLbl := avTok.SNI
+	if domLbl == "" {
+		domLbl = "none (optional)"
+	}
 	for t := 0; t < 6; t++ {
 		Hint(fmt.Sprintf("Kharej %s · any port", atAddr))
+		Box(Stdout, "Test mode",
+			keyLabel("Enter")+"  Standard carriers     "+GRY+"Direct, CDN, Reverse        "+atEstNormal+RST,
+			keyLabel("f")+"      Anti-censor fast      "+GRY+"rst/synrst x 3 SNIs,       "+atEstFast+RST,
+			"                               "+GRY+"best row applied"+RST,
+			keyLabel("a")+"      + Anti-censor         "+GRY+"full grid, fake-SNI, fp   "+atEstAnti+RST,
+			keyLabel("r")+"      Reverse only          "+GRY+"just the r= plan carriers "+atEstReverse+RST,
+			keyLabel("d")+"      Cloudflare domain     "+GRY+domLbl+RST,
+			keyLabel("q")+"      Cancel")
 		k, _, _ := KeyRead(0)
 		switch k {
 		case "enter":
 			return "normal", nil
+		case "f", "F":
+			return "fast", nil
 		case "a", "A":
 			return "anti", nil
+		case "r", "R":
+			return "reverse", nil
 		case "d", "D":
 			Hint("Domain proxied to Kharej via Cloudflare (orange cloud, SSL Full).")
 			avTok.SNI = Ask("Cloudflare domain", avTok.SNI)
+			domLbl = avTok.SNI
+			if domLbl == "" {
+				domLbl = "none (optional)"
+			}
 		case "q", "Q", "esc":
 			return "", fmt.Errorf("cancelled")
 		}

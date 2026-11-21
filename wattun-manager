@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112102   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112103   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -3797,6 +3797,11 @@ AUTO_VAR_EXT_RAW=$SHAPED_RAW # extended-only raw-tier shapes (bare plan entry, n
 AUTO_VAR_CDN='wss grpc'
 AUTO_VAR_REVERSE='icmp tcp tls ws wss h2 h2c grpc'
 AUTO_VAR_ANTI='tcp tls wss h2 grpc ws h2c'
+# Anti-censor fast preset (2026-11-21): the two desync modes that clear a permit-list filter in the field
+# (rst, synrst — see the anti grid's field note) against the two operator allowlist SNIs and the Cloudflare
+# edge name: 6 rows per direct pool carrier instead of the full grid's ~28, minutes instead of half an hour.
+AT_FAST_MODES='rst synrst'
+AT_FAST_SNIS='mci.ir irancell.ir cloudflare.com'
 # The reverse listen ports of a new auto token: one random open port per reverse carrier except icmp.
 auto_rplan_build() { # [base] -> "tcp:P1,tls:P2,..." (when base given: sequential from base; else random open ports)
   local out='' c p=${1:-}
@@ -4601,12 +4606,28 @@ auto_variants_anti() { # direct plan part
   done
   return 0
 }
+# The fast preset's cut of the anti grid: every direct pool carrier x AT_FAST_MODES x AT_FAST_SNIS. The rows are
+# ordinary anti variants (av_anti sees the fake-sni/fake-mode pair), so the ranked table, the 8 % rank margin and
+# at_to_t's fake-sni/fake-mode lines all apply unchanged — no separate apply path.
+auto_variants_fast() { # direct plan part
+  local d=$1 c p fs fm hp
+  for c in $AUTO_VAR_ANTI; do
+    p=$(plan_port "$d" "$c"); [ -n "$p" ] || continue
+    hp=$(join_hp "$AT_ADDR" "$p")
+    for fs in $AT_FAST_SNIS; do
+      for fm in $AT_FAST_MODES; do av_add "$c $fm $fs" "$c" d "$hp" '' '' '' '' '' "$fs" "$fm"; done
+    done
+  done
+  return 0
+}
 auto_variants() { # T_* from the auto token -> AV_* (the token's plan is the source; B1/B2/B4)
   local d r c p name
   AV_LABEL=(); AV_CAR=(); AV_KIND=(); AV_PEER=(); AV_PORT=(); AV_SNI=(); AV_FP=(); AV_ECH=(); AV_FRAG=()
   AV_FS=(); AV_FM=(); AV_X=()
   split_hp "$T_PEER"; AT_ADDR=$HP_HOST; AT_PATH=${T_PATH:-/wat}; AT_SKIPPED=''
   d=$(plan_part "$T_AUTO" d); r=$(plan_part "$T_AUTO" r)
+  # reverse preset: only the plan's r= variants — for routes where nothing but reverse passes
+  if [ "$AT_PRESET" != reverse ]; then
   ipv4_ok "$AT_ADDR" && av_add icmp icmp d "$AT_ADDR" '' ''
   for c in ${d//,/ }; do # plan order = test order; a bare entry is a port-less raw carrier (gre/ipip/shaped raw)
     name=${c%%:*}; p=$(plan_entry_port "$c")
@@ -4621,8 +4642,9 @@ auto_variants() { # T_* from the auto token -> AV_* (the token's plan is the sou
     [ "$name" = udp ] && [ -n "$p" ] && [ -n "$(bin_ver_ok 3.3.9)" ] \
       && av_add "udp hop" udp d "$(join_hp "$AT_ADDR" "$p")" '' '' '' '' '' '' '' "-udp-hop=$AT_HOP"
   done
-  [ "$AT_PRESET" = anti ] && auto_variants_anti "$d"
-  if [ -n "$T_SNI" ]; then
+  case "$AT_PRESET" in anti) auto_variants_anti "$d" ;; fast) auto_variants_fast "$d" ;; esac
+  fi
+  if [ -n "$T_SNI" ] && [ "$AT_PRESET" != reverse ]; then
     for c in $AUTO_VAR_CDN; do # h2 never connects through Cloudflare
       p=$(plan_port "$d" "$c"); [ -n "$p" ] || continue
       cf_port_ok "$c" "$p" || continue
@@ -5480,7 +5502,11 @@ at_none() { # nothing worked
   hint " · Check Kharej status, token currency, and cloud firewall"
   hint " · Retest after fixing:  ${AT_AGAIN:-paste token again}"
 }
-at_preset_ask() { # -> AT_PRESET normal|anti (--test in unattended runs), T_SNI (CDN domain, d) ; rc 1 = cancelled
+# Time estimates shown in the Test mode menu (one table so they can be tuned without touching the box rows):
+# screening rows x ~20 s a row at the 8-16 MB probe sizes and the ~8 MB/s budget rate, rounded to a range.
+#   normal  ~14 rows  -> ~1-3 min    fast    ~14 + 7x6 rows -> ~4-6 min
+#   anti    ~200 rows -> ~15-40 min  reverse ~8 rows        -> ~1-2 min
+at_preset_ask() { # -> AT_PRESET normal|anti|fast|reverse (--test in unattended runs), T_SNI (CDN domain, d) ; rc 1 = cancelled
   AT_PRESET=${NI_TEST:-normal}
   [ "$NONINTERACTIVE" = 1 ] && return 0
   [ "${UI_W:-0}" -gt 0 ] || ui_init_width
@@ -5495,16 +5521,21 @@ at_preset_ask() { # -> AT_PRESET normal|anti (--test in unattended runs), T_SNI 
     dom_lbl="${T_SNI:-none (optional)}"
     echo
     box_top "Test mode"
-    box_row "$(key_label Enter)  Standard carriers    ${GRY}Direct, CDN, Reverse   ~1-3 min${RST}"
-    box_row "$(key_label a)      + Anti-censor        ${GRY}Adds fake-SNI, fp      ~15-40 min${RST}"
-    box_row "$(key_label d)      Cloudflare domain    ${GRY}$dom_lbl${RST}"
+    box_row "$(key_label Enter)  Standard carriers     ${GRY}Direct, CDN, Reverse        ~1-3 min${RST}"
+    box_row "$(key_label f)      Anti-censor fast      ${GRY}rst/synrst x 3 SNIs,       ~4-6 min${RST}"
+    box_row "                               ${GRY}best row applied${RST}"
+    box_row "$(key_label a)      + Anti-censor         ${GRY}full grid, fake-SNI, fp   ~15-40 min${RST}"
+    box_row "$(key_label r)      Reverse only          ${GRY}just the r= plan carriers ~1-2 min${RST}"
+    box_row "$(key_label d)      Cloudflare domain     ${GRY}$dom_lbl${RST}"
     box_row "$(key_label q)      Cancel"
     box_bot
     printf '  %s?%s Choice %s[Enter]%s %s›%s ' "$CYN" "$RST" "$GRY" "$RST" "$GRY" "$RST"
     key_read
     case "$KEY" in
       enter) AT_PRESET=normal; echo; return 0 ;;
+      f|F) AT_PRESET=fast; echo; return 0 ;;
       a|A) AT_PRESET=anti; echo; return 0 ;;
+      r|R) AT_PRESET=reverse; echo; return 0 ;;
       d|D) echo; hint "Domain proxied to Kharej via Cloudflare (orange cloud, SSL Full)."
            ask_ok "Cloudflare domain" "$T_SNI" v_domain_opt || continue; T_SNI=$REPLY_V
            if [ -n "$T_SNI" ] && [ -n "${T_AUTO:-}" ]; then
@@ -10076,7 +10107,7 @@ ni_parse() {
       --fake-ttl) [[ "$v" =~ ^[0-9]{1,3}$ ]] && [ "$v" -le 255 ] || { err "--fake-ttl: use a hop count 0-255 (0 = auto, got '$v')"; return 1; }; NI_FAKETTL=$v ;;
       --pool-rotate) v_pool_rotate "$v" || return 1; NI_POOLROT=$v ;;
       --pool-rotate-bytes) v_pool_bytes "$v" || return 1; NI_POOLBYTES=$v ;;
-      --test) case "$v" in normal|anti) NI_TEST=$v ;; *) err "--test: use normal or anti (got '$v')"; return 1 ;; esac ;;
+      --test) case "$v" in normal|anti|fast|reverse) NI_TEST=$v ;; *) err "--test: use normal, anti, fast or reverse (got '$v')"; return 1 ;; esac ;;
       --token) v_token "$v" || return 1; NI_TOKEN=$v ;;
       --map) [ -n "$v" ] || { err "--map needs a list such as 39901:18999,8443:443"; return 1; }; NI_MAP=$v ;;
       --pick) case "$v" in best|bond|rbond) NI_PICK=$v ;; *,*|*+*) [[ "$v" =~ ^[0-9]+([,+][0-9]+)+$ ]] || { err "--pick: rows joined with commas or +, such as 1,3 or 1+3 (got '$v')"; return 1; }; NI_PICK=$v ;; *) [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] || { err "--pick: use best, bond, a row number or rows such as 1,3 (got '$v')"; return 1; }; NI_PICK=$((10#$v)) ;; esac ;;
@@ -10168,11 +10199,14 @@ or NONINTERACTIVE=1). Plain output, errors on stderr, exit code 0 = done, 1 = fa
          old Iran ignores them, so their test ports stay open in the background for Iran to probe anytime. Raw tier needs CAP_NET_RAW
          and the cloud firewall to pass IP protocols 41/50/97/115.
          (--addr skips the public-IP detection; --cdn-domain is for auto; --listen/--path/--sni/--max-mbps for the others)
-  iran --token TOKEN --map 39901:18999[,8443:443] [--name NAME] [--pick best|bond|N|N,N...] [--test normal|anti] [--sessions N] [--max-mbps N] --yes
+  iran --token TOKEN --map 39901:18999[,8443:443] [--name NAME] [--pick best|bond|N|N,N...] [--test normal|anti|fast|reverse] [--sessions N] [--max-mbps N] --yes
          creates and starts the Iran tunnel. Auto token: runs the test, --pick chooses a row (default best, bond = all
          working direct carriers, 1,3 = join those rows). CDN token: automatic CDN tuning. Ends with LINK=up|down and TUNNEL=NAME; exit 1 if down.
          An extended auto token is tested too; carriers this engine cannot run are skipped with a hint and never written
          into the config.
+         --test picks the preset (default normal): normal = direct+CDN+reverse; fast = rst/synrst against
+         mci.ir/irancell.ir/cloudflare.com on every direct pool carrier (best row applied); anti = the full
+         fake-SNI/fp grid; reverse = only the plan's r= carriers.
          --sessions N writes "sessions: N", 1-16 (only with wattun 2.3.0 or newer and one udp/tcp/tls/ws/wss/h2/h2c/grpc
          carrier: the engine refuses it on icmp/gre/ipip, the F19 shapes, bonds and reverse; otherwise it is ignored with a warning)
          --preset rst-fast|mci|irancell|blackout|conservative applies an operator-tailored anti-censorship preset

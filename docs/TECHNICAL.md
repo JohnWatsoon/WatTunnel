@@ -1464,16 +1464,24 @@ carriers, or all working reverse carriers when fewer than two direct carriers pa
 2+ direct/CDN rows or 2+ reverse rows, separated by spaces, commas or `+`; direct and reverse cannot be mixed), `1`-`N`
 (one variant) and `q`. The normal wizard continues at port mapping. The token is saved in `/etc/wattun/NAME.auto`.
 
-**Test presets (3.0.2).** Before the test starts the manager asks what to test. *Normal* (Enter) is the test above, without anti-censor
-variants; its worst-case traffic and a rough time are printed before it starts (see "Bandwidth of the test"). *Anti-censor* (`a`) adds, for every direct pool carrier of the plan (tcp, tls, wss, h2, grpc, ws, h2c): all fake-SNI
+**Test presets (3.0.2; `fast`/`reverse` since 3.4.3).** Before the test starts the manager asks what to test. *Normal* (Enter) is the test above, without anti-censor
+variants; its worst-case traffic and a rough time are printed before it starts (see "Bandwidth of the test"). *Anti-censor fast* (`f`) adds, for every
+direct pool carrier of the plan, only the two desync modes that clear a permit-list filter in the field (`rst`, `synrst`) against `mci.ir`,
+`irancell.ir` and `cloudflare.com` — 6 extra probes per carrier (about 42 for a full plan; roughly 4-6 minutes, estimate), instead of the full grid's
+~28. The ranked table and Enter-applies-the-winner flow are the same as normal, and the winner's `fake-sni`/`fake-mode` ride into the config through
+the standard apply path. *Anti-censor* (`a`) adds, for every direct pool carrier of the plan (tcp, tls, wss, h2, grpc, ws, h2c): all fake-SNI
 modes (`rst synrst paws seq seqsum sum ttl split hlen0 fakeip ff all auto`) with the first curated SNI, `rst`/`synrst`/`paws` against the other
 curated SNIs and `www.cloudflare.com`, and on the TLS carriers `tls-frag` -1 and 40, the chrome/firefox/safari fingerprints and chrome+ECH when a CDN
-domain is set (about 195 variants for a full plan, 30-60 minutes). Reverse tunnels have no anti-censor variants here: the desync runs on the dialing
+domain is set (about 195 variants for a full plan, 30-60 minutes). *Reverse only* (`r`) probes just the plan's `r=` variants — the `icmp reverse` row
+plus the reverse pool legs, about 8 probes (roughly 1-2 minutes, estimate) — for routes where nothing but reverse passes; direct, CDN and anti-censor
+rows are skipped entirely. Reverse tunnels have no anti-censor variants here: the desync runs on the dialing
 side, which is Kharej for a reverse tunnel. During the test `s` skips the running variant, `g` (anti-censor preset) skips the rest of that carrier's
 anti-censor variants and `q` stops the test; the table then ranks what was measured and the usual choice (Enter, `1`-`N`, `c`, `f`, `q`) follows.
 An anti-censor variant has to beat the plain type by 8 % to rank above it, cannot be joined into a bond, and is written with its `fake-sni`,
-`fake-mode`, `fp`, `ech` and `tls-frag` lines. Unattended runs (`wattun iran --token ... --yes`, `auto-test NAME --yes`) use `--test normal|anti`
-(default normal); `auto-retest` and auto-heal always run normal.
+`fake-mode`, `fp`, `ech` and `tls-frag` lines. Unattended runs (`wattun iran --token ... --yes`, `auto-test NAME --yes`) use
+`--test normal|anti|fast|reverse`
+(default normal); `auto-retest` and auto-heal always run normal. The times in the preset menu are estimates (rows x ~20 s); the traffic figure the
+test prints before it starts is the exact worst case.
 
 **Auto-heal.** After two failed restart cycles on an auto tunnel, `wattun-manager heal` starts a re-test (a normal
 screening run, at most once per 30 minutes). It switches to another working variant only when the current one fails,
