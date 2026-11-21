@@ -839,3 +839,17 @@ Windows checkout simply can no longer host that timing pin. CI (push required) m
 Supervisor gates: gofmt/vet clean, GOOS=linux build+vet clean, ./cmd/... ok, full wat/ suite otherwise
 green (699 s, one environmental FAIL as described), test-manager.sh ALL OK (fox, 2026112107).
 Commit: (this commit)
+
+## 2026-11-22 10:00 · supervisor · Handoff 3 plan written — Scepter (pairing + management plane)
+`docs/handoff/PLAN-pairing.md` (local, per the *PLAN*.md gitignore rule) consolidates the owner-approved
+scope: pairing credential (UUID + 32B key + capability bitmask + identity), hybrid control channel (in-band
+JSONL over a reserved sid-0 stream of tunnel 1, hidden fallback latch when all tunnels die), Kharej-owned
+state with numbered events + 512-entry replay + idempotent command journal with intent TTLs, codes-not-
+strings, many-to-many data model from day one, and five phases — A read-only channel, B write intents,
+C remote carrier work, D update orchestration, E panel-readiness polish — each with its command table,
+tests (sim-pair RPC, sid-0 reservation, latch drill in the CI root job, fuzz, mixed-version zero-traffic),
+security requirements (capability checks server-side, rate limits, append-only audit), gates and done-means.
+Version target 3.5.0. Web panel is a later consumer; nothing serves HTTP on Kharej. Hidden infrastructure
+follows the auto-helper precedent (owner requirement: invisible in user views). Names provisional (Scepter /
+pairing key / scepter latch) — owner may rename.
+Commit: none (plan doc is git-ignored; this entry is the record)
