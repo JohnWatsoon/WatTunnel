@@ -487,8 +487,18 @@ type ScepterState struct {
 	src     ScepterSource
 	journal *ScepterJournal
 	rate    scepterRate
+	recent  []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
 	nowf    func() time.Time // tests shrink the clock
 }
+
+// ScepterRec is one handled command for the doctor's "last commands" line (Recent).
+type ScepterRec struct {
+	Cmd  string `json:"cmd"`
+	Code int    `json:"code"`
+	TS   int64  `json:"ts"`
+}
+
+const scepterRecent = 16
 
 // NewScepterState builds the state for a pairing. journalPath may be empty (no journal). src may be nil (the
 // tunnel-listing commands answer empty until the binary wires a source).
@@ -612,7 +622,31 @@ func (ss *ScepterState) Handle(req ScepterRequest, caps uint32) ScepterResponse 
 		// of the request and safe to recompute on a retry, and journaling them would burn the 1 MB on noise
 		ss.journal.Record(req.Cmd, req.ID, ts, resp)
 	}
+	ss.mu.Lock() // every handled request (success or code) is visible to the doctor's last-commands trace
+	ss.recent = append(ss.recent, ScepterRec{Cmd: req.Cmd, Code: code, TS: ts})
+	if len(ss.recent) > scepterRecent {
+		ss.recent = ss.recent[1:]
+	}
+	ss.mu.Unlock()
 	return resp
+}
+
+// Recent returns the last handled commands, oldest first (doctor output only — never /stats, plan D2's
+// hidden-infrastructure rule).
+func (ss *ScepterState) Recent() []ScepterRec {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	out := make([]ScepterRec, len(ss.recent))
+	copy(out, ss.recent)
+	return out
+}
+
+// PairingInfo reports the pairing UUID and capability mask for the local /scepter doctor endpoint.
+func (ss *ScepterState) PairingInfo() (uuid string, caps uint32) {
+	if ss.pair == nil {
+		return "", 0
+	}
+	return ss.pair.UUIDString(), ss.pair.Caps
 }
 
 // args helpers: strictly-typed reads, wrong types are bad_request rather than reflected into anything.
@@ -750,13 +784,18 @@ func cmdHistory(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
 // ServeScepter runs the server side of one scepter stream: read a line, answer (possibly chunked), repeat until
 // the stream ends. The events scepter_up/scepter_down bracket the stream's lifetime for the event log.
 func ServeScepter(st *Stream, ss *ScepterState) {
+	serveScepterLoop(st, newScepterDecoder(st), ss)
+}
+
+// serveScepterLoop is the command loop with a caller-supplied decoder: ServeScepterLatch (latch.go) has already
+// consumed the proof line from the same buffer, so it must not build a fresh one.
+func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState) {
 	caps := uint32(0)
 	if ss.pair != nil {
 		caps = ss.pair.Caps
 	}
 	ss.AddEvent(EvScepterUp, nil)
 	defer ss.AddEvent(EvScepterDown, nil)
-	d := newScepterDecoder(st)
 	var wmu sync.Mutex
 	for {
 		req, code := d.next()
@@ -830,18 +869,27 @@ func DialScepter(sess *Session) (*ScepterClient, error) {
 		return nil, err
 	}
 	c := &ScepterClient{st: st, d: newScepterDecoder(st)}
+	if err := c.helloExchange(sess); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// helloExchange runs the pairing hello and version check shared by DialScepter and the latch dial
+// (latch.go). On failure the stream is reset and the error says why (mixed-version rule: old peer = no retry).
+func (c *ScepterClient) helloExchange(sess *Session) error {
 	hello, code := c.call("scepter.hello", map[string]any{"ver": Version, "caps": CapName(sess.cfg.Pairing.Caps)}, "hello", 0, 30*time.Second)
 	if code != CodeOK {
-		st.Reset()
-		return nil, fmt.Errorf("scepter: hello rejected (code %d)", code)
+		c.st.Reset()
+		return fmt.Errorf("scepter: hello rejected (code %d)", code)
 	}
 	ver, _ := hello["ver"].(string)
 	if ver == "" || olderVersion(ver, Version) {
-		st.Reset()
-		return nil, fmt.Errorf("scepter: pairing needs %s on the server, peer reported %q", Version, ver)
+		c.st.Reset()
+		return fmt.Errorf("scepter: pairing needs %s on the server, peer reported %q", Version, ver)
 	}
 	c.Hello = hello
-	return c, nil
+	return nil
 }
 
 // CloseWrite half-closes; the server's ServeScepter then returns.
@@ -869,6 +917,12 @@ func (c *ScepterClient) call(cmd string, args map[string]any, id string, ts int6
 		return nil, CodeInternal
 	}
 	c.wmu.Unlock()
+	return c.waitResp(id, timeout)
+}
+
+// waitResp reads until one complete response for id arrives (chunked responses reassembled), skipping
+// interleaved lines for other ids. Shared by call and the latch proof ack (latch.go).
+func (c *ScepterClient) waitResp(id string, timeout time.Duration) (map[string]any, int) {
 	deadline := time.Now().Add(timeout)
 	var chunks map[int]string
 	var nChunks int

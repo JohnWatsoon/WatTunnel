@@ -124,6 +124,18 @@ open automatically in the background on verified-free random high ports (`10000.
 auto-heal failover at any time without port conflicts or manual carrier toggles. Existing 3.3.3–3.3.7 narrowed or
 finalized tunnels reopen automatically on update.
 
+## Scepter: pair once, manage from Iran
+
+3.5.0 adds an optional pairing between the two servers (both ends need 3.5.0). `install.sh` prints a `watp1:`
+pairing line next to the first token; `wattun -pair 'watp1:…'` stores it on Kharej and `-pair-to` (or
+`pairing: true` in the config) attaches it on Iran. The tunnel then carries a hidden, encrypted management
+channel: Iran can read Kharej's live state, per-tunnel stats, logs and events over the tunnel itself — no SSH
+needed. If every tunnel of the pair dies, Kharej's **scepter latch** (`-latch-port`, opt-in) opens a shaped
+wss listener on that port so Iran can reach the management plane and revive the pair; a contact must prove the
+32-byte pairing key before anything is served, and the listener closes again on first contact. The channel
+never appears on any dashboard; only the doctor sees it. Details and the command table:
+[TECHNICAL.md](docs/TECHNICAL.md#scepter-the-pairing-and-management-plane-350).
+
 ## What it does
 
 WatTunnel connects an **Iran** server (where your users connect) to a **Kharej** server (where your service runs) and

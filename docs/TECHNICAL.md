@@ -31,12 +31,13 @@ Version: see `wat/version.go` (`wattun -version`).
 10. [Config file](#config-file)
 11. [Command-line flags](#command-line-flags)
 12. [Metrics](#metrics)
-13. [Handover, drain and rollback](#handover-drain-and-rollback)
-14. [Troubleshooting](#troubleshooting)
-15. [Security model](#security-model)
-16. [Build and test](#build-and-test)
-17. [Release history](#release-history)
-18. [License and attribution](#license-and-attribution)
+13. [Scepter: the pairing and management plane (3.5.0)](#scepter-the-pairing-and-management-plane-350)
+14. [Handover, drain and rollback](#handover-drain-and-rollback)
+15. [Troubleshooting](#troubleshooting)
+16. [Security model](#security-model)
+17. [Build and test](#build-and-test)
+18. [Release history](#release-history)
+19. [License and attribution](#license-and-attribution)
 
 ## Why it exists
 
@@ -2358,6 +2359,98 @@ Field result, 2.4.17 (test CDN tunnel, 50-connection load, 2026-10-13): Iran hel
 (2.4.16 climbed from 60 to 91) and both ends dropped to 0 when it stopped, staying there for the 8 minutes checked.
 Iran RSS stayed at 33-43 MB during the load (2.4.16: 40 to 159 MB) and fell back to 32 MB afterwards. Throughput
 and RTT were unchanged.
+
+## Scepter: the pairing and management plane (3.5.0)
+
+Scepter turns a tunnel token into a live pairing: Kharej and Iran **pair once**, and from then on Iran is the
+cockpit — reading state, stats, logs and events of its tunnels on Kharej over an encrypted management channel,
+with no SSH to Kharej. Phase A (3.5.0) is the read-only channel; write intents, remote carrier tests and update
+orchestration come in later phases. Everything is API-first: a future web panel is just another client.
+
+**Version matrix: both ends need 3.5.0** for any Scepter feature. A 3.4.x Kharej paired by a 3.5 Iran degrades
+to today's behavior: no scepter traffic beyond at most one rejected hello, the tunnel itself is untouched.
+
+### The pairing credential and the watp1: line
+
+A credential is `{pairing UUID, 32-byte key, capability, version}`. Capabilities are cumulative tiers:
+`tunnel` < `create` < `manage` < `full` (each tier carries the lower ones; phase A serves reads at `tunnel`
+except telemetry, which needs `manage`). The bootstrap line, printed by `install.sh` next to the first token
+and accepted by `-pair`, is verbatim:
+
+```
+watp1:<version>|<pairing UUID>|<base64 32-byte key>|<capability>
+```
+
+Example: `watp1:1|0a0b0c0d-0e0f-1011-1213-141516171819|AAAA...=|manage`. Version is 1. A classic `wat1:` token
+may also carry pairing as optional field 10 (`pair` or `pair=<capability>`); old parsers ignore it per the
+token-format rule.
+
+Setup:
+
+- Kharej: `wattun -pair 'watp1:...'` stores `/etc/wattun/.pairing` (mode 0600, atomic write) and exits; every
+  later start serves the channel. `-latch-port N` additionally arms the fallback latch (below).
+- Iran: `wattun -pair-to 'watp1:...'` (or config key `pairing: true` with the stored file, or the key's value
+  being a full `watp1:` line) attaches the credential to the tunnel; the cockpit channel opens with it.
+
+### Wire format: JSON Lines on the reserved stream
+
+The channel rides IN BAND: stream id 0 of any live tunnel session (`sid 0` is reserved; engine streams start at
+1). No new frame type exists and everything is inside the session's ChaCha20-Poly1305 AEAD — an old or
+unpaired peer simply never sees sid 0. One JSON object per line, capped at 64 KiB per command:
+
+```
+request  {"id":"…","v":1,"cmd":"…","args":{…},"ts":1732267200,"ttl":600}
+response {"id":"…","code":0,"params":{…},"seq":123}
+```
+
+Codes are machine integers (`0` ok, `1` bad_request, `2` denied, `3` stale, `4` rate_limited, `5` unknown_cmd,
+`6` not_found, `7` internal, `8` too_large, `9` unpaired), never prose. Large payloads (log fetches) are
+chunked: consecutive responses with the same id and `{"chunk":i,"of":n,"data":"…"}`. Every response carries
+`seq`, the server's `state_seq` at answer time.
+
+### The state document and events
+
+Kharej owns state. `state.get` returns one versioned document: engine version, pairing UUID + capability,
+`tunnels` (`{name, carrier, state, health, metrics}`), `event_cursor`, `uptime_s`, `state_seq`. The `state_seq`
+counter increments on every change; clients diff by seq, never by wall clock. Events are numbered with the same
+seq and replayable (`events.since {seq}`, last 512): `tunnel_up`, `tunnel_down`, `tunnel_deleted`,
+`carrier_switched`, `heal_action`, `sla_breach`, `update_available`, `pair_rotated`, `pair_revoked`,
+`scepter_up`, `scepter_down`. Every intent is journaled (append-only, atomic writes, rotated at 1 MB) with its
+outcome; a retry of the same command id returns the recorded outcome (at-most-once application). Intents carry
+`ttl_s` (default 600); expired ones answer `code=stale`.
+
+### Phase A commands
+
+| Command | Args | Capability | Notes |
+|---|---|---|---|
+| `scepter.hello` | — | tunnel | versions, caps, state_seq (the pairing hello) |
+| `scepter.ping` | — | tunnel | keepalive |
+| `state.get` | — | tunnel | the state document |
+| `tunnels.list` | — | tunnel | the tunnels array |
+| `tunnel.stats` | `{name}` | manage | live telemetry |
+| `tunnel.logs` | `{name, tail}` | manage | chunked; tail default 100, cap 1000 |
+| `events.since` | `{seq}` | manage | event replay, oldest first |
+| `history` | `{name}` | manage | the `/stats/history` ring |
+
+Capability checks run server-side on every command. Rate limit: token bucket per pairing (20/s, burst 40).
+
+### The scepter latch (fallback listener)
+
+When every unit of a paired group is inactive — the in-band channel is gone — Kharej (with `-latch-port N` set
+next to a stored pairing) arms a shaped **wss** pool listener on that port after 30 s of quiet. The URL path and
+the session PSK are derived from the pairing key (`sha256` domain separations; a prober that finds the port
+gets the nginx pages). Because this port is the one Scepter surface a stranger can reach, the contact must
+prove knowledge of the 32-byte pairing key BEFORE any command is served: the first line on the latch's
+sid-0 stream is `{"id":"…","v":1,"cmd":"latch.proof","args":{"ts":…,"proof":"<hex HMAC-SHA256(latchKey,
+wat-scepter-latch-proof:<ts>)>"}}` (±10 min skew); a wrong or stale proof answers one denied line, resets the
+stream and closes the session. One session at a time: the listener stands down on the first authenticated
+contact (the contact's connections stay alive) and re-arms only after that session ends with the unit still
+inactive; it also stands down the moment a unit is alive again. On the Iran side, `wattun -latch-dial
+host:port` (with the pairing attached) is the contact primitive: it proves, runs the hello and one ping.
+
+Hidden infrastructure: the latch listener and the scepter session appear in NO user-facing listing or dashboard
+and never in `/stats`. The only visible trace is the doctor's, served by the loopback `/scepter` endpoint on the
+metrics address: pairing UUID, capability, latch state (armed/port/contacts/rejected) and the last 16 commands.
 
 ## Pacing on TCP-based and CDN carriers
 

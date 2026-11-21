@@ -1435,6 +1435,7 @@ type TCPPoolServer struct {
 	perIP    map[string]int         // accepted conns per remote IP (anti-DoS cap; owned by mu)
 	merge    atomic.Bool            // reverse mode: every conn joins one pool whatever its hello id says
 	keep     atomic.Bool            // never close a connection for delivering below its share (SetKeepSlow)
+	lnClosed atomic.Bool            // StopListen (3.5.0): listener closed on purpose; acceptLoop exits, conns live
 	obfKey   atomic.Pointer[[]byte] // SetObfs: PSK that lets the listener recognise hello v2 (nil: only the plain pool id)
 	noDirect bool                   // HTTP carrier: keep 4 KB MTU unless wrapped in ReverseListenIO (3.3.8)
 
@@ -1593,6 +1594,14 @@ func (s *TCPPoolServer) healthLoop() {
 // Addr is the bound address (useful with port 0).
 func (s *TCPPoolServer) Addr() net.Addr { return s.ln.Addr() }
 
+// StopListen (3.5.0, scepter latch) closes the listener but leaves accepted connections working: the latch
+// stands down after its first authenticated contact, and Close() would cut that contact's session with it.
+// acceptLoop exits once the closed listener errors; Close still fully reaps everything.
+func (s *TCPPoolServer) StopListen() error {
+	s.lnClosed.Store(true)
+	return s.ln.Close()
+}
+
 func (s *TCPPoolServer) acceptLoop() {
 	defer s.wg.Done()
 	for {
@@ -1602,6 +1611,9 @@ func (s *TCPPoolServer) acceptLoop() {
 			case <-s.done:
 				return
 			default:
+			}
+			if s.lnClosed.Load() {
+				return // StopListen: no new pools; the existing ones keep serving
 			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue

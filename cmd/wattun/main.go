@@ -187,6 +187,8 @@ func main() {
 	pair := flag.String("pair", "", "accept a watp1: pairing line (version|UUID|key|capability, printed by install.sh next to the first token), store it as this server's Scepter pairing and exit; the file is .pairing in the config dir (/etc/wattun/.pairing on Linux), mode 0600; the management channel serves after the next restart (both ends need 3.5.0)")
 	pairTo := flag.String("pair-to", "", "client: attach this watp1: pairing line to the tunnel: the reserved management stream (sid 0) is opened toward the paired server and the cockpit channel runs alongside normal forwarding; equivalent config key: `pairing: true` with the stored pairing file (3.5.0)")
 	pairingKey := flag.String("pairing", "", "config-file key: `pairing: true` opens the management stream with the pairing stored by -pair; the value may also be a full watp1: line (3.5.0)")
+	latchPort := flag.Int("latch-port", 0, "server, Scepter (3.5.0): port of the scepter latch — a shaped wss listener (key-derived path) that arms while every unit of the pairing is inactive, so the cockpit can revive the pair; the first contact must prove the pairing key and the listener stands down on it. 0 = off (the default; the latch also never exists without a stored pairing)")
+	latchDial := flag.String("latch-dial", "", "client, standalone: contact the scepter latch on Kharej at host:port with the pairing from -pair-to (or the stored pairing file), prove the key, run the pairing hello and one ping, then exit — the cockpit revival primitive and the drill tool (3.5.0)")
 	var hdrs []string
 	flag.Func("header", "client, ws|wss|h2|h2c|grpc carrier: extra request header 'Name: value' (repeatable)", func(v string) error {
 		if !strings.Contains(v, ":") {
@@ -301,6 +303,22 @@ func main() {
 			log.Fatalf("-pair: %v", werr)
 		}
 		log.Printf("pairing %s stored in %s (capability %s); the management channel serves after the next restart", p.UUIDString(), ppath, wat.CapName(p.Caps))
+		return
+	}
+	// -latch-dial (3.5.0): standalone cockpit contact, like -pair a setup/drill action, not a run mode.
+	if *latchDial != "" {
+		var pairing *wat.PairingConfig
+		var perr error
+		if *pairTo != "" {
+			if pairing, perr = wat.ParsePairingLine(*pairTo); perr != nil {
+				log.Fatalf("-pair-to: %v", perr)
+			}
+		} else if pairing, perr = readPairingFile(pairingFilePath(*cfgPath)); perr != nil {
+			log.Fatalf("-latch-dial: no pairing (store one with -pair-to first): %v", perr)
+		}
+		if err := contactLatch(*latchDial, pairing); err != nil {
+			log.Fatalf("-latch-dial %s: %v", *latchDial, err)
+		}
 		return
 	}
 
@@ -1017,6 +1035,7 @@ func main() {
 	}
 	var tun *tunnel
 	var srv *wat.Server
+	var scepter *wat.ScepterState // the Scepter management state, armed below with a stored pairing (3.5.0)
 	if server {
 		if *nSess != 1 {
 			log.Printf("-sessions is a client option, ignored on the server")
@@ -1172,6 +1191,10 @@ func main() {
 			mux.HandleFunc("/debug/pprof/profile", guard(pprof.Profile))
 			// /stats/history (P4, 2026-11-21): 5 s samples of the same totals /stats computes, 60-entry ring
 			mux.HandleFunc("/stats/history", guard(hist.serveHTTP))
+			// /scepter (3.5.0): the doctor's ONLY view of the management plane (plan D2/A.3) — pairing UUID,
+			// caps, latch state, last commands. Loopback like /stats (guard) and never forwarded to (isMetricsPort),
+			// and deliberately NOT part of /stats so no dashboard or listing picks it up.
+			mux.HandleFunc("/scepter", guard(scepterServeHTTP()))
 			mux.HandleFunc("/ports", guard(func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(portReg.snapshot(side))
 			}))
@@ -1358,7 +1381,6 @@ func main() {
 		// Scepter server side (3.5.0): arm the management state for the stored pairing. The unit source exposes
 		// this process's own unit (the systemd template runs one wattun per tunnel); the journal lives next to
 		// the pairing file. With no pairing this stays nil and sid 0 streams are reset — today's behavior.
-		var scepter *wat.ScepterState
 		if cfg.Pairing != nil {
 			unitName := "server"
 			if *cfgPath != "" {
@@ -1372,6 +1394,13 @@ func main() {
 				log.Fatalf("scepter: %v", serr)
 			}
 			log.Printf("scepter: management channel armed (pairing %s, capability %s, journal %s)", cfg.Pairing.UUIDString(), wat.CapName(cfg.Pairing.Caps), jp)
+			scepterNow.Store(scepter) // the /scepter handler reads this (it registered before arming)
+			// The scepter latch (3.5.0, phase A item 4): opt-in with -latch-port next to the stored pairing.
+			if *latchPort > 0 {
+				startLatch(&latchMonitor{pair: cfg.Pairing, scepter: scepter, alive: alive, port: *latchPort,
+					lo: *allowLo, hi: *allowHi, al: al, base: cfg, logf: log.Printf})
+				log.Printf("scepter latch: watching port %d (arms %s after every unit of the pairing goes inactive)", *latchPort, latchArmAfter)
+			}
 		}
 		go func() {
 			for s := range srv.New {
@@ -1773,6 +1802,13 @@ func dialLocal(port int) (net.Conn, error) {
 }
 
 func serve(sess *wat.Session, lo, hi int, al *allow, scepter *wat.ScepterState) {
+	serveLatch(sess, lo, hi, al, scepter, nil, nil)
+}
+
+// serveLatch is serve with the latch proof (3.5.0): with a latchKey, a sid-0 stream must pass
+// wat.ServeScepterLatch's keyed proof before any command is served, and a refused contact closes the whole
+// session. A nil latchKey is the normal in-band channel (proof unnecessary: the session is authenticated).
+func serveLatch(sess *wat.Session, lo, hi int, al *allow, scepter *wat.ScepterState, latchKey []byte, mon *latchMonitor) {
 	for {
 		st, err := sess.Accept()
 		if err != nil {
@@ -1781,9 +1817,18 @@ func serve(sess *wat.Session, lo, hi int, al *allow, scepter *wat.ScepterState) 
 		if st.ID() == 0 { // the reserved scepter stream (3.5.0): route before the 2-byte target-port header.
 			// An old client never opens sid 0; a paired 3.5 client does. No pairing on this server (should not
 			// happen — the client only opens when it holds the credential) resets the stream like any unknown.
-			if scepter != nil {
+			switch {
+			case latchKey != nil:
+				go func() {
+					if wat.ServeScepterLatch(st, scepter, latchKey) {
+						mon.contacted()
+					} else {
+						mon.refused(sess) // no key proof: no command is ever served on this session
+					}
+				}()
+			case scepter != nil:
 				go wat.ServeScepter(st, scepter)
-			} else {
+			default:
 				st.Reset()
 			}
 			continue
