@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112107   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112108   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -127,7 +127,7 @@ LIB=${WAT_MANAGER_LIB:-0}
 # (ask, ask_ok, confirm, key_read, pick_carrier, port_editor, at_choose...) answers with its preset or default.
 # On with --yes, or NONINTERACTIVE=1 in the environment, or when stdin is not a tty and a --flag is given.
 NONINTERACTIVE=${NONINTERACTIVE:-0}
-case "${1:-}" in kharej|iran|cdn-tune|auto-test|delete|uninstall|matrix|auto-retest|bond-retest|auto-prune)
+case "${1:-}" in kharej|iran|cdn-tune|auto-test|delete|uninstall|matrix|auto-retest|bond-retest|auto-prune|scepter)
   for _a in "$@"; do
     case "$_a" in --yes) NONINTERACTIVE=1 ;; --*) [ -t 0 ] || NONINTERACTIVE=1 ;; esac
   done ;;
@@ -922,19 +922,21 @@ set_port_limit() { # name port rate quota [period: day|week|month, 3.3.6; writte
 # Field 9 (auto plan) is written only for carrier "auto" tokens; field 8 stays empty there. Format:
 #   d=udp:4443,tcp:4443,...;r=tcp:24431,...   d = Kharej listen ports (direct), r = ports Iran listens on during the
 #   reverse test. Only ; , : = are used, never '|'. 7/8-field tokens still parse.
+# Field 10 (3.5.0, Scepter plan D5) is the pairing capability tier (tunnel|create|manage|full) of a token-bootstrap
+# pairing: written only when set, exactly like fields 8/9, so an older parser stops at field 9 and ignores it.
 make_token() {
   local f; f=$(printf '%s|%s|%s|%s|%s|%s|%s' "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}")
-  if [ -n "${9:-}" ]; then f="$f|${8:-}|$9"; elif [ "${8:-}" = 1 ]; then f="$f|1"; fi
+  if [ -n "${10:-}" ]; then f="$f|${8:-}|${9:-}|${10}"; elif [ -n "${9:-}" ]; then f="$f|${8:-}|$9"; elif [ "${8:-}" = 1 ]; then f="$f|1"; fi
   printf 'wat1:%s' "$(printf '%s' "$f" | base64 -w0)"
 }
-T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''
+T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''; T_PAIR=''
 T_LEG_C=(); T_LEG_P=() # a bond token's per-leg endpoints (parallel to the carrier list; see token_bond_legs)
-read_token() { # token -> T_CARRIER T_PEER T_KEY T_PATH T_SNI T_ICMP T_PORTS T_REV T_AUTO
+read_token() { # token -> T_CARRIER T_PEER T_KEY T_PATH T_SNI T_ICMP T_PORTS T_REV T_AUTO T_PAIR
   local raw
-  T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''
+  T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''; T_PAIR=''
   [[ "$1" == wat1:* ]] || return 1
   raw=$(printf '%s' "${1#wat1:}" | base64 -d 2>/dev/null) || return 1
-  IFS='|' read -r T_CARRIER T_PEER T_KEY T_PATH T_SNI T_ICMP T_PORTS T_REV T_AUTO <<<"$raw"
+  IFS='|' read -r T_CARRIER T_PEER T_KEY T_PATH T_SNI T_ICMP T_PORTS T_REV T_AUTO T_PAIR <<<"$raw"
   [ -n "$T_CARRIER" ] && [ -n "$T_PEER" ] && [ -n "$T_KEY" ]
 }
 is_reverse() { [ "$(cfg "$1" reverse)" = true ]; }
@@ -1011,7 +1013,7 @@ refresh_token() { # name [fortress] : keep NAME.token in step with NAME.yml — 
   fi
   [ "$changed" = 0 ] && return 0
   tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
-  ( umask 077; make_token "$cr" "$bp" "$T_KEY" "$T_PATH" "$T_SNI" "$T_ICMP" "$allow" "$T_REV" "$T_AUTO" >"$tmp" )
+  ( umask 077; make_token "$cr" "$bp" "$T_KEY" "$T_PATH" "$T_SNI" "$T_ICMP" "$allow" "$T_REV" "$T_AUTO" "$T_PAIR" >"$tmp" )
   mv -f "$tmp" "$f"
 }
 # M1 (2026-11-18): a bonded Kharej config listens on one port per leg (listen-<carrier>:), so its token carries
@@ -1047,6 +1049,185 @@ token_bond_legs() { # T_CARRIER (a bond) + T_PEER -> T_LEG_C/T_LEG_P arrays; T_P
   done
   T_PEER=${T_LEG_P[0]}
   return 0
+}
+
+# ======================================================================================
+#  Scepter pairing (3.5.0, Phase A; plan D3/D4/D5/D6): the pairing credential is
+#  {pairing UUID, 32-byte key, capability tier, version}. Kharej owns the store
+#  $CONF/.pairing (atomic tmp+rename, 0600); Iran consumes a watp1: line (UNWRAPPED,
+#  plan D5 literal text, matching the engine parser and the Go manager):
+#     watp1:1|<36-char pairing UUID>|<base64 of exactly 32 bytes>|<capability>
+#  The classic token's optional field 10 carries the same capability for a
+#  token-bootstrap pairing (see make_token). Capability tiers (D4):
+#     tunnel < create < manage < full
+#  Hidden infrastructure: the store and the audit log are dotfiles, never *.yml
+#  tunnels, so tunnels()/listed_tunnels()/dashboards can never list them (the
+#  scepter latch follows the same rule on the engine side). Both ends need 3.5.0
+#  for every Scepter feature; the manager here is Kharej's LOCAL console only
+#  (Phase B.3 parity decision: cockpit features live in the Go manager/panel).
+# ======================================================================================
+PAIR_CAPS='tunnel create manage full'
+PAIR_STORE=$CONF/.pairing
+PAIR_AUDIT=$CONF/.pairing.audit
+pair_caps_ok() { case " $PAIR_CAPS " in *" ${1:-} "*) return 0 ;; esac; return 1; }
+v_pair_caps() { pair_caps_ok "$1" && return 0; err "Use a capability tier: $PAIR_CAPS."; return 1; }
+v_pair_uuid() {
+  [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] && return 0
+  err "Enter the pairing UUID exactly as printed (36 characters, dashes included)."; return 1
+}
+new_pair_uuid() {
+  local u
+  u=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null) || u=''
+  if [ -z "$u" ]; then # no kernel uuidgen on this host: fold 16 random bytes into the same shape
+    u=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' | sed 's/\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)/\1-\2-\3-\4-\5/')
+  fi
+  printf '%s\n' "${u,,}"
+}
+new_pair_key() { head -c 32 /dev/urandom | base64 -w0; } # the D5 credential: base64 of exactly 32 bytes
+P_VERSION=''; P_UUID=''; P_KEY=''; P_CAPS=''
+# The watp1: line is UNWRAPPED (plan D5 literal text; matches the engine parser committed in d354660 and the Go
+# manager): watp1:<version>|<pairing UUID>|<base64 32-byte key>|<capability> — no outer base64 of the payload.
+make_pairing() { # version uuid key caps -> watp1: line (pure; field order is the wire format, D5)
+  printf 'watp1:%s|%s|%s|%s' "${1:-}" "${2:-}" "${3:-}" "${4:-}"
+}
+read_pairing() { # line -> P_VERSION P_UUID P_KEY P_CAPS ; rc 1 + its own error on a bad line
+  P_VERSION=''; P_UUID=''; P_KEY=''; P_CAPS=''
+  local klen
+  [[ "$1" == watp1:* ]] || { err "A pairing line starts with watp1: (a tunnel token starts with wat1:)."; return 1; }
+  IFS='|' read -r P_VERSION P_UUID P_KEY P_CAPS <<<"${1#watp1:}"
+  [ "$P_VERSION" = 1 ] || { err "Pairing format version '${P_VERSION:-?}' is not known here (this manager speaks version 1)."; return 1; }
+  v_pair_uuid "$P_UUID" || return 1
+  if ! [[ "$P_KEY" =~ ^[A-Za-z0-9+/=]+$ ]] \
+     || { klen=$(printf '%s' "$P_KEY" | base64 -d 2>/dev/null | wc -c | tr -d ' '); [ "$klen" != 32 ]; }; then
+    err "The pairing key must be base64 decoding to exactly 32 bytes."; return 1
+  fi
+  v_pair_caps "$P_CAPS" || return 1
+}
+v_pairing() { read_pairing "$1"; }
+pairing_get() { local v; v=$(sed -n "s/^$1=//p" "$PAIR_STORE" 2>/dev/null | tail -1); printf '%s' "$v"; }
+pairing_active() { [ -f "$PAIR_STORE" ]; }
+pairing_store_write() { # uuid key caps [oldkey oldkey-expires-epoch] : the whole store, atomically (tmp+rename, 0600)
+  local tmp old created
+  mkdir -p "$CONF"
+  created=$(pairing_get created); [ -n "$created" ] || created=$(date +%s) # a rotation keeps the original creation time
+  old=$(umask); umask 077
+  tmp=$(mktemp "$CONF/.tmp.XXXXXX") || { umask "$old"; return 1; }
+  {
+    echo "# WatTunnel Scepter pairing store. Written by wattun-manager; keep it 0600. Iran consumes the watp1: line."
+    echo "version=1"
+    echo "uuid=$1"
+    echo "key=$2"
+    echo "caps=$3"
+    echo "created=$created"
+    if [ -n "${4:-}" ]; then echo "oldkey=$4"; echo "oldkey_expires=$5"; fi # the 24 h rotation window (plan D-rotation)
+  } >"$tmp" || { rm -f "$tmp"; umask "$old"; return 1; }
+  chmod 600 "$tmp"; mv -f "$tmp" "$PAIR_STORE"; umask "$old"
+}
+pairing_audit() { # event detail : append one line (content is append-only; the write is tmp+rename)
+  local f="$PAIR_AUDIT" tmp
+  mkdir -p "$CONF"
+  tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
+  { [ -f "$f" ] && cat "$f"; printf '%s %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$2"; } >"$tmp" \
+    && chmod 600 "$tmp" && mv -f "$tmp" "$f" || rm -f "$tmp"
+  return 0
+}
+pairing_audit_tail() { # [n=20]
+  [ -f "$PAIR_AUDIT" ] || { hint "No pairing audit entries yet."; return 0; }
+  tail -n "${1:-20}" "$PAIR_AUDIT"
+}
+pairing_status() {
+  local caps created exp left
+  if ! pairing_active; then
+    say "  $(kv pairing "${GRY}off${RST} ${GRY}(no credential; this server cannot be paired)${RST}")"
+    return 0
+  fi
+  caps=$(pairing_get caps)
+  say "  $(kv pairing "${GRN}on${RST}")"
+  say "  $(kv uuid "$(pairing_get uuid)")"
+  say "  $(kv caps "$caps")"
+  created=$(pairing_get created)
+  [ -n "$created" ] && say "  $(kv created "$(date -u -d "@$created" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "$created")")"
+  exp=$(pairing_get oldkey_expires)
+  if [ -n "$(pairing_get oldkey)" ] && [ -n "$exp" ]; then
+    left=$(( exp - $(date +%s) ))
+    if [ "$left" -gt 0 ]; then say "  $(kv rotation "${YEL}old key accepted ${left}s more${RST}")"
+    else say "  $(kv rotation "${GRY}old key expired${RST}")"; fi
+  fi
+  return 0
+}
+scepter_pair() { # generate (or adopt a pasted watp1: line) and store the pairing; prints the line for Iran
+  local line uuid key caps
+  if pairing_active; then
+    confirm "A pairing already exists ($(pairing_get uuid)). Replace it? Iran must be given the new line." n || return 0
+  fi
+  ask "Paste a watp1: line (Enter = generate a fresh pairing here)" ""
+  line=$REPLY_V
+  if [ -n "$line" ]; then
+    read_pairing "$line" || return 1
+    uuid=$P_UUID; key=$P_KEY; caps=$P_CAPS
+  else
+    uuid=$(new_pair_uuid); key=$(new_pair_key); caps=full
+    ask_ok "Capability tier ($PAIR_CAPS)" "$caps" v_pair_caps || return 1; caps=$REPLY_V
+  fi
+  pairing_store_write "$uuid" "$key" "$caps" || { err "Could not write $PAIR_STORE."; return 1; }
+  pairing_audit pair_created "$uuid caps=$caps"
+  ok "Pairing stored ($uuid, caps $caps)."
+  echo
+  printf '  %s%s%s\n\n' "$BOLD$YEL" "$(make_pairing 1 "$uuid" "$key" "$caps")" "$RST"
+  hint "Give this watp1: line to Iran (pairs the cockpit; wattun 3.5.0 on both ends)."
+  return 0
+}
+scepter_rotate() { # [window_secs=86400] : new key; the old key stays valid for the window (default 24 h)
+  local win=${1:-86400} uuid caps key nk
+  case "$win" in ''|*[!0-9]*) err "The rotation window is a number of seconds."; return 1 ;; esac
+  pairing_active || { err "No pairing to rotate (pair first)."; return 1; }
+  uuid=$(pairing_get uuid); caps=$(pairing_get caps); key=$(pairing_get key)
+  nk=$(new_pair_key)
+  pairing_store_write "$uuid" "$nk" "$caps" "$key" "$(( $(date +%s) + win ))" || { err "Could not write $PAIR_STORE."; return 1; }
+  pairing_audit pair_rotated "$uuid window=${win}s"
+  ok "Pairing key rotated; the old key is accepted for $(( win / 3600 )) h more."
+  echo
+  printf '  %s%s%s\n\n' "$BOLD$YEL" "$(make_pairing 1 "$uuid" "$nk" "$caps")" "$RST"
+  hint "Give this new watp1: line to Iran before the window closes."
+  return 0
+}
+scepter_revoke() { # revoke = unpair: drop the credential locally; tunnels keep running (plan D3)
+  pairing_active || { err "No pairing to revoke."; return 1; }
+  if [ "$NONINTERACTIVE" = 1 ]; then
+    [ "${NI_YES:-0}" = 1 ] || { err "scepter revoke without a terminal needs --yes"; return 1; }
+  else
+    confirm "Revoke the pairing ($(pairing_get uuid))? The cockpit channel dies on its next tick; tunnels keep running." n || return 0
+  fi
+  pairing_audit pair_revoked "$(pairing_get uuid)"
+  rm -f "$PAIR_STORE"
+  ok "Pairing revoked. The audit log is kept in $PAIR_AUDIT."
+  return 0
+}
+scepter_menu() { # Kharej's local Scepter console: status, pair, rotate, revoke, audit tail
+  while :; do
+    page "Scepter" "Kharej pairing console"
+    pairing_status
+    echo
+    menu_line p pair r rotate x 'revoke (unpair)' a 'audit tail' 0 back
+    key_read
+    case "$KEY" in
+      p|P) echo; scepter_pair; pause ;;
+      r|R) echo; scepter_rotate; pause ;;
+      x|X) echo; scepter_revoke; pause ;;
+      a|A) echo; pairing_audit_tail 20; pause ;;
+      b|0|q|enter|esc) return 0 ;;
+    esac
+  done
+}
+scepter_cmd() { # status|pair|rotate [secs]|revoke|audit [n]
+  case "${1:-status}" in
+    status) pairing_status ;;
+    pair) scepter_pair ;;
+    rotate) scepter_rotate "${2:-86400}" ;;
+    revoke|unpair) scepter_revoke ;;
+    audit) pairing_audit_tail "${2:-20}" ;;
+    *) err "scepter: use status, pair, rotate, revoke or audit."; return 1 ;;
+  esac
 }
 
 # ---- cross-tunnel conflict checks ----
@@ -1202,7 +1383,10 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   probe-guard: demand a key-derived token on HTTP-family tunnel requests (3.3.8; both ends, opt-in)
 #   mtu-adapt: sender-side payload clamp for size-selective loss (3.3.8; single-ended, no wire signal, opt-in)
 #   max-sessions/max-conns: denial-of-service caps (server sessions, public connections); the defaults fit (3.3.5)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop'
+#   pairing: Scepter pairing attach, Iran side (3.5.0, both ends; the watp1: line or token field 10 carries the credential)
+#   pair/pair-to: the one-shot bootstrap forms of the same (engine flags; the manager writes .pairing itself)
+#   latch-port/latch-dial: the scepter latch listener and its one-shot contact/drill form (3.5.0, Kharej side; opt-in with a stored pairing)
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'
@@ -3395,7 +3579,7 @@ wizard_iran() {
   [ "$NONINTERACTIVE" = 1 ] || conf_set side iran
   name=$(suggest_name iran); [ -n "$NI_NAME" ] && name=$NI_NAME
   mbps=$NI_MBPS; [ -n "$mbps" ] && advdef=y
-  T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''
+  T_CARRIER=''; T_PEER=''; T_KEY=''; T_PATH=''; T_SNI=''; T_ICMP=''; T_PORTS=''; T_REV=''; T_AUTO=''; T_PAIR=''
   T_LEG_C=(); T_LEG_P=()
   AUTO_TOKEN=''; AT_EXTRA=''; CT_DESC=''
   echo
@@ -5624,7 +5808,7 @@ auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, 
       set_value "$n" listen "\":$sp\""; fw_open "$sp/udp"
     fi
     if [ "$(role "$n")" = Iran ] && [ -n "${T_KEY:-}" ]; then # a reusable token describing the chosen shape
-      ( umask 077; make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "${T_PATH:-}" "${T_SNI:-}" "${T_ICMP:-}" "${T_PORTS:-}" "" >"$CONF/$n.token" )
+      ( umask 077; make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "${T_PATH:-}" "${T_SNI:-}" "${T_ICMP:-}" "${T_PORTS:-}" "" "${T_PAIR:-}" >"$CONF/$n.token" )
     fi
   fi
   if [ -n "$T_SNI" ]; then set_value "$n" sni "$T_SNI"; set_value "$n" host "$T_SNI"; fi
@@ -7167,7 +7351,7 @@ change_key() {
     [ -f "$CONF/$n.token" ] || rebuild_kharej_token "$n" || true
     k=$(new_key); ( umask 077; printf '%s\n' "$k" >"$CONF/$n.key" )
     if [ -f "$CONF/$n.token" ] && read_token "$(cat "$CONF/$n.token")"; then
-      make_token "$T_CARRIER" "$T_PEER" "$k" "$T_PATH" "$T_SNI" "$T_ICMP" "$T_PORTS" "$T_REV" "$T_AUTO" >"$CONF/$n.token"
+      make_token "$T_CARRIER" "$T_PEER" "$k" "$T_PATH" "$T_SNI" "$T_ICMP" "$T_PORTS" "$T_REV" "$T_AUTO" "$T_PAIR" >"$CONF/$n.token"
     fi
     step "Restarting ${WAT_PREFIX}@$n" systemctl restart "${WAT_PREFIX}@$n"
     [ -f "$CONF/$n-r.yml" ] && is_auto_kharej "$n" && step "Restarting ${WAT_PREFIX}@$n-r" systemctl restart "${WAT_PREFIX}@$n-r"
@@ -7383,7 +7567,7 @@ set_direction() { # name
   fi
   if [ "$r" = Kharej ] && [ -f "$CONF/$n.token" ] && read_token "$(cat "$CONF/$n.token")"; then
     T_REV=''; is_reverse "$n" && T_REV=1
-    make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "$T_PATH" "$T_SNI" "$T_ICMP" "$T_PORTS" "$T_REV" "$T_AUTO" >"$CONF/$n.token"
+    make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "$T_PATH" "$T_SNI" "$T_ICMP" "$T_PORTS" "$T_REV" "$T_AUTO" "$T_PAIR" >"$CONF/$n.token"
   fi
   warn "Change it on the $([ "$r" = Kharej ] && echo Iran || echo Kharej) server too (Advanced, d), or the link stays down."
   return 0
@@ -9982,7 +10166,7 @@ uninstall_all() {
   return 0
 }
 settings_menu() {
-  local heal_on anim_on up_px sd pad
+  local heal_on anim_on up_px sd pad psc
   while :; do
     systemctl is-enabled -q "$HEAL_UNIT.timer" 2>/dev/null && heal_on="${GRN}on${RST} " || heal_on="${GRY}off${RST}"
     [ "$(conf_get anim 1)" = 1 ] && anim_on="${GRN}on${RST} " || anim_on="${GRY}off${RST}"
@@ -9994,6 +10178,10 @@ settings_menu() {
     printf '  %s %-15s %sBBR, fq, 64 MiB buffers%s\n' "$(key_label b)" 'Kernel boost' "$GRY" "$RST"
     printf '  %s %-15s %s%s%s\n' "$(key_label p)" 'Update proxy' "${up_px:+$BOLD}" "${up_px:-${GRY}direct${RST}}" "${up_px:+$RST}"
     printf '  %s %-15s %s%s%s\n' "$(key_label w)" 'Server role' "$BOLD" "${sd:-not set}" "$RST"
+    if [ "$sd" = kharej ] || pairing_active; then # Scepter console: Kharej's local pairing panel (3.5.0)
+      if pairing_active; then psc="${GRN}paired${RST} ${GRY}($(pairing_get caps))${RST}"; else psc="${GRY}off${RST}"; fi
+      printf '  %s %-15s %s\n' "$(key_label c)" 'Scepter' "$psc"
+    fi
     echo
     menu_line r 'restart all' v 'roll back'
     hr
@@ -10008,6 +10196,8 @@ settings_menu() {
       r|R) echo; if confirm "Restart all tunnels? Open connections drop." n; then restart_all; sleep 1; fi ;;
       a|A) if [ "$(conf_get anim 1)" = 1 ]; then conf_set anim 0; ANIM=0; else conf_set anim 1; [ "$IS_TTY" = 1 ] && [ "${WAT_NO_ANIM:-0}" != 1 ] && ANIM=1; fi ;;
       b|B) boost_menu ;;
+      c|C) { [ "$sd" = kharej ] || pairing_active; } || { warn "Scepter pairing is the Kharej-side console."; sleep 1; continue; }
+           echo; scepter_menu ;;
       p|P)
         echo
         hint "https://ghproxy.net/ · socks5h://127.0.0.1:1080 · '-' to clear"
@@ -10159,6 +10349,11 @@ Usage: $SELF [command]
   unmute NAME PATH      unmute it again; both talk to the running tunnel's metrics server (no root)
   logs NAME             follow the log
   token NAME            print the Kharej token again
+  scepter [status|pair|rotate|revoke|audit]
+                        Kharej's local Scepter console: the pairing credential Iran's cockpit
+                        uses (watp1: line, key rotation with a 24 h overlap, revocation, audit
+                        tail). Both ends need wattun 3.5.0. Unattended: pair/rotate run as-is,
+                        revoke needs --yes.
   preset NAME [PRESET]  apply built-in anti-censorship preset (rst-fast, mci, irancell, blackout, conservative)
   test-bypass NAME      automated connectivity & filter bypass test for anti-censorship profile
   profile save|list|show|del|apply   resilience profiles: save one tunnel's fake-sni/pool-rotate combination
@@ -10246,7 +10441,7 @@ EOF
 main() {
   [ -x "$BIN" ] && VER=$("$BIN" -version 2>/dev/null | awk '{print $2; exit}')
   case "${1:-}" in help|-h|--help) usage; return 0 ;; bundle) shift; bundle_cmd "$@"; return $? ;; esac
-  case "${1:-}" in kharej|iran|cdn-tune|auto-test|delete|uninstall|preset|blackout|test-bypass|test-anticensor|matrix|arm-blackout|audit-blackout) ni_parse "${@:2}" || exit 1 ;; esac
+  case "${1:-}" in kharej|iran|cdn-tune|auto-test|delete|uninstall|preset|blackout|test-bypass|test-anticensor|matrix|arm-blackout|audit-blackout|scepter) ni_parse "${@:2}" || exit 1 ;; esac
   case "${1:-}" in auto-retest) [ "${2:-}" = --yes ] && NONINTERACTIVE=1 ;; esac
   if [ "$NONINTERACTIVE" = 1 ]; then
     case "${1:-}" in ''|new|monitor|ports|logs) err "'${1:-(no command)}' needs a terminal; unattended use: kharej, iran, cdn-tune, auto-test, delete, uninstall, status, test, token, matrix (see: help)"; exit 1 ;; esac
@@ -10282,6 +10477,7 @@ main() {
     backup) shift; backup_cmd "$@" ;;
     restore) shift; restore_cmd "$@" ;;
     boost) shift; boost_cmd "$@" ;;
+    scepter) shift; scepter_cmd "$@" ;;
     auto-optimize) auto_optimize_all ;;
     monitor) live_monitor ;;
     ports) need_tunnel "${2:?name}" && run_flow edit_ports "$2" ;;

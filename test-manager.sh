@@ -2230,5 +2230,109 @@ EOF
   exit "$fail"
 ) || fail=1
 
+# ======================================================================================
+# Scepter pairing (3.5.0, Phase A manager lane): the watp1: line (D5), token field 10, the
+# .pairing store (pair / rotate with an old-key window / revoke) and the audit tail. The
+# store and the audit log are dotfiles, never *.yml tunnels, so no listing may show them.
+# Pure file/bash work: no root, no systemd, no binary.
+# ======================================================================================
+(
+  PUUID='12345678-1234-1234-1234-123456789abc'
+  PKEY=$(printf '%0.sA' $(seq 43))= # base64 of exactly 32 zero bytes (43 A's + '=')
+  _pline=$(make_pairing 1 "$PUUID" "$PKEY" full)
+  chk "pairing: the line carries the watp1: prefix" "${_pline%%:*}" "watp1"
+  chk "pairing: the payload stays unwrapped (visible pipes, no outer base64)" "$(grep -cE "^watp1:1\|$PUUID\|" <<<"$_pline")" "1"
+  read_pairing "$_pline"
+  chk "pairing: round trip keeps version, uuid and caps" "$P_VERSION/$P_UUID/$P_CAPS" "1/$PUUID/full"
+  chk "pairing: the key survives the round trip" "$P_KEY" "$PKEY"
+  expect_fail read_pairing 'wat1:notapairing'
+  expect_fail read_pairing 'watp1:@@@@@'
+  expect_fail read_pairing "$(make_pairing 2 "$PUUID" "$PKEY" full)"
+  expect_fail read_pairing "$(make_pairing 1 not-a-uuid "$PKEY" full)"
+  expect_fail read_pairing "$(make_pairing 1 "$PUUID" "$PKEY" super)"
+  expect_fail read_pairing "$(make_pairing 1 "$PUUID" 'short key' full)"
+  expect_fail read_pairing "$(make_pairing 1 "$PUUID" aGVsbG8= full)" # key decodes to 5 bytes, not 32
+  for c in tunnel create manage full; do v_pair_caps "$c" || { echo "FAIL v_pair_caps $c"; fail=1; }; done
+  expect_fail v_pair_caps root
+  _nu=$(new_pair_uuid)
+  chk "pairing: a generated uuid has the 36-char shape" "${#_nu}" "36"
+  v_pair_uuid "$_nu" || { echo "FAIL v_pair_uuid generated"; fail=1; }
+  _nk=$(new_pair_key)
+  chk "pairing: a generated key decodes to exactly 32 bytes" "$(printf '%s' "$_nk" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" "32"
+  expect_fail v_pair_uuid '1234'
+
+  # token field 10: written only when set; 6/7/8/9-field tokens still parse with T_PAIR empty
+  read_token "$(make_token tcp '198.51.100.3:443' ktok12345678 '' '' '' '')"
+  chk "token: a 7-field token keeps T_PAIR empty" "$T_PORTS/$T_REV/$T_AUTO/$T_PAIR" "///"
+  read_token "$(make_token tcp '198.51.100.3:443' ktok12345678 '' '' '' '' 1)"
+  chk "token: a reverse 8-field token keeps T_PAIR empty" "$T_REV/$T_AUTO/$T_PAIR" "1//"
+  read_token "$(make_token auto 198.51.100.3 kauto1234567 /wat '' '' '' '' 'd=udp:14443;r=tcp:24431')"
+  chk "token: a 9-field auto token keeps T_PAIR empty" "$T_CARRIER/$T_AUTO/$T_PAIR" "auto/d=udp:14443;r=tcp:24431/"
+  _p10tok=$(make_token tcp '198.51.100.3:443' ktok12345678 '' '' '' '' '' '' manage)
+  read_token "$_p10tok"
+  chk "token: field 10 carries the pair capability" "$T_CARRIER/$T_PAIR" "tcp/manage"
+  chk "token: a field-10 token has exactly 10 pipe fields" "$(sed 's/^wat1://' <<<"$_p10tok" | base64 -d | tr -cd '|' | wc -c | tr -d ' ')" "9"
+
+  # the .pairing store
+  chk "store: no pairing before the first pair" "$(pairing_active && echo y || echo n)" "n"
+  pairing_store_write "$PUUID" kold1234567890123 manage
+  chk "store: written and active" "$(pairing_active && echo y || echo n)" "y"
+  chk "store: fields read back" "$(pairing_get uuid)/$(pairing_get caps)" "$PUUID/manage"
+  # 0600 cannot be proven on a noacl MSYS mount: pin the writer's discipline instead (Linux CI exercises the real mode)
+  _psw=$(sed -n '/^pairing_store_write() {/,/^}/p' wattun-manager)
+  chk "store: written under umask 077 and chmod 600" "$([ "$(grep -c 'umask 077' <<<"$_psw")" = 1 ] && [ "$(grep -c 'chmod 600' <<<"$_psw")" = 1 ] && echo y)" "y"
+  _rot=$(scepter_rotate 3600 2>&1)
+  chk "rotate: the new key differs" "$( [ "$(pairing_get key)" != kold1234567890123 ] && echo y)" "y"
+  chk "rotate: the old key is kept for the window" "$(pairing_get oldkey)" "kold1234567890123"
+  _exp=$(pairing_get oldkey_expires); _now=$(date +%s)
+  chk "rotate: expiry is the window away" "$(awk -v e="$_exp" -v n="$_now" 'BEGIN{d=e-n; print (d>3500 && d<=3600) ? "y" : "n"}')" "y"
+  case "$_rot" in *watp1:*) echo "ok   rotate: prints a fresh watp1: line" ;; *) echo "FAIL rotate: prints a watp1: line, got: $_rot"; fail=1 ;; esac
+  read_pairing "$(grep -o 'watp1:[A-Za-z0-9+/=|-]*' <<<"$_rot" | head -1)"
+  chk "rotate: the printed line keeps uuid and caps" "$P_UUID/$P_CAPS" "$PUUID/manage"
+  chk "rotate: the printed key is the new store key" "$P_KEY" "$(pairing_get key)"
+  chk "rotate: logs the rotation" "$(grep -c 'pair_rotated' "$PAIR_AUDIT" 2>/dev/null || echo 0)" "1"
+  expect_fail scepter_rotate notanumber
+  expect_fail scepter_revoke # NONINTERACTIVE without --yes refuses
+  NI_YES=1 scepter_revoke >/dev/null 2>&1
+  chk "revoke: the store is gone" "$(pairing_active && echo y || echo n)" "n"
+  chk "revoke: the audit log survives" "$(grep -c 'pair_revoked' "$PAIR_AUDIT" 2>/dev/null || echo 0)" "1"
+  chk "audit: entries are tailed newest-last" "$(pairing_audit_tail 2 | wc -l | tr -d ' ')" "2"
+  rm -f "$PAIR_AUDIT"
+
+  # the pair screen (unattended: generates a fresh credential with the default tier)
+  _pairout=$(NI_YES=0 scepter_pair 2>&1)
+  chk "pair: stores a fresh credential" "$(pairing_active && echo y || echo n)" "y"
+  case "$_pairout" in *watp1:*) echo "ok   pair: prints a watp1: line" ;; *) echo "FAIL pair: prints a watp1: line, got: $_pairout"; fail=1 ;; esac
+  read_pairing "$(grep -o 'watp1:[A-Za-z0-9+/=|-]*' <<<"$_pairout" | head -1)"
+  chk "pair: the printed line matches the store" "$P_UUID/$P_CAPS/$(pairing_get caps)" "$P_UUID/full/full"
+  chk "pair: the store key matches the printed line" "$P_KEY" "$(pairing_get key)"
+  chk "pair: logs the creation" "$(grep -c 'pair_created' "$PAIR_AUDIT" 2>/dev/null || echo 0)" "1"
+  _pst=$(pairing_status 2>&1)
+  chk "status: shows the uuid" "$(grep -c "$P_UUID" <<<"$_pst")" "1"
+  chk "status: shows the capability tier" "$(grep -c 'full' <<<"$_pst")" "1"
+
+  # hidden infrastructure: the store/audit dotfiles never appear in a tunnel listing
+  eval "$(sed -n '/^tunnels()/,/^}/p' wattun-manager)"
+  printf 'mode: server\ncarrier: tcp\n' >"$WAT_CONF/hidden.yml"
+  chk "hidden: a real tunnel is listed (control)" "$(tunnels | grep -c '^hidden$')" "1"
+  chk "hidden: the pairing store never appears as a tunnel" "$(tunnels | grep -c pairing)" "0"
+  chk "hidden: the audit log never appears as a tunnel" "$(tunnels | grep -c audit)" "0"
+  rm -f "$WAT_CONF/hidden.yml"
+
+  # refresh_token keeps field 10 when the allowed ports change
+  role() { echo Kharej; }
+  printf 'mode: server\ncarrier: tcp\nports:\n  - 443\n' >"$WAT_CONF/t_pk.yml"
+  ( umask 077; make_token tcp '198.51.100.3:443' kpk1234567890 '' '' '' '443' '' '' full >"$WAT_CONF/t_pk.token" )
+  printf 'mode: server\ncarrier: tcp\nports:\n  - 443\n  - 8443\n' >"$WAT_CONF/t_pk.yml"
+  refresh_token t_pk
+  read_token "$(cat "$WAT_CONF/t_pk.token")"
+  chk "refresh: the allow list follows the config" "$T_PORTS" "443,8443"
+  chk "refresh: field 10 survives a token refresh" "$T_PAIR" "full"
+  rm -f "$WAT_CONF"/t_pk.yml "$WAT_CONF"/t_pk.token
+  rm -f "$PAIR_STORE" "$PAIR_AUDIT"
+
+  exit "$fail"
+) || fail=1
+
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"
