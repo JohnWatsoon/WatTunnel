@@ -647,3 +647,36 @@ Gates (Windows checkout): gofmt empty; `go build`/`go vet` and `GOOS=linux go bu
 loopback tests cannot run here — the Linux compile is the proof, the run is CI's); `go test -count=1
 ./cmd/...` ok; `bash -n wattun-manager` ok; `bash test-manager.sh` ALL OK.
 Commit: (this commit)
+
+## 2026-11-21 16:20 · supervisor · P4 review verdict + READY FOR REVIEW (supervised pass)
+P4 `91fae93` reviewed and approved: every fwRules invocation carries -w and the wattun-ptcp comment tag with
+the identical spec on -D; the doctor leftover check runs before the stopped-unit early return (the crash case
+IS a stopped unit — good catch); /stats/history reuses the /stats totals closures (no second aggregation),
+sits behind the loopback guard with the other handlers, and its JSON shape (including the empty ring) is
+pinned by tests. MGR_VERSION 2026112105.
+
+SUPERVISED PASS SUMMARY (owner approved all packages 2026-11-21; five foxes, each reviewed and gate-checked
+by the supervisor before the next dispatch):
+- P1 `1bcd0a4` spray carrier — raw-UDP 5-tuple rotation, the field-proven shape as a shipped carrier
+  (rotation numbers: 98.7-98.8 % delivery, ≤20 pkt/tuple, 15k tuples, 2026-11-20); NAT-shared-IP limitation
+  recorded; CI root-job tests.
+- P5 `329eb04` auto-test presets — fast (rst/synrst × mci/irancell/cloudflare, ~4-6 min, measured best row
+  applies) and reverse-only (~1-2 min) in both managers; --test takes normal|anti|fast|reverse.
+- P2 `0d8790e` repair v2 NACK (frRepairAsk 0x11) — implemented, two real bugs found and fixed on the way
+  (degenerate repairCover = v1's true no-gain root cause; tx-ring scroll-past made 29/29 asks miss), honest
+  verdict: repair stays OFF in every form.
+- P3 `95c8e58` -fast-rtx (3-consecutive-gap early retransmit, off by default) + THE PASS'S MAIN RESULT: the
+  interactive p99 tail during bulk is QUEUEING/SCHEDULING-BOUND, not loss — clean samples (zero retrans/
+  repair) carry the same ~2.5xRTT tail. Future tail work attacks the scheduler/pacer, not recovery.
+- P4 `91fae93` — wattun-ptcp-tagged lock-safe iptables rules + doctor orphan check (both managers);
+  /stats/history (5 s, 60 entries, loopback-only).
+- Review-verdict entries: 5c73d10 (P1), 83c87a9 (P2), b29c621 (P3), this one (P4).
+
+FINAL GATES (supervisor, this checkout): gofmt -l cmd wat testbench empty; go vet ./... and GOOS=linux
+build+vet clean; go test -count=1 ./cmd/... ok (wattun 14.0s, mgr 0.8s, wprobe 0.1s); FULL
+go test -count=1 -timeout 15m ./wat/ → ok 594.7 s; bash test-manager.sh ALL OK (fox-verified at 2026112105).
+NOT runnable here: the Linux-only carriers' loopback tests (ptcp, spray) and the CI jobs (gomgr, icmp root)
+— GOOS=linux compile+vet clean; the runs are CI's once the owner pushes. No push/tag/release (owner rule).
+Version 3.4.3 (unreleased) now carries: Go-manager completion, coded repair (off), ptcp + spray carriers,
+fast-rtx (off), test presets, doctor/fw-tag ops, /stats/history. The release is the owner's call.
+Commit: (this commit)
