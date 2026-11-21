@@ -182,6 +182,11 @@ func main() {
 	stateDir := flag.String("state-dir", "", "directory for the quota-usage and lifetime-totals state files (<config>.quota.json, <config>.totals.json); created 0700 when missing, an existing wider mode is tightened; needs -config. Empty = next to the config, the 2.5.0-3.2.x location (3.3.0). Point it at tmpfs (e.g. /run/wattun) to spare the disk: tmpfs loses the counters on reboot")
 	stateSave := flag.Int("state-save", 30, "seconds between state-file saves (quota usage and lifetime totals); 0 = only on shutdown, at most 2592000 (30 days; 3.3.0)")
 	cfgPath := flag.String("config", "", "YAML-subset config file: keys are flag names, plus a ports: list (hot-reloaded); command-line flags win")
+	// Scepter (3.5.0, phase A): -pair stores a pairing credential on Kharej, -pair-to attaches one on Iran.
+	// Both are opt-in; without them nothing changes (no pairing file, no reserved-stream traffic).
+	pair := flag.String("pair", "", "accept a watp1: pairing line (version|UUID|key|capability, printed by install.sh next to the first token), store it as this server's Scepter pairing and exit; the file is .pairing in the config dir (/etc/wattun/.pairing on Linux), mode 0600; the management channel serves after the next restart (both ends need 3.5.0)")
+	pairTo := flag.String("pair-to", "", "client: attach this watp1: pairing line to the tunnel: the reserved management stream (sid 0) is opened toward the paired server and the cockpit channel runs alongside normal forwarding; equivalent config key: `pairing: true` with the stored pairing file (3.5.0)")
+	pairingKey := flag.String("pairing", "", "config-file key: `pairing: true` opens the management stream with the pairing stored by -pair; the value may also be a full watp1: line (3.5.0)")
 	var hdrs []string
 	flag.Func("header", "client, ws|wss|h2|h2c|grpc carrier: extra request header 'Name: value' (repeatable)", func(v string) error {
 		if !strings.Contains(v, ":") {
@@ -280,6 +285,23 @@ func main() {
 	fecOn, fecOff, err := fecGatePct(*fecOnLoss, *fecOffLoss)
 	if err != nil {
 		log.Fatal(err)
+	}
+	// -pair (3.5.0): store the credential and exit — a setup action, like -version, not a run mode. The stored
+	// file is picked up by every later start (server and client alike, see the attach block below).
+	if *pair != "" {
+		if *pairTo != "" || *pairingKey != "" {
+			log.Fatal("-pair is a standalone setup action: it cannot be combined with -pair-to / pairing:")
+		}
+		p, perr := wat.ParsePairingLine(*pair)
+		if perr != nil {
+			log.Fatalf("-pair: %v", perr)
+		}
+		ppath := pairingFilePath(*cfgPath)
+		if werr := writePairingFile(ppath, p); werr != nil {
+			log.Fatalf("-pair: %v", werr)
+		}
+		log.Printf("pairing %s stored in %s (capability %s); the management channel serves after the next restart", p.UUIDString(), ppath, wat.CapName(p.Caps))
+		return
 	}
 
 	k := []byte(*key)
@@ -953,6 +975,46 @@ func main() {
 		// no CDN can sit in a reverse pool (Kharej dials Iran's IP) or in front of raw tcp/tls: TCP paces (2.4.18)
 		Direct: allReliableDirect(bases, *reverse),
 	}
+	// Scepter attach (3.5.0): the client opens the reserved management stream with -pair-to LINE or the config
+	// key `pairing: true` (or a full watp1: line as the value); the server arms it whenever a stored pairing
+	// exists. No credential anywhere = exactly the pre-3.5 behavior: sid 0 is never opened, never accepted.
+	pairPath := pairingFilePath(*cfgPath)
+	switch {
+	case *pairTo != "":
+		pairing, perr := wat.ParsePairingLine(*pairTo)
+		if perr != nil {
+			log.Fatalf("-pair-to: %v", perr)
+		}
+		if werr := writePairingFile(pairPath, pairing); werr != nil {
+			log.Fatalf("-pair-to: %v", werr)
+		}
+		cfg.Pairing = pairing
+		log.Printf("scepter: pairing %s attached (stored in %s); the cockpit channel opens with the tunnel", pairing.UUIDString(), pairPath)
+	case *pairingKey != "" && *pairingKey != "false":
+		if strings.HasPrefix(*pairingKey, "watp1:") {
+			pairing, perr := wat.ParsePairingLine(*pairingKey)
+			if perr != nil {
+				log.Fatalf("pairing: %v", perr)
+			}
+			cfg.Pairing = pairing
+		} else if pairing, perr := readPairingFile(pairPath); perr == nil {
+			cfg.Pairing = pairing
+		} else {
+			log.Fatalf("pairing: %v (store one first with -pair-to, or set the key to a watp1: line)", perr)
+		}
+	default:
+		if server { // Kharej serves the channel whenever the credential is present (-pair wrote it)
+			if pairing, perr := readPairingFile(pairPath); perr == nil {
+				cfg.Pairing = pairing
+			}
+		}
+	}
+	// Scepter's tunnel.logs reads the process log (pairing.go logRing); installed only when paired, so the
+	// default run keeps its exact today log path.
+	unitLogs := &logRing{}
+	if cfg.Pairing != nil {
+		log.SetOutput(io.MultiWriter(os.Stderr, unitLogs))
+	}
 	var tun *tunnel
 	var srv *wat.Server
 	if server {
@@ -1004,6 +1066,9 @@ func main() {
 		}
 		tun = newTunnel(list)
 		tunRef.Store(tun) // -ech ladder's DoH hook (2.9.0)
+		if cfg.Pairing != nil {
+			go scepterClientLoop(tun, cfg.Pairing)
+		}
 		if *dnsListen != "" {
 			if h, _, err := net.SplitHostPort(*dnsListen); err == nil && !loopbackHost(h) {
 				log.Printf("dns-listen %s is not a loopback address: anyone who can reach it can resolve names through the tunnel (an open resolver); bind it to 127.0.0.1 unless that is intended", *dnsListen)
@@ -1049,6 +1114,21 @@ func main() {
 		}
 		return tun.list[0].CarrierStats() // bonded carriers run one session
 	}
+	// /stats/history's ring (P4) also feeds Scepter's `history` command (3.5.0), so it now runs with or without
+	// -metrics; one 5 s sampler is negligible and the cockpit should not depend on a local metrics port.
+	hist := newStatsHistory()
+	go func() {
+		for range time.Tick(5 * time.Second) {
+			st := stats()
+			s := historySample{T: time.Now().Unix(), RateBps: st.RateBps,
+				SrttMs: float64(st.SRTT) / 1e6, Streams: st.Streams, Alive: alive()}
+			if st.LossPct > 0 { // 0 = not measured yet (cc's last judged interval); omit the key then
+				lp := st.LossPct
+				s.LossPct = &lp
+			}
+			hist.add(s)
+		}
+	}()
 	side = "c"
 	if server {
 		side = "s"
@@ -1091,19 +1171,6 @@ func main() {
 			mux.HandleFunc("/debug/pprof/", guard(pprof.Index))
 			mux.HandleFunc("/debug/pprof/profile", guard(pprof.Profile))
 			// /stats/history (P4, 2026-11-21): 5 s samples of the same totals /stats computes, 60-entry ring
-			hist := newStatsHistory()
-			go func() {
-				for range time.Tick(5 * time.Second) {
-					st := stats()
-					s := historySample{T: time.Now().Unix(), RateBps: st.RateBps,
-						SrttMs: float64(st.SRTT) / 1e6, Streams: st.Streams, Alive: alive()}
-					if st.LossPct > 0 { // 0 = not measured yet (cc's last judged interval); omit the key then
-						lp := st.LossPct
-						s.LossPct = &lp
-					}
-					hist.add(s)
-				}
-			}()
 			mux.HandleFunc("/stats/history", guard(hist.serveHTTP))
 			mux.HandleFunc("/ports", guard(func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(portReg.snapshot(side))
@@ -1288,9 +1355,27 @@ func main() {
 			w.start(fileCfg)
 			go w.run()
 		}
+		// Scepter server side (3.5.0): arm the management state for the stored pairing. The unit source exposes
+		// this process's own unit (the systemd template runs one wattun per tunnel); the journal lives next to
+		// the pairing file. With no pairing this stays nil and sid 0 streams are reset — today's behavior.
+		var scepter *wat.ScepterState
+		if cfg.Pairing != nil {
+			unitName := "server"
+			if *cfgPath != "" {
+				unitName = strings.TrimSuffix(filepath.Base(*cfgPath), ".yml")
+			}
+			src := &unitSource{name: unitName, carrier: *carrier, metrics: *metrics,
+				statsf: stats, alivef: alive, hist: hist, logs: unitLogs}
+			jp := filepath.Join(filepath.Dir(pairPath), ".pairing.journal")
+			var serr error
+			if scepter, serr = wat.NewScepterState(cfg.Pairing, src, jp); serr != nil {
+				log.Fatalf("scepter: %v", serr)
+			}
+			log.Printf("scepter: management channel armed (pairing %s, capability %s, journal %s)", cfg.Pairing.UUIDString(), wat.CapName(cfg.Pairing.Caps), jp)
+		}
 		go func() {
 			for s := range srv.New {
-				go serve(s, *allowLo, *allowHi, al)
+				go serve(s, *allowLo, *allowHi, al, scepter)
 				go serveDgrams(s, *allowLo, *allowHi, al, *udpIdle)
 			}
 		}()
@@ -1687,11 +1772,21 @@ func dialLocal(port int) (net.Conn, error) {
 	return c, err
 }
 
-func serve(sess *wat.Session, lo, hi int, al *allow) {
+func serve(sess *wat.Session, lo, hi int, al *allow, scepter *wat.ScepterState) {
 	for {
 		st, err := sess.Accept()
 		if err != nil {
 			return
+		}
+		if st.ID() == 0 { // the reserved scepter stream (3.5.0): route before the 2-byte target-port header.
+			// An old client never opens sid 0; a paired 3.5 client does. No pairing on this server (should not
+			// happen — the client only opens when it holds the credential) resets the stream like any unknown.
+			if scepter != nil {
+				go wat.ServeScepter(st, scepter)
+			} else {
+				st.Reset()
+			}
+			continue
 		}
 		go func() {
 			var hdr [2]byte

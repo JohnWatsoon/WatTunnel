@@ -42,7 +42,7 @@ func newTCPRig(t *testing.T) *tcpRig {
 	al.setPorts([]int{target})
 	go func() {
 		for s := range srv.New {
-			go serve(s, 1, 65535, al)
+			go serve(s, 1, 65535, al, nil)
 		}
 	}()
 	uc, err := wat.NewUDPClient(us.Addr().String())

@@ -153,7 +153,11 @@ type Config struct {
 	// measured 2026-10-27 as 148-214 MB of live heap for 8 streams on a 894 MB box. Windows are receiver-driven, so
 	// each end bounds the direction it receives; set it on both ends to bound both.
 	WinMax uint64
-	Logf   func(string, ...any)
+	// Pairing (3.5.0, Scepter phase A) attaches a pairing credential to this session: the client may then open the
+	// reserved scepter stream (sid 0) and speak the JSONL management plane (scepter.go). nil = unpaired, exactly the
+	// pre-3.5 behavior: no scepter stream is ever opened, so an old peer never sees sid 0 (both ends need 3.5.0).
+	Pairing *PairingConfig
+	Logf    func(string, ...any)
 }
 
 type Stats struct {
@@ -777,7 +781,10 @@ func (s *Session) Load() (streams, inflight int) {
 	return len(s.streams), s.inflight
 }
 
-// OpenStream starts a new stream (client side).
+// OpenStream starts a new stream (client side). Stream id 0 is NEVER handed out here: it is reserved for the
+// scepter management stream (3.5.0, plan D2 — nextSID starts at 1, and the wrap guard below keeps it off 0 even
+// after 2^64 stream ids). User streams therefore always have id >= 1, and an unpaired session simply never opens
+// sid 0, which is the whole wire-compatibility story: an old peer cannot even see the reservation.
 func (s *Session) OpenStream() (*Stream, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -787,10 +794,34 @@ func (s *Session) OpenStream() (*Stream, error) {
 	if len(s.streams) >= maxStreams {
 		return nil, ErrTooManyConns
 	}
+	if s.nextSID == 0 { // wrapped past 2^64-1: skip the reserved id instead of colliding with the scepter stream
+		s.nextSID = 1
+	}
 	id := s.nextSID
 	s.nextSID++
 	return s.newStream(id), nil
 }
+
+// OpenScepter opens the reserved management stream at sid 0 (3.5.0, Scepter phase A). It is an ordinary reliable
+// Stream — no new frame type — and only a session built with Config.Pairing may open it, so a mixed-version pair
+// (the old end has no pairing material) exchanges zero scepter traffic and keeps today's behavior byte-identical.
+func (s *Session) OpenScepter() (*Stream, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrSessionDead
+	}
+	if s.cfg.Pairing == nil {
+		return nil, ErrNoPairing
+	}
+	if _, exists := s.streams[0]; exists {
+		return nil, ErrTooManyConns // one scepter stream per session
+	}
+	return s.newStream(0), nil
+}
+
+// Paired reports whether this session carries a pairing credential (i.e. OpenScepter is allowed).
+func (s *Session) Paired() bool { return s.cfg.Pairing != nil }
 
 // Accept waits for a stream opened by the peer (server side).
 func (s *Session) Accept() (*Stream, error) {

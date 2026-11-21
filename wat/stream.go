@@ -86,6 +86,10 @@ func (s *Session) newStream(id uint64) *Stream {
 	return st
 }
 
+// ID reports the stream's session-unique id. Immutable, so no lock is needed. Id 0 is the scepter management
+// stream (3.5.0): the server side routes by it before reading the 2-byte target-port header a user stream carries.
+func (st *Stream) ID() uint64 { return st.id }
+
 func (st *Stream) sendable() bool {
 	if len(st.retx) > 0 {
 		return true

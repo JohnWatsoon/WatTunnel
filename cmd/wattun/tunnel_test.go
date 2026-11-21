@@ -22,7 +22,7 @@ func newMultiRig(t *testing.T, n, dead int, al *allow) *tunnel {
 	t.Cleanup(srv.Close)
 	go func() {
 		for s := range srv.New {
-			go serve(s, 0, 65535, al)
+			go serve(s, 0, 65535, al, nil)
 			go serveDgrams(s, 1, 65535, al, time.Minute)
 		}
 	}()
