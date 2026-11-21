@@ -404,6 +404,36 @@ func TestBifrostEndpointRoundTrip(t *testing.T) {
 	}
 }
 
+// With -repair, frRepairCap and frEndpoint never share a packet: a 3.3.9-3.4.2 server stops parsing at the cap
+// and would never learn the ":down" leg's port (review of 3.4.3).
+func TestRepairCapNeverHidesEndpoint(t *testing.T) {
+	cli, err := NewSession(Config{Key: []byte("ep-key"), SID: 0x9a, NoKex: true, NoMask: true, NoShape: true, Repair: true},
+		&epFakeIO{done: make(chan struct{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	now := time.Now()
+	var got [][]byte
+	cli.mu.Lock()
+	for i := 0; i < 2; i++ {
+		cli.wantPing = true
+		o, ok := cli.build(now)
+		if !ok {
+			cli.mu.Unlock()
+			t.Fatal("build emitted nothing")
+		}
+		got = append(got, append([]byte(nil), o.p[hdrLen:]...))
+	}
+	cli.mu.Unlock()
+	if want := []byte{frPing, frRepairCap, 1}; !bytes.Equal(got[0], want) {
+		t.Fatalf("first packet = %v, want ping + cap and no endpoint", got[0])
+	}
+	if want := []byte{frPing, frEndpoint, 0, 5501 >> 8, 5501 & 0xff}; !bytes.Equal(got[1], want) {
+		t.Fatalf("second packet = %v, want ping + endpoint", got[1])
+	}
+}
+
 // ---- Bifrost NAT knock (found live 2026-11-19, Kharej box) ----
 //
 // A client behind NAT whose bond has a receive-only ":down" leg never sends from that leg's socket, so the NAT

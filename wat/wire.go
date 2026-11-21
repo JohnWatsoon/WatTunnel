@@ -32,8 +32,8 @@ const (
 	// frRepair (3.4.3, coded downlink): sliding-window repair symbol, alone in its packet (repair.go). The
 	// frame after the header is nothing but parity bytes, so a peer that knows the type reads it to the end
 	// and an older peer stops at the type byte and loses nothing else — it is never sent to one (the sender
-	// waits for frRepairCap). frRepairCap announces the capability (1-byte version) and is followed in its
-	// packet only by frames an old peer ignores anyway (frEndpoint/frPad), so both are safe to send blind.
+	// waits for frRepairCap). frRepairCap announces the capability (1-byte version); only frPad may follow it, and it never shares a
+	// packet with frEndpoint (a 3.3.9-3.4.2 peer stops at the cap and would miss the endpoint), so both are safe.
 	frRepair    = 0x0f
 	frRepairCap = 0x10
 )

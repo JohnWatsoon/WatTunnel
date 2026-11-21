@@ -319,8 +319,11 @@ func NewPTCPClient(peer, srcIP, sni string, hop int) (*PTCPClient, error) {
 	p := &PTCPClient{raw: r, peer: ips[0].To4(), local: local, port: uint16(port), sni: sni, hopN: hop,
 		flows: map[uint16]*ptcpFlow{}, rx: make(chan ptcpSeg, 256), rbuf: make([]byte, 65536), done: make(chan struct{})}
 	p.fw = &fwRules{bin: "iptables"}
-	p.fw.add("OUTPUT", "-p", "tcp", "--sport", fmt.Sprintf("%d:%d", ptcpLo, ptcpHi), "--tcp-flags", "RST", "RST", "-j", "DROP")
-	p.fw.add("INPUT", "-p", "tcp", "--sport", fmt.Sprint(port), "-j", "ACCEPT")
+	// both rules are pinned to the peer and our source-port range: a bare "--sport 443 -j ACCEPT" would let any
+	// host in by sending from port 443
+	rng, peer := fmt.Sprintf("%d:%d", ptcpLo, ptcpHi), p.peer.String()
+	p.fw.add("OUTPUT", "-p", "tcp", "-d", peer, "--sport", rng, "--tcp-flags", "RST", "RST", "-j", "DROP")
+	p.fw.add("INPUT", "-p", "tcp", "-s", peer, "--sport", fmt.Sprint(port), "--dport", rng, "-j", "ACCEPT")
 	go p.readLoop()
 	return p, nil
 }

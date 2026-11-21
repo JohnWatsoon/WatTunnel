@@ -1221,10 +1221,15 @@ func (s *Session) build(now time.Time) (outPkt, bool) {
 		lane = PinLaneBase + pinSlot
 	}
 	p = s.appendKex(p, now)
+	capped := false
 	if len(p) > 0 && s.repair != nil {
-		p = s.repairCapDue(p, now) // frRepairCap before frEndpoint: an old peer stops here, losing only what it ignores anyway
+		n := len(p)
+		p = s.repairCapDue(p, now)
+		// a 3.3.9-3.4.2 peer stops parsing at frRepairCap and a new one stops after frEndpoint, so the two never
+		// share a packet: the endpoint waits for the next packet (it is not marked sent)
+		capped = len(p) > n
 	}
-	if len(p) > 0 {
+	if len(p) > 0 && !capped {
 		p = s.appendEndpoint(p, now) // Bifrost frEndpoint (3.3.9): LAST frames of an uplink packet, after frKex
 	}
 	if len(p) == 0 {
@@ -2039,7 +2044,7 @@ func (s *Session) parse(b []byte, now time.Time, src net.Addr) (eliciting bool) 
 			}
 		case frRepairCap:
 			// 3.4.3 coded repair: the peer announces it understands frRepair. Parsing CONTINUES — only
-			// frames an old sender never puts after it (frEndpoint/frPad) may follow.
+			// frames an old peer ignores (frPad) may follow; frEndpoint never shares its packet (build).
 			if v := r.byte(); r.err != nil || v != 1 {
 				return
 			}
