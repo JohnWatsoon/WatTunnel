@@ -31,8 +31,9 @@ type cc struct {
 	rttSum   time.Duration
 	rttN     int
 	limited  bool
-	maxPlain int // plaintext bytes per datagram (cwnd floor is 40 of them)
-	backoff  int // consecutive inflated intervals (for stats)
+	maxPlain int     // plaintext bytes per datagram (cwnd floor is 40 of them)
+	burstCap float64 // Config.BurstCap: token-bucket ceiling in bytes (0 = the dynamic ceiling below)
+	backoff  int     // consecutive inflated intervals (for stats)
 
 	// reliable: the carrier is TCP based (Profile.Reliable). It never loses a datagram by itself, but a lost TCP
 	// segment stalls one connection for 1-2 RTT (head-of-line), so a few samples per interval are late while the
@@ -442,6 +443,16 @@ func (c *cc) refill(dt time.Duration) {
 		// Direct TCP carriers rely on kernel socket buffers and BBR pacing. Allow sufficient
 		// token burst headroom (50 ms or 512 KB) so the userspace pacer does not starve socket buffers.
 		burst = max(c.rate*0.05, 512<<10)
+	}
+	if c.burstCap > 0 {
+		// BurstCap (3.4.3, opt-in): the ceiling is what a late pump tick releases in one wakeup. With the
+		// dynamic ceiling a late tick dumped ~94 KB onto the link at once — a 60 ms link-queue p99 that an
+		// interactive echo queues behind during bulk (phase-1 diag, 2026-11-21). Cap the bucket at
+		// max(BurstCap, one packet) so a catch-up spreads over wakeups; steady bulk is untouched because
+		// the pacer's tokens sit below one packet in 100 % of busy ticks (diagsched evidence, same date).
+		if b := max(c.burstCap, float64(c.maxPlain)); b < burst {
+			burst = b
+		}
 	}
 	if c.tokens > burst {
 		c.tokens = burst

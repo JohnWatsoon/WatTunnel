@@ -94,8 +94,15 @@ type Config struct {
 	// exists — no wire change, an old peer needs nothing. Inactive on reliable/direct carriers, where
 	// spurious retransmits were costly (cc.go relLossMul history). Off by default.
 	FastRtx bool
-	NoKex   bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
-	Bond    PathTimings // multipath health/probe timings (server side; zero = production values)
+	// BurstCap (3.4.3) caps the pacer's token bucket in bytes (0 = off, the dynamic ceiling rate*0.005+64 KB
+	// for datagram carriers). That ceiling is how much a late pump tick can release in one wakeup: with it,
+	// a late tick dumped ~94 KB onto the link at once and the link queue read a 60 ms p99 that an interactive
+	// echo queues behind during bulk (phase-1 diag, 2026-11-21). The cap is raised to one packet, so steady
+	// bulk is untouched (tokens sit below one packet in 100 % of busy ticks). Opt-in, sender-local, no wire
+	// change.
+	BurstCap float64
+	NoKex    bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
+	Bond     PathTimings // multipath health/probe timings (server side; zero = production values)
 	// AllowClients (W10, 3.3.0) is the server-side client allowlist: a new session is admitted only from a source IP
 	// inside one of these prefixes. The check runs before admit on the unauthenticated packet, so even a valid packet
 	// from a non-allowed source is dropped. Empty = every source (the pre-3.3.0 behavior). Only a carrier that reports
@@ -432,6 +439,7 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 	}
 	s.cc.reliable = prof.Reliable
 	s.cc.spread = prof.Spread
+	s.cc.burstCap = cfg.BurstCap
 	s.cc.direct = prof.Reliable && cfg.Direct && !noDirect
 	s.pin = s.cc.direct && !noPin && !isChooser(pio)                      // a chooser routes by its own lanes; PinLaneBase means another path there
 	if prof.Reliable && cfg.MinBps == 2e5 && cfg.InitBps > s.cc.minRate { // default floor: never pace a TCP pool below its start rate

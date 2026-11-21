@@ -215,8 +215,11 @@ func TestKillBulkThroughput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, cfg := range []Config{{}, {FastRtx: true}, {Repair: true, RepairAsk: true, FastRtx: true}} {
+	for _, cfg := range []Config{{}, {FastRtx: true}, {Repair: true, RepairAsk: true, FastRtx: true}, {BurstCap: float64(8 * (1400 - overhead))}} {
 		mode := "today"
+		if cfg.BurstCap > 0 {
+			mode = "burst-cap"
+		}
 		if cfg.FastRtx && !cfg.Repair {
 			mode = "fast-rtx"
 		} else if cfg.Repair {
@@ -225,6 +228,42 @@ func TestKillBulkThroughput(t *testing.T) {
 		for _, loss := range []float64{0, 0.005, 0.01, 0.02} {
 			mb, retrans := bulkOnce(t, loss, 8<<20, cfg)
 			t.Logf("KILL throughput %s loss=%.1f%%: %.1f MB/s (8 MB, retrans=%d)", mode, loss*100, mb, retrans)
+		}
+	}
+}
+
+// TestKillBurstCap: the token-burst cap (Config.BurstCap) judged on the kill harness (speed-swarm phase 2,
+// 2026-11-21). The phase-1 diag measured a late pump tick dumping ~94 KB (the dynamic bucket ceiling
+// rate*0.005+64 KB) onto the link in one wakeup, a 60 ms link-queue p99 an interactive echo queues behind.
+// Here the cap is 8xmaxPlain (8 packets: the catch-up spreads over wakeups; steady bulk is untouched because
+// tokens sit below one packet in 100 % of busy ticks). Measuring test — logs p50/p90/p99 at 1 % loss, both
+// MTUs, cap vs today; the pass/fail judgement is made from the logged numbers.
+func TestKillBurstCap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("measuring test")
+	}
+	for _, mtu := range []int{640, 1400} {
+		for _, c := range []struct {
+			name string
+			cfg  Config
+		}{{"today", Config{}}, {"burst-cap", Config{BurstCap: float64(8 * (mtu - overhead))}}} {
+			lat, cls, st := killLatency(t, 0.01, mtu, 120, 3*time.Second, 50*time.Millisecond, c.cfg)
+			var clean []time.Duration
+			var cnt [4]int
+			for i, k := range cls {
+				cnt[k]++
+				if k == kcClean {
+					clean = append(clean, lat[i])
+				}
+			}
+			sort.Slice(clean, func(i, j int) bool { return clean[i] < clean[j] })
+			cleanStr := "n/a"
+			if len(clean) > 0 {
+				cleanStr = fmt.Sprintf("%v (n=%d, p50=%v)", killPct(clean, 0.99), len(clean), killPct(clean, 0.5))
+			}
+			t.Logf("KILL burstcap %s mtu=%d loss=1%%: p50=%v p90=%v p99=%v max=%v cleanP99=%s classes clean=%d down=%d up=%d other=%d (retrans=%d, srtt=%v, min=%v)",
+				c.name, mtu, killPct(lat, 0.5), killPct(lat, 0.9), killPct(lat, 0.99), lat[len(lat)-1],
+				cleanStr, cnt[kcClean], cnt[kcDown], cnt[kcUp], cnt[kcOther], st.Retrans, st.SRTT, st.MinRTT)
 		}
 	}
 }
