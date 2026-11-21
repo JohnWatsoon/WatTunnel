@@ -232,6 +232,11 @@ func runCommand(cmd string, args []string) int {
 			return 1
 		}
 		return dispatch("show_token", name)
+	case "scepter":
+		if !NeedTunnel(name) {
+			return 1
+		}
+		return dispatch("scepter_cmd", name)
 	case "preset":
 		if !NeedTunnel(posNI(args, 0)) {
 			return 1

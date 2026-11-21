@@ -1382,7 +1382,7 @@ func p2TunnelHeader(n, r string) {
 // then only the /stats numbers this tunnel really reports.
 func tunnelHead(w io.Writer, n, r, car string, ti *tunnelInfo) {
 	col, dot, txt := stateCell(r, ti.State)
-	Title(w, n, r+" · "+car+"  "+col+dot+" "+txt+RST)
+	Title(w, n, r+" · "+car+PairedBadge(n)+"  "+col+dot+" "+txt+RST)
 	if ti.State == "stopped" {
 		hintLine(w, "Not running. Start it below, or read its logs.")
 		fmt.Fprintln(w)

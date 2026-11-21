@@ -737,6 +737,9 @@ func dashRow(w io.Writer, i int, n string) {
 		roleName(n) == "Iran" && !IsReverse(n) { // ac_dialer: the dialing side carries the kit
 		pl += "  " + YEL + "[anti-censor off]" + RST
 	}
+	// Scepter (Phase A): a paired Iran tunnel is marked on the fleet row; the
+	// channel itself is hidden infrastructure and never gets its own row.
+	pl += PairedBadge(n)
 	idxPad := ""
 	if i < 10 {
 		idxPad = " "
