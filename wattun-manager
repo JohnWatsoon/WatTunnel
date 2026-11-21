@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112104   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112105   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -6528,10 +6528,20 @@ icmp_path_report() { # name host
 }
 
 test_tunnel() {
-  local n=$1 cr peer host port s p r it e
+  local n=$1 cr peer host port s p r it e pl
   cr=$(cfg "$n" carrier); peer=$(cfg "$n" peer); r=$(role "$n")
   page "Doctor" "$n ($r · $cr)"
   sec_hdr "Checks"
+  # ptcp leftover rules (P4, 2026-11-21): every rule the ptcp carrier inserts is comment-tagged wattun-ptcp;
+  # a live ptcp unit owns them, anything else means orphans from a crash. Report only — never auto-delete.
+  if [ "$cr" != ptcp ] || ! systemctl is-active -q "${WAT_PREFIX}@$n"; then
+    pl=$(iptables -w -S OUTPUT 2>/dev/null | grep wattun-ptcp || true)
+    if [ -n "$pl" ]; then
+      warn "iptables has leftover wattun-ptcp rule(s) (a crashed/stopped ptcp tunnel):"
+      printf '        %s%s%s\n' "$GRY" "$pl" "$RST"
+      hint " · Restart a ptcp tunnel (the next start re-owns and refreshes them) or delete each by re-running it with -D"
+    fi
+  fi
   if systemctl is-active -q "${WAT_PREFIX}@$n"; then ok "Service     running (${WAT_PREFIX}@$n)"
   else err "Service     stopped"; journalctl -u "${WAT_PREFIX}@$n" -n 10 --no-pager -o cat 2>/dev/null; return; fi
   if [ "$r" = Iran ]; then

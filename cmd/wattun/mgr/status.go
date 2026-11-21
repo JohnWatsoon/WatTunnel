@@ -1108,6 +1108,7 @@ type DoctorIO struct {
 	PortBusy  func(port, proto string) bool       // port_busy
 	SysctlEq1 func(key string) bool               // sysctl -n key = 1
 	FwICMP    func() []string                     // iptables/nft ICMP drop/reject rules
+	FwPTCP    func() []string                     // leftover wattun-ptcp-tagged OUTPUT rules (P4, 2026-11-21)
 	Journal   func(name string, args ...string) string
 	SpeedTest func(name string) // the Iran-only tail of the doctor
 }
@@ -1148,6 +1149,17 @@ func Doctor(name string, io_ *DoctorIO) {
 	r := roleName(n)
 	pageHeader(w, "Doctor", fmt.Sprintf("%s (%s · %s)", n, r, cr))
 	secHdr(w, "Checks")
+	// ptcp leftover rules (P4, 2026-11-21): every rule the ptcp carrier inserts is comment-tagged wattun-ptcp;
+	// a live ptcp unit owns them, anything else means orphans from a crash. Report only — never auto-delete.
+	if cr != "ptcp" || !p1IsActive(Unit(n)) {
+		if hits := ptcpLeftovers(d); len(hits) > 0 {
+			warnLine(w, fmt.Sprintf("iptables has %d leftover wattun-ptcp rule(s) (a crashed/stopped ptcp tunnel):", len(hits)))
+			for _, l := range hits {
+				fmt.Fprintf(w, "        %s%s%s\n", GRY, l, RST)
+			}
+			hintLine(w, " · Restart a ptcp tunnel (the next start re-owns and refreshes them) or delete each by re-running it with -D")
+		}
+	}
 	if p1IsActive(Unit(n)) {
 		okLine(w, fmt.Sprintf("Service     running (wattun@%s)", n))
 	} else {
@@ -1362,6 +1374,24 @@ func tailErrors(log string, n int) string {
 		hits = hits[len(hits)-n:]
 	}
 	return strings.Join(hits, "\n")
+}
+
+// ptcpLeftovers: OUTPUT rules tagged wattun-ptcp — what a crashed ptcp carrier leaves behind (P4, 2026-11-21).
+func ptcpLeftovers(d *DoctorIO) []string {
+	if d.FwPTCP != nil {
+		return d.FwPTCP()
+	}
+	out, err := exec.Command("iptables", "-w", "-S", "OUTPUT").Output()
+	if err != nil {
+		return nil
+	}
+	var hits []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.Contains(l, "wattun-ptcp") {
+			hits = append(hits, l)
+		}
+	}
+	return hits
 }
 
 // local_icmp_check(): prints the kernel-ignore hint and returns the offending firewall rules.

@@ -20,7 +20,10 @@ package wat
 // dying. Like the fieldprobe, both ends install iptables rules that drop their own outgoing RSTs for the
 // carrier's ports (idempotent: a stale rule from a crashed run is deleted before the new one is inserted;
 // a crash leaves the rule behind — harmless to other traffic, and the next start or the installer's cleanup
-// removes it). Without iptables the carrier still runs (a warning is logged; RSTs leak).
+// removes it). Every rule carries the comment tag "wattun-ptcp" (P4, 2026-11-21) so an operator or
+// wattun-manager doctor can spot a crashed run's orphans by tag; all invocations pass -w so a boot-time
+// insert waits for the iptables lock instead of racing systemd/ufw. Without iptables the carrier still
+// runs (a warning is logged; RSTs leak).
 //
 // Both ends need 3.4.3 and the same carrier name; this is a wattun-internal shape, not real TCP to a peer's
 // kernel. Not in the auto-test set; not field-measured as a carrier yet (only the probe shapes are).
@@ -257,8 +260,12 @@ type fwRules struct {
 }
 
 func (f *fwRules) add(rule ...string) {
-	_ = exec.Command(f.bin, append([]string{"-D"}, rule...)...).Run() // stale copy from a crashed run
-	if out, err := exec.Command(f.bin, append([]string{"-I"}, rule...)...).CombinedOutput(); err != nil {
+	// every rule carries the comment tag (P4, 2026-11-21): doctor/orphan hunting by tag; -m comment is
+	// standard on every distro's iptables. -w waits for the xtables lock so a boot-time insert cannot race
+	// another iptables user (systemd, ufw); the -D carries the identical spec or it would not match.
+	rule = append(rule, "-m", "comment", "--comment", "wattun-ptcp")
+	_ = exec.Command(f.bin, append([]string{"-w", "-D"}, rule...)...).Run() // stale copy from a crashed run
+	if out, err := exec.Command(f.bin, append([]string{"-w", "-I"}, rule...)...).CombinedOutput(); err != nil {
 		log.Printf("ptcp: %s -I %s: %v %s (RSTs may leak; install iptables or ignore)",
 			f.bin, strings.Join(rule, " "), err, strings.TrimSpace(string(out)))
 		return
@@ -268,7 +275,7 @@ func (f *fwRules) add(rule ...string) {
 
 func (f *fwRules) clear() {
 	for _, r := range f.rules {
-		_ = exec.Command(f.bin, append([]string{"-D"}, r...)...).Run()
+		_ = exec.Command(f.bin, append([]string{"-w", "-D"}, r...)...).Run()
 	}
 	f.rules = nil
 }

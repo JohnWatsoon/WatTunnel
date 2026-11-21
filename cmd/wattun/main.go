@@ -1087,6 +1087,21 @@ func main() {
 			mux := http.NewServeMux()
 			mux.HandleFunc("/debug/pprof/", guard(pprof.Index))
 			mux.HandleFunc("/debug/pprof/profile", guard(pprof.Profile))
+			// /stats/history (P4, 2026-11-21): 5 s samples of the same totals /stats computes, 60-entry ring
+			hist := newStatsHistory()
+			go func() {
+				for range time.Tick(5 * time.Second) {
+					st := stats()
+					s := historySample{T: time.Now().Unix(), RateBps: st.RateBps,
+						SrttMs: float64(st.SRTT) / 1e6, Streams: st.Streams, Alive: alive()}
+					if st.LossPct > 0 { // 0 = not measured yet (cc's last judged interval); omit the key then
+						lp := st.LossPct
+						s.LossPct = &lp
+					}
+					hist.add(s)
+				}
+			}()
+			mux.HandleFunc("/stats/history", guard(hist.serveHTTP))
 			mux.HandleFunc("/ports", guard(func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(portReg.snapshot(side))
 			}))

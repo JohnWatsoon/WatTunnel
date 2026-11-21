@@ -619,3 +619,31 @@ were all correctly doomed; any future tail work attacks the scheduler/pacer's tr
 echoes during bulk instead.
 Supervisor gates re-run: build/vet/gofmt clean, fast-rtx + kill subsets ok, ./cmd/... ok.
 Commit: none (review only; this note rides with the P4 commit)
+
+## 2026-11-21 20:05 · implementer · P4 — ptcp iptables rules tagged + race-safe; /stats/history ring; doctor hooks
+**Item 1 — ptcp firewall rules** (`wat/ptcp_linux.go`): every rule the carrier inserts (client OUTPUT RST-drop,
+client INPUT ACCEPT, server OUTPUT RST-drop, server INPUT ACCEPT) now carries `-m comment --comment
+wattun-ptcp` and every iptables invocation passes `-w` (waits for the xtables lock — a boot-time insert can no
+longer race systemd/ufw). The delete-before-insert idempotence is unchanged; the `-D` carries the byte-identical
+spec (comment included) so it still matches. `-m comment` is standard on every distro; if the `-I` fails anyway
+the carrier logs the same warning and runs (unchanged).
+**Doctor hooks**: `wattun-manager` `test_tunnel` (top of Checks, so a STOPPED unit also reports — the crash
+case) and the Go manager's `Doctor` both list `iptables -w -S OUTPUT` rules tagged `wattun-ptcp` when the unit
+being diagnosed is not a live ptcp tunnel, with the advice "restart a ptcp tunnel or delete each by re-running
+it with -D". Report only, never auto-delete. The Go side got a real slot: `DoctorIO.FwPTCP` mirrors the existing
+`FwICMP` hook (injectable for tests; `ptcpLeftovers` in status.go). MGR_VERSION → 2026112105. TECHNICAL.md's
+ptcp row now mentions the tag.
+**Item 2 — `/stats/history`** (`cmd/wattun/history.go`, ~70 lines): while the metrics server runs, a sampler
+records every 5 s (unix `t`, `rate_bps`, `srtt_ms`, `loss_pct` when the CC has measured an interval — pointer,
+omitted while 0/unmeasured — `streams`, `alive`) into a 60-entry ring (5 min, oldest dropped). `GET
+/stats/history` serves the ring oldest-first as a JSON array (`[]` before the first sample). The samples reuse
+the SAME totals closure `/stats` uses (`stats()`/`alive()` in main.go — server-mode multi-session aggregation
+included); no second aggregation exists. Handler sits next to `/stats` under the same `guard`, server stays
+loopback-only (unchanged rule). TECHNICAL.md Metrics section documents it (5 s cadence, 60 samples,
+localhost-only). No wire change, no config key, version stays 3.4.3.
+Tests: `cmd/wattun/history_test.go` — ring bounded at 60 with oldest dropped, exact JSON shape (loss_pct
+omitted when unset, empty case `[]`), handler round-trip via httptest.
+Gates (Windows checkout): gofmt empty; `go build`/`go vet` and `GOOS=linux go build`/`go vet` clean (ptcp
+loopback tests cannot run here — the Linux compile is the proof, the run is CI's); `go test -count=1
+./cmd/...` ok; `bash -n wattun-manager` ok; `bash test-manager.sh` ALL OK.
+Commit: (this commit)
