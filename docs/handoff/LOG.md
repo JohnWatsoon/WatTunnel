@@ -463,3 +463,17 @@ Commit: (this commit)
 - **Decisions:** server -listen "41000" means 41000-41999 (base port spans +999, default = probe's range); range low port doubles as the server's fixed downlink source port so the client's BPF can match it; real UDP checksum instead of the probe's legal 0; client raw socket bound to the source IP so kernel-built IP header matches the checksummed pseudo-header; -reverse refused (downlink rotation rides the client's hops).
 - **Tests:** go build/vet + GOOS=linux build/vet clean; gofmt empty; go test ./cmd/... ok; TestParseSprayPorts pass; bash -n + test-manager.sh ALL OK. NOT run here: TestSprayPacketCodec/Rotation/Loopback and the full wat suite (Linux-only; CI runs them).
 - **Commit:** (this commit)
+
+## 2026-11-21 12:10 · supervisor · P1 spray carrier — review verdict
+Reviewed `1bcd0a4` end to end: BPF jump tables hand-verified (every false path lands on the drop — the probe's
+F7 lesson), checksum + bind reasoning sound (real UDP checksum, socket bound so the kernel-built IP header
+matches the pseudo-header), rotation bounds correct (N..1.5N, asserted in the loopback test), buffer/pool
+lifetimes follow the udpHop pattern, sendmmsg uses the RawSockaddrInet4 form (the probe's historical
+"family 0" bug avoided). Wiring complete in both managers; honest field wording kept.
+One limitation found, accepted and recorded: `SprayServer.peers` is keyed by client IP only, so two clients
+behind one NAT IP would aim each other's downlink at the newest sport (the wrong session's datagrams then
+fail AEAD silently). Single client per source IP — the production shape — is unaffected; a (ip, live-port
+set) demux would need the encrypted session id, which the carrier cannot see. Documented here rather than
+fixed.
+Gates re-run by the supervisor: build/vet/gofmt clean both GOOS, `go test -count=1 ./cmd/...` ok.
+Commit: none (review only; the limitation note rides in this entry)
