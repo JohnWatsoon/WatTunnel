@@ -680,3 +680,28 @@ NOT runnable here: the Linux-only carriers' loopback tests (ptcp, spray) and the
 Version 3.4.3 (unreleased) now carries: Go-manager completion, coded repair (off), ptcp + spray carriers,
 fast-rtx (off), test presets, doctor/fw-tag ops, /stats/history. The release is the owner's call.
 Commit: (this commit)
+
+## 2026-11-21 18:30 · supervisor · speed-swarm phase 1 — three diagnostics synthesized; P3 conclusion corrected
+Three parallel diagnostic foxes (diagcc / diagprof / diagsched, all read-only on existing files, new test
+files only) delivered:
+- diagcc: the bulk cap at 0 % loss is the delay-AIMD equilibrium (growth ×1.10 / cut ×0.93 oscillation,
+  token-limited 100 % of steady ticks), not any hard limit; wire ceiling ~9.4-9.7 MB/s; InitBps 8e6 → 7.9-8.2,
+  +slack 50 ms → 8.3-8.6; MaxBps/Paths/Hedge/WinMax measured no-ops; ACK pressure ~1 % of reverse.
+- diagprof: engine CPU is not the ceiling — 75-77 MB/s in-process (145k pkt/s), 0 allocs/pkt steady, 0 GC in
+  5 s, s.mu contention 0.56 %, crypto ~11 %; at the field's ~27 MB/s the whole pair costs 5-8 % of one core.
+  Only CPU-side shippable: WAT_BATCH-style sendmmsg for the plain udp carrier (opt-in), deferred seals for
+  fec/repair under s.mu when those features field-run.
+- diagsched: **the P3 "queueing-bound" conclusion was a harness bug** — killLatency sorted latencies after
+  appending the class labels, destroying the sample↔class pairing, so "clean" positions indexed the sorted
+  slowest third. With pairing fixed (measured, interleaved, identical packet streams): clean echoes during
+  bulk p50 40.7 ms / p99 41.3 ms = the no-bulk floor; the echo never queues behind tokens; cross-session
+  isolation already works. The REAL tail: (a) token-burst dumps (cc.refill cap rate*0.005+64 KB lets a late
+  tick dump ~94 KB; link-queue p99 60 ms, present at 0 % loss), (b) loss-recovery samples (aligned p99
+  ~103 ms = lossTime+RTT).
+This entry supersedes the P3 "queueing-bound" conclusion: the tail is loss-recovery latency plus
+self-induced pacing dumps — both directly attackable. Synthesis and dispatch: harness fix first (unblocks
+honest judgement), then the cc.go burst-cap knob (opt-in) and the AIMD equilibrium tune, each judged by the
+fixed harness with numbers; ICMP untouched; full wat suite the gate.
+Diag files (diagcc_test.go, diagprof_test.go, diagsched_test.go) committed as permanent measurement tools —
+all green (`go test -count=1 -run 'DiagCC|DiagSched|DiagProf' ./wat/`), gofmt clean.
+Commit: (this commit)
