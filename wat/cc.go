@@ -31,9 +31,11 @@ type cc struct {
 	rttSum   time.Duration
 	rttN     int
 	limited  bool
-	maxPlain int     // plaintext bytes per datagram (cwnd floor is 40 of them)
-	burstCap float64 // Config.BurstCap: token-bucket ceiling in bytes (0 = the dynamic ceiling below)
-	backoff  int     // consecutive inflated intervals (for stats)
+	maxPlain int           // plaintext bytes per datagram (cwnd floor is 40 of them)
+	burstCap float64       // Config.BurstCap: token-bucket ceiling in bytes (0 = the dynamic ceiling below)
+	backoff  int           // consecutive inflated intervals (for stats)
+	rateTune bool          // Config.RateTune: gentler cut, only while the queue is still growing (3.4.3)
+	lastAvg  time.Duration // RateTune: the previous judged tick's avg RTT, the hysteresis baseline
 
 	// reliable: the carrier is TCP based (Profile.Reliable). It never loses a datagram by itself, but a lost TCP
 	// segment stalls one connection for 1-2 RTT (head-of-line), so a few samples per interval are late while the
@@ -524,6 +526,23 @@ func (c *cc) tick(now time.Time) {
 		if c.reliable || c.anyRel || c.spread {
 			avg = c.tickMin
 		}
+		// RateTune (3.4.3, opt-in) hysteresis: cut only while the queue is still GROWING, and HOLD the rate
+		// while a standing queue sits at a stable size (no cut, no growth into it). The growth x1.10 / cut
+		// x0.93 pair oscillates and never settles at link rate (measured 2026-11-21, diagcc: 19-44 cuts per
+		// 16-32 MB transfer, average rate 5.3-7.3 of a ~9.4-9.7 MB/s ceiling): every tick above the slack cuts
+		// 7 %, so the rate saws between a drained queue and a refilled one. With RateTune the cut is gentler
+		// (x0.97) and fires only when this tick's avg grew over the previous tick's; growth happens only below
+		// the slack, so the queue cannot run away (a first hysteresis-only draft that kept growing into a
+		// stable queue pinned the sim link queue at its 100 ms cap: srtt 101 ms, 13.5k queue-overflow drops in
+		// 32 MB, rate 14.2 MB/s into a ~9.7 link). The trade is a standing queue near the slack (elevated srtt)
+		// for a rate that settles near link rate. Loss never cuts here either way; the loss rules above are
+		// untouched.
+		prevAvg := c.lastAvg
+		c.lastAvg = avg
+		cutMul := 0.93
+		if c.rateTune {
+			cutMul = 0.97
+		}
 		slack := c.slack
 		if s := c.minRTT / 8; s > slack {
 			slack = s
@@ -545,12 +564,17 @@ func (c *cc) tick(now time.Time) {
 			c.diag.DeepTrips++
 		}
 		if avg > c.minRTT+slack && (!c.reliable || c.limited) {
-			c.diag.DelayCuts++
-			c.rate *= 0.93
-			if f := c.floor(); c.rate < f {
-				c.rate = min(f, c.rate/0.93) // clamp to the floor, but never raise a rate already below it
+			if c.rateTune && avg <= prevAvg {
+				// standing queue at a stable size: hold the rate — no cut, and the growth branch below is
+				// skipped too, so the queue cannot be pumped deeper (see the RateTune comment above)
+			} else {
+				c.diag.DelayCuts++
+				c.rate *= cutMul
+				if f := c.floor(); c.rate < f {
+					c.rate = min(f, c.rate/cutMul) // clamp to the floor, but never raise a rate already below it
+				}
+				c.backoff++
 			}
-			c.backoff++
 		} else {
 			c.backoff = 0
 			if c.limited && !cut {

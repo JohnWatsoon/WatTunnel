@@ -262,7 +262,7 @@ func TestDiagCCSteady(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		cfg  Config
-	}{{"default", Config{}}, {"init8", Config{InitBps: 8e6}}, {"init8+slack50", Config{InitBps: 8e6, Slack: 50 * time.Millisecond}}, {"init8+slack50+max64", Config{InitBps: 8e6, Slack: 50 * time.Millisecond, MaxBps: 64e6}}} {
+	}{{"default", Config{}}, {"init8", Config{InitBps: 8e6}}, {"init8+slack50", Config{InitBps: 8e6, Slack: 50 * time.Millisecond}}, {"init8+slack50+max64", Config{InitBps: 8e6, Slack: 50 * time.Millisecond, MaxBps: 64e6}}, {"rate-tune", Config{RateTune: true}}, {"rate-tune+init8", Config{RateTune: true, InitBps: 8e6}}} {
 		mbps, st := diagDownload(t, 0, 1400, 32<<20, c.cfg, nil)
 		t.Logf("STEADY %-22s %5.2f MB/s (rate=%.2f srtt=%v min=%v tok=%d cwnd=%d app=%d delayCuts=%d lost=%d spur=%d)",
 			c.name, mbps, st.RateBps/1e6, st.SRTT, st.MinRTT, st.CC.TokLimited, st.CC.CwndLimited, st.CC.AppLimited, st.CC.DelayCuts, st.CC.Lost, st.CC.Spurious)

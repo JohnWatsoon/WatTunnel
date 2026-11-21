@@ -101,6 +101,13 @@ type Config struct {
 	// bulk is untouched (tokens sit below one packet in 100 % of busy ticks). Opt-in, sender-local, no wire
 	// change.
 	BurstCap float64
+	// RateTune (3.4.3) retunes the delay-AIMD pair: the cut becomes gentler (x0.97 instead of x0.93) and fires
+	// only when the tick-avg RTT GREW over the previous tick, so a standing queue at a stable size stops
+	// triggering cuts and the rate settles near link rate instead of sawing between drain and refill (diagcc,
+	// 2026-11-21: 19-44 cuts per 16-32 MB, average 5.3-7.3 MB/s of a ~9.4-9.7 ceiling). The trade is a standing
+	// queue (elevated srtt). Still delay-based only: loss never cuts. Opt-in, sender-local, no wire change; off
+	// keeps today's behavior byte-identical.
+	RateTune bool
 	NoKex    bool        // skip the forward-secrecy key exchange on this session (same as WAT_NO_KEX, but per session)
 	Bond     PathTimings // multipath health/probe timings (server side; zero = production values)
 	// AllowClients (W10, 3.3.0) is the server-side client allowlist: a new session is admitted only from a source IP
@@ -440,6 +447,7 @@ func NewSession(cfg Config, pio PacketIO) (*Session, error) {
 	s.cc.reliable = prof.Reliable
 	s.cc.spread = prof.Spread
 	s.cc.burstCap = cfg.BurstCap
+	s.cc.rateTune = cfg.RateTune
 	s.cc.direct = prof.Reliable && cfg.Direct && !noDirect
 	s.pin = s.cc.direct && !noPin && !isChooser(pio)                      // a chooser routes by its own lanes; PinLaneBase means another path there
 	if prof.Reliable && cfg.MinBps == 2e5 && cfg.InitBps > s.cc.minRate { // default floor: never pace a TCP pool below its start rate

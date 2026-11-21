@@ -114,6 +114,7 @@ func main() {
 	repair := flag.Bool("repair", false, "sliding-window coded repair: a repair symbol every few data packets so the receiver rebuilds lost packets locally instead of waiting for the sender's loss timer and a retransmit round trip (cuts the loss-tail latency of a lossy downlink; both ends need 3.4.3 with -repair; off by default)")
 	fastRtx := flag.Bool("fast-rtx", false, "fast retransmit: a packet that 3 consecutive peer ACKs have skipped (a larger packet number acked while it is not) is resent at once instead of waiting out the loss timer (experimental loss-tail latency tool, 3.4.3; sender-local, an older peer needs nothing; inactive on reliable/direct carriers; off by default)")
 	burstCap := flag.Int("burst-cap", 0, "pacer: cap the token bucket in KB (0 = the dynamic default, rate*50ms + 64 KB). The bucket ceiling is how much a late pump tick can dump onto the link in one wakeup - the queueing an interactive echo meets behind a bulk sender (measured ~94 KB per late tick, 3.4.3); a cap below one packet is raised to one packet, so steady bulk keeps its rate. Sender-local, an older peer needs nothing; off by default")
+	rateTune := flag.Bool("rate-tune", false, "pacer: retune the delay AIMD for throughput - the rate cut becomes gentler (x0.97 instead of x0.93) and fires only while the tick-avg RTT is still growing, so a standing queue at a stable size stops triggering cuts and bulk settles near link rate instead of sawing (measured 19-44 cuts per 16-32 MB, 5.3-7.3 of a ~9.4-9.7 MB/s ceiling, 3.4.3). The trade is a standing queue (higher srtt). Still delay-based only - loss never cuts. Sender-local, an older peer needs nothing; off by default")
 	shapeData := flag.Float64("shape-data", 0, "pad packets that carry stream data to randomized realistic sizes, spending at most this percent of the stream bytes sent (0 = off, at most 25; 3.3.0)")
 	noiseMode := flag.String("noise", "off", "idle traffic, off|low|med|custom: while the session has no user data for ~2 keepalives, send non-ack-eliciting filler packets at the matching byte budget (low 128 B/s, med 1024 B/s; custom uses -noise-bps; 3.3.0)")
 	noiseBps := flag.Int("noise-bps", 0, "noise, with -noise custom: filler byte budget in bytes/second (64..1000000; 3.3.0)")
@@ -945,7 +946,7 @@ func main() {
 		PingEvery: time.Duration(*pingEvery) * time.Second, NoMask: !*hdrMask, NoShape: !*shape,
 		LegacyMaskFlip: *legacyMaskFlip,
 		Logf:           log.Printf, Hedge: *hedge, FEC: *fecMode == "auto", FECOnLoss: fecOn, FECOffLoss: fecOff, Repair: *repair, FastRtx: *fastRtx,
-		BurstCap:   float64(*burstCap) * 1024,
+		BurstCap: float64(*burstCap) * 1024, RateTune: *rateTune,
 		MaxPayload: maxPayload, Bond: tm, AllowClients: allowClientPrefixes,
 		ShapeData: shapeFrac, NoiseBps: noiseBpsVal, NoiseFrom: noiseFrom, NoiseTo: noiseTo,
 		WinMax: uint64(*winMax) << 20,

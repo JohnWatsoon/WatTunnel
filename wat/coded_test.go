@@ -157,7 +157,7 @@ func TestKillInteractiveP99(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, cfg := range []Config{{}, {FastRtx: true}, {Repair: true, RepairAsk: true, FastRtx: true}} {
+	for _, cfg := range []Config{{}, {FastRtx: true}, {Repair: true, RepairAsk: true, FastRtx: true}, {RateTune: true}} {
 		mode := "today"
 		if cfg.Repair {
 			mode = "repair+ask"
@@ -168,6 +168,9 @@ func TestKillInteractiveP99(t *testing.T) {
 			} else {
 				mode = "fast-rtx"
 			}
+		}
+		if cfg.RateTune {
+			mode = "rate-tune"
 		}
 		for _, mtu := range []int{640, 1400} {
 			lat, cls, st := killLatency(t, 0.01, mtu, 120, 3*time.Second, 50*time.Millisecond, cfg)
@@ -215,10 +218,13 @@ func TestKillBulkThroughput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
 	}
-	for _, cfg := range []Config{{}, {FastRtx: true}, {Repair: true, RepairAsk: true, FastRtx: true}, {BurstCap: float64(8 * (1400 - overhead))}} {
+	for _, cfg := range []Config{{}, {FastRtx: true}, {Repair: true, RepairAsk: true, FastRtx: true}, {BurstCap: float64(8 * (1400 - overhead))}, {RateTune: true}} {
 		mode := "today"
 		if cfg.BurstCap > 0 {
 			mode = "burst-cap"
+		}
+		if cfg.RateTune {
+			mode = "rate-tune"
 		}
 		if cfg.FastRtx && !cfg.Repair {
 			mode = "fast-rtx"
