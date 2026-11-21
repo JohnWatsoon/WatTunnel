@@ -456,3 +456,10 @@ exactly that. My earlier A3 log entry's "clear win at 1400" claim is superseded 
 
 Gates: gofmt empty; go vet + GOOS=linux go vet clean; `go test -count=1 -run 'TestRepair|TestBifrost|TestKillInteractiveP99|TestKillBulkThroughput' ./wat/` → ok.
 Commit: (this commit)
+
+## 2026-11-21 11:05 · implementer · spray carrier — raw-UDP 5-tuple rotation shipped as an engine carrier
+- **What:** `case "spray"` carrier next to ptcp: client = one bound SOCK_RAW/IPPROTO_UDP socket, self-built UDP header with a real checksum, sport AND dport rotate every -spray-hop..1.5x packets (default 16), sendmmsg batches; server = one BPF-filtered raw socket on the dport range, replies to the NEWEST observed client sport. wat/spray{,_linux,_other}.go, tests, main.go wiring, both managers (MGR_VERSION 2026112102), TECHNICAL.md rows, CI root-job regex + TestSpray.
+- **Reason:** the 2026-11-20 field run proved the rotation itself (98.7% delivery, no tuple over 20 packets, 15k tuples, no block); this wraps it in the production engine for the 3.4.3 release.
+- **Decisions:** server -listen "41000" means 41000-41999 (base port spans +999, default = probe's range); range low port doubles as the server's fixed downlink source port so the client's BPF can match it; real UDP checksum instead of the probe's legal 0; client raw socket bound to the source IP so kernel-built IP header matches the checksummed pseudo-header; -reverse refused (downlink rotation rides the client's hops).
+- **Tests:** go build/vet + GOOS=linux build/vet clean; gofmt empty; go test ./cmd/... ok; TestParseSprayPorts pass; bash -n + test-manager.sh ALL OK. NOT run here: TestSprayPacketCodec/Rotation/Loopback and the full wat suite (Linux-only; CI runs them).
+- **Commit:** (this commit)

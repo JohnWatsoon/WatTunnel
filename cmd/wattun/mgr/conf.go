@@ -673,7 +673,7 @@ func CarrierOK(c string) bool {
 		c = c[:strings.LastIndex(c, ":")]
 	}
 	switch c {
-	case "icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip":
+	case "icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip", "ptcp", "spray":
 		return true
 	}
 	return shapedRaw[c] || shapedUDP[c]
@@ -716,7 +716,7 @@ func VCarrierList(v string) bool {
 	for _, c := range strings.Split(v, "+") {
 		base := CarrierLegBase(c)
 		if !CarrierOK(base) {
-			Err(fmt.Sprintf("Unknown carrier '%s' (use icmp, udp, tcp, tls, ws, wss, h2, h2c, grpc, gre, ipip, ptcp, sit, 6to4, xfrm-ipsec, etherip, l2tpv3, fou-gre, gue-ipip, vxlan, geneve, dnscrypt-udp, ntp-direct, openvpn-dco, srtp-direct; join several with + to bond; a bond leg may end in :up or :down, 3.3.9 on both ends).", c))
+			Err(fmt.Sprintf("Unknown carrier '%s' (use icmp, udp, tcp, tls, ws, wss, h2, h2c, grpc, gre, ipip, ptcp, spray, sit, 6to4, xfrm-ipsec, etherip, l2tpv3, fou-gre, gue-ipip, vxlan, geneve, dnscrypt-udp, ntp-direct, openvpn-dco, srtp-direct; join several with + to bond; a bond leg may end in :up or :down, 3.3.9 on both ends).", c))
 			return false
 		}
 		switch CarrierLegDir(c) {

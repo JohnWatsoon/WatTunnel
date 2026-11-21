@@ -65,7 +65,7 @@ jobs:
       # The ICMP and raw-IP tests skip without root (icmp_linux_test.go, rawip_linux_test.go). They must not
       # skip here: this job runs them under sudo so a real raw-socket regression fails CI. TestRawIPShapedLoopback
       # is the only end-to-end test of the raw shaped carriers (H9 in the 2026-11-04 audit).
-      - run: sudo -E env "PATH=$PATH" go test -count=1 -timeout 15m -run 'TestICMP|TestRawIP|TestRawIPShapedLoopback|TestPTCP' ./wat/
+      - run: sudo -E env "PATH=$PATH" go test -count=1 -timeout 15m -run 'TestICMP|TestRawIP|TestRawIPShapedLoopback|TestPTCP|TestSpray' ./wat/
   race:
     runs-on: ubuntu-latest
     timeout-minutes: 20

@@ -126,6 +126,7 @@ func main() {
 	udpDNS := flag.Bool("udp-dns", false, "udp carrier: start every datagram with a DNS message header and question, so a filter that lets only DNS-looking UDP through (measured: UDP to port 53 passes, everything else is cut after 3 datagrams) passes the tunnel; use with port 53 on the server. Both ends must set it; an older peer cannot read it (3.0.0)")
 	udpHop := flag.Int("udp-hop", 0, "udp carrier, client only (Wraith, 3.3.9): send from a new UDP source port every N to 1.5N packets (0 = off; 12 suits a path that cuts each flow after ~30 packets). Any udp server connects (it follows the newest source port); a 3.3.9 server also detects the hopping and paces the downlink for it")
 	ptcpHop := flag.Int("ptcp-hop", 12, "ptcp carrier, client only (Phantom, 3.4.3): open a new fake-TCP flow (fresh source port, SYN, ClientHello) every N to 1.5N packets (the 2026-11-14 field run measured a ~30-packet cut per 5-tuple; 12 keeps a margin)")
+	sprayHop := flag.Int("spray-hop", 16, "spray carrier, client only (3.4.3): rotate the UDP 5-tuple (fresh source AND destination port) every N to 1.5N packets; 16 keeps every tuple under the ~30-packet cut measured in the field (2026-11-20: no tuple over 20 packets at 98.7% delivery)")
 	udpDNSEdns := flag.Bool("udp-dns-edns", false, "udp carrier with udp-dns: make the frames structurally complete DNS (3.3.8; both ends) - queries add an EDNS0 OPT record (ARCOUNT=1, size 1232) and the server replies as real answers that echo the query's id and question and carry the tunnel packet as TXT RDATA, instead of ANCOUNT=0 ciphertext after the question. A legacy query still gets the legacy reply, so the server can enable this while clients upgrade; a legacy server cannot parse the OPT")
 	probeGuard := flag.Bool("probe-guard", false, "ws|wss|h2|h2c|grpc carriers: the server answers a tunnel request only when it carries the key-derived X-Request-Id token, so an active prober gets the decoy/nginx pages instead of a real 101/200 (3.3.8; both ends; default off keeps older peers interoperable)")
 	shape := flag.Bool("shape", true, "randomize idle traffic: pad small packets (acks, keepalives, key exchange) to random sizes and jitter the keepalive interval around -ping-every (3.0.0; wire-compatible with older peers)")
@@ -640,6 +641,33 @@ func main() {
 				pio = r
 			}
 			log.Printf("ptcp carrier: Phantom fake-TCP shape (probe-proven 2026-11-14, not field-measured as a carrier); both ends need 3.4.3")
+		case "spray":
+			// spray (3.4.3): raw-UDP 5-tuple rotation, the field-proven rotation (2026-11-20: 98.7% delivery,
+			// no tuple over 20 packets, 15k tuples, no block) as a carrier. One raw socket per end, no iptables,
+			// no handshake; the server's -listen names the dport range (a single port means port..port+999,
+			// default base 41000 = 41000-41999) and the client's -peer host[:port|lo-hi] must derive the same
+			// range. Not reverse: the downlink's rotation rides the client's hops. Not field-measured as a
+			// carrier yet; only the rotation is.
+			if *reverse {
+				log.Fatalf("spray carrier: -reverse is not supported (the downlink's rotation rides the client's hops; the field run measured no cut on Kharej->Iran, use udp there)")
+			}
+			if server {
+				r, err := wat.NewSprayServer(listen)
+				if err != nil {
+					log.Fatalf("spray carrier: -listen %q: %v", listen, err)
+				}
+				raw = r
+			} else {
+				if peer == "" {
+					log.Fatalf("spray carrier: -peer is empty (want the server's host[:port or lo-hi], default port 41000 spanning 41000-41999)")
+				}
+				r, err := wat.NewSprayClient(peer, src, *sprayHop)
+				if err != nil {
+					log.Fatalf("spray socket: %v", err)
+				}
+				pio = r
+			}
+			log.Printf("spray carrier: raw-UDP 5-tuple rotation (rotation field-proven 2026-11-20, the carrier itself not field-measured yet); both ends need 3.4.3 and the same port range")
 		case "sit", "6to4", "xfrm-ipsec", "etherip", "l2tpv3":
 			// F19 phase 1 (3.3.0): raw-tier shaped carriers. wattun-internal wire shapes between two 3.3.0 peers
 			// (both ends need the same carrier name), not real 6in4/IPsec/EtherIP/L2TPv3; raw sockets are Linux+root.
