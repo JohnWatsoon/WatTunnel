@@ -605,3 +605,17 @@ target scheduler/pacer queueing of interactive echoes during bulk, not loss reco
 Tests: gofmt empty, vet clean, `go test -count=1 ./cmd/...` ok, full `go test -count=1 -timeout 15m ./wat/`
 ok, `bash -n wattun-manager` + `bash test-manager.sh` ALL OK.
 Commit: (this commit)
+
+## 2026-11-21 15:40 · supervisor · P3 fast retransmit + tail diagnosis — review verdict
+Reviewed `95c8e58`: the gap counter lives on sentPkt and dies with done (no map to leak), increments exactly
+when an ACK names a larger pn while the packet is unacked, fast-loses at 3 with the !cc.reliable gate, and the
+pre-existing loss rules are untouched below it. Harness classification and the three-mode loop are as briefed.
+Verdict endorsed: -fast-rtx ships OFF (all modes inside the same noise band; near-no-op on non-spread paths
+where the existing largest-pn>=4 rule fires first — its honest scope is spread carriers).
+THE DIAGNOSIS IS THE SESSION'S MAIN RESULT: the clean subset (zero retrans/repair activity on either end)
+carries the same ~2.5xRTT tail (clean p50 ≈ 87 ms vs run p50 42 ms, clean p99 102-194 ms). The interactive
+tail during bulk is queueing/scheduling/pacing-bound — NOT loss-recovery latency. Repair v1, v2 and fast-rtx
+were all correctly doomed; any future tail work attacks the scheduler/pacer's treatment of interactive
+echoes during bulk instead.
+Supervisor gates re-run: build/vet/gofmt clean, fast-rtx + kill subsets ok, ./cmd/... ok.
+Commit: none (review only; this note rides with the P4 commit)
