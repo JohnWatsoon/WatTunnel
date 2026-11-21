@@ -705,3 +705,27 @@ fixed harness with numbers; ICMP untouched; full wat suite the gate.
 Diag files (diagcc_test.go, diagprof_test.go, diagsched_test.go) committed as permanent measurement tools —
 all green (`go test -count=1 -run 'DiagCC|DiagSched|DiagProf' ./wat/`), gofmt clean.
 Commit: (this commit)
+
+## 2026-11-21 21:30 · implementer · speed-swarm phase 2 WI1 — kill harness pairing bug FIXED, clean-subset numbers re-baselined
+**What** (wat/coded_test.go only): killLatency now sorts each sample's class WITH its latency (a small
+pair slice sorted together, then split back out), so `lat[i]`/`cls[i]` stay paired. Signature and
+semantics unchanged (the doc comment already promised "per-sample loss classes"). A comment records the
+bug and names TestDiagSchedKillTRun as the discovery; the stale present-tense bug descriptions in
+diagsched_test.go (TestDiagSchedKillRepl / TestDiagSchedKillTRun doc comments) now carry the fix date
+and keep the deliberately-buggy `exactsort` copy as the permanent reproduction.
+
+**Re-baseline (FIXED harness, Windows checkout, 3 runs of TestKillInteractiveP99, 120 samples, 1 % loss,
+40 ms RTT, 3 s warmup, 50 ms gap):**
+- clean p99, 640 MTU: 41.4 / 41.8 / 41.9 ms (n=31/30/30, clean p50 40.8-40.9, max 41.5-41.9)
+- clean p99, 1400 MTU: 41.4 / 41.9 / 41.8 ms (n=31/30/30, clean p50 40.8, max 41.3-41.9)
+- whole-run p50 42.1-42.6 ms, p99 100.0-104.1 ms (640) and 101.7-151.8 ms (1400) — unchanged, as
+  expected: whole-run percentiles never depended on the pairing.
+The diag-predicted ~40.7/41.3 clean floor is confirmed (measured clean p50 40.7-40.9, clean p99
+41.3-42.1): the echo does NOT queue behind bulk tokens; the whole-run p99 tail is loss-recovery latency,
+and the old "clean p50 ~87 ms" P3 numbers were sort-mispairing artifacts. TestDiagSchedKillTRun after the
+fix: theirs/exact/mine rows all cleanP50 ~40.7-40.9 ms, only the deliberately-buggy exactsort copy still
+reads ~87-88 ms.
+
+Gates: gofmt -l wat empty; go build ./... && go vet ./wat/ clean; TestKillInteractiveP99 x3 and
+TestDiagSchedKillTRun green.
+Commit: (this commit)

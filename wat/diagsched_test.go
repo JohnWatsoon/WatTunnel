@@ -740,8 +740,10 @@ func TestDiagSchedEchoTail(t *testing.T) {
 }
 
 // TestDiagSchedKillRepl is killLatency (coded_test.go) re-implemented without its trailing sort, plus
-// the aligned-vs-ghost accounting that pins the clean-p50 ~87 ms fact on the sort's destroyed
-// cls[i]<->lat[i] pairing (GHOST = what the sorted array reports, ALIGNED = the truth).
+// the aligned-vs-ghost accounting that pinned the clean-p50 ~87 ms fact on the sort's destroyed
+// cls[i]<->lat[i] pairing (GHOST = what the sorted array reports, ALIGNED = the truth). killLatency
+// was fixed on 2026-11-21 (classes now sort WITH the latencies); this test and the ~87 ms numbers
+// below remain as the historical record of the bug.
 func TestDiagSchedKillRepl(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")
@@ -790,9 +792,12 @@ func TestDiagSchedKillRepl(t *testing.T) {
 
 // TestDiagSchedKillTRun: killLatency vs byte-identical copies of it, interleaved in one process. The
 // copies without the trailing sort.Slice report the aligned clean p50 (~41 ms, the no-bulk floor);
-// every variant that sorts lat in place reports ~85 ms — the sort destroys the cls[i]<->lat[i]
-// pairing, and TestKillInteractiveP99 then reads the slow (loss-recovery) half of the sorted array
+// every variant that sorts lat in place reports ~85 ms — the sort destroyed the cls[i]<->lat[i]
+// pairing, and TestKillInteractiveP99 then read the slow (loss-recovery) half of the sorted array
 // through chronologically-clean labels. That is the whole "clean p50 ~87 ms during bulk" fact.
+// THE DISCOVERY of the harness bug (2026-11-21): after the fix killLatency sorts classes with
+// latencies and the "theirs" rows moved to ~41 ms, agreeing with "exact"; only the deliberately
+// buggy "exactsort" copy still reproduces the old ~87 ms mispairing.
 func TestDiagSchedKillTRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("measuring test")

@@ -71,7 +71,14 @@ func classifyKill(up, down bool) killClass {
 }
 
 // killLatency runs a bulk download on one stream and measures small echo latencies on other streams while
-// it runs. It returns the sorted latencies, the per-sample loss classes, and the sender's stats snapshot.
+// it runs. It returns the sorted latencies, the per-sample loss classes (still paired: lat[i] and cls[i]
+// describe the same sample), and the sender's stats snapshot.
+//
+// The pairing matters: until 2026-11-21 this sorted lat AFTER appending cls, so a caller reading
+// lat[i] at a chronologically-clean cls[i] got the i-th SLOWEST latency, and every "clean-subset"
+// number since P3 read loss-recovery samples (clean p50 ~87 ms) instead of the real clean floor
+// (~41 ms). TestDiagSchedKillTRun (diagsched_test.go) was the discovery: interleaved byte-identical
+// copies with and without the trailing sort report clean p50 ~85 vs ~41 ms.
 func killLatency(t testing.TB, loss float64, mtu int, samples int, warmup, gap time.Duration, cfg Config) (lat []time.Duration, cls []killClass, st Stats) {
 	t.Helper()
 	cli, srv := newPairCap(t, loss, 20*time.Millisecond, 10e6, mtu, cfg)
@@ -119,7 +126,18 @@ func killLatency(t testing.TB, loss float64, mtu int, samples int, warmup, gap t
 			s1.Retrans > s0.Retrans || c1.RepairRecovered > c0.RepairRecovered))
 		time.Sleep(gap)
 	}
-	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
+	// sort lat and cls together, so the class pairing survives the sort (see the doc comment above)
+	pair := make([]struct {
+		lat time.Duration
+		c   killClass
+	}, len(lat))
+	for i := range lat {
+		pair[i].lat, pair[i].c = lat[i], cls[i]
+	}
+	sort.Slice(pair, func(i, j int) bool { return pair[i].lat < pair[j].lat })
+	for i := range pair {
+		lat[i], cls[i] = pair[i].lat, pair[i].c
+	}
 	return lat, cls, srv.Stats()
 }
 
