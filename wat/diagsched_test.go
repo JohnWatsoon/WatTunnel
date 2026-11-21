@@ -1,3 +1,7 @@
+//go:build diag
+
+// The speed-swarm diagnostics (2026-11-21): measurement tools, NOT regression pins — they add ~7 min to
+// the suite, so they build only under the diag tag:  go test -tags diag -run Diag ./wat/
 package wat
 
 // Diagnostic harness for the interactive tail during bulk (P4, 2026-11-21). Decomposes one echo sample

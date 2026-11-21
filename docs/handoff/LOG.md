@@ -811,3 +811,31 @@ Gates: gofmt -l cmd wat testbench empty; go build + go vet and GOOS=linux build+
 go test -count=1 ./cmd/... ok; bash -n wattun-manager + bash test-manager.sh ALL OK (2026112107);
 TestDiagCCSteady x3, TestKillInteractiveP99, TestKillBulkThroughput, TestInteractiveDuringBulk green.
 Commit: (this commit)
+
+## 2026-11-21 19:20 · supervisor · speed pass closed — verdicts, diag-tag gate, and one environmental caveat
+Impl fox delivered all three items (aad8603 / 23dcdc7 / 2117340); numbers verified from its log entries:
+- WI1 harness pairing fix: clean echo p99 re-baselined to 41.4-41.9 ms at both MTUs (the floor); whole-run
+  p99 unchanged (loss-recovery latency).
+- WI2 -burst-cap: SHIPS ON (opt-in, default off) — echo p90 during bulk 87-95 → 42.3-42.7 ms in 6/6 runs
+  (the queueing tail above the floor is gone); p99 wins at 640 (103→82), noise-bound at 1400; bulk cost
+  ~2-4 %.
+- WI3 -rate-tune: SHIPS ON (opt-in, default off) — delay cuts 42 → 21-26, no queue overflow after the
+  hold-state fix; bulk 8.82-8.84 MB/s with init8 (default-start 7.7, honestly below the 8.5 stretch);
+  echo p50 intact; p90/p99 during bulk slightly worse (the standing queue's trade, documented). The fox
+  caught and fixed its own runaway draft — the hold state is the shipped form.
+- CPU/syscall: nothing to change (diagprof: 75-77 MB/s in-process, 5-8 % of one core at field rate).
+
+Suite budget: the three diag suites added ~434 s and pushed the full wat/ suite past the 15-minute timeout
+(measured 900 s+ FAIL). They are measurement tools, not regression pins → moved behind a `diag` build tag
+(3879b76's files, this commit): `go test -tags diag -run Diag ./wat/` runs them; the default suite is back
+to ~700 s. Commands documented in AGENTS.md/CLAUDE.md.
+
+CAVEAT (environmental, proven): `TestMultiPeerSkipsDeadAtOnce` now fails DETERMINISTICALLY on this Windows
+checkout (dial-to-refused-port ~1.01 s vs the 90 ms pin) — and it fails identically at 91fae93 and b2295ba
+(verified in throwaway worktrees), i.e. at commits whose full suites were green this morning. The
+environment changed (firewall/Defender dial behavior), not the code; the speed pass never touches TCP pool
+dialing. Per repo rules the test is NOT loosened — Linux CI is the arbiter for the release gate; this
+Windows checkout simply can no longer host that timing pin. CI (push required) must show it green.
+Supervisor gates: gofmt/vet clean, GOOS=linux build+vet clean, ./cmd/... ok, full wat/ suite otherwise
+green (699 s, one environmental FAIL as described), test-manager.sh ALL OK (fox, 2026112107).
+Commit: (this commit)
