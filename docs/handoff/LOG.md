@@ -1055,3 +1055,25 @@ Commit: fcfee6c, 1be4dfb
 - Left for later: first live proof of systemd-run launch + -update-job swap + fetchRelease on a real Kharej
   pair (no systemd on Windows dev, unprivileged CI); cockpit screens for the phase D commands (phase E).
 Commit: a86676a
+
+## 2026-11-22 · supervisor · Phase D closed — engine (a86676a) + cockpit (e92fe35); PHASE D READY FOR REVIEW
+- Lane I (engine ops, relaunched fresh after the runtime crash killed the first attempt with an
+  empty tree) self-committed a86676a: update.status/update.run (CapFull only; engine stages a
+  verified release - download + RSA PKCS1v15 verify against a third byte-identical SIG_PUB copy
+  drift-pinned by test; the swap handed to a systemd-run transient unit running -update-job,
+  because in-engine/child watchdogs die with the engine's cgroup), BIN.prev backup gate + 40 s
+  rollback watchdog (10 s stable-active), .update.status mailbox, survival contract (3 s worker
+  grace, journal-then-flush, latch 30 s arm < 40 s watch, revived engine's mailbox watcher fires
+  the terminal events), doctor.fetch/backup.export (chunked, 4 MB/5 MB caps)/audit.tail.
+  Supervisor verified: full wat suite 711.2 s exit 0, gofmt/vet/build clean, TestScepter ok.
+- Lane J (mgr ops console) committed as e92fe35 after gate re-run: Operations item (update
+  status/run full-gated with drop-and-latch warning + same-id retry semantics, doctor rows,
+  verified backup assembly, audit viewer), E.4 gap fix (tunnel-only credential headless-page
+  hint), too_large code hint, 17 tests + hidden-filter pin + A-C reachability pins. Gates green.
+- FINDING carried to phase E: probe-<ts>.yml test units are listed by the bash manager on Kharej
+  (transient ttl-bounded server units) — hidden-infrastructure rule extended to cover them.
+- Phase D commits: a86676a -> 7a6c1db (log) -> e92fe35.
+PHASE D READY FOR REVIEW. Proceeding to phase E: Lane K (engine event coalescing/backpressure,
+audit-per-command with credential UUID + rotation test), Lane L (bash mgr probe-listing filter +
+MGR_VERSION, README content-sync for cockpit/ops, docs sweep).
+Commit: a86676a, e92fe35
