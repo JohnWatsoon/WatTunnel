@@ -98,7 +98,10 @@ func Run(args []string) int {
 	}
 	if NonInteractive {
 		switch cmd {
-		case "", "new", "monitor", "ports", "logs":
+		case "", "new", "monitor", "ports", "logs", "scepter":
+			// scepter is interactive-only: the cockpit reads keys and answers
+			// key-by-key (the RPC panel comes later); unattended use is the
+			// engine's -scepter-call.
 			Err(fmt.Sprintf("'%s' needs a terminal; unattended use: kharej, iran, cdn-tune, auto-test, delete, uninstall, status, test, token, matrix (see: help)", cmd))
 			return 1
 		case "delete", "uninstall":
@@ -233,6 +236,9 @@ func runCommand(cmd string, args []string) int {
 		}
 		return dispatch("show_token", name)
 	case "scepter":
+		if name == "" { // the fleet view of pairs
+			return dispatch("scepter_fleet")
+		}
 		if !NeedTunnel(name) {
 			return 1
 		}

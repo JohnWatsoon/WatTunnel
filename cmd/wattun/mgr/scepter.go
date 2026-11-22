@@ -1,28 +1,35 @@
 // Scepter — the Iran-side cockpit surface of the pairing plane (plan
-// docs/handoff/PLAN-pairing.md, Phase A). Three parts live here:
+// docs/handoff/PLAN-pairing.md, phases A + B). Four parts live here:
 //
 //   - the watp1: pairing line (parse + validate + make): the credential a
 //     Kharej owner pastes on Iran once (D4/D5);
 //   - the capability bitmask and its human labels (tunnel/create/manage/full);
-//   - the cockpit screen: pairing status of a tunnel, attach (the -pair-to
-//     equivalent) and the read-only RPC views, behind a thin client seam so no
-//     fake data can ever be shown as real.
+//   - the transport: the real client seam, one shell-out per call to the
+//     binary's one-shot `-scepter-call` (raw JSONL in, parsed answer out);
+//   - the attach screen (phase A); the fleet/wizard/tunnel pages live in
+//     scepter_cockpit.go (phase B).
 //
 // Engine pairing (the scepter stream, sid 0) and the -pair/-pair-to flags are
 // the engine lane's; this file only consumes the config key `pairing: true`
 // (Cfg reads the yml directly, so no engine API is assumed) and shells out to
-// the binary for the attach step. Both ends need 3.5.0 for any live RPC
-// (stated per the plan's version matrix).
+// the binary for everything that needs the paired session. Both ends need
+// 3.5.0 for any live RPC (stated per the plan's version matrix).
 
 package mgr
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // ======================================================================================
@@ -194,8 +201,10 @@ func (c ScepterCaps) Has(need ScepterCaps) bool { return c&need == need }
 // ======================================================================================
 // The client seam: one JSONL RPC over the scepter stream (reserved sid 0,
 // request {"id","v","cmd","args"} / response {"id","code","params"} — D7).
-// The default dialer refuses instead of inventing data; the engine lane's
-// paired-session transport replaces it by swapping one var.
+// The real transport is one shell-out per Call to the binary's one-shot
+// `-scepter-call` (same -config context as the run itself; it dials the
+// reserved stream, prints every raw response line — chunks included — and
+// exits 0 once answered, 1 on a transport failure). Tests swap this var.
 // ======================================================================================
 
 // ScepterResult mirrors one response object: a machine code (never prose) and
@@ -210,9 +219,204 @@ type ScepterClient interface {
 	Call(cmd string, args map[string]any) (ScepterResult, error)
 }
 
-// scepterDial opens the scepter stream of tunnel NAME's paired session.
+// scepterDial opens the cockpit channel of tunnel NAME's paired session.
+// Refusal is honest and local: an unpaired tunnel has no channel. Everything
+// that can only be learned from Kharej (old peer, dead link, unknown flag)
+// surfaces at Call time as the engine's own error text.
 var scepterDial = func(tunnel string) (ScepterClient, error) {
-	return nil, fmt.Errorf("pairing channel needs wattun 3.5.0 on both ends (engine support lands with Phase A)")
+	if !IsPaired(tunnel) {
+		return nil, fmt.Errorf("tunnel '%s' is not paired — attach the watp1: line from Kharej first (Scepter screen, press a)", tunnel)
+	}
+	return scepterCLI{tunnel: tunnel}, nil
+}
+
+// scepterCallTimeout bounds one shell-out. runScepterCall answers or dies
+// within its own deadlines (30 s pairing hello + 30 s response wait), so this
+// only kills a wedged child; a healthy call returns in well under a second
+// once the tunnel is up.
+const scepterCallTimeout = 65 * time.Second
+
+// scepterCLI is the real ScepterClient: every Call runs
+// `wattun -config NAME.yml -scepter-call CMD -scepter-args JSON` and parses
+// the JSONL answer. A write intent carries its command id inside args (the
+// binary lifts it), so a retry after an unclear outcome replays the server
+// journal instead of re-applying.
+type scepterCLI struct{ tunnel string }
+
+func (c scepterCLI) Call(cmd string, args map[string]any) (ScepterResult, error) {
+	out, err := scepterExec(c.tunnel, cmd, args)
+	if err != nil {
+		return ScepterResult{}, err
+	}
+	return scepterParseCall(out)
+}
+
+// scepterExec runs one -scepter-call and returns its stdout (raw JSONL). The
+// engine's own stderr reaches the user untouched — "pairing needs 3.5.0 on
+// both ends" is exactly what an old peer must be told.
+func scepterExec(tunnel, cmd string, args map[string]any) ([]byte, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	aj, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), scepterCallTimeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, P.Bin, "-config", filepath.Join(P.Conf, tunnel+".yml"),
+		"-scepter-call", cmd, "-scepter-args", string(aj))
+	var stdout, stderr bytes.Buffer
+	c.Stdout, c.Stderr = &stdout, &stderr
+	if err := c.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("%s", msg)
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("no answer within %s", scepterCallTimeout)
+		}
+		return nil, err
+	}
+	return stdout.Bytes(), nil
+}
+
+// scepterRespLine is one JSONL line of the -scepter-call stdout.
+type scepterRespLine struct {
+	ID     string             `json:"id"`
+	Code   int                `json:"code"`
+	Params map[string]any     `json:"params"`
+	Chunk  *scepterChunkPiece `json:"chunk"`
+}
+
+// scepterChunkPiece marks piece i of n of a large payload.
+type scepterChunkPiece struct {
+	I    int    `json:"chunk"`
+	N    int    `json:"of"`
+	Data string `json:"data"`
+}
+
+// scepterParseCall parses one -scepter-call stdout into the final answer. A
+// chunked payload arrives as {"chunk":i,"of":n,"data":…} lines; the pieces
+// concatenate in order and reassemble into {"logs": [...]} — the same shape
+// wat.ScepterClient.waitResp answers. Any line without a chunk marker is the
+// whole answer. Missing pieces, duplicate indexes and junk lines are transport
+// failures: the parser never invents a field.
+func scepterParseCall(out []byte) (ScepterResult, error) {
+	var pieces map[int]string
+	n, got, closeCode := 0, 0, 0
+	saw := false
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var r scepterRespLine
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			return ScepterResult{}, fmt.Errorf("unparseable response line: %v", err)
+		}
+		saw = true
+		if r.Chunk == nil {
+			return ScepterResult{Code: r.Code, Params: r.Params}, nil
+		}
+		if n == 0 {
+			n = r.Chunk.N
+		}
+		if r.Chunk.N != n || r.Chunk.N <= 0 || r.Chunk.I < 0 || r.Chunk.I >= n {
+			return ScepterResult{}, fmt.Errorf("broken chunking (piece %d of %d, expected %d)", r.Chunk.I, r.Chunk.N, n)
+		}
+		if pieces == nil {
+			pieces = map[int]string{}
+		}
+		if _, dup := pieces[r.Chunk.I]; dup {
+			return ScepterResult{}, fmt.Errorf("chunk %d arrived twice", r.Chunk.I)
+		}
+		pieces[r.Chunk.I] = r.Chunk.Data
+		closeCode = r.Code
+		got++
+		if got == n {
+			var sb strings.Builder
+			for i := 0; i < n; i++ {
+				sb.WriteString(pieces[i])
+			}
+			return ScepterResult{Code: closeCode, Params: map[string]any{"logs": strings.Split(sb.String(), "\n")}}, nil
+		}
+	}
+	if !saw {
+		return ScepterResult{}, fmt.Errorf("no response on the command's stdout")
+	}
+	return ScepterResult{}, fmt.Errorf("chunked response ended early (%d of %d pieces)", got, n)
+}
+
+// ---- response codes (the engine's scepter wire codes, mirrored — mgr does
+// not import the engine library; new codes append, never renumber) ----
+
+const (
+	scepterCodeOK           = 0
+	scepterCodeBad          = 1 // malformed line, wrong version, bad args
+	scepterCodeDenied       = 2 // capability insufficient
+	scepterCodeStale        = 3 // intent TTL expired or built on an old state
+	scepterCodeRate         = 4 // per-pair command rate exceeded
+	scepterCodeUnknownCmd   = 5
+	scepterCodeNotFound     = 6 // no such tunnel / event range
+	scepterCodeInternal     = 7 // Kharej-side op failure (rolled-back write)
+	scepterCodeTooLarge     = 8
+	scepterCodeUnpaired     = 9
+	scepterCodeNameTaken    = 10 // params {"name"}
+	scepterCodePortBusy     = 11 // params {"port","user"}
+	scepterCodeCarrierNeeds = 12 // params {"carrier","ver","need"}
+)
+
+// scepterCodeHint maps a code (with its params) to the short human hint the
+// screens print under it — codes ride the wire, prose is local (the panel
+// localizes later). A hint only explains what the code already says; it never
+// invents state.
+func scepterCodeHint(code int, p map[string]any) string {
+	str := func(k string) string { s, _ := p[k].(string); return s }
+	switch code {
+	case scepterCodeOK:
+		return ""
+	case scepterCodeBad:
+		if k := str("key"); k != "" {
+			return fmt.Sprintf("Kharej refused %q (%s)", k, orStr(str("why"), "bad value"))
+		}
+		if s := str("ports"); s != "" {
+			return "Kharej refused the ports: " + s
+		}
+		if s := str("name"); s != "" {
+			return fmt.Sprintf("%q is not a valid tunnel name (1-32 letters, digits, - or _)", s)
+		}
+		return "Kharej refused the command (bad arguments)"
+	case scepterCodeDenied:
+		return "needs the '" + orStr(str("need"), "higher") + "' capability on the pairing line"
+	case scepterCodeStale:
+		return "the intent was built on an outdated state — retry on the fresh one"
+	case scepterCodeRate:
+		return "too many commands too fast — wait a moment and retry"
+	case scepterCodeUnknownCmd:
+		return "this Kharej does not know the command (needs wattun 3.5.0 there)"
+	case scepterCodeNotFound:
+		return "no such tunnel on Kharej (deleted from its console?)"
+	case scepterCodeInternal:
+		if rb, _ := p["rolled_back"].(bool); rb {
+			return "Kharej failed to apply it and rolled back — nothing changed"
+		}
+		return "Kharej-side failure"
+	case scepterCodeUnpaired:
+		return "the pairing is not active on this session"
+	case scepterCodeNameTaken:
+		return "the name '" + orStr(str("name"), "?") + "' is already used on Kharej"
+	case scepterCodePortBusy:
+		// the port arrives as a JSON number; a string is accepted for stubs
+		port := str("port")
+		if port == "" {
+			if f, ok := p["port"].(float64); ok {
+				port = strconv.FormatInt(int64(f), 10)
+			}
+		}
+		return "port " + orStr(port, "?") + " is already bound by " + orStr(str("user"), "another listener")
+	case scepterCodeCarrierNeeds:
+		return "carrier '" + orStr(str("carrier"), "?") + "' needs " + orStr(str("need"), "a different platform") + " on Kharej"
+	}
+	return ""
 }
 
 // scepterPairTo attaches a pairing line to a tunnel — the -pair-to equivalent.
@@ -230,19 +434,9 @@ var scepterPairTo = func(tunnel, line string) error {
 	return nil
 }
 
-// The read-only Phase A commands (plan A.3) the screen can run, in menu order.
-var scepterReadCmds = []struct{ key, cmd, desc string }{
-	{"h", "scepter.hello", "versions, capabilities, state_seq of the paired Kharej"},
-	{"s", "state.get", "the versioned state document (tunnels, health, cursor)"},
-	{"t", "tunnels.list", "tunnels of the paired Kharej"},
-	{"v", "tunnel.stats", "live /stats numbers of one remote tunnel"},
-	{"l", "tunnel.logs", "remote journal tail (chunked)"},
-	{"e", "events.since", "events since a state_seq cursor"},
-	{"y", "history", "traffic history of one remote tunnel"},
-}
-
 // ======================================================================================
-// The screen (Iran side): `wattun-manager scepter NAME`.
+// The screen (Iran side): `wattun-manager scepter NAME` (attach when unpaired;
+// the paired cockpit lives in scepter_cockpit.go) and `scepter` (the fleet).
 // ======================================================================================
 
 func init() {
@@ -270,40 +464,30 @@ func PairedBadge(name string) string {
 }
 
 func scepterScreen(n string) {
+	if IsPaired(n) {
+		scepterPairScreen(n)
+		return
+	}
+	// Not paired: the only useful action is attaching the line. The read/write
+	// views all need the channel, so they are not offered (they would only
+	// print the dial refusal).
 	for {
 		Page("Scepter", n+" · Iran cockpit")
-		if IsPaired(n) {
-			Say("  " + GRN + "●" + RST + " paired — the management channel rides this tunnel's reserved stream")
-		} else {
-			Say("  " + GRY + "◌" + RST + " not paired — attach the pairing line from Kharej (install.sh prints it)")
-		}
-		Hint("Read-only views need wattun 3.5.0 on both ends; write intents come with Phase B.")
+		Say("  " + GRY + "◌" + RST + " not paired — attach the pairing line from Kharej (install.sh prints it)")
+		Hint("Pairing needs wattun 3.5.0 on both ends; the cockpit then rides this tunnel's reserved stream.")
 		fmt.Fprintln(Stdout)
-		MenuLine(Stdout, "a", "attach pairing line", "h", "hello", "s", "state", "t", "tunnels",
-			"v", "tunnel stats", "l", "tunnel logs", "e", "events", "y", "history", "0", "back")
+		MenuLine(Stdout, "a", "attach pairing line", "0", "back")
 		fmt.Fprintf(Stdout, "  %s▸%s ", CYN, RST)
 		k, _, ok := KeyRead(0)
 		if !ok || k == "0" || k == "q" || k == "esc" {
 			return
 		}
-		switch k {
-		case "a":
+		if k == "a" {
 			scepterAttach(n)
 			Pause()
-		default:
-			// the read-only items: each is one RPC behind the client seam
-			found := false
-			for _, c := range scepterReadCmds {
-				if c.key == k {
-					found = true
-					scepterRead(n, c.cmd, c.desc)
-					Pause()
-				}
-			}
-			if !found {
-				Hint("Press a, h, s, t, v, l, e, y or 0.")
-				sleepMS(600)
-			}
+		} else {
+			Hint("Press a or 0.")
+			sleepMS(600)
 		}
 	}
 }
@@ -333,7 +517,7 @@ func scepterAttach(n string) {
 }
 
 // scepterRead runs one read-only RPC and prints the honest outcome — the
-// refusal of the stub dialer included, never fabricated rows.
+// transport refusal and rejection codes included, never fabricated rows.
 func scepterRead(n, cmd, desc string) {
 	fmt.Fprintln(Stdout)
 	Hint(cmd + " — " + desc)
@@ -347,12 +531,35 @@ func scepterRead(n, cmd, desc string) {
 		Warn("channel error: " + err.Error())
 		return
 	}
-	if res.Code != 0 {
-		Err(fmt.Sprintf("%s answered code %d", cmd, res.Code))
+	if res.Code != scepterCodeOK {
+		scepterCodeErr(cmd, res)
 		return
 	}
-	for k, v := range res.Params {
-		Say("  " + kv(k, fmt.Sprintf("%v", v)))
+	scepterPrintParams(res.Params)
+}
+
+// scepterPrintParams prints a successful answer's params as kv rows, sorted —
+// a map's iteration order must not jitter the screen.
+func scepterPrintParams(p map[string]any) {
+	ks := make([]string, 0, len(p))
+	for k := range p {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	for _, k := range ks {
+		Say("  " + kv(k, fmt.Sprintf("%v", p[k])))
+	}
+}
+
+// scepterCodeErr prints a non-OK answer: the machine code, its hint and any
+// detail Kharej attached.
+func scepterCodeErr(cmd string, res ScepterResult) {
+	Err(fmt.Sprintf("%s answered code %d", cmd, res.Code))
+	if h := scepterCodeHint(res.Code, res.Params); h != "" {
+		Hint(h)
+	}
+	if d, _ := res.Params["detail"].(string); d != "" {
+		Hint("Kharej: " + d)
 	}
 }
 

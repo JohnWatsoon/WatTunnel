@@ -1,6 +1,7 @@
 package mgr
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,10 +174,10 @@ func TestScepterScreenStubTransport(t *testing.T) {
 	P.Conf = dir
 	defer func() { P.Conf = old }()
 	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
-	// the stub dialer refuses; the screen must say so, never invent rows
+	// an unpaired tunnel refuses at the dial — the honest answer, no rows
 	out := capture(t, func() { scepterRead("ir", "state.get", "the state document") })
-	if !strings.Contains(out, "state.get") || !strings.Contains(out, "3.5.0") {
-		t.Errorf("stub refusal missing command/version:\n%s", out)
+	if !strings.Contains(out, "state.get") || !strings.Contains(out, "not paired") {
+		t.Errorf("dial refusal missing command/reason:\n%s", out)
 	}
 	// a fake client proves the success path prints params, code errors print codes
 	oldDial := scepterDial
@@ -193,3 +194,447 @@ func TestScepterScreenStubTransport(t *testing.T) {
 type stubClient struct{ r ScepterResult }
 
 func (s stubClient) Call(string, map[string]any) (ScepterResult, error) { return s.r, nil }
+
+func TestScepterParseCall(t *testing.T) {
+	// one plain answer line: code and params ride through
+	res, err := scepterParseCall([]byte(`{"id":"x","code":0,"params":{"a":1},"seq":5}` + "\n"))
+	if err != nil || res.Code != 0 || res.Params["a"] != float64(1) {
+		t.Errorf("plain line: res=%+v err=%v", res, err)
+	}
+	// an answered rejection: exit 0, the code rides the JSON
+	res, err = scepterParseCall([]byte(`{"id":"x","code":10,"params":{"name":"tunnel"}}` + "\n"))
+	if err != nil || res.Code != 10 || res.Params["name"] != "tunnel" {
+		t.Errorf("rejection line: res=%+v err=%v", res, err)
+	}
+	// chunked, arriving in order: pieces join and reassemble into logs
+	chunked := `{"id":"x","code":0,"chunk":{"chunk":0,"of":2,"data":"line1\nli"}}` + "\n" +
+		`{"id":"x","code":0,"chunk":{"chunk":1,"of":2,"data":"ne2\nline3"}}` + "\n"
+	res, err = scepterParseCall([]byte(chunked))
+	if err != nil || res.Code != 0 {
+		t.Fatalf("chunked: res=%+v err=%v", res, err)
+	}
+	logs, _ := res.Params["logs"].([]string)
+	if len(logs) != 3 || logs[0] != "line1" || logs[1] != "line2" || logs[2] != "line3" {
+		t.Errorf("chunked logs = %v", logs)
+	}
+	// chunked, arriving out of order: the pieces still join by index
+	swapped := `{"id":"x","code":0,"chunk":{"chunk":1,"of":2,"data":"ne2"}}` + "\n" +
+		`{"id":"x","code":0,"chunk":{"chunk":0,"of":2,"data":"li"}}` + "\n"
+	res, err = scepterParseCall([]byte(swapped))
+	if err != nil {
+		t.Fatalf("swapped chunks: %v", err)
+	}
+	if logs, _ := res.Params["logs"].([]string); len(logs) != 1 || logs[0] != "line2" {
+		t.Errorf("swapped chunks joined = %v", logs)
+	}
+	// a chunk piece with data spanning a real line break survives the split
+	empty := `{"id":"x","code":0,"chunk":{"chunk":0,"of":1,"data":""}}` + "\n"
+	res, err = scepterParseCall([]byte(empty))
+	if err != nil {
+		t.Fatalf("single empty chunk: %v", err)
+	}
+	if logs, _ := res.Params["logs"].([]string); len(logs) != 1 || logs[0] != "" {
+		t.Errorf("single empty chunk logs = %v", logs)
+	}
+	// transport-shaped failures: garbage, empty, incomplete chunking, duplicates
+	for _, c := range []struct {
+		name, out string
+	}{
+		{"garbage", "not json at all\n"},
+		{"empty", ""},
+		{"only whitespace", "  \n \n"},
+		{"incomplete chunks", `{"id":"x","code":0,"chunk":{"chunk":0,"of":3,"data":"a"}}` + "\n"},
+		{"count changed", `{"id":"x","code":0,"chunk":{"chunk":0,"of":2,"data":"a"}}` + "\n" +
+			`{"id":"x","code":0,"chunk":{"chunk":1,"of":5,"data":"b"}}` + "\n"},
+		{"duplicate piece", `{"id":"x","code":0,"chunk":{"chunk":0,"of":2,"data":"a"}}` + "\n" +
+			`{"id":"x","code":0,"chunk":{"chunk":0,"of":2,"data":"a"}}` + "\n"},
+		{"index out of range", `{"id":"x","code":0,"chunk":{"chunk":9,"of":2,"data":"a"}}` + "\n"},
+		{"zero of", `{"id":"x","code":0,"chunk":{"chunk":0,"of":0,"data":""}}` + "\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := scepterParseCall([]byte(c.out)); err == nil {
+				t.Errorf("no error for %q", c.name)
+			}
+		})
+	}
+}
+
+func TestScepterExecTransportFailure(t *testing.T) {
+	old := P.Bin
+	defer func() { P.Bin = old }()
+	// a binary that does not exist: the exec failure surfaces, no data invented
+	P.Bin = filepath.Join(t.TempDir(), "no-such-wattun")
+	if _, err := scepterExec("ir", "state.get", nil); err == nil {
+		t.Error("no error for a missing binary")
+	}
+	// a binary that fails with stderr: the engine's own words surface untouched
+	// (the test binary rejects the flags; the point is that its stderr arrives)
+	P.Bin = os.Args[0]
+	_, err := scepterExec("ir", "state.get", nil)
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Errorf("stderr of the failing child not surfaced: %v", err)
+	}
+}
+
+func TestScepterCodeHints(t *testing.T) {
+	cases := []struct {
+		code int
+		p    map[string]any
+		want string
+	}{
+		{scepterCodeOK, nil, ""},
+		{scepterCodeBad, map[string]any{"key": "max-mbps", "why": "unknown config key"}, "max-mbps"},
+		{scepterCodeBad, map[string]any{"ports": "bad port item"}, "refused the ports"},
+		{scepterCodeBad, nil, "bad arguments"},
+		{scepterCodeDenied, map[string]any{"need": "manage"}, "'manage'"},
+		{scepterCodeStale, nil, "outdated state"},
+		{scepterCodeRate, nil, "wait a moment"},
+		{scepterCodeUnknownCmd, nil, "3.5.0"},
+		{scepterCodeNotFound, nil, "no such tunnel"},
+		{scepterCodeInternal, map[string]any{"rolled_back": true, "detail": "unit did not come up"}, "rolled back"},
+		{scepterCodeInternal, nil, "Kharej-side failure"},
+		{scepterCodeUnpaired, nil, "pairing is not active"},
+		{scepterCodeNameTaken, map[string]any{"name": "t1"}, "'t1' is already used"},
+		{scepterCodePortBusy, map[string]any{"port": float64(443), "user": "t2"}, "port 443 is already bound by t2"},
+		{scepterCodeCarrierNeeds, map[string]any{"carrier": "icmp", "need": "linux+CAP_NET_RAW"}, "icmp' needs linux+CAP_NET_RAW"},
+		{99, nil, ""},
+	}
+	for _, c := range cases {
+		if got := scepterCodeHint(c.code, c.p); !strings.Contains(got, c.want) {
+			t.Errorf("hint(%d, %v) = %q, want it to contain %q", c.code, c.p, got, c.want)
+		}
+	}
+}
+
+func TestScepterCreateArgs(t *testing.T) {
+	// the full intent: id, name, carrier, ports, params, base_seq, ttl_s
+	args := scepterCreateArgs("t1", "udp", "443", map[string]string{"listen": ":8443"}, 41, "mgr1")
+	for k, want := range map[string]any{
+		"id": "mgr1", "name": "t1", "carrier": "udp", "ports": "443",
+		"base_seq": uint64(41), "ttl_s": scepterTTLDefault,
+	} {
+		if got := args[k]; got != want {
+			t.Errorf("args[%q] = %v, want %v", k, got, want)
+		}
+	}
+	if p, ok := args["params"].(map[string]string); !ok || p["listen"] != ":8443" {
+		t.Errorf("params = %v", args["params"])
+	}
+	// an empty name stays absent (Kharej suggests one) and so do empty params
+	args = scepterCreateArgs("", "udp", "443", nil, 0, "mgr2")
+	if _, present := args["name"]; present {
+		t.Error("empty name must stay absent")
+	}
+	if _, present := args["params"]; present {
+		t.Error("empty params must stay absent")
+	}
+	if args["base_seq"] != uint64(0) || args["ttl_s"] != 600 {
+		t.Errorf("base_seq/ttl defaults = %v/%v", args["base_seq"], args["ttl_s"])
+	}
+}
+
+func TestScepterRemoteNameSuggest(t *testing.T) {
+	rows := []scepterTunRow{{Name: "tunnel"}, {Name: "tunnel-2"}, {Name: "other"}}
+	if got := scepterRemoteNameSuggest(rows); got != "tunnel-3" {
+		t.Errorf("suggest over taken names = %q, want tunnel-3", got)
+	}
+	if got := scepterRemoteNameSuggest(nil); got != "tunnel" {
+		t.Errorf("suggest over an empty list = %q, want tunnel", got)
+	}
+}
+
+func TestScepterRunStaleRetry(t *testing.T) {
+	InitColor(false, 8)
+	// the stale retry's "rebuild on the fresh state?" goes through Confirm;
+	// NonInteractive answers yes and keeps the loop deterministic.
+	old := NonInteractive
+	NonInteractive = true
+	defer func() { NonInteractive = old }()
+	// scripted channel: the first create answers stale, state.get answers the
+	// fresh document (seq 41), the resend is recorded and answers OK.
+	stale := ScepterResult{Code: scepterCodeStale}
+	fresh := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"ver": "3.5.0", "state_seq": float64(41), "tunnels": []any{}, "pair": map[string]any{},
+	}}
+	done := ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "t1"}}
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.create": {{r: stale}, {r: done}},
+		"state.get":     {{r: fresh}},
+	}}
+	var firstID string
+	var seqs []uint64
+	_, ok := scepterRun(cl, "tunnel.create", func(seq uint64, id string) map[string]any {
+		if firstID == "" {
+			firstID = id
+		}
+		seqs = append(seqs, seq)
+		return scepterCreateArgs("t1", "udp", "443", nil, seq, id)
+	}, 7)
+	if !ok {
+		t.Fatal("no final answer")
+	}
+	if len(seqs) != 2 || seqs[0] != 7 || seqs[1] != 41 {
+		t.Errorf("base_seq per send = %v, want [7 41]", seqs)
+	}
+	sent := cl.cmds["tunnel.create"]
+	if len(sent) != 2 {
+		t.Fatalf("sent %d creates, want 2", len(sent))
+	}
+	if sent[0]["id"] == sent[1]["id"] {
+		t.Error("a stale retry must mint a fresh command id (the old intent never applied)")
+	}
+	if sent[0]["id"] != firstID || sent[1]["base_seq"] != uint64(41) {
+		t.Errorf("ids/base_seq = %v/%v", sent[0]["id"], sent[1]["base_seq"])
+	}
+}
+
+func TestScepterRunTransportRetryKeepsID(t *testing.T) {
+	InitColor(false, 8)
+	// first send fails at the transport (outcome unknown), the resend of the
+	// SAME id is what makes the journal replay instead of double-applying.
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.create": {{e: fmt.Errorf("channel dead")}, {r: ScepterResult{Code: scepterCodeOK}}},
+	}}
+	// the retry question goes through Confirm; NonInteractive answers yes
+	old := NonInteractive
+	NonInteractive = true
+	defer func() { NonInteractive = old }()
+	_, ok := scepterRun(cl, "tunnel.create", func(seq uint64, id string) map[string]any {
+		return scepterCreateArgs("t1", "udp", "443", nil, seq, id)
+	}, 7)
+	if !ok {
+		t.Fatal("retry did not land")
+	}
+	sent := cl.cmds["tunnel.create"]
+	if len(sent) != 2 || sent[0]["id"] != sent[1]["id"] {
+		t.Errorf("transport retry must reuse the command id: %v vs %v", sent[0]["id"], sent[1]["id"])
+	}
+	if sent[0]["base_seq"] != uint64(7) || sent[1]["base_seq"] != uint64(7) {
+		t.Error("a transport retry keeps the intent (and its base_seq) untouched")
+	}
+}
+
+// scriptClient answers each command from a per-command script of answers and
+// records the args of every send — the seam's stub for the intent-loop tests.
+type scriptClient struct {
+	byCmd map[string][]scriptAns
+	cmds  map[string][]map[string]any
+}
+
+type scriptAns struct {
+	r ScepterResult
+	e error
+}
+
+func (s *scriptClient) Call(cmd string, args map[string]any) (ScepterResult, error) {
+	if s.cmds == nil {
+		s.cmds = map[string][]map[string]any{}
+	}
+	s.cmds[cmd] = append(s.cmds[cmd], args)
+	q := s.byCmd[cmd]
+	if len(q) == 0 {
+		return ScepterResult{}, fmt.Errorf("script exhausted for %s", cmd)
+	}
+	a := q[0]
+	s.byCmd[cmd] = q[1:]
+	return a.r, a.e
+}
+
+func TestScepterParseDoc(t *testing.T) {
+	// a recorded state.get answer: the full document shape
+	doc, err := scepterParseDoc(map[string]any{
+		"v": float64(1), "ver": "3.5.0", "state_seq": float64(12), "uptime_s": float64(3600),
+		"event_cursor": float64(9),
+		"pair":         map[string]any{"uuid": "1b0e6a52-0000", "caps": "manage"},
+		"tunnels": []any{
+			map[string]any{"name": "t1", "carrier": "udp", "state": "active", "health": "ok",
+				"ports": "443", "metrics": "127.0.0.1:19700"},
+			map[string]any{"name": "t2", "carrier": "icmp", "state": "inactive", "health": "down"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if doc.Ver != "3.5.0" || doc.StateSeq != 12 || doc.UptimeS != 3600 || doc.Cursor != 9 {
+		t.Errorf("doc head = %+v", doc)
+	}
+	if doc.PairCaps != "manage" || len(doc.Tunnels) != 2 || doc.Tunnels[0].Name != "t1" || doc.Tunnels[1].Ports != "" {
+		t.Errorf("doc body = %+v", doc)
+	}
+	// garbage and empty answers are errors, never an empty-looking success
+	if _, err := scepterParseDoc(nil); err == nil {
+		t.Error("nil params accepted")
+	}
+	if _, err := scepterParseDoc(map[string]any{"unrelated": 1}); err == nil {
+		t.Error("params without a document accepted")
+	}
+}
+
+func TestScepterCapsOf(t *testing.T) {
+	for tier, want := range map[string]ScepterCaps{
+		"tunnel": CapTunnel,
+		"create": CapTunnel | CapCreate,
+		"manage": CapTunnel | CapCreate | CapManage,
+		"full":   CapTunnel | CapCreate | CapManage | CapFull,
+	} {
+		if got := scepterCapsOf(map[string]any{"caps": tier}); got != want {
+			t.Errorf("capsOf(%q) = %d, want %d", tier, got, want)
+		}
+	}
+	// an unknown or missing tier is no capability at all (write items hide)
+	if scepterCapsOf(map[string]any{"caps": "root"}) != 0 || scepterCapsOf(nil) != 0 {
+		t.Error("unknown tier must map to 0")
+	}
+}
+
+func TestScepterValidators(t *testing.T) {
+	InitColor(false, 8)
+	// remote names: the engine's name rule without the local file check
+	if !vScepterName("T-1_x") || vScepterName("") || vScepterName("-way-too-long-0123456789abcdef0123") ||
+		vScepterName("bad name") || vScepterName("dot.dot") {
+		t.Error("vScepterName disagrees with the name rule")
+	}
+	// ports: the engine's parsePortItem grammar
+	for _, s := range []string{"443", "443,53/udp", "8443:443/udp", "2000-2010", "2000-2010:3000-3010/tcp", "80/tcp"} {
+		if !vScepterPorts(s) {
+			t.Errorf("ports %q rejected", s)
+		}
+	}
+	for _, s := range []string{"", "  ", "0", "443, ", "1-2:3", "a", "443/", "-5", "70000", "443:444:555"} {
+		if vScepterPorts(s) {
+			t.Errorf("ports %q accepted", s)
+		}
+	}
+	// limits: the engine's parseLimitItem grammar, comma-separated; empty clears;
+	// a bare port is parsed (and ignored) by the engine too, period needs a quota
+	for _, s := range []string{"", "443", "443 rate=10MB", "443 rate=10MB,53 quota=1GB period=week"} {
+		if !vScepterLimits(s) {
+			t.Errorf("limits %q rejected", s)
+		}
+	}
+	for _, s := range []string{"443 speed=10MB", "443 rate=", "443 period=month", "x rate=1MB"} {
+		if vScepterLimits(s) {
+			t.Errorf("limits %q accepted", s)
+		}
+	}
+}
+
+func TestScepterFleetScreen(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "a.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "b.yml"), []byte("mode: client\ncarrier: tcp\npairing: true\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "c.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	// a answers with a real document; b's channel is down — the row says so
+	doc := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"ver": "3.5.0", "state_seq": float64(4), "uptime_s": float64(90), "event_cursor": float64(2),
+		"tunnels": []any{map[string]any{"name": "web", "carrier": "udp", "state": "active", "health": "ok"}},
+	}}
+	oldDial := scepterDial
+	defer func() { scepterDial = oldDial }()
+	scepterDial = func(tunnel string) (ScepterClient, error) {
+		if tunnel == "a" {
+			return stubClient{doc}, nil
+		}
+		return nil, fmt.Errorf("channel dead")
+	}
+	defer feed("0")() // open nothing, then leave
+	out := capture(t, scepterFleet)
+	// the fleet shows the pair summary (version, seq, tunnel COUNT), not the
+	// remote tunnel names — those open through the pair screen
+	for _, want := range []string{"a", "3.5.0", "1 tunnel(s)", "b", "unreachable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("fleet output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "c\n") || strings.Contains(out, " c ") {
+		t.Errorf("the unpaired tunnel must not be a fleet row:\n%s", out)
+	}
+}
+
+func TestScepterFleetScreenEmpty(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	defer feed("0")()
+	out := capture(t, scepterFleet)
+	if !strings.Contains(out, "no pairs") || !strings.Contains(out, "watp1:") {
+		t.Errorf("empty fleet hint missing:\n%s", out)
+	}
+}
+
+func TestScepterPairScreenSmoke(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	// hello says manage, state.get lists one remote tunnel; the screen renders
+	// both and leaves on esc without calling anything else.
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"scepter.hello": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+			"ver": "3.5.0", "caps": "manage", "uuid": "u1", "state_seq": float64(6)}}}},
+		"state.get": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+			"ver": "3.5.0", "state_seq": float64(6), "uptime_s": float64(60), "event_cursor": float64(3),
+			"pair":    map[string]any{"uuid": "u1", "caps": "manage"},
+			"tunnels": []any{map[string]any{"name": "web", "carrier": "udp", "state": "active", "health": "ok"}},
+		}}}},
+	}}
+	oldDial := scepterDial
+	scepterDial = func(string) (ScepterClient, error) { return cl, nil }
+	defer func() { scepterDial = oldDial }()
+	defer feed("0")()
+	out := capture(t, func() { scepterScreen("ir") })
+	for _, want := range []string{"web", "3.5.0", "create", "State document"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("pair screen missing %q:\n%s", want, out)
+		}
+	}
+	if len(cl.cmds["scepter.hello"]) != 1 || len(cl.cmds["state.get"]) < 1 {
+		t.Errorf("unexpected call pattern: %v", cl.cmds)
+	}
+}
+
+func TestScepterTunnelPageSmoke(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	stats := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"name": "web", "alive": true, "streams": float64(3), "rate_bps": float64(1500000), "loss_pct": float64(0.4),
+	}}
+	doc := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"ver": "3.5.0", "state_seq": float64(6), "event_cursor": float64(3),
+		"tunnels": []any{map[string]any{"name": "web", "carrier": "udp", "state": "active", "health": "ok"}},
+	}}
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"state.get":    {{r: doc}, {r: doc}}, // page entry + refresh after the stats action
+		"tunnel.stats": {{r: stats}},
+	}}
+	oldDial := scepterDial
+	scepterDial = func(string) (ScepterClient, error) { return cl, nil }
+	defer func() { scepterDial = oldDial }()
+	defer feed("s0")() // open stats, then back out of the page
+	out := capture(t, func() { scepterTunnelPage("ir", cl, CapTunnel|CapCreate|CapManage, "web") })
+	for _, want := range []string{"Stats", "Streams", "Rate", "MB/s", "Loss"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("tunnel page missing %q:\n%s", want, out)
+		}
+	}
+	if len(cl.cmds["tunnel.stats"]) != 1 {
+		t.Errorf("stats called %d times, want 1", len(cl.cmds["tunnel.stats"]))
+	}
+}

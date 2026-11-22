@@ -17,8 +17,13 @@ Usage: $SELF [command]
   unmute NAME PATH      unmute it again; both talk to the running tunnel's metrics server (no root)
   logs NAME             follow the log
   token NAME            print the Kharej token again
-  scepter NAME          pairing cockpit (Iran): pairing status, attach the watp1: line
-                        from Kharej, read-only remote views (needs wattun 3.5.0 on both ends)
+  scepter [NAME]        pairing cockpit (Iran): without a name, the fleet of paired Kharej
+                        servers with their live remote state; with a name, that pair's
+                        cockpit — create tunnels on Kharej (wizard over the encrypted
+                        channel), open its remote tunnels (state, stats, logs, events,
+                        ports, limits, presets), start/stop/restart, edit and delete
+                        (needs wattun 3.5.0 on both ends; a write needs the pairing's
+                        create/manage capability)
   preset NAME [PRESET]  apply built-in anti-censorship preset (rst-fast, mci, irancell, blackout, conservative)
   test-bypass NAME      automated connectivity & filter bypass test for anti-censorship profile
   profile save|list|show|del|apply   resilience profiles: save one tunnel's fake-sni/pool-rotate combination
