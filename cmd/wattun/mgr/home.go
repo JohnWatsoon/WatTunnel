@@ -6,11 +6,15 @@ package mgr
 // stale_tunnels, heal_enable/disable and boost_*.
 
 import (
+	crand "crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +32,11 @@ func init() {
 	Register("backup_cmd", func(args ...string) int { return b2i(backupCmd(arg(args, 0))) })
 	Register("restore_cmd", func(args ...string) int { return b2i(restoreCmd(arg(args, 0))) })
 	Register("boost_cmd", func(args ...string) int { return boostCmd(arg(args, 0)) })
+	// The Kharej-side Scepter console, under its bash name (scepter_menu):
+	// Settings' Scepter row and the CLI route through the registry like every
+	// screen. If a later scepter lane registers the same name, its init (a
+	// later file) overwrites this one — the richer console wins, same contract.
+	Register("scepter_menu", func(args ...string) int { scepterConsole(); return 0 })
 }
 
 // ---- live samples: byte-counter deltas give honest per-second rates ----
@@ -37,6 +46,10 @@ type sample struct {
 	at      time.Time
 	down    []float64 // users' download rate history (bytes/s)
 	up      []float64
+	dNum    *Tween // the head's displayed down rate settles instead of jumping
+	uNum    *Tween
+	dBar    *Fill // the head's meters ease toward the new level (ui_anim.go)
+	uBar    *Fill
 }
 
 var samples = map[string]*sample{}
@@ -80,6 +93,59 @@ func appendCap(v []float64, x float64, n int) []float64 {
 		v = v[len(v)-n:]
 	}
 	return v
+}
+
+// meterW is the home head's rate meter width; two meters plus the row's other
+// columns must fit the 96-column gate the head's rich row already used.
+const meterW = 8
+
+// histMax is a meter's scale: the biggest rate the tunnel has shown lately, so
+// the bar is proportional within the row the way Spark normalizes to its own
+// history (a fixed cap would make any real route look empty or pegged).
+func histMax(v []float64, cur float64) float64 {
+	m := cur
+	for _, x := range v {
+		if x > m {
+			m = x
+		}
+	}
+	return m
+}
+
+// headRate steps the tweened rate for one home-head render and returns the
+// settled number plus the eased GradBar meter behind it (the Fill holds the
+// bar's 0..1 level, the Tween the printed rate — both step to the same target,
+// so the number and its bar move together; UseAnim off snaps everything and
+// the render is byte-stable across refreshes).
+func headRate(num *Tween, bar *Fill, live bool, rate float64, hist []float64) (txt, meter string) {
+	if !live {
+		return GRY + "—" + RST, GRY + tbar(0, 1, meterW) + RST
+	}
+	txt = Rate(num.Step(rate))
+	scale := histMax(hist, rate)
+	if scale <= 0 {
+		scale = 1
+	}
+	meter = GradBar(bar.Step(rate/scale)*scale, scale, meterW)
+	return txt, meter
+}
+
+// initHeadTweens creates the head's display state at the tunnel's current
+// rates (first paint shows the real values; nothing eases in from zero).
+func initHeadTweens(s *sample, down, up float64) {
+	if s.dNum != nil {
+		return
+	}
+	ds := histMax(s.down, down)
+	if ds <= 0 {
+		ds = 1
+	}
+	us := histMax(s.up, up)
+	if us <= 0 {
+		us = 1
+	}
+	s.dNum, s.dBar = NewTween(down), NewFill(down/ds)
+	s.uNum, s.uBar = NewTween(up), NewFill(up/us)
 }
 
 // ---- host line: hostname · public IP · role · counts ----
@@ -240,8 +306,24 @@ func wideTable() bool { return TermCols() >= 112 }
 
 // ---- home ----
 
+// mainMenuItems builds the home menu's rows; n is the live tunnel count for
+// the Tunnels row. Scepter sits at the top level: the cockpit is the product's
+// headline surface (U0 coverage pass), not a settings sub-entry.
+func mainMenuItems(n int) []Item {
+	return []Item{
+		{Label: "Tunnels", Desc: fmt.Sprintf("watch traffic, restart, edit or delete (%d)", n)},
+		{Label: "New tunnel", Desc: "set one up step by step, or paste a token"},
+		{Label: "Scepter", Desc: "the paired Kharej cockpit: remote tunnels and state"},
+		{Label: "Find a carrier", Desc: "test which carriers pass on this route"},
+		{Label: "Blackout kit", Desc: "emergency bond and token for a shutdown"},
+		{Label: "Tools", Desc: "update, monitor, backup, firewall, kernel boost"},
+		{Label: "Settings", Desc: "auto-heal, animations, boost, update proxy, role"},
+		{Label: "Exit", Off: true},
+	}
+}
+
 // MainMenu is the manager's home screen: wordmark, host line, a live glance at
-// every tunnel, then the six choices.
+// every tunnel, then the choices.
 func MainMenu() int {
 	autoMigrateAll(true)
 	sel := 0
@@ -262,21 +344,13 @@ func MainMenu() int {
 			homeHead(w, names, infos, stale, anim)
 			anim = false
 		}
-		items := []Item{
-			{Label: "Tunnels", Desc: fmt.Sprintf("watch traffic, restart, edit or delete (%d)", len(names))},
-			{Label: "New tunnel", Desc: "set one up step by step, or paste a token"},
-			{Label: "Find a carrier", Desc: "test which carriers pass on this route"},
-			{Label: "Blackout kit", Desc: "emergency bond and token for a shutdown"},
-			{Label: "Tools", Desc: "update, backup, speed test, kernel boost, firewall"},
-			{Label: "Settings", Desc: "auto-heal, animations, update proxy, server role"},
-			{Label: "Exit", Off: true},
-		}
-		i, k := Choose(head, items, &sel, []string{"↑↓", "move", "⏎", "open", "1-6", "jump", "q", "quit"}, 2*time.Second)
+		items := mainMenuItems(len(names))
+		i, k := Choose(head, items, &sel, []string{"↑↓", "move", "⏎", "open", "1-8", "jump", "q", "quit"}, 2*time.Second)
 		switch k {
 		case "eof":
 			return 0
 		case "q", "Q":
-			i = 6
+			i = 7
 		case "n", "N":
 			i = 1
 		case "esc", "tick", "move":
@@ -288,18 +362,23 @@ func MainMenu() int {
 		case 1:
 			dispatch("new_tunnel")
 		case 2:
-			findCarrier()
+			// The cockpit's fleet entry (ScepterFleetEntry, lane U3): wired via
+			// the Register lookup "scepter_fleet" — the scepter_cockpit.go
+			// contract names this exact route for the home lane's nav.
+			dispatch("scepter_fleet")
 		case 3:
-			blackoutKit()
+			findCarrier()
 		case 4:
+			blackoutKit()
+		case 5:
 			if toolsMenu() == reloadRC {
 				return reloadRC
 			}
-		case 5:
+		case 6:
 			if settingsMenu() == 2 {
 				return 0 // uninstalled
 			}
-		case 6:
+		case 7:
 			CurShow()
 			ClearScreen()
 			return 0
@@ -330,7 +409,10 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 	} else {
 		fmt.Fprintf(w, "  %s\n  %s\n", left, right)
 	}
-	fmt.Fprintf(w, "  %s%s%s\n\n", GRY, rep("─", uiW()), RST)
+	// The header band is the screen's one bright moment (ui_grad.go); colour
+	// off keeps the old grey rule byte-for-byte (GradLine's tier-0 contract).
+	GradBand(w, uiW())
+	gap(w, SecGap)
 	if len(names) == 0 {
 		hint := "Start on Kharej (the server outside), then paste its token on Iran."
 		switch serverSide() {
@@ -339,7 +421,9 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 		case "kharej":
 			hint = "Create the tunnel here, then paste its token on the Iran server."
 		}
-		fmt.Fprintf(w, "  %sNo tunnels yet.%s %s%s%s\n\n", BOLD, RST, GRY, hint, RST)
+		fmt.Fprintf(w, "  %sNo tunnels yet.%s %s%s%s\n", BOLD, RST, GRY, hint, RST)
+		fmt.Fprintf(w, "  %sStart with New tunnel in the menu below.%s\n", GRY, RST)
+		gap(w, SecGap)
 		return
 	}
 	max := 6
@@ -354,9 +438,20 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 		line := fmt.Sprintf("  %s%s%s %s %s", col, dot, RST, padR(BOLD+trunc(n, 12)+RST, 13), padR(GRY+trunc(carrierText(n), 16)+RST, 17))
 		switch ti.State {
 		case "up", "degraded":
-			line += fmt.Sprintf("%s↓%s %s  %s↑%s %s  %s", CYN, RST, padL(Rate(down), 10), SAF, RST, padL(Rate(up), 10), padL(fmt.Sprintf("%.0f ms", ti.RTT), 6))
-			if s := samples[n]; s != nil && TermCols() >= 96 {
-				line += "   " + Spark(s.down, 10)
+			if TermCols() >= 96 {
+				// Wide: the rates get tweened meters (U1's GradBar+Fill). The
+				// spark gives way below 96; from 112 it returns next to them.
+				if s := samples[n]; s != nil {
+					initHeadTweens(s, down, up)
+					dt, dm := headRate(s.dNum, s.dBar, true, down, s.down)
+					ut, um := headRate(s.uNum, s.uBar, true, up, s.up)
+					line += fmt.Sprintf("%s↓%s %s %s  %s↑%s %s %s  %s", CYN, RST, padL(dt, 10), dm, SAF, RST, padL(ut, 10), um, padL(fmt.Sprintf("%.0f ms", ti.RTT), 6))
+					if TermCols() >= 112 {
+						line += "  " + Spark(s.down, 10)
+					}
+				}
+			} else {
+				line += fmt.Sprintf("%s↓%s %s  %s↑%s %s  %s", CYN, RST, padL(Rate(down), 10), SAF, RST, padL(Rate(up), 10), padL(fmt.Sprintf("%.0f ms", ti.RTT), 6))
 			}
 			if ti.Why != "" {
 				line += "  " + YEL + ti.Why + RST
@@ -370,6 +465,8 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 		}
 		fmt.Fprintln(w, line)
 	}
+	gap(w, SecGap)
+	pairLines(w)
 	var rp []string
 	for _, n := range names {
 		if fileExists(filepath.Join(P.Conf, n+".repaste")) {
@@ -383,6 +480,111 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 		fmt.Fprintf(w, "\n  %s!%s %s still runs the old binary: open it and restart to load %s.\n", YEL, RST, strings.Join(stale, ", "), orStr(Ver, "the new version"))
 	}
 	fmt.Fprintln(w)
+}
+
+// gap writes n blank rows — the spacing rhythm is whole blank rows only
+// (ui_panel.go RowH/SecGap/PanelGap), so sections read at one cadence.
+func gap(w io.Writer, n int) {
+	for i := 0; i < n; i++ {
+		fmt.Fprintln(w)
+	}
+}
+
+// ---- Scepter pair line: the last fleet state, honestly absent when unpaired ----
+
+// The head redraws every tick and must never dial (the fleet screen's own
+// rule: fetched on entry and on refresh, never per tick). So the head renders
+// the LAST fetched state document and one short-lived goroutine refreshes the
+// cache at most every pairRefreshEvery — a stalled Kharej costs one pending
+// dial in the background, never the render loop.
+const pairRefreshEvery = 10 * time.Second
+
+var (
+	pairMu     sync.Mutex
+	pairDocs   = map[string]*scepterDoc{} // last good state per paired tunnel
+	pairFail   = map[string]string{}      // last fetch error per paired tunnel, "" never stored
+	pairFlying bool                       // one refresh pass in flight
+	pairAt     time.Time                  // last finished pass
+	homeSpin   Spinner                    // the head's one spinner (waiting state)
+)
+
+// pairKick starts one background refresh pass when the cache is stale.
+func pairKick() {
+	pairs := pairedTunnels()
+	if len(pairs) == 0 {
+		return
+	}
+	pairMu.Lock()
+	stale := time.Since(pairAt) >= pairRefreshEvery
+	if stale && !pairFlying {
+		pairFlying = true
+	} else {
+		stale = false
+	}
+	pairMu.Unlock()
+	if !stale {
+		return
+	}
+	go func() {
+		for _, n := range pairs {
+			doc, err := scepterFetchDocOr(n)
+			pairMu.Lock()
+			if err != nil {
+				pairFail[n] = err.Error()
+			} else {
+				pairDocs[n] = &doc
+				delete(pairFail, n)
+			}
+			pairMu.Unlock()
+		}
+		pairMu.Lock()
+		pairFlying = false
+		pairAt = time.Now()
+		pairMu.Unlock()
+	}()
+}
+
+// scepterFetchDocOr fetches one pair's state document, dial failure and RPC
+// failure collapsed into one error each (the row must say why, not which layer).
+func scepterFetchDocOr(n string) (scepterDoc, error) {
+	cl, err := scepterDial(n)
+	if err != nil {
+		return scepterDoc{}, err
+	}
+	return scepterFetchDoc(cl)
+}
+
+// pairLines renders the pair status under the head: one line per paired
+// tunnel's Kharej (seq, remote tunnels, uptime — the state document), the
+// waiting spinner while the first fetch runs, the dial error honestly, and
+// the plain not-paired line otherwise. Kharej hosts skip the block: their
+// pairing plane is the console in Settings (IsPaired is Iran-only).
+func pairLines(w io.Writer) {
+	if serverSide() == "kharej" {
+		return
+	}
+	pairKick()
+	pairs := pairedTunnels()
+	if len(pairs) == 0 {
+		fmt.Fprintf(w, "  %s◌%s %sScepter%s  %snot paired — open a tunnel and attach the Kharej pairing line%s\n",
+			GRY, RST, BOLD, RST, GRY, RST)
+		return
+	}
+	pairMu.Lock()
+	defer pairMu.Unlock()
+	for _, n := range pairs {
+		doc, fail := pairDocs[n], pairFail[n]
+		switch {
+		case fail != "":
+			fmt.Fprintf(w, "  %s!%s %sScepter %s%s  %sunreachable: %s%s\n", YEL, RST, BOLD, trunc(n, 16), RST, YEL, fail, RST)
+		case doc != nil:
+			fmt.Fprintf(w, "  %s◆%s %sScepter %s%s  %sseq %d · %d remote tunnel(s) · up %s%s\n",
+				GRN, RST, BOLD, trunc(n, 16), RST, GRY, doc.StateSeq, len(doc.Tunnels), scepterUp(doc.UptimeS), RST)
+		default:
+			fmt.Fprintf(w, "  %s%s%s %sScepter %s%s  %schecking the pair…%s\n",
+				GRY, homeSpin.Frame(), RST, BOLD, trunc(n, 16), RST, GRY, RST)
+		}
+	}
 }
 
 // ---- tunnels table ----
@@ -484,74 +686,133 @@ func pickTunnel(title, why string, filter func(string) bool) string {
 
 // ---- Tools ----
 
+// toolAction is one Tools row: what it shows and the code it runs (rc is the
+// exit code the Tools menu propagates — reloadRC after a self-update).
+type toolAction struct {
+	label, desc string
+	run         func() int
+}
+
+// toolGroup runs one regrouped Tools submenu (the old flat ten-row list became
+// Update / Monitor / Maintenance / Host security — unrelated concerns do not
+// share one list). Every action keeps its original Page/Pause behavior.
+func toolGroup(title string, actions []toolAction) int {
+	sel := 0
+	ClearScreen()
+	for {
+		items := make([]Item, len(actions))
+		for i, a := range actions {
+			items[i] = Item{Label: a.label, Desc: a.desc}
+		}
+		i, k := Choose(func(w io.Writer) { Title(w, title, "") }, items, &sel, []string{"⏎", "open", "esc", "back"}, 0)
+		if k == "esc" || k == "q" || k == "eof" || k == "0" || i < 0 {
+			return 0
+		}
+		ClearScreen()
+		if rc := actions[i].run(); rc == reloadRC {
+			return rc
+		}
+		ClearScreen()
+	}
+}
+
 func toolsMenu() int {
 	sel := 0
 	ClearScreen()
 	for {
 		items := []Item{
-			{Label: "Update", Desc: "get the newest wattun from GitHub"},
-			{Label: "Roll back", Desc: "go back to the previous binary"},
-			{Label: "Speed test", Desc: "measure one tunnel, down and up"},
-			{Label: "Live monitor", Desc: "every tunnel on one screen"},
-			{Label: "All tunnels", Desc: "start, stop or restart everything at once"},
-			{Label: "Back up configs", Desc: "save " + P.Conf + " to a .tar.gz"},
-			{Label: "Restore configs", Desc: "put a backup back"},
-			{Label: "Kernel boost", Desc: "BBR, fq and 64 MiB buffers"},
-			{Label: "Iran firewall", Desc: "block access to this server from inside Iran"},
-			{Label: "Offline bundle", Desc: "pack the installer for a server without GitHub"},
+			{Label: "Update", Desc: "get the newest wattun · roll back"},
+			{Label: "Monitor", Desc: "speed test · live monitor · all tunnels"},
+			{Label: "Maintenance", Desc: "back up · restore · offline bundle"},
+			{Label: "Host security", Desc: "Iran firewall · kernel boost"},
 		}
-		i, k := Choose(func(w io.Writer) { Title(w, "Tools", "") }, items, &sel, []string{"⏎", "open", "esc", "back"}, 0)
+		i, k := Choose(func(w io.Writer) { Title(w, "Tools", "grouped by what they touch") }, items, &sel, []string{"⏎", "open", "esc", "back"}, 0)
 		if k == "esc" || k == "q" || k == "eof" || k == "0" {
 			return 0
 		}
 		if i < 0 {
 			continue
 		}
-		ClearScreen()
+		var rc int
 		switch i {
 		case 0:
-			Page("Update", "")
-			if dispatch("update") == 0 {
-				fmt.Fprintln(Stdout)
-				Hint("The manager reloads itself to show the new version.")
-				Pause()
-				return reloadRC
-			}
-			Pause()
+			rc = toolGroup("Tools · Update", []toolAction{
+				{"Update", "get the newest wattun from GitHub", func() int {
+					Page("Update", "")
+					if dispatch("update") == 0 {
+						fmt.Fprintln(Stdout)
+						Hint("The manager reloads itself to show the new version.")
+						Pause()
+						return reloadRC
+					}
+					Pause()
+					return 0
+				}},
+				{"Roll back", "go back to the previous binary", func() int {
+					Page("Roll back", "")
+					runFlow("rollback")
+					Pause()
+					return 0
+				}},
+			})
 		case 1:
-			Page("Roll back", "")
-			runFlow("rollback")
-			Pause()
+			toolGroup("Tools · Monitor", []toolAction{
+				{"Speed test", "measure one tunnel, down and up", func() int {
+					if n := pickTunnel("Speed test", "which tunnel?", func(n string) bool { return roleName(n) == "Iran" }); n != "" {
+						Page("Speed test", n)
+						dispatch("speed_test", n, "10")
+						Pause()
+					}
+					return 0
+				}},
+				{"Live monitor", "every tunnel on one screen", func() int {
+					runFlow("live_monitor")
+					return 0
+				}},
+				{"All tunnels", "start, stop or restart everything at once", func() int {
+					batchMenu()
+					return 0
+				}},
+			})
 		case 2:
-			if n := pickTunnel("Speed test", "which tunnel?", func(n string) bool { return roleName(n) == "Iran" }); n != "" {
-				Page("Speed test", n)
-				dispatch("speed_test", n, "10")
-				Pause()
-			}
+			toolGroup("Tools · Maintenance", []toolAction{
+				{"Back up configs", "save " + P.Conf + " to a .tar.gz", func() int {
+					Page("Back up configs", "")
+					backupCmd(Ask("Backup file", "wattun-backup-"+time.Now().Format("20060102")+".tar.gz"))
+					Pause()
+					return 0
+				}},
+				{"Restore configs", "put a backup back", func() int {
+					Page("Restore configs", "")
+					if p := Ask("Backup .tar.gz path", ""); p != "" {
+						restoreCmd(p)
+					}
+					Pause()
+					return 0
+				}},
+				{"Offline bundle", "pack the installer for a server without GitHub", func() int {
+					Page("Offline bundle", "")
+					dispatch("bundle_cmd")
+					Pause()
+					return 0
+				}},
+			})
 		case 3:
-			runFlow("live_monitor")
-		case 4:
-			batchMenu()
-		case 5:
-			Page("Back up configs", "")
-			backupCmd(Ask("Backup file", "wattun-backup-"+time.Now().Format("20060102")+".tar.gz"))
-			Pause()
-		case 6:
-			Page("Restore configs", "")
-			if p := Ask("Backup .tar.gz path", ""); p != "" {
-				restoreCmd(p)
-			}
-			Pause()
-		case 7:
-			boostMenu()
-		case 8:
-			Page("Iran firewall", "")
-			dispatch("iran_firewall_cmd")
-			Pause()
-		case 9:
-			Page("Offline bundle", "")
-			dispatch("bundle_cmd")
-			Pause()
+			toolGroup("Tools · Host security", []toolAction{
+				{"Iran firewall", "block access to this server from inside Iran", func() int {
+					Page("Iran firewall", "")
+					dispatch("iran_firewall_cmd")
+					Pause()
+					return 0
+				}},
+				{"Kernel boost", "BBR, fq and 64 MiB buffers", func() int {
+					boostMenu()
+					return 0
+				}},
+			})
+		}
+		if rc == reloadRC {
+			return reloadRC
 		}
 		ClearScreen()
 	}
@@ -802,19 +1063,40 @@ func onOff(b bool) string {
 	return GRY + "off" + RST
 }
 
-// settingsMenu returns 2 after an uninstall (the manager exits).
+// settingsItems builds the Settings rows. The Scepter console row shows when
+// this host can own the pairing store — Kharej, an unsaved role, or a store
+// that already exists (bash settings_menu's gate: kharej || ” || pairing_active;
+// an unsaved side must still reach the first pair, an explicit Iran hides it —
+// Iran pairs from the Go cockpit). The Kernel boost row is bash parity: the
+// settings_menu carries it, the old Go port had dropped it.
+func settingsItems() []Item {
+	px := ConfGet("update-proxy", "")
+	items := []Item{
+		{Label: "Auto-heal", Desc: onOff(healOn()) + GRY + "   restarts down Iran tunnels, keeps auto tunnels in step"},
+		{Label: "Animations", Desc: onOff(ConfGet("anim", "1") == "1") + GRY + "   spinners and the wordmark reveal"},
+		{Label: "Kernel boost", Desc: onOff(fileExists(boostSysctl())) + GRY + "   BBR, fq, 64 MiB buffers"},
+		{Label: "Update proxy", Desc: orStr(px, "direct") + GRY + "   mirror or proxy for updates"},
+		{Label: "Server role", Desc: orStr(serverSide(), "not set") + GRY + "   Kharej (outside) or Iran (inside)"},
+	}
+	if serverSide() != "iran" || fileExists(pairStorePath()) {
+		desc := GRY + "off" + RST + GRY + "   Kharej's pairing console: pair, rotate, revoke, audit" + RST
+		if c, st := pairLoad(); st == 0 {
+			desc = GRN + "paired" + RST + GRY + "   (" + capTier(c.line.Caps) + ") pair, rotate, revoke, audit" + RST
+		}
+		items = append(items, Item{Label: "Scepter", Desc: desc})
+	}
+	items = append(items, Item{Label: "Uninstall", Desc: RED + "remove wattun, its tunnels and configs" + RST})
+	return items
+}
+
+// settingsMenu returns 2 after an uninstall (the manager exits). Rows are
+// matched by label: the Scepter row is conditional, so indexes would drift.
 func settingsMenu() int {
 	sel := 0
 	ClearScreen()
 	for {
 		px := ConfGet("update-proxy", "")
-		items := []Item{
-			{Label: "Auto-heal", Desc: onOff(healOn()) + GRY + "   restarts down Iran tunnels, keeps auto tunnels in step"},
-			{Label: "Animations", Desc: onOff(ConfGet("anim", "1") == "1") + GRY + "   spinners and the wordmark reveal"},
-			{Label: "Update proxy", Desc: orStr(px, "direct") + GRY + "   mirror or proxy for updates"},
-			{Label: "Server role", Desc: orStr(serverSide(), "not set") + GRY + "   Kharej (outside) or Iran (inside)"},
-			{Label: "Uninstall", Desc: RED + "remove wattun, its tunnels and configs" + RST},
-		}
+		items := settingsItems()
 		i, k := Choose(func(w io.Writer) { Title(w, "Settings", "") }, items, &sel, []string{"⏎", "change", "esc", "back"}, 0)
 		if k == "esc" || k == "q" || k == "eof" || k == "0" {
 			return 0
@@ -822,8 +1104,8 @@ func settingsMenu() int {
 		if i < 0 {
 			continue
 		}
-		switch i {
-		case 0:
+		switch items[i].Label {
+		case "Auto-heal":
 			fmt.Fprintln(Stdout)
 			if healOn() {
 				healDisable()
@@ -831,7 +1113,7 @@ func settingsMenu() int {
 				healEnable()
 			}
 			sleepMS(800)
-		case 1:
+		case "Animations":
 			if ConfGet("anim", "1") == "1" {
 				_ = ConfSet("anim", "0")
 				UseAnim = false
@@ -839,7 +1121,9 @@ func settingsMenu() int {
 				_ = ConfSet("anim", "1")
 				UseAnim = IsTTY && os.Getenv("WAT_NO_ANIM") != "1"
 			}
-		case 2:
+		case "Kernel boost":
+			boostMenu()
+		case "Update proxy":
 			fmt.Fprintln(Stdout)
 			Hint("https://ghproxy.net/ · socks5h://127.0.0.1:1080 · '-' to clear")
 			switch v := Ask("Update proxy / mirror URL", px); {
@@ -851,9 +1135,12 @@ func settingsMenu() int {
 				Ok("Saved update proxy: " + v)
 			}
 			sleepMS(800)
-		case 3:
+		case "Server role":
 			askSide()
-		case 4:
+		case "Scepter":
+			ClearScreen()
+			scepterConsole()
+		case "Uninstall":
 			ClearScreen()
 			Page("Uninstall", "")
 			if runFlow("uninstall_all") == 0 {
@@ -902,6 +1189,373 @@ func askSide() string {
 			return ""
 		}
 	}
+}
+
+// ---- Scepter console (bash scepter_menu, Kharej's local pairing panel) ----
+
+// The store is $CONF/.pairing (PAIR_STORE): line 1 is the credential in the
+// engine's watp1: format, the manager's own bookkeeping rides as '# ' comment
+// lines after it (bash pairing_store_write). The engine writes a bare line and
+// skips comments on read (cmd/wattun/pairing.go readPairingFile), so both
+// shapes parse here; the console only ever rewrites the whole file, never one
+// line, so the engine's copy of the credential is replaced byte-complete.
+
+func pairStorePath() string { return filepath.Join(P.Conf, ".pairing") }
+func pairAuditPath() string { return filepath.Join(P.Conf, ".pairing.audit") }
+
+// pairCred is the store's parsed content: the credential plus the manager's
+// bookkeeping (bash pairing_load's P_* variables).
+type pairCred struct {
+	line          PairingLine
+	created       int64  // epoch seconds the pairing was first created; a rotation keeps it
+	oldKey        string // the pre-rotation key, kept for reference during the window
+	oldKeyExpires int64  // epoch seconds the rotation window ends, 0 = no rotation pending
+}
+
+// pairLoad parses the store: 0 = parsed, 1 = exists but unreadable, 2 = no
+// store (bash pairing_load's rc contract). Deliberately stricter than the bash
+// on the credential line: ReadPairingLine refuses a version the manager does
+// not know, and an unparsable store must not be rewritten — it may be a newer
+// engine's format holding the only copy of the credential (F1-B, 2026-11-22).
+func pairLoad() (*pairCred, int) {
+	b, err := os.ReadFile(pairStorePath())
+	if err != nil {
+		return nil, 2
+	}
+	var c pairCred
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if strings.HasPrefix(l, "#") {
+			if k, v, ok := strings.Cut(strings.TrimPrefix(l, "#"), "="); ok {
+				switch strings.TrimSpace(k) {
+				case "created":
+					c.created = int64(atoi(strings.TrimSpace(v)))
+				case "oldkey":
+					c.oldKey = strings.TrimSpace(v)
+				case "oldkey_expires":
+					c.oldKeyExpires = int64(atoi(strings.TrimSpace(v)))
+				}
+			}
+			continue
+		}
+		if c.line.Version != "" {
+			continue // a later credential line never wins: the engine reads the first
+		}
+		p, perr := ReadPairingLine(l)
+		if perr != nil {
+			return nil, 1
+		}
+		c.line = p
+	}
+	if c.line.Version == "" {
+		return nil, 1
+	}
+	return &c, 0
+}
+
+// pairStoreWrite writes the whole store atomically at 0600, engine format
+// first: the engine's parser reads exactly line 1 (bash pairing_store_write).
+func pairStoreWrite(p PairingLine, oldKey string, oldKeyExpires int64) error {
+	created := time.Now().Unix()
+	if c, st := pairLoad(); st == 0 && c.created > 0 {
+		created = c.created // a rotation keeps the original creation time
+	}
+	var b strings.Builder
+	b.WriteString(MakePairingLine(p.Version, p.UUID, p.Key, p.Caps))
+	b.WriteString("\n\n")
+	fmt.Fprintf(&b, "# created=%d\n", created)
+	if oldKey != "" {
+		fmt.Fprintf(&b, "# oldkey=%s\n# oldkey_expires=%d\n", oldKey, oldKeyExpires)
+	}
+	return atomicWrite(pairStorePath(), []byte(b.String()), 0o600)
+}
+
+// pairAudit appends one line, never rewriting (F5, 2026-11-22: the engine
+// appends with open-append-close per entry — a tmp+rename rewrite drops
+// entries written to the renamed-away inode in the read-rename window). A
+// failed append is an error: an unaudited pairing change must not look like
+// success.
+func pairAudit(event, detail string) bool {
+	_ = os.MkdirAll(P.Conf, 0o700)
+	f, err := os.OpenFile(pairAuditPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		Err("Could not append to " + pairAuditPath() + " — the audit line was NOT recorded.")
+		return false
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s %s\n", time.Now().UTC().Format("2006-01-02T15:04:05Z"), event, detail)
+	return true
+}
+
+// pairAuditTail prints the last n audit lines raw (bash pairing_audit_tail).
+func pairAuditTail(n int) {
+	b, err := os.ReadFile(pairAuditPath())
+	if err != nil {
+		Hint("No pairing audit entries yet.")
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	for _, l := range lines {
+		Say(l)
+	}
+}
+
+// pairStatus renders the store's state as KV rows (bash pairing_status).
+func pairStatus() []string {
+	c, st := pairLoad()
+	switch st {
+	case 2:
+		return []string{KV(11, "pairing", GRY+"off"+RST+GRY+" (no credential; this server cannot be paired)"+RST)}
+	case 1:
+		return []string{KV(11, "pairing", YEL+"unreadable"+RST+GRY+" ("+pairStorePath()+" is not a format this manager reads)"+RST)}
+	}
+	rows := []string{
+		KV(11, "pairing", GRN+"on"+RST),
+		KV(11, "uuid", c.line.UUID),
+		KV(11, "caps", capTier(c.line.Caps)),
+	}
+	if c.created > 0 {
+		rows = append(rows, KV(11, "created", time.Unix(c.created, 0).UTC().Format("2006-01-02 15:04 UTC")))
+	}
+	if c.oldKey != "" && c.oldKeyExpires > 0 {
+		// "the old key is accepted" was a lie (round-2, 2026-11-22): the engine
+		// takes only the current credential — the old line sits in the store as
+		// reference for the rotation window.
+		if left := c.oldKeyExpires - time.Now().Unix(); left > 0 {
+			rows = append(rows, KV(11, "rotation", YEL+"attach the new line on Iran now — window "+strconv.FormatInt(left, 10)+"s"+RST))
+		} else {
+			rows = append(rows, KV(11, "rotation", GRY+"old key expired"+RST))
+		}
+	}
+	return rows
+}
+
+// newPairUUID mints a lowercase 8-4-4-4-12 hex UUID from 16 random bytes (bash
+// new_pair_uuid's fold — crypto/rand, no kernel file needed).
+func newPairUUID() string {
+	b := make([]byte, 16)
+	if _, err := crand.Read(b); err != nil {
+		return "" // the caller refuses an empty UUID, same as the bash's empty fallback
+	}
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// newPairKey is the D5 credential: exactly 32 random bytes (bash
+// new_pair_key's head -c 32 /dev/urandom); MakePairingLine renders the base64.
+func newPairKey() []byte {
+	b := make([]byte, 32)
+	if _, err := crand.Read(b); err != nil {
+		return nil
+	}
+	return b
+}
+
+// pairCapsOK is the capability tier validator (bash v_pair_caps / PAIR_CAPS).
+func pairCapsOK(s string) bool {
+	_, ok := capName[s]
+	return ok
+}
+
+// pairKharejOnly refuses the write actions on an explicit Iran side (bash
+// scepter_kharej_only, F1-C): on Iran the same path holds the CLIENT credential
+// written by wattun -pair-to; rewriting it here would desync the pair.
+func pairKharejOnly() bool {
+	if serverSide() == "iran" {
+		Err("This is the Kharej-side action; Iran's pairing is managed by the Go cockpit (wattun -pair-to).")
+		return false
+	}
+	return true
+}
+
+// pairReadable refuses to touch a store this manager cannot parse (bash
+// pairing_check_readable, F1-B): it may be a newer engine's format holding the
+// only copy of the credential, and pair/rotate/revoke would destroy it.
+func pairReadable() bool {
+	if _, st := pairLoad(); st != 1 {
+		return true
+	}
+	Err(pairStorePath() + " exists but this manager cannot read it; nothing was changed.")
+	Hint("Pair or rotate with the engine (wattun -pair) or delete the file by hand, then try again.")
+	return false
+}
+
+// scepterConsole is the Scepter console (bash scepter_menu). On Iran it
+// degrades to read-only: status and audit only, pair/rotate/revoke are the
+// Kharej console's to run. The panels are quiet chrome (ui_panel.go); the
+// status rows are the screen's one KV list.
+func scepterConsole() {
+	if serverSide() == "iran" {
+		ClearScreen()
+		sel := 0
+		for {
+			head := func(w io.Writer) {
+				Title(w, "Scepter", "Iran · read-only")
+				Panel(w, "Pairing", pairStatus()...)
+				gap(w, SecGap)
+				Hint("Pairing is managed on Kharej. On Iran run: wattun -pair-to <watp1: line> (Go cockpit).")
+				gap(w, SecGap)
+			}
+			i, k := Choose(head, []Item{{Key: "a", Label: "Audit tail", Desc: "the last entries of .pairing.audit"}},
+				&sel, []string{"⏎", "open", "esc", "back"}, 0)
+			if k == "esc" || k == "q" || k == "eof" || k == "0" {
+				return
+			}
+			if i < 0 {
+				continue
+			}
+			gap(Stdout, SecGap)
+			pairAuditTail(20)
+			Pause()
+			ClearScreen()
+		}
+	}
+	sel := 0
+	ClearScreen()
+	for {
+		_, st := pairLoad()
+		head := func(w io.Writer) {
+			Title(w, "Scepter", "Kharej pairing console")
+			Panel(w, "Pairing", pairStatus()...)
+			gap(w, SecGap)
+		}
+		items := []Item{
+			{Key: "p", Label: "Pair", Desc: "generate or adopt a watp1: line, store it"},
+			{Key: "r", Label: "Rotate", Desc: "new key, 24 h window to re-attach on Iran"},
+			{Key: "x", Label: "Revoke", Desc: "unpair: drop the credential, tunnels keep running", Off: st != 0},
+			{Key: "a", Label: "Audit tail", Desc: "the last entries of .pairing.audit"},
+		}
+		i, k := Choose(head, items, &sel, []string{"⏎", "run", "esc", "back"}, 0)
+		if k == "esc" || k == "q" || k == "eof" || k == "0" {
+			return
+		}
+		if i < 0 {
+			continue
+		}
+		ClearScreen()
+		switch i {
+		case 0:
+			scepterPair()
+		case 1:
+			scepterRotate()
+		case 2:
+			scepterRevoke()
+		case 3:
+			gap(Stdout, SecGap)
+			pairAuditTail(20)
+		}
+		Pause()
+		ClearScreen()
+	}
+}
+
+// scepterPair generates (or adopts a pasted) watp1: line, stores the pairing
+// and prints the line for Iran (bash scepter_pair).
+func scepterPair() {
+	if !pairKharejOnly() || !pairReadable() {
+		return
+	}
+	if c, st := pairLoad(); st == 0 {
+		if !Confirm(fmt.Sprintf("A pairing already exists (%s). Replace it? Iran must be given the new line.", c.line.UUID), false) {
+			return
+		}
+	}
+	var p PairingLine
+	if line := Ask("Paste a watp1: line (Enter = generate a fresh pairing here)", ""); strings.TrimSpace(line) != "" {
+		var err error
+		p, err = ReadPairingLine(strings.TrimSpace(line))
+		if err != nil {
+			Err(err.Error())
+			return
+		}
+	} else {
+		tier := capTier(CapFull)
+		if !AskOK("Capability tier ("+tier+")", tier, pairCapsOK) {
+			return
+		}
+		tier = ReplyV
+		p = PairingLine{Version: ScepterVersion, UUID: newPairUUID(), Key: newPairKey(),
+			Caps: tierBits(capName[tier])}
+		if p.UUID == "" || p.Key == nil {
+			Err("No randomness available for a fresh pairing.")
+			return
+		}
+	}
+	if pairStoreWrite(p, "", 0) != nil {
+		Err("Could not write " + pairStorePath() + ".")
+		return
+	}
+	pairAudit("pair_created", p.UUID+" caps="+capTier(p.Caps))
+	Ok(fmt.Sprintf("Pairing stored (%s, caps %s).", p.UUID, capTier(p.Caps)))
+	fmt.Fprintln(Stdout)
+	fmt.Fprintf(Stdout, "  %s%s%s\n\n", BOLD+YEL, MakePairingLine(p.Version, p.UUID, p.Key, p.Caps), RST)
+	Hint("Give this watp1: line to Iran (pairs the cockpit; wattun 3.5.0 on both ends).")
+}
+
+// scepterRotate mints a new key under the same UUID, keeping the original
+// creation time and the old line for the window's reference (bash
+// scepter_rotate; the menu always used the default 24 h window).
+func scepterRotate() {
+	if !pairKharejOnly() {
+		return
+	}
+	c, st := pairLoad()
+	if st == 2 {
+		Err("No pairing to rotate (pair first).")
+		return
+	}
+	if st == 1 {
+		pairReadable() // its error text is the honest why
+		return
+	}
+	nk := newPairKey()
+	if nk == nil {
+		Err("No randomness available for a rotation.")
+		return
+	}
+	p := c.line
+	p.Key = nk
+	const win = 86400 // bash scepter_menu's default rotation window (24 h)
+	if pairStoreWrite(p, base64.StdEncoding.EncodeToString(c.line.Key), time.Now().Unix()+win) != nil {
+		Err("Could not write " + pairStorePath() + ".")
+		return
+	}
+	pairAudit("pair_rotated", p.UUID+" window="+strconv.Itoa(win)+"s")
+	Ok("Pairing key rotated; the engine switches to the new key within its poll interval.")
+	fmt.Fprintln(Stdout)
+	fmt.Fprintf(Stdout, "  %s%s%s\n\n", BOLD+YEL, MakePairingLine(p.Version, p.UUID, p.Key, p.Caps), RST)
+	Hint("Attach this new watp1: line on Iran NOW (rotation takes effect at the next store poll).")
+}
+
+// scepterRevoke unpairs: drop the credential locally; tunnels keep running
+// (bash scepter_revoke, plan D3).
+func scepterRevoke() {
+	if !pairKharejOnly() {
+		return
+	}
+	c, st := pairLoad()
+	if st == 2 {
+		Err("No pairing to revoke.")
+		return
+	}
+	if st == 1 {
+		pairReadable()
+		return
+	}
+	if !Confirm(fmt.Sprintf("Revoke the pairing (%s)? The cockpit channel dies on its next tick; tunnels keep running.", c.line.UUID), false) {
+		return
+	}
+	if !pairAudit("pair_revoked", c.line.UUID) {
+		return
+	}
+	_ = os.Remove(pairStorePath())
+	Ok("Pairing revoked. The audit log is kept in " + pairAuditPath() + ".")
 }
 
 // ---- auto-heal timer (bash heal_enable / heal_disable / ensure_heal_timer) ----
@@ -1083,11 +1737,12 @@ func sysctlGet(k string) string {
 }
 
 func boostStatus(w io.Writer) {
-	fmt.Fprintf(w, "  %s\n", kv("boost", onOff(fileExists(boostSysctl()))))
-	fmt.Fprintf(w, "  %s\n", kv("congestion", sysctlGet("net.ipv4.tcp_congestion_control")))
-	fmt.Fprintf(w, "  %s\n", kv("qdisc", sysctlGet("net.core.default_qdisc")))
-	fmt.Fprintf(w, "  %s\n", kv("rmem max", Human(parseF(sysctlGet("net.core.rmem_max")))))
-	fmt.Fprintf(w, "  %s\n", kv("wmem max", Human(parseF(sysctlGet("net.core.wmem_max")))))
+	Panel(w, "Kernel boost",
+		KV(11, "boost", onOff(fileExists(boostSysctl()))),
+		KV(11, "congestion", sysctlGet("net.ipv4.tcp_congestion_control")),
+		KV(11, "qdisc", sysctlGet("net.core.default_qdisc")),
+		KV(11, "rmem max", Human(parseF(sysctlGet("net.core.rmem_max")))),
+		KV(11, "wmem max", Human(parseF(sysctlGet("net.core.wmem_max")))))
 	if isContainer() {
 		warnLine(w, "Container environment: sysctl writes may be restricted.")
 	}
