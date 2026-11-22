@@ -6,9 +6,15 @@ package wat
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -65,8 +71,9 @@ func (f *fakeSource) History(name string) ([]map[string]any, bool) {
 }
 
 // newScepterPair builds a paired sim pair with ServeScepter running on the server's accepted sid-0 stream,
-// mirroring what cmd/wattun's serve() does. journalPath may be empty (no journal).
-func newScepterPair(t *testing.T, caps uint32, journalPath string, src ScepterSource) (*ScepterClient, *ScepterState) {
+// mirroring what cmd/wattun's serve() does. journalPath may be empty (no journal); ops, when given, arms the
+// write side (phase B).
+func newScepterPair(t *testing.T, caps uint32, journalPath string, src ScepterSource, ops ...ScepterOps) (*ScepterClient, *ScepterState) {
 	t.Helper()
 	pair := testPairing(caps)
 	cfg := Config{Pairing: pair}
@@ -74,6 +81,9 @@ func newScepterPair(t *testing.T, caps uint32, journalPath string, src ScepterSo
 	state, err := NewScepterState(pair, src, journalPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, o := range ops {
+		state.SetOps(o)
 	}
 	t.Cleanup(func() { state.journal.Close() }) // Windows: an open journal keeps TempDir from cleaning up
 	t.Cleanup(func() { cli.Close(); srv.Close() })
@@ -527,4 +537,587 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+// ---- phase B: write intents ----
+
+// fakeOps is the TEST implementation of ScepterOps (plan B.3): the same contract as the production
+// fileScepterOps — name rules, name_taken, port collisions, real files in a temp CONF dir (atomic writes),
+// backup before apply, rollback on a failed unit start — without systemd: unit actions are recorded and tests
+// inject failures via failStart.
+type fakeOps struct {
+	dir       string
+	failStart map[string]bool // unit starts "succeed" but the unit dies: the verify catches it
+	binds     map[int]string  // canned port collisions: bind port -> user (what the production scan would find)
+	actions   []string        // recorded "name:action" (unit ops)
+	active    map[string]bool
+	creates   int // Create calls that executed (journal idempotency counting)
+
+	inN, maxIn atomic.Int64 // concurrency probe: the queue test pins max concurrent edits to 1
+	delay      time.Duration
+}
+
+func newFakeOps(t *testing.T) *fakeOps {
+	return &fakeOps{dir: t.TempDir(), failStart: map[string]bool{}, binds: map[int]string{}, active: map[string]bool{}}
+}
+
+func (f *fakeOps) runUnit(name, action string) {
+	f.actions = append(f.actions, name+":"+action)
+	switch action {
+	case "start", "restart":
+		f.active[name] = !f.failStart[name]
+	case "stop":
+		f.active[name] = false
+	}
+}
+
+func (f *fakeOps) yml(name string) string { return filepath.Join(f.dir, name+".yml") }
+
+func (f *fakeOps) has(name string) bool {
+	_, err := os.Stat(f.yml(name))
+	return err == nil
+}
+
+func (f *fakeOps) begin() {
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
+	n := f.inN.Add(1)
+	for {
+		m := f.maxIn.Load()
+		if n <= m || f.maxIn.CompareAndSwap(m, n) {
+			break
+		}
+	}
+}
+
+func (f *fakeOps) end() { f.inN.Add(-1) }
+
+// setYMLKey / dropYMLKey: the fake's line surgery, the same top-level semantics as the production ops.
+func setYMLKey(text, k, v string) string {
+	var out []string
+	done := false
+	for _, l := range strings.Split(text, "\n") {
+		if strings.HasPrefix(l, k+":") && !strings.HasPrefix(l, " ") {
+			continue
+		}
+		if !done && (strings.HasPrefix(l, "metrics:") || strings.HasPrefix(l, "ports:")) {
+			out = append(out, k+": "+v)
+			done = true
+		}
+		out = append(out, l)
+	}
+	if !done {
+		out = append(out, k+": "+v)
+	}
+	return strings.Join(out, "\n")
+}
+
+func dropYMLKey(text, k string) string {
+	var out []string
+	for _, l := range strings.Split(text, "\n") {
+		if strings.HasPrefix(l, k+":") && !strings.HasPrefix(l, " ") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
+func writeAtomicTest(path, content string) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (f *fakeOps) Create(spec ScepterTunnelSpec) (map[string]any, int) {
+	f.creates++
+	f.begin()
+	defer f.end()
+	name := spec.Name
+	if name == "" {
+		name = "tunnel"
+	}
+	if !ValidScepterName(name) {
+		return map[string]any{"name": name}, CodeBadRequest
+	}
+	if f.has(name) {
+		return map[string]any{"name": name}, CodeNameTaken
+	}
+	if spec.Carrier == "icmp" && runtime.GOOS != "linux" {
+		// platform check first, like the production ops: a carrier that cannot run here never reaches the port scan
+		return map[string]any{"carrier": "icmp", "ver": Version, "need": "linux+CAP_NET_RAW"}, CodeCarrierNeeds
+	}
+	port := 4443 // the fake's bind rule: the carrier default, or params' listen
+	if v := spec.Params["listen"]; v != "" {
+		if i := strings.LastIndex(v, ":"); i >= 0 {
+			fmt.Sscanf(v[i+1:], "%d", &port)
+		}
+	}
+	if user, busy := f.binds[port]; busy {
+		return map[string]any{"port": port, "user": user}, CodePortBusy
+	}
+	body := "mode: server\nkey: " + spec.Key + "\ncarrier: " + spec.Carrier + "\nports:\n  - 20030\n"
+	if err := writeAtomicTest(f.yml(name), body); err != nil {
+		return map[string]any{"detail": err.Error()}, CodeInternal
+	}
+	if err := writeAtomicTest(filepath.Join(f.dir, name+".key"), spec.Key); err != nil {
+		return map[string]any{"detail": err.Error()}, CodeInternal
+	}
+	f.runUnit(name, "start")
+	if !f.active[name] { // the rollback drill: restore absence
+		f.runUnit(name, "stop")
+		os.Remove(f.yml(name))
+		os.Remove(filepath.Join(f.dir, name+".key"))
+		return map[string]any{"detail": "unit did not come up", "rolled_back": true}, CodeInternal
+	}
+	return map[string]any{"name": name, "carrier": spec.Carrier, "key": spec.Key, "token": "wat1:fake"}, CodeOK
+}
+
+func (f *fakeOps) Edit(name string, patch ScepterPatch) (map[string]any, int) {
+	f.begin()
+	defer f.end()
+	b, err := os.ReadFile(f.yml(name))
+	if err != nil {
+		return map[string]any{"name": name}, CodeNotFound
+	}
+	text := string(b)
+	for _, k := range patch.Drop {
+		text = dropYMLKey(text, k)
+	}
+	for k, v := range patch.Set {
+		text = setYMLKey(text, k, v)
+	}
+	writeAtomicTest(f.yml(name)+".bak", string(b))
+	writeAtomicTest(f.yml(name), text)
+	f.runUnit(name, "restart")
+	if !f.active[name] {
+		writeAtomicTest(f.yml(name), string(b))
+		f.runUnit(name, "restart")
+		return map[string]any{"detail": "rolled back", "rolled_back": true}, CodeInternal
+	}
+	p := map[string]any{"name": name}
+	if c, is := patch.Set["carrier"]; is {
+		p["carrier"] = c
+	}
+	return p, CodeOK
+}
+
+func (f *fakeOps) Delete(name string) (map[string]any, int) {
+	f.begin()
+	defer f.end()
+	if !f.has(name) {
+		return map[string]any{"name": name}, CodeNotFound
+	}
+	f.runUnit(name, "stop")
+	os.Rename(f.yml(name), f.yml(name)+".bak")
+	os.Remove(filepath.Join(f.dir, name+".key"))
+	return map[string]any{"name": name, "stopped": true}, CodeOK
+}
+
+func (f *fakeOps) Unit(name, action string) (map[string]any, int) {
+	f.begin()
+	defer f.end()
+	if !f.has(name) {
+		return map[string]any{"name": name}, CodeNotFound
+	}
+	f.runUnit(name, action)
+	want := action != "stop"
+	if f.active[name] != want {
+		return map[string]any{"detail": "state"}, CodeInternal
+	}
+	state := "inactive"
+	if want {
+		state = "active"
+	}
+	return map[string]any{"name": name, "state": state}, CodeOK
+}
+
+func (f *fakeOps) SetLimits(name string, items []string) (map[string]any, int) {
+	b, err := os.ReadFile(f.yml(name))
+	if err != nil {
+		return map[string]any{"name": name}, CodeNotFound
+	}
+	writeAtomicTest(f.yml(name), setYMLKey(string(b), "limits", strings.Join(items, ", ")))
+	return map[string]any{"name": name, "limits": len(items)}, CodeOK
+}
+
+// dirSource is the ScepterSource reading the fake ops' CONF dir, so the state document reflects what the
+// write intents did to the files (create/delete round-trips are visible in tunnels.list).
+type dirSource struct{ dir string }
+
+func (d dirSource) Tunnels() []ScepterTunnelInfo {
+	out := []ScepterTunnelInfo{} // never nil: an empty list marshals as [], not null
+	files, _ := filepath.Glob(filepath.Join(d.dir, "*.yml"))
+	sort.Slice(files, func(i, j int) bool { return files[i] < files[j] })
+	for _, f := range files {
+		name := strings.TrimSuffix(filepath.Base(f), ".yml")
+		out = append(out, ScepterTunnelInfo{Name: name, Carrier: "udp", State: "active", Health: "ok"})
+	}
+	return out
+}
+
+func (d dirSource) TunnelStats(string) (map[string]any, bool) { return nil, false }
+func (d dirSource) TunnelLogs(string, int) ([]string, bool)   { return nil, false }
+func (d dirSource) History(string) ([]map[string]any, bool)   { return nil, false }
+
+func testWriteArgs(extra map[string]any) map[string]any {
+	a := map[string]any{"carrier": "udp", "ports": "20030"}
+	for k, v := range extra {
+		a[k] = v
+	}
+	return a
+}
+
+// Create/edit/delete round-trips on a sim Kharej with real files in a temp CONF (plan B.4): the files appear,
+// the state document follows, the delete moves everything aside.
+func TestScepterWriteRoundTrip(t *testing.T) {
+	ops := newFakeOps(t)
+	src := dirSource{ops.dir}
+	c, _ := newScepterPair(t, CapFull, "", src, ops)
+
+	p, code := c.Call("tunnel.create", testWriteArgs(map[string]any{"name": "wt1", "base_seq": 7, "ttl_s": 300}))
+	if code != CodeOK {
+		t.Fatalf("create code %d params %v", code, p)
+	}
+	if p["name"] != "wt1" || p["key"] == "" || p["token"] != "wat1:fake" {
+		t.Fatalf("create params: %v", p)
+	}
+	if _, err := os.Stat(filepath.Join(ops.dir, "wt1.key")); err != nil {
+		t.Fatal("create wrote no key file")
+	}
+	// base_seq mismatch is not fatal, but the response carries the fresh state (the plan's state model)
+	if _, ok := p["state"]; !ok {
+		t.Fatalf("stale base_seq must carry the fresh state: %v", p)
+	}
+	if st, _ := p["state"].(map[string]any); st["state_seq"] == float64(7) {
+		t.Fatal("carried state must be fresher than base_seq 7")
+	}
+	// the event and the state document followed
+	p, code = c.Call("tunnels.list", nil)
+	if code != CodeOK || len(p["tunnels"].([]any)) != 1 {
+		t.Fatalf("tunnels.list after create: %v %v", code, p)
+	}
+	// edit: set a key, the file changes, the unit restarted
+	p, code = c.Call("tunnel.edit", map[string]any{"name": "wt1", "set": map[string]any{"ping-every": "5"}})
+	if code != CodeOK {
+		t.Fatalf("edit code %d params %v", code, p)
+	}
+	b, _ := os.ReadFile(filepath.Join(ops.dir, "wt1.yml"))
+	if !strings.Contains(string(b), "ping-every: 5") {
+		t.Fatalf("edit did not land in the yml: %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(ops.dir, "wt1.yml.bak")); err != nil {
+		t.Fatal("edit left no .bak")
+	}
+	// limits and presets go through the same file
+	if p, code = c.Call("limits.set", map[string]any{"name": "wt1", "limits": []any{"20030 rate=5MB quota=100GB"}}); code != CodeOK {
+		t.Fatalf("limits.set code %d params %v", code, p)
+	}
+	if p, code = c.Call("preset.apply", map[string]any{"name": "wt1", "preset": "plain"}); code != CodeOK {
+		t.Fatalf("preset.apply code %d params %v", code, p)
+	}
+	// unit ops
+	if p, code = c.Call("tunnel.stop", map[string]any{"name": "wt1"}); code != CodeOK || p["state"] != "inactive" {
+		t.Fatalf("stop: %v %v", code, p)
+	}
+	if p, code = c.Call("tunnel.start", map[string]any{"name": "wt1"}); code != CodeOK || p["state"] != "active" {
+		t.Fatalf("start: %v %v", code, p)
+	}
+	// delete: confirm mismatch is refused, the right one moves the files aside
+	if _, code = c.Call("tunnel.delete", map[string]any{"name": "wt1", "confirm": "nope"}); code != CodeBadRequest {
+		t.Fatalf("wrong confirm code %d", code)
+	}
+	if _, code = c.Call("tunnel.delete", map[string]any{"name": "wt1", "confirm": "wt1"}); code != CodeOK {
+		t.Fatalf("delete code %d", code)
+	}
+	if ops.has("wt1") {
+		t.Fatal("deleted tunnel's yml still live")
+	}
+	if _, err := os.Stat(filepath.Join(ops.dir, "wt1.yml.bak")); err != nil {
+		t.Fatal("delete kept no .bak (not reversible by construction)")
+	}
+	p, _ = c.Call("tunnels.list", nil)
+	if n := len(p["tunnels"].([]any)); n != 0 {
+		t.Fatalf("tunnels.list after delete: %d entries", n)
+	}
+}
+
+// Every structured rejection code of plan B.2, exercised over the wire.
+func TestScepterWriteRejections(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.binds[4443] = "t-old"
+	c, _ := newScepterPair(t, CapFull, "", &fakeSource{}, ops)
+	// name_taken
+	ops.writeDirect("dup", t)
+	if _, code := c.Call("tunnel.create", testWriteArgs(map[string]any{"name": "dup"})); code != CodeNameTaken {
+		t.Fatalf("name_taken code %d", code)
+	}
+	// port_busy {port}
+	p, code := c.Call("tunnel.create", testWriteArgs(nil))
+	if code != CodePortBusy || p["port"] != float64(4443) || p["user"] != "t-old" {
+		t.Fatalf("port_busy: %v %v", code, p)
+	}
+	// carrier_needs {ver}: the raw carriers need Linux (this checkout is Windows; CI's Linux run creates it fine)
+	if runtime.GOOS != "linux" {
+		if p, code = c.Call("tunnel.create", testWriteArgs(map[string]any{"name": "raw1", "carrier": "icmp"})); code != CodeCarrierNeeds || p["ver"] != Version {
+			t.Fatalf("carrier_needs: %v %v", code, p)
+		}
+	}
+	// bad name syntax
+	if _, code = c.Call("tunnel.create", testWriteArgs(map[string]any{"name": "../evil"})); code != CodeBadRequest {
+		t.Fatalf("bad name code %d", code)
+	}
+	// stale: an expired intent (checked while the command bucket is still fresh — the TTL answer precedes any op)
+	old := time.Now().Unix() - 4000
+	if _, code = c.call("tunnel.create", testWriteArgs(map[string]any{"name": "stale1", "carrier": "nope-carrier"}), "stale-id", old, 30*time.Second); code != CodeStale {
+		t.Fatalf("stale code %d", code)
+	}
+	// ttl_s in args raises the window: the same intent age now proceeds (and a wrong type is bad_request).
+	// The free listen keeps the create away from the canned 4443 collision this test plants.
+	if _, code = c.call("tunnel.create", testWriteArgs(map[string]any{"name": "ttls", "carrier": "nope-carrier",
+		"ttl_s": 90000, "params": map[string]any{"listen": ":20041"}}), "ttls-id", old, 30*time.Second); code != CodeOK {
+		t.Fatalf("ttl_s must apply to the intent window too, code %d", code)
+	}
+	if _, code = c.call("tunnel.create", map[string]any{"carrier": "udp", "ports": "1", "ttl_s": "x"}, "ttlx-id", time.Now().Unix(), 30*time.Second); code != CodeBadRequest {
+		t.Fatalf("wrong ttl_s type code %d", code)
+	}
+	// rate_limited: the create bucket (burst 5) is spent by the attempts above
+	for i := 0; i < 6; i++ {
+		c.Call("tunnel.create", testWriteArgs(map[string]any{"name": "rl" + itoa(i), "carrier": "nope-carrier"}))
+	}
+	if _, code = c.Call("tunnel.create", testWriteArgs(map[string]any{"name": "rl-final", "carrier": "nope-carrier"})); code != CodeRateLimited {
+		t.Fatalf("rate_limited code %d", code)
+	}
+	_ = ops // rl0..rl5 etc created files in the temp dir; only the codes matter here
+	// denied: a tunnel-only credential has no create bit (server-side check, plan security requirement)
+	c2, _ := newScepterPair(t, CapTunnel, "", &fakeSource{}, newFakeOps(t))
+	if _, code = c2.Call("tunnel.create", testWriteArgs(map[string]any{"name": "d1"})); code != CodeDenied {
+		t.Fatalf("denied code %d", code)
+	}
+	if _, code = c2.Call("tunnel.edit", map[string]any{"name": "t1"}); code != CodeDenied {
+		t.Fatalf("edit denied code %d", code)
+	}
+	// unknown: write commands toward a phase-A server (no ops armed) do not exist
+	c3, _ := newScepterPair(t, CapFull, "", &fakeSource{})
+	if _, code = c3.Call("tunnel.create", testWriteArgs(nil)); code != CodeUnknownCmd {
+		t.Fatalf("no-ops create code %d, want unknown_cmd", code)
+	}
+}
+
+// writeDirect seeds the fake CONF dir like a pre-existing tunnel (bypassing the ops: it is "already there").
+func (f *fakeOps) writeDirect(name string, t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(f.yml(name), []byte("mode: server\ncarrier: udp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The rollback drill (plan B.4): the unit refuses to come up → CodeInternal with rolled_back, the files are
+// gone, the state document is unchanged (no event, no state_seq bump), and a retry with a fresh id works.
+func TestScepterCreateRollback(t *testing.T) {
+	ops := newFakeOps(t)
+	c, state := newScepterPair(t, CapFull, "", dirSource{ops.dir}, ops)
+	ops.failStart["rb1"] = true
+	seqBefore := state.StateSeq()
+	args := testWriteArgs(map[string]any{"name": "rb1"})
+	p, code := c.call("tunnel.create", args, "rb-retry", time.Now().Unix(), 30*time.Second) // fixed id: the retry below must replay it
+	if code != CodeInternal || p["rolled_back"] != true {
+		t.Fatalf("rollback: %v %v", code, p)
+	}
+	if ops.has("rb1") {
+		t.Fatal("rolled-back create left its yml behind")
+	}
+	if _, err := os.Stat(filepath.Join(ops.dir, "rb1.key")); !os.IsNotExist(err) {
+		t.Fatal("rolled-back create left its key behind")
+	}
+	if state.StateSeq() != seqBefore {
+		t.Fatal("a rolled-back intent must not bump state_seq (no change, no event)")
+	}
+	// the failure is journaled: the same id replays the recorded outcome without re-running the op
+	before := ops.creates
+	p2, code2 := c.call("tunnel.create", args, "rb-retry", time.Now().Unix(), 30*time.Second)
+	if code2 != CodeInternal || p2["rolled_back"] != true {
+		t.Fatalf("replayed failure: %v %v", code2, p2)
+	}
+	if ops.creates != before {
+		t.Fatal("a journaled failure re-ran the op")
+	}
+	// edit rollback: the unit refuses the new config, the .bak content is restored
+	ops.writeDirect("rb2", t)
+	ops.failStart["rb2"] = true
+	if _, code = c.Call("tunnel.edit", map[string]any{"name": "rb2", "set": map[string]any{"ping-every": "9"}}); code != CodeInternal {
+		t.Fatalf("edit rollback code %d", code)
+	}
+	b, _ := os.ReadFile(filepath.Join(ops.dir, "rb2.yml"))
+	if strings.Contains(string(b), "ping-every: 9") {
+		t.Fatalf("edit rollback left the patch in place: %q", b)
+	}
+	ops.failStart["rb2"] = false
+	if p, code = c.Call("tunnel.edit", map[string]any{"name": "rb2", "set": map[string]any{"ping-every": "9"}}); code != CodeOK {
+		t.Fatalf("edit after rollback fix: %v %v", code, p)
+	}
+}
+
+// Journal replay idempotency for write intents (plan B.4): a retried create runs once, and the journal
+// carries the outcome across a state rebuild (Kharej restart).
+func TestScepterWriteJournalReplay(t *testing.T) {
+	ops := newFakeOps(t)
+	jp := filepath.Join(t.TempDir(), ".journal")
+	c, _ := newScepterPair(t, CapFull, jp, dirSource{ops.dir}, ops)
+	args := testWriteArgs(map[string]any{"name": "jr1"})
+	p1, code1 := c.call("tunnel.create", args, "jr-fixed", time.Now().Unix(), 30*time.Second)
+	p2, code2 := c.call("tunnel.create", args, "jr-fixed", time.Now().Unix(), 30*time.Second)
+	if code1 != CodeOK || code2 != CodeOK {
+		t.Fatalf("codes %d/%d", code1, code2)
+	}
+	b1, _ := json.Marshal(p1)
+	b2, _ := json.Marshal(p2)
+	if string(b1) != string(b2) {
+		t.Fatalf("retry outcome differs: %s vs %s", b1, b2)
+	}
+	if ops.creates != 1 {
+		t.Fatalf("op ran %d times, want 1", ops.creates)
+	}
+	// across a "restart": a fresh state over the same journal answers from the records
+	ops2 := newFakeOps(t)
+	ops2.dir = ops.dir // same CONF, fresh ops (the new binary's reality)
+	c.Close()
+	state2, err := NewScepterState(testPairing(CapFull), dirSource{ops.dir}, jp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state2.journal.Close()
+	state2.SetOps(ops2)
+	resp := state2.Handle(ScepterRequest{ID: "jr-fixed", V: scepterV, Cmd: "tunnel.create",
+		Args: args, TS: time.Now().Unix()}, testPairing(CapFull).Caps)
+	if resp.Code != CodeOK {
+		t.Fatalf("replayed code %d", resp.Code)
+	}
+	if ops2.creates != 0 {
+		t.Fatal("the replayed create ran the op again after the restart")
+	}
+}
+
+// base_seq: absent skips the check; a matching seq applies silently.
+func TestScepterWriteBaseSeqOptional(t *testing.T) {
+	ops := newFakeOps(t)
+	c, state := newScepterPair(t, CapFull, "", dirSource{ops.dir}, ops)
+	seq := state.StateSeq()
+	p, code := c.Call("tunnel.create", testWriteArgs(map[string]any{"name": "bs1", "base_seq": float64(seq)}))
+	if code != CodeOK {
+		t.Fatal(code)
+	}
+	if _, ok := p["state"]; ok {
+		t.Fatalf("matching base_seq must not carry the state: %v", p)
+	}
+}
+
+// Concurrent commands from two clients serialize on the one queue (plan B.4/E.2): write intents never
+// interleave — the fake's concurrency probe pins max-concurrent-edits to 1, and a reader issuing its Handle
+// while a slow edit is in flight only observes the state AFTER it. The calls go through Handle exactly as two
+// serveScepterLoop goroutines (two clients, two streams) would; the wire itself is pinned by the round-trip
+// tests (one ScepterClient's reader is not safe for concurrent waits, by design one stream = one caller).
+func TestScepterQueueSerializes(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.delay = 30 * time.Millisecond
+	state, err := NewScepterState(testPairing(CapFull), dirSource{ops.dir}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.journal.Close() })
+	state.SetOps(ops)
+	ops.writeDirect("q1", t)
+	caps := testPairing(CapFull).Caps
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ { // two clients issuing writes at once
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 3; j++ {
+				req := ScepterRequest{ID: fmt.Sprintf("q%d-%d", i, j), V: scepterV, Cmd: "tunnel.edit", TS: time.Now().Unix(),
+					Args: map[string]any{"name": "q1", "set": map[string]any{"ping-every": itoa(i*10 + j)}}}
+				if resp := state.Handle(req, caps); resp.Code != CodeOK {
+					t.Errorf("concurrent edit code %d", resp.Code)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if m := ops.maxIn.Load(); m != 1 {
+		t.Fatalf("write intents overlapped: max concurrent = %d, want 1 (one command queue)", m)
+	}
+	// a reader during a slow write waits behind it (one queue for reads and writes alike)
+	done := make(chan uint64, 1)
+	go func() {
+		state.Handle(ScepterRequest{ID: "q-slow", V: scepterV, Cmd: "tunnel.edit", TS: time.Now().Unix(),
+			Args: map[string]any{"name": "q1", "set": map[string]any{"ping-every": "1"}}}, caps)
+		done <- state.StateSeq()
+	}()
+	time.Sleep(5 * time.Millisecond) // the edit (30 ms) is now in flight
+	pre := state.StateSeq()
+	post := <-done
+	if post != pre+1 {
+		t.Fatalf("state moved by %d across the in-flight edit (pre %d, post %d): the write did not run as one unit", post-pre, pre, post)
+	}
+}
+
+// Presets: the engine-owned catalog, applied through the edit path; unknown presets answer bad_request with
+// the catalog.
+func TestScepterPresetApply(t *testing.T) {
+	ops := newFakeOps(t)
+	c, _ := newScepterPair(t, CapManage, "", dirSource{ops.dir}, ops)
+	ops.writeDirect("pr1", t)
+	if _, code := c.Call("preset.apply", map[string]any{"name": "pr1", "preset": "stealth"}); code != CodeOK {
+		t.Fatal(code)
+	}
+	b, _ := os.ReadFile(filepath.Join(ops.dir, "pr1.yml"))
+	if !strings.Contains(string(b), "noise: med") || !strings.Contains(string(b), "shape-data: 8") {
+		t.Fatalf("stealth preset did not land: %q", b)
+	}
+	p, code := c.Call("preset.apply", map[string]any{"name": "pr1", "preset": "nope"})
+	if code != CodeBadRequest || p["presets"] != "plain,stealth" {
+		t.Fatalf("unknown preset: %v %v", code, p)
+	}
+}
+
+// CallRaw streams every raw response line for its id — the -scepter-call contract the Go manager parses.
+func TestScepterCallRaw(t *testing.T) {
+	c, _ := newScepterPair(t, CapManage, "", &fakeSource{})
+	var sb strings.Builder
+	code, err := c.CallRaw("tunnel.stats", map[string]any{"name": "t1"}, "raw1", &sb)
+	if err != nil || code != CodeOK {
+		t.Fatalf("CallRaw: code %d err %v", code, err)
+	}
+	var resp ScepterResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(sb.String())), &resp); err != nil {
+		t.Fatalf("raw line: %v (%q)", err, sb.String())
+	}
+	if resp.ID != "raw1" || resp.Seq == 0 {
+		t.Fatalf("raw response: %+v", resp)
+	}
+	// chunked payloads arrive as several raw lines in order
+	src := &fakeSource{}
+	for i := 0; i < 400; i++ {
+		src.logs = append(src.logs, strings.Repeat("r", 80)+itoa(i))
+	}
+	c2, _ := newScepterPair(t, CapManage, "", src)
+	sb.Reset()
+	if code, err = c2.CallRaw("tunnel.logs", map[string]any{"name": "t1", "tail": 400}, "raw2", &sb); err != nil || code != CodeOK {
+		t.Fatalf("chunked CallRaw: %d %v", code, err)
+	}
+	lines := strings.Split(strings.TrimSpace(sb.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected several chunk lines, got %d", len(lines))
+	}
+	first, last := lines[0], lines[len(lines)-1]
+	var fr, lr ScepterResponse
+	json.Unmarshal([]byte(first), &fr)
+	json.Unmarshal([]byte(last), &lr)
+	if fr.Chunk == nil || lr.Chunk == nil || lr.Chunk.I != lr.Chunk.N-1 {
+		t.Fatalf("chunk lines: first %v last %v", fr.Chunk, lr.Chunk)
+	}
 }

@@ -189,6 +189,8 @@ func main() {
 	pairingKey := flag.String("pairing", "", "config-file key: `pairing: true` opens the management stream with the pairing stored by -pair; the value may also be a full watp1: line (3.5.0)")
 	latchPort := flag.Int("latch-port", 0, "server, Scepter (3.5.0): port of the scepter latch — a shaped wss listener (key-derived path) that arms while every unit of the pairing is inactive, so the cockpit can revive the pair; the first contact must prove the pairing key and the listener stands down on it. 0 = off (the default; the latch also never exists without a stored pairing)")
 	latchDial := flag.String("latch-dial", "", "client, standalone: contact the scepter latch on Kharej at host:port with the pairing from -pair-to (or the stored pairing file), prove the key, run the pairing hello and one ping, then exit — the cockpit revival primitive and the drill tool (3.5.0)")
+	scepterCall := flag.String("scepter-call", "", "client, standalone one-shot (3.5.0 phase B): run ONE Scepter command on the paired Kharej through this tunnel's reserved stream (same -config/-pair-to context as the run itself), print every response line as JSONL on stdout (chunk pieces included) and exit; exit 0 once answered — the machine code rides the JSON — exit 1 on a transport failure. This is what the Go manager shells out to (its scepterDial seam)")
+	scepterArgs := flag.String("scepter-args", "", "with -scepter-call: the command's args as a JSON object (e.g. '{\"name\":\"t1\",\"carrier\":\"udp\",\"ports\":\"20030\"}'); a top-level \"id\" is lifted as the command id, so a retried call reuses it and the server journal answers at-most-once (3.5.0)")
 	var hdrs []string
 	flag.Func("header", "client, ws|wss|h2|h2c|grpc carrier: extra request header 'Name: value' (repeatable)", func(v string) error {
 		if !strings.Contains(v, ":") {
@@ -320,6 +322,16 @@ func main() {
 			log.Fatalf("-latch-dial %s: %v", *latchDial, err)
 		}
 		return
+	}
+	// -scepter-call (3.5.0 phase B): a client-side one-shot like -latch-dial; validated here, run after the
+	// tunnel is built below (it dials the live session's reserved stream).
+	if *scepterCall != "" {
+		if *mode != "client" {
+			log.Fatal("-scepter-call is a client action: it dials the paired Kharej through this tunnel")
+		}
+		if _, _, err := parseScepterCallArgs(*scepterArgs); err != nil {
+			log.Fatalf("-scepter-args: %v", err)
+		}
 	}
 
 	k := []byte(*key)
@@ -1084,7 +1096,10 @@ func main() {
 			list = append(list, s)
 		}
 		tun = newTunnel(list)
-		tunRef.Store(tun) // -ech ladder's DoH hook (2.9.0)
+		tunRef.Store(tun)       // -ech ladder's DoH hook (2.9.0)
+		if *scepterCall != "" { // one-shot cockpit command (3.5.0 phase B): dial, run, print, exit
+			os.Exit(runScepterCall(tun, *scepterCall, *scepterArgs))
+		}
 		if cfg.Pairing != nil {
 			go scepterClientLoop(tun, cfg.Pairing)
 		}
@@ -1394,6 +1409,11 @@ func main() {
 				log.Fatalf("scepter: %v", serr)
 			}
 			log.Printf("scepter: management channel armed (pairing %s, capability %s, journal %s)", cfg.Pairing.UUIDString(), wat.CapName(cfg.Pairing.Caps), jp)
+			// The write side (3.5.0 phase B): real ops over this config dir and systemd. self is this unit's
+			// name; the ops refuse to edit it — the cockpit channel rides this very unit. known is the same
+			// config-key closure the cfgWatcher uses, so a remote create accepts exactly the keys this binary
+			// parses (and the standalone action flags stay out of created tunnels).
+			scepter.SetOps(newFileScepterOps(filepath.Dir(pairPath), unitName, known, log.Printf))
 			scepterNow.Store(scepter) // the /scepter handler reads this (it registered before arming)
 			// The scepter latch (3.5.0, phase A item 4): opt-in with -latch-port next to the stored pairing.
 			if *latchPort > 0 {

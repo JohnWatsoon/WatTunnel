@@ -2414,10 +2414,12 @@ Kharej owns state. `state.get` returns one versioned document: engine version, p
 `tunnels` (`{name, carrier, state, health, metrics}`), `event_cursor`, `uptime_s`, `state_seq`. The `state_seq`
 counter increments on every change; clients diff by seq, never by wall clock. Events are numbered with the same
 seq and replayable (`events.since {seq}`, last 512): `tunnel_up`, `tunnel_down`, `tunnel_deleted`,
-`carrier_switched`, `heal_action`, `sla_breach`, `update_available`, `pair_rotated`, `pair_revoked`,
-`scepter_up`, `scepter_down`. Every intent is journaled (append-only, atomic writes, rotated at 1 MB) with its
-outcome; a retry of the same command id returns the recorded outcome (at-most-once application). Intents carry
-`ttl_s` (default 600); expired ones answer `code=stale`.
+`carrier_switched`, `tunnel_edited` (phase B: edit/limits/preset applied), `heal_action`, `sla_breach`,
+`update_available`, `pair_rotated`, `pair_revoked`, `scepter_up`, `scepter_down`. Every intent is journaled
+(append-only, atomic writes, rotated at 1 MB) with its outcome; a retry of the same command id returns the
+recorded outcome (at-most-once application). Applied intents and rolled-back Kharej-side failures
+(`code=internal`) are journaled; pure rejections (`denied`/`stale`/`rate_limited`/`bad_request`) are
+recomputed on a retry. Intents carry `ttl_s` (default 600); expired ones answer `code=stale`.
 
 ### Phase A commands
 
@@ -2433,6 +2435,60 @@ outcome; a retry of the same command id returns the recorded outcome (at-most-on
 | `history` | `{name}` | manage | the `/stats/history` ring |
 
 Capability checks run server-side on every command. Rate limit: token bucket per pairing (20/s, burst 40).
+
+### Phase B commands: write intents (both ends 3.5.0)
+
+Every write command is **validate → backup → apply → verify → report** on Kharej, and a failure rolls back:
+files are written atomically (tmp + rename), an edit keeps the previous yml as `NAME.yml.bak` (the same
+convention the Go manager's auto-apply uses), a delete moves every file aside to `.bak` instead of destroying
+it, and a unit that fails its start/liveness verify is stopped and restored before the answer says
+`rolled_back` (`code=7` with `{"rolled_back":true}`). All writes run on ONE command queue per pairing —
+concurrent clients serialize, and no write ever touches the session pump.
+
+| Command | Args | Capability | Notes |
+|---|---|---|---|
+| `tunnel.create` | `{name?, carrier, ports, params?, base_seq?, ttl_s?}` | create | writes `NAME.yml` + `NAME.key` (+ `NAME.token`), assigns a free loopback `metrics:` port (19700..), starts `wattun@NAME` and verifies it came up. The response carries `name`, the generated `key`, and `token` when `params.peer` is set (the cockpit fills the peer itself otherwise). `name` absent → Kharej picks `tunnel`, `tunnel-2`, … |
+| `tunnel.edit` | `{name, set?, drop?, ports?, base_seq?, ttl_s?}` | manage | line-surgery on the yml (the manager's set/unset semantics), re-parsed before anything is written, then restart + verify; `set.carrier` reports back as `carrier` (the `carrier_switched` event) |
+| `tunnel.delete` | `{name, confirm}` | manage | `confirm` must equal `name`; stops the unit, moves `yml`/`key`/`token` to `.bak` |
+| `tunnel.start` / `tunnel.stop` / `tunnel.restart` | `{name}` | manage | systemd unit ops with liveness verify (`start` is `enable --now`) |
+| `limits.set` | `{name, limits:[items]}` | manage | rewrites the `limits:` list (same `PORT rate=… quota=… period=…` syntax); `limits: []` clears; hot-reloaded by the unit's watcher — never restarts |
+| `preset.apply` | `{name, preset}` | manage | a named patch through the edit path; catalog (engine-owned): `stealth` (`shape-data: 8`, `noise: med`), `plain` (drops both) |
+
+`ttl_s` in the args is the args-alias of the wire `ttl` field (the intent lifetime; default 600, expired =
+`code=stale`). `base_seq` is the state_seq the intent was built on: a mismatch is not fatal (Kharej
+re-validates anyway), but the response then carries the fresh `state` document so the client can re-decide.
+Write commands exist only where the ops source is armed (a 3.5.0 server that runs one); an older or
+reads-only deployment answers `unknown_cmd`, and an unpaired/old peer is never asked (the client-side hello
+gates the channel).
+
+Rejection codes appended for write intents (numbers are the contract, the panel localizes later):
+`10 name_taken` (`{"name"}`), `11 port_busy` (`{"port","user"}` — a LISTEN/metrics collision with another
+tunnel or a local listener; target-port overlap is deliberately fine, several tunnels may forward to the same
+local service), `12 carrier_needs` (`{"carrier","ver","need"}` — a raw-socket carrier off Linux, or a name
+this binary does not ship). `4 rate_limited` also covers the per-pair **create** bucket (5 at once, then
+1 per 10 s) and the per-host tunnel cap (64 units, `{"resource":"tunnels","cap":64}`); `3 stale`, `2 denied`
+(with `{"need":tier}`) and `1 bad_request` are unchanged. Name rules are byte-for-byte the manager's:
+1-32 chars of `[A-Za-z0-9_-]` (the name becomes `wattun@NAME` and `NAME.yml`). Params keys must be config
+keys this binary parses; the keys the ops write themselves (`mode`, `key`, `carrier`, `ports`, `limits`,
+`header`) and the standalone action flags (`config`, `version`, `pair`, `pair-to`, `pairing`, `latch-port`,
+`latch-dial`, `scepter-call`, `scepter-args`, `state-dir`) are refused. A pairing may never edit, delete or
+restart its OWN unit (`code=1` with `{"self":…}`) — the cockpit channel rides that very unit; the local
+console handles it.
+
+### The one-shot client action: `wattun -scepter-call`
+
+```
+wattun -config iran-tunnel.yml -scepter-call state.get
+wattun -config iran-tunnel.yml -scepter-call tunnel.create -scepter-args '{"carrier":"udp","ports":"20030","id":"c-42"}'
+```
+
+A standalone client action like `-latch-dial` (client mode only): it builds the tunnel from the ordinary
+`-config`/`-pair-to` context, dials the paired session's reserved stream, runs ONE command and prints every
+raw response line as JSONL on stdout — chunk pieces included, exactly as the protocol speaks them. Exit code
+is 0 once the command was answered (the machine code rides the JSON; the Go manager parses stdout) and 1 on a
+transport failure (reason on stderr). A top-level `"id"` in `-scepter-args` becomes the command id, so a
+retried call is answered from the server journal at-most-once. This is what the Go manager shells out to
+(its `scepterDial` seam) and what a script or the future panel can drive directly.
 
 ### The scepter latch (fallback listener)
 

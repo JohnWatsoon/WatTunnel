@@ -18,6 +18,7 @@ package wat
 
 import (
 	"bufio"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,6 +196,10 @@ const (
 	CodeInternal    = 7
 	CodeTooLarge    = 8 // command line above scepterMaxLine
 	CodeUnpaired    = 9 // peer spoke scepter without a pairing (or the answer said so)
+	// Phase B write-intent rejections (plan B.2), appended in order:
+	CodeNameTaken    = 10 // tunnel.create: the name already exists on Kharej; params {"name"}
+	CodePortBusy     = 11 // a listen port collides with another tunnel or a local listener; params {"port","user"}
+	CodeCarrierNeeds = 12 // the carrier cannot run on this Kharej; params {"carrier","ver","need"}
 )
 
 const (
@@ -260,8 +266,13 @@ func (d *scepterDecoder) next() (ScepterRequest, int) {
 		return ScepterRequest{}, CodeTooLarge
 	}
 	if err != nil {
-		if err == io.EOF && len(line) == 0 {
-			return ScepterRequest{}, -1 // clean end of stream
+		if len(line) == 0 {
+			// no data with the error: the stream is dead (session closed/reset — Stream.Read then answers the
+			// same error forever), so the loop must END. Returning bad_request here spun the serve loop hot on
+			// marshal+read-error forever, one burned core per closed scepter pair (found by the phase B suite:
+			// every closed pair left a runnable goroutine in writeRespLine). Data WITH the error is the other
+			// case: a final unterminated garbage line, answered once, then the clean EOF below ends the loop.
+			return ScepterRequest{}, -1
 		}
 		return ScepterRequest{}, CodeBadRequest
 	}
@@ -293,6 +304,7 @@ const (
 	EvTunnelDown      = "tunnel_down"
 	EvTunnelDeleted   = "tunnel_deleted"
 	EvCarrierSwitched = "carrier_switched"
+	EvTunnelEdited    = "tunnel_edited" // phase B: edit/limits.set/preset.apply applied (not in the plan's phase-A list; appended, data not commands)
 	EvHealAction      = "heal_action"
 	EvSLABreach       = "sla_breach"
 	EvUpdateAvailable = "update_available"
@@ -477,7 +489,7 @@ func (r *scepterRate) allow(now time.Time) bool {
 }
 
 // ScepterState is one pairing's server-side management state: the state document, the event ring, the journal
-// and the rate bucket. One per pairing credential per process; safe for concurrent streams.
+// and the rate buckets. One per pairing credential per process; safe for concurrent streams.
 type ScepterState struct {
 	mu      sync.Mutex
 	pair    *PairingConfig
@@ -485,10 +497,15 @@ type ScepterState struct {
 	seq     uint64
 	events  []ScepterEvent // ring: capped at scepterEvents, oldest dropped
 	src     ScepterSource
+	ops     ScepterOps // the write side (phase B); nil until SetOps — then write commands answer unknown_cmd
 	journal *ScepterJournal
 	rate    scepterRate
-	recent  []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
-	nowf    func() time.Time // tests shrink the clock
+	// createRate is the slower per-pair bucket on tunnel.create (plan B.2: "creation/test rate limits per
+	// pair"): five creates at once, then one per 10 s — a human cockpit never feels it, a runaway loop stops.
+	createRate scepterRate
+	qmu        sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
+	recent     []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
+	nowf       func() time.Time // tests shrink the clock
 }
 
 // ScepterRec is one handled command for the doctor's "last commands" line (Recent).
@@ -509,9 +526,19 @@ func NewScepterState(pair *PairingConfig, src ScepterSource, journalPath string)
 	}
 	return &ScepterState{
 		pair: pair, src: src, journal: j, started: time.Now(),
-		rate: scepterRate{rate: 20, burst: 40},
-		nowf: time.Now,
+		rate:       scepterRate{rate: 20, burst: 40},
+		createRate: scepterRate{rate: 0.1, burst: 5},
+		nowf:       time.Now,
 	}, nil
+}
+
+// SetOps arms the write side (phase B). Without it every write command answers unknown_cmd — a phase-A binary,
+// or a deployment that wants the read-only cockpit only. Call once at startup, before any scepter stream is
+// served; the binary wires the real ops in main, tests inject a fake.
+func (ss *ScepterState) SetOps(ops ScepterOps) {
+	ss.mu.Lock()
+	ss.ops = ops
+	ss.mu.Unlock()
 }
 
 // AddEvent records a state change and returns its seq (the state_seq counter increments on EVERY change).
@@ -561,28 +588,40 @@ func (ss *ScepterState) document() map[string]any {
 type scepterHandler func(ss *ScepterState, req ScepterRequest) (map[string]any, int)
 
 type scepterCmd struct {
-	minCap uint32
-	fn     scepterHandler
+	minCap   uint32
+	fn       scepterHandler
+	needsOps bool // a phase-B write intent: unknown_cmd while no ScepterOps is armed (phase-A server)
 }
 
 // scepterCmds is the registry. Every entry names its minimum capability and the check runs SERVER-side on every
 // command (client-side gating is UX, not security — plan security requirement). Phase A read split: hello/ping
 // answer any credential (they reveal only liveness), the pairing's own state (state.get/tunnels.list) answers
 // CapTunnel, and everything that reads live telemetry (stats/logs/events/history) needs CapManage per D4
-// ("manage: +edit/delete/test/stats/events").
+// ("manage: +edit/delete/test/stats/events"). Phase B write split (plan B.1): create is CapCreate, everything
+// that changes an existing tunnel is CapManage.
 var scepterCmds = map[string]scepterCmd{
-	"scepter.hello": {CapTunnel, cmdHello},
-	"scepter.ping":  {CapTunnel, cmdPing},
-	"state.get":     {CapTunnel, cmdStateGet},
-	"tunnels.list":  {CapTunnel, cmdTunnelsList},
-	"tunnel.stats":  {CapManage, cmdTunnelStats},
-	"tunnel.logs":   {CapManage, cmdTunnelLogs},
-	"events.since":  {CapManage, cmdEventsSince},
-	"history":       {CapManage, cmdHistory},
+	"scepter.hello": {minCap: CapTunnel, fn: cmdHello},
+	"scepter.ping":  {minCap: CapTunnel, fn: cmdPing},
+	"state.get":     {minCap: CapTunnel, fn: cmdStateGet},
+	"tunnels.list":  {minCap: CapTunnel, fn: cmdTunnelsList},
+	"tunnel.stats":  {minCap: CapManage, fn: cmdTunnelStats},
+	"tunnel.logs":   {minCap: CapManage, fn: cmdTunnelLogs},
+	"events.since":  {minCap: CapManage, fn: cmdEventsSince},
+	"history":       {minCap: CapManage, fn: cmdHistory},
+
+	"tunnel.create":  {minCap: CapCreate, fn: cmdTunnelCreate, needsOps: true},
+	"tunnel.edit":    {minCap: CapManage, fn: cmdTunnelEdit, needsOps: true},
+	"tunnel.delete":  {minCap: CapManage, fn: cmdTunnelDelete, needsOps: true},
+	"tunnel.start":   {minCap: CapManage, fn: cmdTunnelUnit("start"), needsOps: true},
+	"tunnel.stop":    {minCap: CapManage, fn: cmdTunnelUnit("stop"), needsOps: true},
+	"tunnel.restart": {minCap: CapManage, fn: cmdTunnelUnit("restart"), needsOps: true},
+	"limits.set":     {minCap: CapManage, fn: cmdLimitsSet, needsOps: true},
+	"preset.apply":   {minCap: CapManage, fn: cmdPresetApply, needsOps: true},
 }
 
 // Handle validates and runs one request. Order (each step is a trust-boundary check, cheapest first):
-// registry → rate → journal replay (idempotency) → TTL → capability → execute → journal. The caller stamps Seq.
+// registry → ops presence → rate → journal replay (idempotency) → TTL → capability → execute → journal.
+// The caller stamps Seq.
 func (ss *ScepterState) Handle(req ScepterRequest, caps uint32) ScepterResponse {
 	c, ok := scepterCmds[req.Cmd]
 	if req.ID == "" || !ok {
@@ -590,11 +629,25 @@ func (ss *ScepterState) Handle(req ScepterRequest, caps uint32) ScepterResponse 
 	}
 	now := ss.nowf()
 	ss.mu.Lock()
+	ops := ss.ops // snapshotted under the lock: SetOps races nothing
+	ss.mu.Unlock()
+	if c.needsOps && ops == nil {
+		// a phase-A server (or a reads-only deployment): the write commands do not exist here. Answered
+		// before the rate bucket so probing writes cannot drain a reader's command budget.
+		return ScepterResponse{ID: req.ID, Code: CodeUnknownCmd}
+	}
+	ss.mu.Lock()
 	rl := ss.rate.allow(now)
 	ss.mu.Unlock()
 	if !rl {
 		return ScepterResponse{ID: req.ID, Code: CodeRateLimited}
 	}
+	// ONE command queue per pairing (plan B.4/E.2, the bash manager's mgr_lock pattern): from the idempotency
+	// replay to the journal record the whole command holds one mutex, so two scepter streams never interleave
+	// write intents, a retry racing its original cannot double-apply, and Kharej's files are touched by one
+	// intent at a time. The rate bucket stays outside: flooding is rejected without queueing behind a restart.
+	ss.qmu.Lock()
+	defer ss.qmu.Unlock()
 	if resp, ok := ss.journal.Lookup(req.ID); ok && resp.ID == req.ID {
 		resp.Seq = ss.StateSeq() // refresh the tail: the client may have been offline a while
 		return resp
@@ -602,6 +655,13 @@ func (ss *ScepterState) Handle(req ScepterRequest, caps uint32) ScepterResponse 
 	ttl := req.TTL
 	if ttl == 0 {
 		ttl = scepterTTL
+		if n, ok := argInt(req.Args, "ttl_s"); !ok {
+			// ttl_s (plan's intent shape) is the args alias of the wire `ttl` field, reserved on every
+			// command; strictly-typed args rule: a wrong type is bad_request.
+			return ScepterResponse{ID: req.ID, Code: CodeBadRequest}
+		} else if n > 0 {
+			ttl = n
+		}
 	}
 	ts := req.TS
 	if ts == 0 {
@@ -618,8 +678,10 @@ func (ss *ScepterState) Handle(req ScepterRequest, caps uint32) ScepterResponse 
 	if params == nil {
 		resp.Params = nil
 	}
-	if code == CodeOK { // only applied intents are journaled: rejections (denied/stale/rate) are pure functions
-		// of the request and safe to recompute on a retry, and journaling them would burn the 1 MB on noise
+	if code == CodeOK || code == CodeInternal { // applied intents AND Kharej-side op failures (rolled-back
+		// writes) are journaled: a retry of a failed write replays the recorded failure instead of re-running
+		// the op. Pure rejections (denied/stale/rate/bad args/not found) are recomputed on a retry and would
+		// burn the 1 MB journal on noise.
 		ss.journal.Record(req.Cmd, req.ID, ts, resp)
 	}
 	ss.mu.Lock() // every handled request (success or code) is visible to the doctor's last-commands trace
@@ -678,6 +740,71 @@ func argInt(args map[string]any, key string) (int, bool) {
 		return n, true
 	}
 	return 0, false
+}
+
+// argStringMap reads an object of scalar values as strings (create/edit params and patches): absent is the
+// zero value, numbers and booleans are stringified (JSON clients send whatever is convenient), any other
+// shape is bad_request.
+func argStringMap(args map[string]any, key string) (map[string]string, bool) {
+	if args == nil {
+		return nil, true
+	}
+	v, ok := args[key]
+	if !ok {
+		return nil, true
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]string, len(m))
+	for k, e := range m {
+		s, ok := argScalar(e)
+		if !ok {
+			return nil, false
+		}
+		out[k] = s
+	}
+	return out, true
+}
+
+// argStringSlice reads an array of scalars as strings (edit's drop list, limits.set's items).
+func argStringSlice(args map[string]any, key string) ([]string, bool) {
+	if args == nil {
+		return nil, true
+	}
+	v, ok := args[key]
+	if !ok {
+		return nil, true
+	}
+	a, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(a))
+	for _, e := range a {
+		s, ok := argScalar(e)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, s)
+	}
+	return out, true
+}
+
+func argScalar(v any) (string, bool) {
+	switch n := v.(type) {
+	case string:
+		return n, true
+	case float64:
+		if n == float64(int64(n)) {
+			return strconv.FormatInt(int64(n), 10), true
+		}
+		return strconv.FormatFloat(n, 'f', -1, 64), true
+	case bool:
+		return strconv.FormatBool(n), true
+	}
+	return "", false
 }
 
 // cmdHello is the pairing hello exchange (plan phase A item 2): the request's args carry the client's ver/caps
@@ -779,6 +906,254 @@ func cmdHistory(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
 		return nil, CodeNotFound
 	}
 	return map[string]any{"history": h}, CodeOK
+}
+
+// ---- write intents (phase B, plan B.1/B.2) ----
+//
+// Every write command is validate → backup → apply → verify → report, with the ops source owning Kharej's
+// reality (tunnel files, units, port bookkeeping). This engine layer stays deliberately thin: argument typing,
+// the per-pair create bucket, the event, and the base_seq tail. Rejections come back as machine codes from the
+// ops (validation is Kharej's, plan B.2); a rolled-back write is CodeInternal with {"rolled_back":true} and is
+// journaled (Handle), so a retry replays the outcome instead of re-running the op.
+
+// ScepterTunnelSpec is one tunnel.create intent, typed. The name is optional (Kharej picks one), Key is
+// engine-generated (the created tunnel's new PSK, delivered to the cockpit inside the session AEAD), Params
+// are extra config keys (flag names) written verbatim into the yml. Ports is the ports: list in the token's
+// field-7 shape: "20030,8443:443/udp", ranges included.
+type ScepterTunnelSpec struct {
+	Name    string
+	Carrier string
+	Ports   string
+	Params  map[string]string
+	Key     string
+}
+
+// ScepterPatch is one tunnel.edit / preset.apply intent: top-level config keys to set, keys to drop, and an
+// optional replacement ports: list. All empty is rejected by the handler (an empty patch would restart the
+// unit for nothing).
+type ScepterPatch struct {
+	Set   map[string]string
+	Drop  []string
+	Ports string
+}
+
+// ScepterOps is the write side of the management plane (plan B.1: validate → backup → apply → verify →
+// report; failures roll back). Implemented over /etc/wattun + systemd by cmd/wattun/scepter_ops.go; tests
+// inject a fake over a temp CONF dir. Handlers call it with the command queue held (one intent at a time), so
+// implementations need no locking of their own. Every method answers (params, code) in response codes.
+type ScepterOps interface {
+	Create(spec ScepterTunnelSpec) (map[string]any, int)
+	Edit(name string, patch ScepterPatch) (map[string]any, int)
+	Delete(name string) (map[string]any, int)
+	Unit(name, action string) (map[string]any, int) // action: "start" | "stop" | "restart"
+	SetLimits(name string, items []string) (map[string]any, int)
+}
+
+// ValidScepterName is the tunnel-name rule: a name becomes the systemd instance (wattun@NAME) and the config
+// path ($CONF/NAME.yml), so it stays inside [A-Za-z0-9_-]{1,32} — byte-for-byte the rule wattun-manager's
+// v_name enforces, so local and remote creates accept the same names.
+func ValidScepterName(name string) bool {
+	if len(name) == 0 || len(name) > 32 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// scepterNewKey generates the PSK of a remotely created tunnel: 40 alphanumerics, the manager's new_key shape
+// (32 urandom bytes stripped of base64 punctuation). It travels to the cockpit inside the session AEAD only.
+func scepterNewKey() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 40)
+	if _, err := crand.Read(b); err != nil {
+		return "" // crypto/rand never fails on Linux/Windows; an empty key is rejected by the ops' yml check
+	}
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b)
+}
+
+// scepterPresets is the preset.apply catalog (plan B.1). Values are long-shipped config keys (flag names) so
+// a preset cannot name a knob an existing unit would fail to parse; a preset goes through the edit path, so
+// a unit that still refuses to come up rolls back like any edit.
+var scepterPresets = map[string]ScepterPatch{
+	"stealth": {Set: map[string]string{"shape-data": "8", "noise": "med"}}, // pad stream packets (≤8 % extra bytes) and send idle filler while quiet (3.3.0 knobs)
+	"plain":   {Drop: []string{"shape-data", "noise"}},                     // back to the unshaped defaults
+}
+
+// cmdTunnelCreate: tunnel.create {name?, carrier, ports, params…, base_seq, ttl_s} (plan B.1).
+func cmdTunnelCreate(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok {
+		return nil, CodeBadRequest
+	}
+	carrier, ok := argString(req.Args, "carrier")
+	if !ok || carrier == "" {
+		return nil, CodeBadRequest
+	}
+	ports, ok := argString(req.Args, "ports")
+	if !ok || ports == "" {
+		return nil, CodeBadRequest
+	}
+	params, ok := argStringMap(req.Args, "params")
+	if !ok {
+		return nil, CodeBadRequest
+	}
+	if name != "" && !ValidScepterName(name) {
+		// the same rule the manager enforces locally; Kharej re-checks (the ops own existence/caps)
+		return map[string]any{"name": name}, CodeBadRequest
+	}
+	if !ss.createRate.allow(ss.nowf()) {
+		return map[string]any{"resource": "create"}, CodeRateLimited
+	}
+	spec := ScepterTunnelSpec{Name: name, Carrier: carrier, Ports: ports, Params: params, Key: scepterNewKey()}
+	pre := ss.StateSeq() // the state_seq the intent met on arrival: base_seq is compared against THIS, not
+	// the post-apply seq (which the event bump advanced by one — a matching base_seq must not carry the state)
+	p, code := ss.ops.Create(spec)
+	if code == CodeOK {
+		ss.AddEvent(EvTunnelUp, map[string]any{"name": p["name"], "via": "scepter"})
+		p = ss.writeTail(p, req, pre)
+	}
+	return p, code
+}
+
+// cmdTunnelEdit: tunnel.edit {name, set?, drop?, ports?, base_seq, ttl_s} — the plan's "patch…". carrier may
+// be set (a carrier switch is an edit; phase C adds the link-verified change around it).
+func cmdTunnelEdit(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok || name == "" {
+		return nil, CodeBadRequest
+	}
+	set, ok := argStringMap(req.Args, "set")
+	if !ok {
+		return nil, CodeBadRequest
+	}
+	drop, ok := argStringSlice(req.Args, "drop")
+	if !ok {
+		return nil, CodeBadRequest
+	}
+	ports, ok := argString(req.Args, "ports")
+	if !ok {
+		return nil, CodeBadRequest
+	}
+	if set == nil && drop == nil && ports == "" {
+		return nil, CodeBadRequest
+	}
+	pre := ss.StateSeq() // see cmdTunnelCreate: base_seq is judged against the pre-apply seq
+	p, code := ss.ops.Edit(name, ScepterPatch{Set: set, Drop: drop, Ports: ports})
+	if code == CodeOK {
+		if c, is := p["carrier"]; is && c != "" { // the ops echo the carrier only when the patch switched it
+			ss.AddEvent(EvCarrierSwitched, map[string]any{"name": name, "carrier": c})
+		} else {
+			ss.AddEvent(EvTunnelEdited, map[string]any{"name": name})
+		}
+		p = ss.writeTail(p, req, pre)
+	}
+	return p, code
+}
+
+// cmdTunnelDelete: tunnel.delete {name, confirm:"name"} — a destructive op repeats the name back (plan D3:
+// reversible by construction; the ops keep .bak files, nothing is destroyed).
+func cmdTunnelDelete(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	confirm, _ := argString(req.Args, "confirm")
+	if !ok || name == "" || confirm != name {
+		return nil, CodeBadRequest
+	}
+	p, code := ss.ops.Delete(name)
+	if code == CodeOK {
+		ss.AddEvent(EvTunnelDeleted, map[string]any{"name": name})
+	}
+	return p, code
+}
+
+// cmdTunnelUnit builds the tunnel.start|stop|restart handlers (plan B.1). start/restart report a live unit,
+// stop a stopped one; the verify is the ops' job, the event the engine's.
+func cmdTunnelUnit(action string) scepterHandler {
+	return func(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+		name, ok := argString(req.Args, "name")
+		if !ok || name == "" {
+			return nil, CodeBadRequest
+		}
+		p, code := ss.ops.Unit(name, action)
+		if code == CodeOK {
+			if action == "stop" {
+				ss.AddEvent(EvTunnelDown, map[string]any{"name": name, "via": "scepter"})
+			} else {
+				ss.AddEvent(EvTunnelUp, map[string]any{"name": name, "via": "scepter"})
+			}
+		}
+		return p, code
+	}
+}
+
+// cmdLimitsSet: limits.set {name, limits:[…]} — the per-port rate/quota items in the yml's `limits:` syntax.
+// Hot-reloaded by the unit's cfgWatcher, so this never restarts the unit (no channel cut, no dropped streams).
+func cmdLimitsSet(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok || name == "" {
+		return nil, CodeBadRequest
+	}
+	if _, present := req.Args["limits"]; !present { // limits: [] clears every limit; absent args is bad_request
+		return nil, CodeBadRequest
+	}
+	items, ok := argStringSlice(req.Args, "limits")
+	if !ok {
+		return nil, CodeBadRequest
+	}
+	p, code := ss.ops.SetLimits(name, items)
+	if code == CodeOK {
+		ss.AddEvent(EvTunnelEdited, map[string]any{"name": name, "limits": len(items)})
+	}
+	return p, code
+}
+
+// cmdPresetApply: preset.apply {name, preset} — a named patch from the engine-owned catalog through the edit
+// path, so every client (TUI, panel) sees the same preset names and a preset rolls back like any edit.
+func cmdPresetApply(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok || name == "" {
+		return nil, CodeBadRequest
+	}
+	preset, ok := argString(req.Args, "preset")
+	if !ok || preset == "" {
+		return nil, CodeBadRequest
+	}
+	patch, known := scepterPresets[preset]
+	if !known {
+		names := make([]string, 0, len(scepterPresets))
+		for n := range scepterPresets {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return map[string]any{"presets": strings.Join(names, ",")}, CodeBadRequest
+	}
+	pre := ss.StateSeq()
+	p, code := ss.ops.Edit(name, patch)
+	if code == CodeOK {
+		ss.AddEvent(EvTunnelEdited, map[string]any{"name": name, "preset": preset})
+		p = ss.writeTail(p, req, pre)
+	}
+	return p, code
+}
+
+// writeTail applies the plan's base_seq rule: a create/edit built on an outdated state_seq still applies
+// (Kharej re-validates against its own reality — mismatch is not fatal), but the response carries the fresh
+// document so the client can re-decide. The comparison is against the pre-apply seq (captured by the handler
+// before the ops ran); base_seq absent or 0 skips the check.
+func (ss *ScepterState) writeTail(p map[string]any, req ScepterRequest, pre uint64) map[string]any {
+	if base, ok := argInt(req.Args, "base_seq"); ok && base > 0 && uint64(base) != pre {
+		p["base_seq"] = base
+		p["state"] = ss.document()
+	}
+	return p
 }
 
 // ServeScepter runs the server side of one scepter stream: read a line, answer (possibly chunked), repeat until
@@ -899,6 +1274,62 @@ func (c *ScepterClient) Close() error { return c.st.CloseWrite() }
 // {"logs": [...]} by splitting the concatenated data on newlines.
 func (c *ScepterClient) Call(cmd string, args map[string]any) (map[string]any, int) {
 	return c.call(cmd, args, fmt.Sprintf("c%d-%d", time.Now().UnixNano(), scepterCallSeq.Add(1)), time.Now().Unix(), 30*time.Second)
+}
+
+// CallRaw runs one command and streams EVERY raw response line for its id (chunk pieces included, in order)
+// to w, returning the final response's code — the one-shot `-scepter-call` contract: the caller (the Go
+// manager, or any script) parses the JSONL exactly as the protocol speaks it, chunks included. Lines for
+// other ids are skipped (the peer may interleave), a transport error or the 30 s deadline ends the stream.
+func (c *ScepterClient) CallRaw(cmd string, args map[string]any, id string, w io.Writer) (int, error) {
+	if id == "" {
+		id = fmt.Sprintf("raw%d-%d", time.Now().UnixNano(), scepterCallSeq.Add(1))
+	}
+	req := ScepterRequest{ID: id, V: scepterV, Cmd: cmd, Args: args, TS: time.Now().Unix()}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return CodeInternal, err
+	}
+	c.wmu.Lock()
+	_, werr := c.st.Write(append(b, '\n'))
+	c.wmu.Unlock()
+	if werr != nil {
+		return CodeInternal, werr
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	var nChunks, got int
+	for {
+		if time.Now().After(deadline) {
+			return CodeInternal, errors.New("scepter: response timeout")
+		}
+		line, err := c.d.br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull { // a response line over the cap: drained, reported, never buffered loose
+			for {
+				if _, e := c.d.br.ReadSlice('\n'); e != bufio.ErrBufferFull {
+					break
+				}
+			}
+			return CodeTooLarge, errors.New("scepter: oversized response line")
+		}
+		if err != nil {
+			return CodeInternal, err
+		}
+		var resp ScepterResponse
+		if json.Unmarshal(trimEOL(line), &resp) != nil || resp.ID != id {
+			continue
+		}
+		w.Write(trimEOL(line))
+		w.Write([]byte{'\n'})
+		if resp.Chunk != nil {
+			if nChunks == 0 {
+				nChunks = resp.Chunk.N
+			}
+			got++
+			if got < nChunks {
+				continue
+			}
+		}
+		return resp.Code, nil
+	}
 }
 
 // scepterCallSeq disambiguates command ids inside one process (nanoseconds alone can repeat on Windows clocks).
