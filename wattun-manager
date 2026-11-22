@@ -1386,7 +1386,8 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   pairing: Scepter pairing attach, Iran side (3.5.0, both ends; the watp1: line or token field 10 carries the credential)
 #   pair/pair-to: the one-shot bootstrap forms of the same (engine flags; the manager writes .pairing itself)
 #   latch-port/latch-dial: the scepter latch listener and its one-shot contact/drill form (3.5.0, Kharej side; opt-in with a stored pairing)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial'
+#   scepter-call/scepter-args: the one-shot write-intent/RPC call form (3.5.0, Iran side; the Go manager shells out to it)
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial scepter-call scepter-args'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'
