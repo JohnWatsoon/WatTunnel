@@ -90,7 +90,7 @@ func newScepterPair(t *testing.T, caps uint32, journalPath string, src ScepterSo
 	for _, o := range ops {
 		state.SetOps(o)
 	}
-	t.Cleanup(func() { state.journal.Close() }) // Windows: an open journal keeps TempDir from cleaning up
+	t.Cleanup(func() { state.Stop(); state.journal.Close() }) // Windows: an open journal keeps TempDir from cleaning up
 	t.Cleanup(func() { cli.Close(); srv.Close() })
 	go func() {
 		for {
@@ -248,7 +248,7 @@ func TestScepterEventCoalescing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ss.journal.Close() })
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
 	var secs atomic.Int64 // the fake clock: whole seconds from base
 	base := time.Now()
 	ss.nowf = func() time.Time { return base.Add(time.Duration(secs.Load()) * time.Second) }
@@ -304,7 +304,7 @@ func TestScepterEventRingBackpressure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ss.journal.Close() })
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
 	ss.evWindow = 0 // fill fast: every event fires (coalescing off for this drill)
 	const extra = 100
 	for i := 0; i < scepterEvents+extra; i++ {
@@ -386,13 +386,18 @@ func TestScepterEventRingBackpressure(t *testing.T) {
 	}
 }
 
-// Retries of the same command id return the recorded outcome and run the handler once (at-most-once).
+// Retries of the same command id return the recorded outcome and run the handler once (at-most-once) — for
+// MUTATING commands only (H1/F4, 2026-11-22): a read is a re-executable pure function, so the same id on a
+// read re-runs it (journaling reads once grew the replay set without bound and stale-replayed a hello across
+// an engine update).
 func TestScepterJournalIdempotency(t *testing.T) {
 	src := &fakeSource{}
-	c, _ := newScepterPair(t, CapManage, t.TempDir()+"/.journal", src)
-	args := map[string]any{"name": "t1"}
-	p1, code1 := c.call("tunnel.stats", args, "fixed-id-1", time.Now().Unix(), 10*time.Second)
-	p2, code2 := c.call("tunnel.stats", args, "fixed-id-1", time.Now().Unix(), 10*time.Second)
+	ops := newFakeOps(t)
+	ops.writeDirect("t1", t)
+	c, _ := newScepterPair(t, CapManage, t.TempDir()+"/.journal", src, ops)
+	args := map[string]any{"name": "t1", "set": map[string]any{"ping-every": "5"}}
+	p1, code1 := c.call("tunnel.edit", args, "fixed-id-1", time.Now().Unix(), 10*time.Second)
+	p2, code2 := c.call("tunnel.edit", args, "fixed-id-1", time.Now().Unix(), 10*time.Second)
 	if code1 != CodeOK || code2 != CodeOK {
 		t.Fatalf("codes %d/%d", code1, code2)
 	}
@@ -401,24 +406,39 @@ func TestScepterJournalIdempotency(t *testing.T) {
 	if string(b1) != string(b2) {
 		t.Fatalf("retry outcome differs: %s vs %s", b1, b2)
 	}
+	restarts := 0
+	for _, a := range ops.actions {
+		if a == "t1:restart" {
+			restarts++
+		}
+	}
+	if restarts != 1 {
+		t.Fatalf("mutation ran %d times, want 1", restarts)
+	}
+	// a read under the same rules: a fixed id does NOT replay it, it re-executes
+	c.call("tunnel.stats", map[string]any{"name": "t1"}, "fixed-id-2", time.Now().Unix(), 10*time.Second)
+	c.call("tunnel.stats", map[string]any{"name": "t1"}, "fixed-id-2", time.Now().Unix(), 10*time.Second)
 	src.mu.Lock()
 	calls := src.statsCalls
 	src.mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("handler ran %d times, want 1", calls)
+	if calls != 2 {
+		t.Fatalf("read ran %d times, want 2 (reads are re-executable, never replayed)", calls)
 	}
 }
 
 // The authenticated peer may still send garbage: every malformed line answers with a machine code, nothing
-// crashes, and a valid command right after still works.
+// crashes, and a valid command right after still works. Decode-level rejects are AUDITED too (L4, 2026-11-22):
+// a garbage flood leaves cmd "?" rows in the shared audit file, with the id where it could be parsed.
 func TestScepterJSONRobustness(t *testing.T) {
 	pair := testPairing(CapFull)
 	cfg := Config{Pairing: pair}
 	cli, srv, _, _ := newPair(t, 0, time.Millisecond, 20e6, cfg)
-	state, err := NewScepterState(pair, &fakeSource{}, "")
+	dir := t.TempDir()
+	state, err := NewScepterState(pair, &fakeSource{}, filepath.Join(dir, ".pairing.journal"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { state.Stop(); state.journal.Close() })
 	go func() {
 		for {
 			st, err := srv.Accept()
@@ -486,6 +506,29 @@ func TestScepterJSONRobustness(t *testing.T) {
 		if r.resp.Code != wantCode {
 			t.Fatalf("line %d (%q…): code %d, want %d", i, lines[i][:min(24, len(lines[i]))], r.resp.Code, wantCode)
 		}
+	}
+	// the audit saw the flood: four decode-level rows with cmd "?" (lines 1/2/4/5 — line 3 decoded fine and
+	// was audited by Handle as the empty command it was), one with the parsed id, plus the good ping
+	ab, err := os.ReadFile(filepath.Join(dir, ScepterAuditFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pluses, aID, ping int
+	for _, l := range strings.Split(strings.TrimRight(string(ab), "\n"), "\n") {
+		switch {
+		case strings.Contains(l, " cmd=? code=1"):
+			pluses++
+			if strings.HasSuffix(l, "id=a") {
+				aID++
+			}
+		case strings.Contains(l, " cmd=? code=8"):
+			pluses++
+		case strings.HasSuffix(l, "cmd=scepter.ping code=0 id=ok1"):
+			ping++
+		}
+	}
+	if pluses != 4 || aID != 1 || ping != 1 {
+		t.Fatalf("audit rows for garbage: ?=%d (id=a %d), ping=%d, file %q", pluses, aID, ping, ab)
 	}
 }
 
@@ -675,6 +718,13 @@ func TestParsePairing(t *testing.T) {
 	}
 	if _, err := ParsePairingTokenField("pair=bogus", []byte("k")); err == nil {
 		t.Fatal("pair=bogus accepted")
+	}
+	// lookalikes are NOT the pair field (L5-strict, 2026-11-22): only exact "pair" / "pair=<tier>" marks a
+	// credential — a prefix match once silently promoted "pairxyz" to a tunnel-capability pairing
+	for _, lookalike := range []string{"pairxyz", "pairing", "pairs"} {
+		if f, err := ParsePairingTokenField(lookalike, []byte("k")); f != nil || err != nil {
+			t.Fatalf("lookalike %q must parse to no pairing, got %v %v", lookalike, f, err)
+		}
 	}
 }
 
@@ -1213,10 +1263,12 @@ func TestScepterWriteRejections(t *testing.T) {
 	if _, code = c.call("tunnel.create", testWriteArgs(map[string]any{"name": "stale1", "carrier": "nope-carrier"}), "stale-id", old, 30*time.Second); code != CodeStale {
 		t.Fatalf("stale code %d", code)
 	}
-	// ttl_s in args raises the window: the same intent age now proceeds (and a wrong type is bad_request).
-	// The free listen keeps the create away from the canned 4443 collision this test plants.
+	// ttl_s in args raises the window (clamped to the 3600 s ceiling, F6/L6): a 700 s-old intent proceeds
+	// at ttl_s 900 (and a wrong type is bad_request). The free listen keeps the create away from the canned
+	// 4443 collision this test plants.
+	younger := time.Now().Unix() - 700
 	if _, code = c.call("tunnel.create", testWriteArgs(map[string]any{"name": "ttls", "carrier": "nope-carrier",
-		"ttl_s": 90000, "params": map[string]any{"listen": ":20041"}}), "ttls-id", old, 30*time.Second); code != CodeOK {
+		"ttl_s": 900, "params": map[string]any{"listen": ":20041"}}), "ttls-id", younger, 30*time.Second); code != CodeOK {
 		t.Fatalf("ttl_s must apply to the intent window too, code %d", code)
 	}
 	if _, code = c.call("tunnel.create", map[string]any{"carrier": "udp", "ports": "1", "ttl_s": "x"}, "ttlx-id", time.Now().Unix(), 30*time.Second); code != CodeBadRequest {
@@ -1327,7 +1379,7 @@ func TestScepterWriteJournalReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer state2.journal.Close()
+	defer func() { state2.Stop(); state2.journal.Close() }()
 	state2.SetOps(ops2)
 	resp := state2.Handle(ScepterRequest{ID: "jr-fixed", V: scepterV, Cmd: "tunnel.create",
 		Args: args, TS: time.Now().Unix()}, testPairing(CapFull).Caps)
@@ -1365,7 +1417,7 @@ func TestScepterQueueSerializes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { state.journal.Close() })
+	t.Cleanup(func() { state.Stop(); state.journal.Close() })
 	state.SetOps(ops)
 	ops.writeDirect("q1", t)
 	caps := testPairing(CapFull).Caps
@@ -1852,11 +1904,14 @@ func TestScepterAuditTailRPC(t *testing.T) {
 func TestScepterAuditPerCommand(t *testing.T) {
 	dir := t.TempDir()
 	jp := filepath.Join(dir, ".pairing.journal")
+	ops := newFakeOps(t)
+	ops.writeDirect("t1", t)
 	ss, err := NewScepterState(testPairing(CapFull), nil, jp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ss.journal.Close() })
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
+	ss.SetOps(ops)
 	pair := testPairing(CapFull)
 	ap := filepath.Join(dir, ScepterAuditFile)
 
@@ -1866,7 +1921,8 @@ func TestScepterAuditPerCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().Unix()
-	if r := ss.Handle(ScepterRequest{ID: "ok-1", V: scepterV, Cmd: "scepter.ping", TS: now}, pair.Caps); r.Code != CodeOK {
+	edit := map[string]any{"name": "t1", "set": map[string]any{"ping-every": "5"}}
+	if r := ss.Handle(ScepterRequest{ID: "ok-1", V: scepterV, Cmd: "tunnel.edit", Args: edit, TS: now}, pair.Caps); r.Code != CodeOK {
 		t.Fatalf("ok command: code %d", r.Code)
 	}
 	if r := ss.Handle(ScepterRequest{ID: "den-1", V: scepterV, Cmd: "tunnel.stats", Args: map[string]any{"name": "t1"}, TS: now}, CapTunnel); r.Code != CodeDenied {
@@ -1884,11 +1940,11 @@ func TestScepterAuditPerCommand(t *testing.T) {
 	}
 	ss.rate = scepterRate{rate: 20, burst: 40}
 	// a journaled retry replays the recorded outcome and is audited as the attempt it was
-	if r := ss.Handle(ScepterRequest{ID: "ok-1", V: scepterV, Cmd: "scepter.ping", TS: now}, pair.Caps); r.Code != CodeOK {
+	if r := ss.Handle(ScepterRequest{ID: "ok-1", V: scepterV, Cmd: "tunnel.edit", Args: edit, TS: now}, pair.Caps); r.Code != CodeOK {
 		t.Fatalf("replayed retry: code %d", r.Code)
 	}
 	// a newline in the id collapses: one command, one line, no forged entries
-	if r := ss.Handle(ScepterRequest{ID: "evil\nid", V: scepterV, Cmd: "scepter.ping", TS: now}, pair.Caps); r.Code != CodeOK {
+	if r := ss.Handle(ScepterRequest{ID: "evil\nid", V: scepterV, Cmd: "tunnel.edit", Args: edit, TS: now}, pair.Caps); r.Code != CodeOK {
 		t.Fatalf("sanitized command: code %d", r.Code)
 	}
 
@@ -1901,13 +1957,13 @@ func TestScepterAuditPerCommand(t *testing.T) {
 		cmd, id string
 		code    int
 	}{
-		{"scepter.ping", "ok-1", CodeOK},
+		{"tunnel.edit", "ok-1", CodeOK},
 		{"tunnel.stats", "den-1", CodeDenied},
 		{"scepter.ping", "old-1", CodeStale},
 		{"nope.cmd", "unk-1", CodeUnknownCmd},
 		{"scepter.ping", "rl-1", CodeRateLimited},
-		{"scepter.ping", "ok-1", CodeOK}, // the replay, audited again
-		{"scepter.ping", "evil_id", CodeOK},
+		{"tunnel.edit", "ok-1", CodeOK}, // the replay, audited again
+		{"tunnel.edit", "evil_id", CodeOK},
 	}
 	if len(lines) != len(want)+1 || lines[0] != strings.TrimRight(mgr, "\n") {
 		t.Fatalf("audit lines (%d): %q", len(lines), lines)
@@ -1922,21 +1978,22 @@ func TestScepterAuditPerCommand(t *testing.T) {
 			t.Fatalf("audit line %d does not start with an RFC3339 UTC stamp: %q", i+1, l)
 		}
 	}
-	// the journal stayed outcomes-only: only the applied pings are there, none of the rejections is
+	// the journal stayed outcomes-only, MUTATIONS only (H1/F4): the applied edits are there, none of the
+	// rejections and none of the pings (reads re-execute, they are never replayed)
 	jb, err := os.ReadFile(jp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	jl := strings.Split(strings.TrimRight(string(jb), "\n"), "\n")
-	if len(jl) != 2 { // ok-1 (the retry replays, never re-records) and the sanitized ping — both code 0
-		t.Fatalf("journal holds %d records, want the 2 applied pings only", len(jl))
+	if len(jl) != 2 { // ok-1 (the retry replays, never re-records) and the sanitized edit — both code 0
+		t.Fatalf("journal holds %d records, want the 2 applied edits only", len(jl))
 	}
 	for _, l := range jl {
 		if strings.Contains(l, "den-1") || strings.Contains(l, "old-1") || strings.Contains(l, "unk-1") || strings.Contains(l, "rl-1") {
 			t.Fatalf("a pure rejection was journaled: %q", l)
 		}
-		if !strings.Contains(l, `"code":0`) {
-			t.Fatalf("journal line is not an outcome record: %q", l)
+		if !strings.Contains(l, `"code":0`) || !strings.Contains(l, `"cmd":"tunnel.edit"`) {
+			t.Fatalf("journal line is not a mutation outcome record: %q", l)
 		}
 	}
 }
@@ -2076,7 +2133,7 @@ func TestScepterUpdateWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ss.journal.Close() })
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
 	ss.SetOps(newFakeOps(t)) // arms the watcher (the status path exists next to the journal)
 	mail := filepath.Join(dir, ScepterUpdateStatusFile)
 	now := time.Now().Unix()
@@ -2136,5 +2193,562 @@ func waitScepterEvent(t *testing.T, ss *ScepterState, kind, want string) {
 			t.Fatalf("no %s event (phase %q) within the deadline", kind, want)
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// ---- wave-2 hardening pins (2026-11-22): journal bounds, cmd mismatch, TTL clamp, panic recovery,
+// tunnel liveness watcher, hello floor, name rule, reload/disarm, session CloseScepter ----
+
+// The journal bound (H1/F4): a read flood through Handle journals NOTHING; a mutation flood keeps the
+// replay set at scepterJournalKeep (oldest pruned); the reload after rotation sees at most the pruned set,
+// with the recorded command intact (Lookup matches on cmd).
+func TestScepterJournalBounded(t *testing.T) {
+	jp := filepath.Join(t.TempDir(), ".pairing.journal")
+	ss, err := NewScepterState(testPairing(CapFull), nil, jp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
+	// reads: never journaled, no matter how many (Handle is the enforcement point; rate-limited reads are
+	// pure rejections and equally unrecorded)
+	now := time.Now().Unix()
+	for i := 0; i < 2000; i++ {
+		ss.Handle(ScepterRequest{ID: "read-" + itoa(i), V: scepterV, Cmd: "scepter.ping", TS: now}, testPairing(CapFull).Caps)
+	}
+	if len(ss.journal.keep) != 0 {
+		t.Fatalf("read flood journaled %d records, want 0", len(ss.journal.keep))
+	}
+	if st, serr := os.Stat(jp); serr == nil && st.Size() > 0 {
+		t.Fatalf("read flood wrote %d bytes to the journal", st.Size())
+	}
+	// mutations: the replay set stays at the bound, the oldest ids pruned in insertion order (Record is the
+	// journal's own low-level API — Handle filters by scepterMutations before it)
+	j := ss.journal
+	resp := ScepterResponse{ID: "x", Code: CodeOK}
+	for i := 0; i < 20000; i++ { // ~1.6 MB of ~80 B records: rotation fires mid-flood
+		j.Record("tunnel.edit", "mut-"+itoa(i), time.Now().Unix(), resp)
+	}
+	if len(j.keep) != scepterJournalKeep || len(j.order) != scepterJournalKeep {
+		t.Fatalf("keep = %d/%d, want the %d bound", len(j.keep), len(j.order), scepterJournalKeep)
+	}
+	if _, ok := j.keep["mut-0"]; ok {
+		t.Fatal("the oldest id survived the prune")
+	}
+	if _, ok := j.keep["mut-19999"]; !ok {
+		t.Fatal("the newest id was pruned")
+	}
+	if _, ok := j.Lookup("mut-0", "tunnel.edit"); ok {
+		t.Fatal("a pruned id replayed")
+	}
+	j.Close()
+	// a reload after the rotation: at most the pruned set, with cmd intact (a rotated record replays for
+	// its own command and misses for any other)
+	j2, err := OpenScepterJournal(jp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j2.Close()
+	if len(j2.keep) > scepterJournalKeep {
+		t.Fatalf("reload holds %d records, want at most %d", len(j2.keep), scepterJournalKeep)
+	}
+	if _, ok := j2.Lookup("mut-19999", "tunnel.edit"); !ok {
+		t.Fatal("the newest id did not survive the reload")
+	}
+	if _, ok := j2.Lookup("mut-19999", "tunnel.stop"); ok {
+		t.Fatal("a reloaded record replayed for a different command")
+	}
+}
+
+// A pruned (or unknown) id re-executes fresh through the full Handle path: the op runs again and the answer
+// is a new CodeOK, not a replay.
+func TestScepterPrunedIDReexecutes(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.writeDirect("t1", t)
+	dir := t.TempDir()
+	ss, err := NewScepterState(testPairing(CapFull), nil, filepath.Join(dir, ".pairing.journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
+	ss.SetOps(ops)
+	args := map[string]any{"name": "t1", "set": map[string]any{"ping-every": "1"}}
+	req := ScepterRequest{ID: "prune-1", V: scepterV, Cmd: "tunnel.edit", Args: args, TS: time.Now().Unix()}
+	if r := ss.Handle(req, testPairing(CapFull).Caps); r.Code != CodeOK {
+		t.Fatalf("first run: %d", r.Code)
+	}
+	for i := 0; i < scepterJournalKeep+10; i++ { // flood the journal past the bound: prune-1 ages out
+		ss.journal.Record("tunnel.edit", "flood-"+itoa(i), time.Now().Unix(), ScepterResponse{ID: "flood", Code: CodeOK})
+	}
+	restarts := 0
+	for _, a := range ops.actions {
+		if a == "t1:restart" {
+			restarts++
+		}
+	}
+	if r := ss.Handle(req, testPairing(CapFull).Caps); r.Code != CodeOK {
+		t.Fatalf("re-executed run: %d", r.Code)
+	}
+	n := 0
+	for _, a := range ops.actions {
+		if a == "t1:restart" {
+			n++
+		}
+	}
+	if n != restarts+1 {
+		t.Fatalf("the pruned id replayed (op ran %d -> %d)", restarts, n)
+	}
+}
+
+// A reused id with a DIFFERENT command must not replay the old outcome (F4/M2): the second command
+// re-executes and its own outcome is recorded.
+func TestScepterJournalCmdMismatch(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.writeDirect("t1", t)
+	c, _ := newScepterPair(t, CapManage, "", dirSource{ops.dir}, ops)
+	p, code := c.call("tunnel.edit", map[string]any{"name": "t1", "set": map[string]any{"ping-every": "3"}},
+		"dup-id", time.Now().Unix(), 10*time.Second)
+	if code != CodeOK {
+		t.Fatalf("edit: %d %v", code, p)
+	}
+	p2, code := c.call("tunnel.stop", map[string]any{"name": "t1"}, "dup-id", time.Now().Unix(), 10*time.Second)
+	if code != CodeOK || p2["state"] != "inactive" {
+		t.Fatalf("same id, different cmd: %v %v (want the stop's own outcome, not the edit replay)", code, p2)
+	}
+	stopped := false
+	for _, a := range ops.actions {
+		if a == "t1:stop" {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatal("the mismatched command never executed (the old outcome was replayed)")
+	}
+}
+
+// The intent TTL is the server's, not the client's (F6/L6): a huge ttl is clamped to the 3600 s ceiling (a
+// 4000 s-old intent can NEVER be fresh), a tiny one to the 60 s floor, and a future-minted intent is judged
+// from the moment the server saw it, so it expires normally instead of living forever.
+func TestScepterTTLClampAndFutureTS(t *testing.T) {
+	ss, err := NewScepterState(testPairing(CapFull), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
+	now := time.Now().Unix()
+	pair := testPairing(CapFull).Caps
+	// ceiling: 4000 s old + clamped 3600 + 60 skew is still expired
+	if r := ss.Handle(ScepterRequest{ID: "huge", V: scepterV, Cmd: "scepter.ping", TS: now - 4000, TTL: 999999}, pair); r.Code != CodeStale {
+		t.Fatalf("huge ttl code %d, want stale (clamped to the ceiling)", r.Code)
+	}
+	// floor: 100 s old + clamped 60 + skew is fresh (the request's ttl 10 would have expired it)
+	if r := ss.Handle(ScepterRequest{ID: "tiny", V: scepterV, Cmd: "scepter.ping", TS: now - 100, TTL: 10}, pair); r.Code != CodeOK {
+		t.Fatalf("tiny ttl code %d, want OK (clamped to the floor)", r.Code)
+	}
+	// future ts: expires normally — a finite horizon, never immortal. At arrival the clamp judges it from
+	// NOW; once the server clock passes the claimed ts + clamped ttl + skew it is stale (a controllable
+	// clock proves it; the horizon here is 1000 + 3600 + 60).
+	var secs atomic.Int64
+	base := time.Now()
+	ss.nowf = func() time.Time { return base.Add(time.Duration(secs.Load()) * time.Second) }
+	if r := ss.Handle(ScepterRequest{ID: "future", V: scepterV, Cmd: "scepter.ping", TS: base.Unix() + 1000, TTL: 3600}, pair); r.Code != CodeOK {
+		t.Fatalf("future-minted intent code %d, want OK (ts judged from now)", r.Code)
+	}
+	secs.Store(1000 + int64(intentTTLMax) + int64(scepterSkew/time.Second) + 1)
+	if r := ss.Handle(ScepterRequest{ID: "future2", V: scepterV, Cmd: "scepter.ping", TS: base.Unix() + 1000, TTL: 3600}, pair); r.Code != CodeStale {
+		t.Fatalf("the future-minted intent outlived its horizon: code %d, want stale", r.Code)
+	}
+}
+
+// A panicking handler (an ops bug — the ops run inside the recovered invocation) answers CodeInternal, is
+// audited, and the engine keeps serving (L3, 2026-11-22). The panic rides the ops, not a registry override,
+// so the shared command map is never mutated by a test.
+func TestScepterPanicRecovered(t *testing.T) {
+	dir := t.TempDir()
+	ss, err := NewScepterState(testPairing(CapFull), nil, filepath.Join(dir, ".pairing.journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
+	ops := &panickyOps{fakeOps: newFakeOps(t)}
+	ops.writeDirect("t1", t)
+	ss.SetOps(ops)
+	now := time.Now().Unix()
+	r := ss.Handle(ScepterRequest{ID: "p-1", V: scepterV, Cmd: "tunnel.edit",
+		Args: map[string]any{"name": "t1", "set": map[string]any{"ping-every": "1"}}, TS: now}, testPairing(CapFull).Caps)
+	if r.Code != CodeInternal || r.Params["detail"] == nil {
+		t.Fatalf("panic code %d params %v, want internal with a detail", r.Code, r.Params)
+	}
+	if r := ss.Handle(ScepterRequest{ID: "p-2", V: scepterV, Cmd: "scepter.ping", TS: now}, testPairing(CapFull).Caps); r.Code != CodeOK {
+		t.Fatalf("the engine died with the panic: code %d", r.Code)
+	}
+	ab, err := os.ReadFile(filepath.Join(dir, ScepterAuditFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ab), "cmd=tunnel.edit code=7 id=p-1") {
+		t.Fatalf("the panic left no audit row: %q", ab)
+	}
+}
+
+// panickyOps is a fakeOps whose Edit blows up mid-op: the L3 recovery must catch it like any op failure.
+type panickyOps struct{ *fakeOps }
+
+func (p *panickyOps) Edit(string, ScepterPatch) (map[string]any, int) { panic("boom") }
+
+// The tunnel liveness watcher (F8-state): a tunnel dying OUTSIDE scepter (systemd stop, a crash) still
+// reaches seq-diffing clients — the watcher fires tunnel_down (and up again) with via:"watch" and the
+// state_seq advances. First sightings record their baseline silently (the create path owns that event).
+func TestScepterTunnelWatcher(t *testing.T) {
+	old := scepterWatchPoll
+	scepterWatchPoll = 100 * time.Millisecond
+	t.Cleanup(func() { scepterWatchPoll = old }) // runs LAST: the watcher is stopped before the var is restored
+	ws := &watchSrc{up: true}
+	ss, err := NewScepterState(testPairing(CapManage), ws, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ss.Stop) // runs FIRST
+	// the baseline: the watcher's first poll records the tunnel silently (a first sighting is not news —
+	// the create path owns that event). Wait for it before flipping, or the flip lands on the baseline.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ss.mu.Lock()
+		n := len(ss.watchSnap)
+		ss.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the watcher never took its baseline snapshot")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	seq := ss.StateSeq()
+	ws.mu.Lock()
+	ws.up = false
+	ws.mu.Unlock()
+	waitScepterEvent(t, ss, EvTunnelDown, "")
+	if ss.StateSeq() == seq {
+		t.Fatal("tunnel_down did not advance state_seq")
+	}
+	var down map[string]any
+	ss.mu.Lock()
+	for _, ev := range ss.events {
+		if ev.Type == EvTunnelDown {
+			down = ev.Detail
+		}
+	}
+	ss.mu.Unlock()
+	if down["via"] != "watch" || down["name"] != "w1" {
+		t.Fatalf("tunnel_down detail: %v (want via watch, name w1)", down)
+	}
+	seq = ss.StateSeq()
+	ws.mu.Lock()
+	ws.up = true
+	ws.mu.Unlock()
+	waitScepterEvent(t, ss, EvTunnelUp, "")
+	if ss.StateSeq() == seq {
+		t.Fatal("tunnel_up did not advance state_seq")
+	}
+}
+
+// watchSrc is a one-tunnel ScepterSource the watcher test can flip between active/ok and inactive/down.
+type watchSrc struct {
+	mu sync.Mutex
+	up bool
+}
+
+func (w *watchSrc) Tunnels() []ScepterTunnelInfo {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	st, h := "inactive", "down"
+	if w.up {
+		st, h = "active", "ok"
+	}
+	return []ScepterTunnelInfo{{Name: "w1", Carrier: "udp", State: st, Health: h}}
+}
+
+func (w *watchSrc) TunnelStats(string) (map[string]any, bool) { return nil, false }
+func (w *watchSrc) TunnelLogs(string, int) ([]string, bool)   { return nil, false }
+func (w *watchSrc) History(string) ([]map[string]any, bool)   { return nil, false }
+
+// The hello gate is the SCEPTER FLOOR, not the client's own version (M3): a server reporting exactly
+// scepterMinScepterVer pairs with a newer client — a 3.5.1 cockpit must not kill a 3.5.0 server's channel.
+// The gate function is pinned below; the canned-server drill runs the real helloExchange against both sides
+// of the floor (in-process both ends report Version, so only a canned answer exercises the skew).
+func TestScepterHelloFloor(t *testing.T) {
+	if !scepterPeerVerOK(scepterMinScepterVer) || !scepterPeerVerOK("3.6.0") {
+		t.Fatal("the floor and anything above it must pair")
+	}
+	if scepterPeerVerOK("3.4.9") || scepterPeerVerOK("") {
+		t.Fatal("below the floor (or unparseable) must fail closed")
+	}
+	for _, srvVer := range []string{scepterMinScepterVer, "3.4.9"} {
+		pair := testPairing(CapFull)
+		cfg := Config{Pairing: pair}
+		cli, srv, _, _ := newPair(t, 0, time.Millisecond, 20e6, cfg)
+		go func() { // a canned sid-0 server: answers the hello itself with srvVer, never a real command
+			st, err := srv.Accept()
+			if err != nil {
+				return
+			}
+			if st.ID() != 0 {
+				st.Reset()
+				return
+			}
+			b, _ := json.Marshal(ScepterResponse{ID: "hello", Code: CodeOK, Params: map[string]any{
+				"ver": srvVer, "v": scepterV, "caps": "full", "uuid": pair.UUIDString(), "state_seq": 0}})
+			st.Write(append(b, '\n'))
+			st.CloseWrite()
+		}()
+		wantErr := srvVer != scepterMinScepterVer
+		c, err := DialScepter(cli)
+		if (err != nil) != wantErr {
+			t.Fatalf("server %s: dial err %v, wantErr %v", srvVer, err, wantErr)
+		}
+		if err == nil {
+			if c.Hello["ver"] != srvVer {
+				t.Fatalf("hello ver = %v, want %s", c.Hello["ver"], srvVer)
+			}
+			c.Close()
+		}
+	}
+}
+
+// The name rule (F12-name): the manager's own shape, plus the ban on the auto reverse companion shape —
+// "x-r" is hidden by the manager's listings whenever x is an auto Kharej tunnel (companion_of), so the
+// cockpit never mints one. Ordinary dashes stay legal (v_name allows them).
+func TestScepterNameRule(t *testing.T) {
+	for _, ok := range []string{"t1", "a-b_c9", "R", "myr", "r-x", "x-rr", strings.Repeat("n", 32)} {
+		if !ValidScepterName(ok) {
+			t.Fatalf("%q must be valid (dashes are ordinary)", ok)
+		}
+	}
+	for _, bad := range []string{"", "x-r", "a-r", "1-2-3-r", "-r", strings.Repeat("n", 33), "sp ace", "dot.dot"} {
+		if ValidScepterName(bad) {
+			t.Fatalf("%q must be invalid (companion shape, size, or charset)", bad)
+		}
+	}
+}
+
+// ReloadPairing with a new credential: the NEXT command's capability check uses the NEW caps, over the wire,
+// on the SAME live stream (rotation overlaps; only revocation kills the channel).
+func TestScepterReloadPairingRotate(t *testing.T) {
+	pair := testPairing(CapFull)
+	cfg := Config{Pairing: pair}
+	cli, srv, _, _ := newPair(t, 0, time.Millisecond, 20e6, cfg)
+	state, err := NewScepterState(pair, &fakeSource{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Stop(); state.journal.Close(); cli.Close(); srv.Close() })
+	go func() {
+		for {
+			st, err := srv.Accept()
+			if err != nil {
+				return
+			}
+			if st.ID() != 0 {
+				st.Reset()
+				continue
+			}
+			go ServeScepter(st, state)
+		}
+	}()
+	c, err := DialScepter(cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, code := c.Call("tunnel.stats", map[string]any{"name": "t1"}); code != CodeOK {
+		t.Fatalf("pre-rotation stats code %d", code)
+	}
+	tunnelOnly := testPairing(CapTunnel)
+	state.ReloadPairing(tunnelOnly)
+	if _, code := c.Call("tunnel.stats", map[string]any{"name": "t1"}); code != CodeDenied {
+		t.Fatalf("post-rotation stats code %d, want denied (new caps, same stream)", code)
+	}
+	if _, code := c.Call("state.get", nil); code != CodeOK {
+		t.Fatalf("post-rotation state.get code %d (still a tunnel-capability command)", code)
+	}
+	u, caps := state.PairingInfo()
+	if u != tunnelOnly.UUIDString() || caps != tunnelOnly.Caps {
+		t.Fatalf("pairing info after rotate: %s %d", u, caps)
+	}
+	waitScepterEvent(t, state, EvPairRotated, "")
+}
+
+// ReloadPairing(nil) disarms: the live scepter stream dies mid-call (the in-flight call errors), and new
+// sid-0 service is refused — while the tunnel itself (user streams on the same session) keeps working.
+func TestScepterReloadPairingDisarm(t *testing.T) {
+	pair := testPairing(CapFull)
+	cfg := Config{Pairing: pair}
+	cli, srv, _, _ := newPair(t, 0, time.Millisecond, 20e6, cfg)
+	blk := &blockStatsSource{gate: make(chan struct{})}
+	state, err := NewScepterState(pair, blk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Stop(); state.journal.Close(); cli.Close(); srv.Close() })
+	go func() {
+		for {
+			st, err := srv.Accept()
+			if err != nil {
+				return
+			}
+			if st.ID() != 0 {
+				// the tunnel lives on: user streams echo (revocation must kill only the management plane)
+				go func(s *Stream) { io.Copy(s, s); s.CloseWrite() }(st)
+				continue
+			}
+			go ServeScepter(st, state)
+		}
+	}()
+	c, err := DialScepter(cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the in-flight call: the server is parked inside the source until we open the gate
+	callDone := make(chan int, 1)
+	go func() { _, code := c.Call("tunnel.stats", map[string]any{"name": "t1"}); callDone <- code }()
+	deadline := time.Now().Add(2 * time.Second)
+	for blk.entered.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	state.ReloadPairing(nil) // instant revocation: the stream dies under the parked call
+	close(blk.gate)          // let the (already doomed) handler finish
+	select {
+	case code := <-callDone:
+		if code != CodeInternal {
+			t.Fatalf("in-flight call during disarm: code %d, want internal (stream error)", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the in-flight call never noticed the disarm")
+	}
+	// new sid-0 service is refused: NO command answer ever comes back on a fresh scepter stream. The disarm
+	// reset tombstoned sid 0 on the server (the stream-id reuse discipline, ~2 min), so within the tomb
+	// window the attempt is simply never answered (onStream drops it), and after it the serve-loop guard
+	// resets; either way nothing is served — that is the property pinned here.
+	st, err := cli.OpenScepter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(ScepterRequest{ID: "after", V: scepterV, Cmd: "scepter.ping", TS: time.Now().Unix()})
+	if _, werr := st.Write(append(b, '\n')); werr != nil {
+		t.Fatal(werr)
+	}
+	got := make(chan []byte, 1)
+	go func() {
+		line, _ := bufio.NewReader(st).ReadBytes('\n') // a reset also lands here, as an empty (errored) read
+		got <- line
+	}()
+	select {
+	case line := <-got:
+		if len(line) > 0 {
+			t.Fatalf("a disarmed state served an answer: %q", line)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		// the wanted outcome: silence
+	}
+	// the tunnel lives on: a user stream round-trips on the same session after the revocation
+	us, err := cli.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	us.Write([]byte("alive"))
+	us.CloseWrite()
+	got2 := make(chan []byte, 1)
+	go func() { b2, _ := io.ReadAll(us); got2 <- b2 }()
+	select {
+	case b2 := <-got2:
+		if string(b2) != "alive" {
+			t.Fatalf("user stream data: %q", b2)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("user stream dead after disarm (revocation must kill only the management plane)")
+	}
+	waitScepterEvent(t, state, EvPairRevoked, "")
+	if u, caps := state.PairingInfo(); u != "" || caps != 0 {
+		t.Fatalf("disarmed pairing info: %s %d", u, caps)
+	}
+}
+
+// blockStatsSource parks every TunnelStats caller on a channel: the disarm drill needs the server parked
+// mid-command so the stream reset lands under a genuinely in-flight call.
+type blockStatsSource struct {
+	gate    chan struct{}
+	entered atomic.Int64
+}
+
+func (b *blockStatsSource) Tunnels() []ScepterTunnelInfo {
+	return []ScepterTunnelInfo{{Name: "t1", Carrier: "udp", State: "active", Health: "ok"}}
+}
+
+func (b *blockStatsSource) TunnelStats(string) (map[string]any, bool) {
+	b.entered.Store(1)
+	<-b.gate
+	return map[string]any{"name": "t1"}, true
+}
+
+func (b *blockStatsSource) TunnelLogs(string, int) ([]string, bool) { return nil, false }
+func (b *blockStatsSource) History(string) ([]map[string]any, bool) { return nil, false }
+
+// Session.CloseScepter kills the sid-0 stream and nothing else (F8-revoke): the peer's scepter stream dies
+// with the frRst, user streams on the same session keep working, and a session without an open sid-0
+// stream is a no-op.
+func TestSessionCloseScepter(t *testing.T) {
+	pcfg := Config{Pairing: testPairing(CapTunnel)}
+	cli, srv, _, _ := newPair(t, 0, time.Millisecond, 10e6, pcfg)
+	t.Cleanup(func() { cli.Close(); srv.Close() })
+	go func() { // the server echoes user streams; the scepter stream is popped untouched (CloseScepter's subject)
+		for {
+			s, err := srv.Accept()
+			if err != nil {
+				return
+			}
+			if s.ID() == 0 {
+				continue
+			}
+			go func(s *Stream) { io.Copy(s, s); s.CloseWrite() }(s)
+		}
+	}()
+	srv.CloseScepter() // no sid-0 open: must be a no-op, not a crash
+	st, err := cli.OpenScepter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// materialize sid 0 on the server: a stream comes into being THERE only with its first data frame
+	if _, werr := st.Write([]byte(`{"id":"x"`)); werr != nil {
+		t.Fatal(werr)
+	}
+	// the kill must reach the client's read as a reset
+	errc := make(chan error, 1)
+	go func() { _, rerr := st.Read(make([]byte, 16)); errc <- rerr }()
+	time.Sleep(50 * time.Millisecond) // let the data frame cross and the server create the stream
+	srv.CloseScepter()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("the client's scepter stream survived CloseScepter")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the frRst never reached the client")
+	}
+	// a user stream round-trips on the same session: only the management plane died
+	us, err := cli.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	us.Write([]byte("fine"))
+	us.CloseWrite()
+	got := make(chan string, 1)
+	go func() { b, _ := io.ReadAll(us); got <- string(b) }()
+	select {
+	case s := <-got:
+		if s != "fine" {
+			t.Fatalf("user stream data: %q", s)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("user stream dead after CloseScepter")
 	}
 }

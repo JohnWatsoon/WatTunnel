@@ -128,10 +128,16 @@ func ParsePairingLine(s string) (*PairingConfig, error) {
 // ParsePairingTokenField parses optional field 10 of a classic wat1: token (plan D5): "pair" or "pair=<capability>"
 // marks the token's key as also a pairing credential. The UUID is derived from the key (sha256 prefix) because a
 // classic token carries none. Fields 1-9 are the manager's business; an old 6/7/9-field token has no field 10 and
-// parses to (nil, nil) — the token-format rule (optional trailing fields) is preserved.
+// parses to (nil, nil) — the token-format rule (optional trailing fields) is preserved. Anything else starting
+// with "pair" ("pairxyz", "pairing") is NOT the pair field and parses to (nil, nil) too: only the exact shapes
+// above mark a credential (L5-strict, 2026-11-22 — a prefix match once silently promoted "pairxyz" to a
+// tunnel-capability pairing).
 func ParsePairingTokenField(field10 string, tokenKey []byte) (*PairingConfig, error) {
 	if field10 == "" || !strings.HasPrefix(field10, "pair") {
 		return nil, nil
+	}
+	if tier := field10[len("pair"):]; tier != "" && tier[0] != '=' {
+		return nil, nil // a lookalike field (a future pair* extension): not a pairing credential
 	}
 	caps := CapTunnel
 	if _, rest, ok := strings.Cut(field10, "="); ok {
@@ -293,7 +299,7 @@ func (d *scepterDecoder) next() (ScepterRequest, int) {
 		return ScepterRequest{}, CodeBadRequest
 	}
 	if req.V != scepterV {
-		return ScepterRequest{}, CodeBadRequest
+		return req, CodeBadRequest // partial: id/cmd parsed — the audit names the attempt (L4, 2026-11-22)
 	}
 	return req, CodeOK
 }
@@ -388,19 +394,51 @@ type ScepterSource interface {
 	History(name string) ([]map[string]any, bool)
 }
 
-// ScepterJournal is the append-only command journal (plan: every intent with client id, outcome, state_seq;
-// rotated at 1 MB; retries of the same command id return the recorded outcome). Records are appended with a
-// single O_APPEND write (POSIX-atomic at the sizes involved, ~1 KB) and rotation writes a fresh tmp file that
-// atomically replaces the live one — the same discipline as the manager's state files.
-type ScepterJournal struct {
-	mu   sync.Mutex
-	path string
-	f    *os.File
-	size int64
-	keep map[string]ScepterResponse // in-memory replay of live ids (carried across rotation; bounded by use)
+// scepterMutations is the set of MUTATING commands — the only ones the journal records (H1/F4, 2026-11-22).
+// At-most-once application (the journal's reason to exist) only means anything for commands that change
+// Kharej; every read (hello, ping, state.get, tunnels.list, tunnel.stats, tunnel.logs, events.since,
+// history, auto.rows, doctor.fetch, audit.tail, update.status, backup.export) is a re-executable pure
+// function of Kharej's live state, and journaling it once grew j.keep without bound (big log fetches) and
+// made a journaled hello from a previous engine life replay verbatim across an update. Writes NOT in this
+// set on purpose: auto.test triggers a run but answers before it (a repeat answers already_running, nothing
+// double-applies), so a replayed outcome would only freeze an old run id in place.
+var scepterMutations = map[string]bool{
+	"tunnel.create":  true,
+	"tunnel.edit":    true,
+	"tunnel.delete":  true,
+	"tunnel.start":   true,
+	"tunnel.stop":    true,
+	"tunnel.restart": true,
+	"limits.set":     true,
+	"preset.apply":   true,
+	"carrier.change": true,
+	"auto.apply":     true,
+	"test.open":      true,
+	"test.close":     true,
+	"update.run":     true,
 }
 
-const scepterJournalRotate = 1 << 20
+// scepterJournalKeep bounds the in-memory replay set (H1/F4, 2026-11-22): insertion-ordered ids, the oldest
+// pruned past 4096. Retries arrive within minutes; 4096 mutations is months of cockpit traffic, and a
+// pruned id simply re-executes (reads re-execute anyway; a re-executed write re-validates against Kharej's
+// reality, so the worst case is a structured rejection like name_taken, never a broken state).
+const (
+	scepterJournalRotate = 1 << 20
+	scepterJournalKeep   = 4096
+)
+
+// ScepterJournal is the append-only command journal (plan: every MUTATING intent with client id, outcome,
+// state_seq; rotated at 1 MB; retries of the same command id return the recorded outcome). Records are
+// appended with a single O_APPEND write (POSIX-atomic at the sizes involved, ~1 KB) and rotation writes a
+// fresh tmp file that atomically replaces the live one — the same discipline as the manager's state files.
+type ScepterJournal struct {
+	mu    sync.Mutex
+	path  string
+	f     *os.File
+	size  int64
+	keep  map[string]journalRec // in-memory replay of live ids, bounded at scepterJournalKeep
+	order []string              // keep's keys in insertion order: pruning drops order[0] first
+}
 
 // journalRec is the on-disk line.
 type journalRec struct {
@@ -411,21 +449,33 @@ type journalRec struct {
 }
 
 // OpenScepterJournal loads existing ids (for idempotent retries across a restart) and positions for append.
-// A nil path means "no journal" (tests, or pairing without persistence): retries then re-execute.
+// A nil path means "no journal" (tests, or pairing without persistence): retries then re-execute. The load
+// keeps only the newest scepterJournalKeep records — a journal written by an older engine may hold more
+// (it once journaled reads too); lines are chronological, so the tail is the live set.
 func OpenScepterJournal(path string) (*ScepterJournal, error) {
-	j := &ScepterJournal{path: path, keep: map[string]ScepterResponse{}}
+	j := &ScepterJournal{path: path, keep: map[string]journalRec{}}
 	if path == "" {
 		return j, nil
 	}
 	if b, err := os.ReadFile(path); err == nil {
+		var recs []journalRec
 		for _, line := range strings.Split(string(b), "\n") {
 			if strings.TrimSpace(line) == "" {
 				continue
 			}
 			var r journalRec
 			if json.Unmarshal([]byte(line), &r) == nil && r.ID != "" {
-				j.keep[r.ID] = r.Resp
+				recs = append(recs, r)
 			}
+		}
+		if len(recs) > scepterJournalKeep {
+			recs = recs[len(recs)-scepterJournalKeep:]
+		}
+		for _, r := range recs {
+			if _, dup := j.keep[r.ID]; !dup {
+				j.order = append(j.order, r.ID)
+			}
+			j.keep[r.ID] = r
 		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -439,7 +489,7 @@ func OpenScepterJournal(path string) (*ScepterJournal, error) {
 	return j, nil
 }
 
-// Record appends one outcome and remembers it for idempotent retries.
+// Record appends one outcome and remembers it for idempotent retries, pruning the oldest id past the bound.
 func (j *ScepterJournal) Record(cmd, id string, ts int64, resp ScepterResponse) {
 	if j == nil {
 		return
@@ -449,8 +499,9 @@ func (j *ScepterJournal) Record(cmd, id string, ts int64, resp ScepterResponse) 
 	if id == "" {
 		return // an id-less line (should not happen) is not replayable anyway
 	}
+	rec := journalRec{ID: id, Cmd: cmd, TS: ts, Resp: resp}
 	if j.f != nil {
-		b, err := json.Marshal(journalRec{ID: id, Cmd: cmd, TS: ts, Resp: resp})
+		b, err := json.Marshal(rec)
 		if err == nil {
 			b = append(b, '\n')
 			if n, werr := j.f.Write(b); werr == nil {
@@ -461,21 +512,26 @@ func (j *ScepterJournal) Record(cmd, id string, ts int64, resp ScepterResponse) 
 			j.rotateLocked()
 		}
 	}
-	j.keep[id] = resp
+	if _, dup := j.keep[id]; !dup { // a re-recorded id (same id, different cmd) keeps its original place
+		j.order = append(j.order, id)
+	}
+	j.keep[id] = rec
+	for len(j.order) > scepterJournalKeep {
+		delete(j.keep, j.order[0])
+		j.order = j.order[1:]
+	}
 }
 
 func (j *ScepterJournal) rotateLocked() {
 	j.f.Close()
 	tmp := j.path + ".tmp"
-	var keep []journalRec
-	for id, resp := range j.keep {
-		keep = append(keep, journalRec{ID: id, Resp: resp})
-	}
 	var b strings.Builder
-	for _, r := range keep { // short-term idempotency survives rotation; old ids age out (bounded journal)
-		if line, err := json.Marshal(r); err == nil {
-			b.Write(line)
-			b.WriteByte('\n')
+	for _, id := range j.order { // the pruned live set only, in insertion order; old ids age out
+		if r, ok := j.keep[id]; ok {
+			if line, err := json.Marshal(r); err == nil {
+				b.Write(line)
+				b.WriteByte('\n')
+			}
 		}
 	}
 	if err := os.WriteFile(tmp, []byte(b.String()), 0600); err == nil {
@@ -502,17 +558,22 @@ func (j *ScepterJournal) Close() {
 	}
 }
 
-// Lookup returns the recorded outcome for a command id, if any.
-func (j *ScepterJournal) Lookup(id string) (ScepterResponse, bool) {
+// Lookup returns the recorded outcome for a command id, if any. The recorded COMMAND must match too
+// (F4/M2, 2026-11-22): a client reusing an id for a different command used to be answered with the old
+// outcome — a cmd mismatch misses and the command re-executes fresh. A record with an empty Cmd is a
+// rotation artifact of the pre-fix writer (rotateLocked once dropped the field); it matches any command,
+// which is the safe side: replaying a recorded mutating outcome beats re-running the op blind.
+func (j *ScepterJournal) Lookup(id, cmd string) (ScepterResponse, bool) {
 	if j == nil || id == "" {
 		return ScepterResponse{}, false
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if r, ok := j.keep[id]; ok {
-		return r, true
+	r, ok := j.keep[id]
+	if !ok || (r.Cmd != "" && r.Cmd != cmd) {
+		return ScepterResponse{}, false
 	}
-	return ScepterResponse{}, false
+	return r.Resp, true
 }
 
 // ---- command audit (plan E.3): every command, every outcome, with the credential UUID ----
@@ -657,10 +718,17 @@ type ScepterState struct {
 	// updateRate bounds update.run (phase D): one at once, then one per 5 min — an update is the most
 	// structural op the cockpit can ask for, and a retry loop must never machine-gun restarts of the host.
 	updateRate  scepterRate
-	updateWatch atomic.Bool      // the status watcher is spawned once per state (SetOps)
-	qmu         sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
-	recent      []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
-	nowf        func() time.Time // tests shrink the clock
+	updateWatch atomic.Bool // the status watcher is spawned once per state (SetOps)
+	// watchStop/watchDone shut the tunnel liveness watcher down (Stop); watchSnap is its last snapshot of
+	// which tunnels were up. lives holds the scepter streams this state is currently serving so a disarm
+	// (ReloadPairing(nil)) can kill them mid-line.
+	watchStop chan struct{}
+	watchDone chan struct{}
+	watchSnap map[string]bool
+	lives     map[*Stream]struct{}
+	qmu       sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
+	recent    []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
+	nowf      func() time.Time // tests shrink the clock
 }
 
 // ScepterRec is one handled command for the doctor's "last commands" line (Recent).
@@ -701,7 +769,134 @@ func NewScepterState(pair *PairingConfig, src ScepterSource, journalPath string)
 		}
 		ss.audit = a
 	}
+	if src != nil { // the tunnel liveness watcher needs a source to watch (F8-state, 2026-11-22)
+		ss.watchStop, ss.watchDone = make(chan struct{}), make(chan struct{})
+		go ss.watchTunnels()
+	}
 	return ss, nil
+}
+
+// Stop ends the state's background watcher(s). Production runs the state for the process's whole life and
+// never calls this; tests do, so a shrunk poll interval cannot leak a goroutine past the test.
+func (ss *ScepterState) Stop() {
+	ss.mu.Lock()
+	ws, wd := ss.watchStop, ss.watchDone
+	ss.watchStop, ss.watchDone = nil, nil
+	ss.mu.Unlock()
+	if ws != nil {
+		close(ws)
+		<-wd // the watcher is gone before this returns (tests restore the poll var after Stop)
+	}
+}
+
+// scepterWatchPoll is the tunnel liveness watcher's cadence (F8-state, 2026-11-22): tunnels move up/down
+// OUTSIDE scepter too (systemd stop, a crash, heal) — that changes the state document without a state_seq
+// bump, and a seq-diffing client would never learn a tunnel died. The watcher diffs ScepterSource.Tunnels()
+// against its last snapshot and fires tunnel_up/tunnel_down with via:"watch" (AddEvent bumps state_seq, so
+// clients re-poll state.get). Var, not const: tests shrink it. Cadence cost on the default deployment: one
+// Tunnels() read per 5 s per paired process — the same read state.get makes.
+var scepterWatchPoll = 5 * time.Second
+
+// watchTunnels is the liveness watcher (F8-state): polls the source, diffs state/health per tunnel against
+// the last snapshot, fires the up/down events OUTSIDE the state lock (AddEvent locks it itself). A tunnel
+// seen for the first time records its baseline silently — the create path already fired its own event — and
+// a tunnel that vanishes from the listing is dropped silently too (deletion fires tunnel_deleted).
+func (ss *ScepterState) watchTunnels() {
+	// both channels captured once: Stop nils the struct fields under the lock, and the goroutine must not
+	// read them back (a field read here would race the nil-out under -race)
+	ws, wd := ss.watchStop, ss.watchDone
+	defer close(wd)
+	for {
+		select {
+		case <-ws:
+			return
+		case <-time.After(scepterWatchPoll):
+		}
+		ss.mu.Lock()
+		src := ss.src
+		ss.mu.Unlock()
+		if src == nil {
+			return
+		}
+		snap := map[string]bool{}
+		for _, t := range src.Tunnels() {
+			snap[t.Name] = t.State == "active" && t.Health != "down"
+		}
+		type flip struct {
+			name string
+			up   bool
+		}
+		var fires []flip
+		ss.mu.Lock()
+		for name, up := range snap {
+			if prev, seen := ss.watchSnap[name]; seen && prev != up {
+				fires = append(fires, flip{name, up})
+			}
+		}
+		ss.watchSnap = snap
+		ss.mu.Unlock()
+		for _, f := range fires {
+			if f.up {
+				ss.AddEvent(EvTunnelUp, map[string]any{"name": f.name, "via": "watch"})
+			} else {
+				ss.AddEvent(EvTunnelDown, map[string]any{"name": f.name, "via": "watch"})
+			}
+		}
+	}
+}
+
+// cred snapshots the credential under the state lock: ReloadPairing swaps it (revocation/rotation), so no
+// reader may dereference ss.pair outside the lock.
+func (ss *ScepterState) cred() (uuid string, caps uint32) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.pair == nil {
+		return "", 0
+	}
+	return ss.pair.UUIDString(), ss.pair.Caps
+}
+
+// ReloadPairing swaps the pairing credential — the ENGINE side of the plan security requirement
+// "revocation is instant and local" (F8-revoke, 2026-11-22; the .pairing poller that calls it lives in
+// cmd/wattun): future commands are checked against the NEW credential (uuid/caps; a live stream's per-command
+// cap check re-reads it). p == nil disarms: the state turns unpaired, every live scepter stream is reset
+// mid-line (the cockpit's in-flight call errors; a client cannot tell that from a link cut — by design, the
+// channel is dead either way), and new sid-0 service is refused (serveScepterLoop). The tunnel PSK is
+// untouched: sessions and user streams keep running — only the management plane dies. pair_rotated /
+// pair_revoked fire here so the ring records the event even with the channel already gone.
+func (ss *ScepterState) ReloadPairing(p *PairingConfig) {
+	ss.mu.Lock()
+	old := ss.pair
+	ss.pair = p
+	var lives []*Stream
+	for st := range ss.lives {
+		lives = append(lives, st)
+	}
+	ss.mu.Unlock()
+	if p == nil {
+		for _, st := range lives { // outside ss.mu: Reset takes the session lock (lock order: never ss.mu → session)
+			st.Reset()
+		}
+	}
+	if old == nil && p == nil {
+		return // nothing was paired and nothing changed
+	}
+	why := EvPairRotated
+	u := p
+	if p == nil {
+		why, u = EvPairRevoked, old
+	}
+	if ss.audit != nil && u != nil {
+		ss.audit.record(ss.nowf(), u.UUIDString(), why, "reload", CodeOK)
+	}
+	ss.AddEvent(why, map[string]any{"uuid": uuidOf(u)})
+}
+
+func uuidOf(p *PairingConfig) string {
+	if p == nil {
+		return ""
+	}
+	return p.UUIDString()
 }
 
 // SetOps arms the write side (phase B). Without it every write command answers unknown_cmd — a phase-A binary,
@@ -863,10 +1058,7 @@ var scepterCmds = map[string]scepterCmd{
 // runs AFTER handle returned (the command queue is released), so the queue never waits on audit I/O either.
 func (ss *ScepterState) Handle(req ScepterRequest, caps uint32) ScepterResponse {
 	resp := ss.handle(req, caps)
-	uuid := ""
-	if ss.pair != nil {
-		uuid = ss.pair.UUIDString()
-	}
+	uuid, _ := ss.cred()
 	ss.audit.record(ss.nowf(), uuid, req.Cmd, req.ID, resp.Code)
 	return resp
 }
@@ -897,7 +1089,7 @@ func (ss *ScepterState) handle(req ScepterRequest, caps uint32) ScepterResponse 
 	// intent at a time. The rate bucket stays outside: flooding is rejected without queueing behind a restart.
 	ss.qmu.Lock()
 	defer ss.qmu.Unlock()
-	if resp, ok := ss.journal.Lookup(req.ID); ok && resp.ID == req.ID {
+	if resp, ok := ss.journal.Lookup(req.ID, req.Cmd); ok && resp.ID == req.ID {
 		resp.Seq = ss.StateSeq() // refresh the tail: the client may have been offline a while
 		return resp
 	}
@@ -912,9 +1104,16 @@ func (ss *ScepterState) handle(req ScepterRequest, caps uint32) ScepterResponse 
 			ttl = n
 		}
 	}
+	ttl = intentTTLClamp(ttl) // the client does not set its own window (F6/L6, 2026-11-22)
 	ts := req.TS
 	if ts == 0 {
 		ts = now.Unix() // an id-less clock: treat as fresh (the journal still dedups)
+	} else if ts > now.Unix()+int64(scepterSkew/time.Second) {
+		// minted in the future: the server does not honor future minting (F6/L6, 2026-11-22) — the intent is
+		// judged from NOW at this check, so it can never be both future-dated and expired, and what the
+		// journal and the doctor's trace record is the server's clock. The horizon stays finite either way:
+		// ttl is clamped above, so the intent expires no later than its claimed ts + intentTTLMax + skew.
+		ts = now.Unix()
 	}
 	if now.After(time.Unix(ts, 0).Add(time.Duration(ttl)*time.Second + scepterSkew)) {
 		return ScepterResponse{ID: req.ID, Code: CodeStale}
@@ -922,13 +1121,26 @@ func (ss *ScepterState) handle(req ScepterRequest, caps uint32) ScepterResponse 
 	if caps&c.minCap == 0 {
 		return ScepterResponse{ID: req.ID, Code: CodeDenied, Params: map[string]any{"need": CapName(c.minCap)}}
 	}
-	params, code := c.fn(ss, req)
+	params, code := func() (params map[string]any, code int) {
+		defer func() {
+			if r := recover(); r != nil {
+				// a panicking handler (an ops bug) must not take the engine down (L3, 2026-11-22): answer
+				// CodeInternal like any Kharej-side op failure — which means a mutating intent's replay
+				// below is the recorded failure, never a blind re-run of a half-applied op.
+				params = map[string]any{"detail": fmt.Sprintf("panic: %v", r)}
+				code = CodeInternal
+			}
+		}()
+		return c.fn(ss, req)
+	}()
 	resp := ScepterResponse{ID: req.ID, Code: code, Params: params}
 	if params == nil {
 		resp.Params = nil
 	}
-	if code == CodeOK || code == CodeInternal { // applied intents AND Kharej-side op failures (rolled-back
-		// writes) are journaled: a retry of a failed write replays the recorded failure instead of re-running
+	if scepterMutations[req.Cmd] && (code == CodeOK || code == CodeInternal) { // MUTATING intents only
+		// (H1/F4, 2026-11-22 — reads re-execute; journaling them once grew the replay set without bound and
+		// stale-replayed a hello across an engine update): applied intents AND Kharej-side op failures
+		// (rolled-back writes) are journaled, so a retry replays the recorded outcome instead of re-running
 		// the op. Pure rejections (denied/stale/rate/bad args/not found) are recomputed on a retry and would
 		// burn the 1 MB journal on noise.
 		ss.journal.Record(req.Cmd, req.ID, ts, resp)
@@ -954,10 +1166,7 @@ func (ss *ScepterState) Recent() []ScepterRec {
 
 // PairingInfo reports the pairing UUID and capability mask for the local /scepter doctor endpoint.
 func (ss *ScepterState) PairingInfo() (uuid string, caps uint32) {
-	if ss.pair == nil {
-		return "", 0
-	}
-	return ss.pair.UUIDString(), ss.pair.Caps
+	return ss.cred()
 }
 
 // args helpers: strictly-typed reads, wrong types are bad_request rather than reflected into anything.
@@ -1056,11 +1265,30 @@ func argScalar(v any) (string, bool) {
 	return "", false
 }
 
+// intentTTLBounds is the intent-TTL window the server clamps the client's request into (F6/L6, 2026-11-22):
+// a 60 s floor (a shorter one races the retry it was minted for), a 1 h ceiling (a client-chosen ttl must not
+// outlive an outage), the 600 s default unchanged in between.
+const (
+	intentTTLMin = 60
+	intentTTLMax = 3600
+)
+
+func intentTTLClamp(ttl int) int {
+	switch {
+	case ttl < intentTTLMin:
+		return intentTTLMin
+	case ttl > intentTTLMax:
+		return intentTTLMax
+	}
+	return ttl
+}
+
 // cmdHello is the pairing hello exchange (plan phase A item 2): the request's args carry the client's ver/caps
 // (informational — the response's own ver is authoritative for the version decision, made by DialScepter).
 func cmdHello(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	uuid, caps := ss.cred()
 	return map[string]any{
-		"ver": Version, "v": scepterV, "caps": CapName(ss.pair.Caps), "uuid": ss.pair.UUIDString(), "state_seq": ss.StateSeq(),
+		"ver": Version, "v": scepterV, "caps": CapName(caps), "uuid": uuid, "state_seq": ss.StateSeq(),
 	}, CodeOK
 }
 
@@ -1224,8 +1452,14 @@ type ScepterOps interface {
 }
 
 // ValidScepterName is the tunnel-name rule: a name becomes the systemd instance (wattun@NAME) and the config
-// path ($CONF/NAME.yml), so it stays inside [A-Za-z0-9_-]{1,32} — byte-for-byte the rule wattun-manager's
-// v_name enforces, so local and remote creates accept the same names.
+// path ($CONF/NAME.yml), so it stays inside [A-Za-z0-9_-]{1,32} — byte-for-byte the shape wattun-manager's
+// v_name enforces (wattun-manager v_name, line ~1528: `^[a-zA-Z0-9_-]{1,32}$`; dashes in ordinary names ARE
+// allowed there, so no dash is banned here). One extra ban on top, from the manager's LISTING rules: a name
+// ending in "-r" is the auto reverse companion shape — companion_of (wattun-manager:4291-4296) strips
+// "${name%-r}" and is_auto_helper (562-563) hides such units from every tunnel listing when the parent is an
+// auto Kharej tunnel — so a cockpit-created "x-r" could exist on Kharej yet never show in the manager. v_name
+// itself bans nothing; the hide is conditional on the parent, but the collision shape is exactly "suffix
+// after the last '-' == r", so that is what is rejected here (F12-name, 2026-11-22).
 func ValidScepterName(name string) bool {
 	if len(name) == 0 || len(name) > 32 {
 		return false
@@ -1237,7 +1471,7 @@ func ValidScepterName(name string) bool {
 		}
 		return false
 	}
-	return true
+	return !strings.HasSuffix(name, "-r")
 }
 
 // ScepterNewKey generates a tunnel PSK: 40 alphanumerics, the manager's new_key shape (32 urandom bytes
@@ -1770,10 +2004,23 @@ func ServeScepter(st *Stream, ss *ScepterState) {
 // serveScepterLoop is the command loop with a caller-supplied decoder: ServeScepterLatch (latch.go) has already
 // consumed the proof line from the same buffer, so it must not build a fresh one.
 func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState) {
-	caps := uint32(0)
-	if ss.pair != nil {
-		caps = ss.pair.Caps
+	ss.mu.Lock()
+	if ss.pair == nil { // disarmed by ReloadPairing(nil) (or a pairing-less state): the reserved stream serves
+		// nothing — refused contacts get a reset, never a command answer (F8-revoke, 2026-11-22)
+		ss.mu.Unlock()
+		st.Reset()
+		return
 	}
+	if ss.lives == nil {
+		ss.lives = map[*Stream]struct{}{}
+	}
+	ss.lives[st] = struct{}{} // registered so ReloadPairing(nil) can kill this stream mid-line
+	ss.mu.Unlock()
+	defer func() {
+		ss.mu.Lock()
+		delete(ss.lives, st)
+		ss.mu.Unlock()
+	}()
 	ss.AddEvent(EvScepterUp, nil)
 	defer ss.AddEvent(EvScepterDown, nil)
 	var wmu sync.Mutex
@@ -1783,9 +2030,15 @@ func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState) {
 			return
 		}
 		if code != CodeOK {
+			// decode-level garbage is audited too (L4, 2026-11-22): unparseable JSON, a wrong protocol
+			// version, an oversized line — a garbage flood leaves a trace in the shared audit file with
+			// cmd "?" and whatever of the id could be parsed (the audit line sanitizes it).
+			uuid, _ := ss.cred()
+			ss.audit.record(ss.nowf(), uuid, "?", req.ID, code)
 			writeRespLine(st, &wmu, ScepterResponse{ID: req.ID, Code: code})
 			continue
 		}
+		_, caps := ss.cred() // re-read per command: ReloadPairing (rotate) changes the caps mid-stream
 		resp := ss.Handle(req, caps)
 		resp.Seq = ss.StateSeq() // the response tail: every answer carries the state it was built on
 		writeResp(st, &wmu, resp)
@@ -1855,6 +2108,14 @@ func DialScepter(sess *Session) (*ScepterClient, error) {
 	return c, nil
 }
 
+// scepterPeerVerOK gates the hello on the SCEPTER FLOOR, not the client's own version (M3, 2026-11-22): a
+// 3.5.1 client must not refuse a 3.5.0 server's cockpit — the floor (scepterMinScepterVer) is the oldest
+// version that serves the management plane at all, which is what "pairing needs" actually means. Empty
+// (unparseable) versions still fail closed.
+func scepterPeerVerOK(ver string) bool {
+	return ver != "" && !OlderVersion(ver, scepterMinScepterVer)
+}
+
 // helloExchange runs the pairing hello and version check shared by DialScepter and the latch dial
 // (latch.go). On failure the stream is reset and the error says why (mixed-version rule: old peer = no retry).
 func (c *ScepterClient) helloExchange(sess *Session) error {
@@ -1864,9 +2125,9 @@ func (c *ScepterClient) helloExchange(sess *Session) error {
 		return fmt.Errorf("scepter: hello rejected (code %d)", code)
 	}
 	ver, _ := hello["ver"].(string)
-	if ver == "" || OlderVersion(ver, Version) {
+	if !scepterPeerVerOK(ver) {
 		c.st.Reset()
-		return fmt.Errorf("scepter: pairing needs %s on the server, peer reported %q", Version, ver)
+		return fmt.Errorf("scepter: pairing needs %s on the server, peer reported %q", scepterMinScepterVer, ver)
 	}
 	c.Hello = hello
 	return nil

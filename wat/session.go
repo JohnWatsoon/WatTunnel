@@ -823,6 +823,26 @@ func (s *Session) OpenScepter() (*Stream, error) {
 // Paired reports whether this session carries a pairing credential (i.e. OpenScepter is allowed).
 func (s *Session) Paired() bool { return s.cfg.Pairing != nil }
 
+// CloseScepter kills the reserved sid-0 stream only — the ENGINE half of instant revocation (F8-revoke,
+// 2026-11-22): the caller (cmd/wattun's .pairing poller, via ScepterState.ReloadPairing for the streams its
+// state serves) tears down the management plane while the session and every user stream keep running, because
+// the tunnel PSK is unchanged. The peer's scepter stream dies with the frRst, exactly like a Reset; no sid-0
+// stream, nothing to do. Not a wrapper around Stream.Reset: that locks the session itself, and we hold it.
+func (s *Session) CloseScepter() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.streams[0]
+	if !ok || st.dead {
+		return
+	}
+	var f []byte
+	f = append(f, frRst)
+	f = appendUv(f, st.id)
+	s.ctrl = append(s.ctrl, f)
+	s.kick()
+	s.killStream(st, ErrReset)
+}
+
 // Accept waits for a stream opened by the peer (server side).
 func (s *Session) Accept() (*Stream, error) {
 	s.mu.Lock()

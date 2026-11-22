@@ -24,6 +24,12 @@ import (
 // revival path of last resort, contacted by hand after an outage, and a false rejection costs an SSH trip.
 const latchProofSkew = 10 * time.Minute
 
+// latchProofDeadline caps how long the proof line may take to arrive (L1, 2026-11-22): a key-holder that
+// opens the reserved stream and stalls the proof (half a line, silent after the first byte) would otherwise
+// block the latch's one-session slot forever, and the latch can only re-arm when the contact's session dies.
+// Deadline exceeded = denied+reset+close, exactly like a wrong proof. Var, not const: tests shrink it.
+var latchProofDeadline = 10 * time.Second
+
 // LatchKey derives the latch session PSK from the pairing key (domain-separated SHA-256, the hdrmask.go /
 // ProbeGuardKey pattern). Distinct from the tunnel PSK so the latch port never accepts the tunnel's sessions
 // and vice versa.
@@ -57,12 +63,31 @@ func latchProofOK(key []byte, ts int64, proof string, now time.Time) bool {
 }
 
 // ServeScepterLatch serves one latch session's reserved stream: the FIRST line must be the proof command
-// {"id":"…","v":1,"cmd":"latch.proof","args":{"ts":…,"proof":"…"}}; only then does the normal read-only command
-// loop run. A wrong or stale proof answers one code=denied line, resets the stream and returns false — the
-// caller (cmd/wattun) closes the whole session, so nothing else is ever served on it.
+// {"id":"…","v":1,"cmd":"latch.proof","args":{"ts":…,"proof":"…"}} within latchProofDeadline; only then does
+// the normal read-only command loop run. A wrong or stale proof — or a proof line that never completes within
+// the deadline (L1, 2026-11-22: the stream has no read deadline of its own, so the wait races a timer) —
+// answers one code=denied line when there is an answer to give, resets the stream and returns false — the
+// caller (cmd/wattun) closes the whole session, so nothing else is ever served on it and the latch slot frees.
 func ServeScepterLatch(st *Stream, ss *ScepterState, key []byte) bool {
 	d := newScepterDecoder(st)
-	req, code := d.next()
+	type proofRes struct {
+		req  ScepterRequest
+		code int
+	}
+	ch := make(chan proofRes, 1) // buffered: a late decoder result must not leak its goroutine past the reset
+	go func() {
+		req, code := d.next()
+		ch <- proofRes{req, code}
+	}()
+	var req ScepterRequest
+	code := -1
+	select {
+	case r := <-ch:
+		req, code = r.req, r.code
+	case <-time.After(latchProofDeadline):
+		// a proof line that never completes: denied+close, same as a wrong proof (the timer goroutine's
+		// blocked ReadSlice dies with the reset below and its send lands in the buffered channel)
+	}
 	if code != CodeOK {
 		st.Reset()
 		return false

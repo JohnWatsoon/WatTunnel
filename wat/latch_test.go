@@ -21,7 +21,7 @@ func TestLatchDrill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { state.journal.Close() })
+	t.Cleanup(func() { state.Stop(); state.journal.Close() })
 	key := LatchKey(pair)
 	ps, err := NewWSPoolServer("127.0.0.1:0", HTTPServerOptions{Path: LatchPath(pair), Secure: true})
 	if err != nil {
@@ -114,7 +114,7 @@ func TestLatchProofReject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { state.journal.Close() })
+	t.Cleanup(func() { state.Stop(); state.journal.Close() })
 	good := LatchKey(pair)
 	other := testPairing(CapTunnel) // a DIFFERENT credential: another UUID + key, no knowledge of ours
 	other.Key[0] ^= 1
@@ -164,5 +164,41 @@ func TestLatchStaleProof(t *testing.T) {
 	}
 	if LatchPath(other) == LatchPath(testPairing(CapFull)) || string(LatchKey(other)) == string(key) {
 		t.Fatal("the latch key and path must depend on the pairing key")
+	}
+}
+
+// TestLatchProofDeadline: a contact that opens the reserved stream but never completes the proof line (half
+// a line, then silence) is denied within latchProofDeadline and the stream is reset — a stalled key-holder
+// cannot own the latch's one-session slot forever (L1, 2026-11-22; the seam var keeps the test fast).
+func TestLatchProofDeadline(t *testing.T) {
+	old := latchProofDeadline
+	latchProofDeadline = 300 * time.Millisecond
+	t.Cleanup(func() { latchProofDeadline = old }) // runs LAST: the var is restored after the serve goroutine is done
+	pair := testPairing(CapFull)
+	state, err := NewScepterState(pair, &fakeSource{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Stop(); state.journal.Close() }) // runs FIRST
+	cli, srv, _, _ := newPair(t, 0, time.Millisecond, 10e6, Config{Pairing: pair})
+	t.Cleanup(func() { cli.Close(); srv.Close() })
+	st, err := cli.OpenScepter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// half a proof line: no newline, ever — the decoder blocks, the deadline must fire
+	_, _ = st.Write([]byte(`{"id":"x","v":1,"cmd":"latch.proof"`))
+	served := make(chan bool, 1)
+	go func() { served <- ServeScepterLatch(st, state, LatchKey(pair)) }()
+	select {
+	case ok := <-served:
+		if ok {
+			t.Fatal("an incomplete proof line must be denied")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeScepterLatch never returned on the stalled proof")
+	}
+	if len(state.Recent()) != 0 {
+		t.Fatalf("a stalled contact executed commands: %+v", state.Recent())
 	}
 }
