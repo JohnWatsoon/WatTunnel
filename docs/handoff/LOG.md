@@ -998,3 +998,23 @@ Commit: b1ffbeb
 - Left for later: spawnProbeClient first live proof on a sim pair with real units (Windows dev
   cannot run probe units); mgr surfaces (Lane H dispatching now).
 Commit: b1ffbeb
+
+## 2026-11-22 · supervisor · Phase C closed — cockpit committed (1be4dfb) + test.close arg fix (fcfee6c); PHASE C READY FOR REVIEW
+- Lane H (mgr cockpit) delivered uncommitted; supervisor found one blocking detail on the way in:
+  its test.close sent the probe id as args["id"], which the one-shot CLI lifts as the command id and
+  deletes — the probe id never reached the engine (code=1, masked by the ttl-expiry hint). Fixed as
+  fcfee6c: the arg is now "probe" (wire-safe: unreleased, both ends ship together), pinned by a
+  parse-split regression test and the RPC drill; TECHNICAL.md table updated. Lane H then committed
+  as 1be4dfb (remote carrier test with honest rate-limit/no-peer handling, carrier.change flow with
+  the Iran-side restart contract and revert, fleet auto-test with already_running + ranked table +
+  apply; tunnel page now feeds base_seq from state_seq, not the event cursor; create wizard's listen
+  prompt accepts the empty default). 25 tests green; gates re-run by supervisor (gofmt/vet, cmd suite
+  40.4 s, mgr 0.58 s, TestScepter ./wat/ ok).
+- Phase C commits: b1ffbeb (engine probes/carrier.change/auto-test) -> fcfee6c (test.close arg fix)
+  -> 1be4dfb (cockpit) -> 608b588 (log).
+- Carried to later phases: spawnProbeClient first live proof on a sim pair with real units (CI has
+  no engine-process test; Windows dev cannot run probe units) — flagged for the Phase E/wave-3 notes.
+PHASE C READY FOR REVIEW. Proceeding to phase D (operations): update orchestration (update.status/
+update.run gated on full, wattun.prev required, latch covers the channel gap), doctor.fetch,
+backup.export (chunked), audit.tail, CI update drill.
+Commit: fcfee6c, 1be4dfb
