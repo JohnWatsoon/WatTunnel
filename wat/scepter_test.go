@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"bytes"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -757,6 +759,11 @@ type fakeOps struct {
 	actions   []string        // recorded "name:action" (unit ops)
 	active    map[string]bool
 	creates   int // Create calls that executed (journal idempotency counting)
+	rotates   int // KeyRotate/PairRotate executions (journal idempotency counting)
+	muteOps   int // Mute EXECUTED flips (a no-op mute does not count)
+	resets    []int
+	muted     map[string]bool
+	pair      *PairingConfig // the "current" credential PairRotate rotates (nil = testPairing(CapManage))
 
 	// phase C: probe lifecycle bookkeeping and the auto-test rows the fake serves
 	probes      map[string]string // probe id -> carrier, while open
@@ -784,7 +791,7 @@ type fakeOps struct {
 
 func newFakeOps(t *testing.T) *fakeOps {
 	return &fakeOps{dir: t.TempDir(), failStart: map[string]bool{}, binds: map[int]string{}, active: map[string]bool{},
-		probes: map[string]string{}, failLink: map[string]bool{}, backupCode: CodeOK,
+		probes: map[string]string{}, failLink: map[string]bool{}, backupCode: CodeOK, muted: map[string]bool{},
 		rows: []map[string]any{
 			{"rank": 1, "carrier": "tcp", "port": 20501, "ok": true, "down_mbps": 9.5},
 			{"rank": 2, "carrier": "udp", "port": 20502, "ok": false, "why": "no link"},
@@ -1134,6 +1141,86 @@ func (f *fakeOps) AuditTail(n int) (map[string]any, int) {
 	return map[string]any{"logs": []string{string(da), string(dj)}}, CodeOK
 }
 
+// ---- U0 audit coverage fakes (2026-11-23): keyrotate, pair.rotate, mute, limits.reset ----
+
+// KeyRotate mirrors the production contract over the fake dir: new key into yml + key file, unit restarted,
+// the edit path's rollback on a dead start. rotates counts executed rotations (journal idempotency).
+func (f *fakeOps) KeyRotate(name string) (map[string]any, int) {
+	f.begin()
+	defer f.end()
+	f.rotates++
+	b, err := os.ReadFile(f.yml(name))
+	if err != nil {
+		return map[string]any{"name": name}, CodeNotFound
+	}
+	newKey := ScepterNewKey()
+	writeAtomicTest(f.yml(name)+".bak", string(b))
+	writeAtomicTest(f.yml(name), setYMLKey(string(b), "key", newKey))
+	writeAtomicTest(filepath.Join(f.dir, name+".key"), newKey)
+	f.runUnit(name, "restart")
+	if !f.active[name] { // the rollback drill: restore the old key everywhere
+		writeAtomicTest(f.yml(name), string(b))
+		f.runUnit(name, "restart")
+		return map[string]any{"detail": "rolled back", "rolled_back": true}, CodeInternal
+	}
+	return map[string]any{"name": name, "key": newKey, "token": "wat1:fake"}, CodeOK
+}
+
+// PairRotate mirrors the production store rewrite over the fake dir: same UUID+caps, new 32-byte key, the
+// manager's # created / # oldkey / # oldkey_expires comment contract (pairing_store_write shape). pair is
+// the "current" credential the fake rotates (tests set it; default testPairing(CapManage)).
+func (f *fakeOps) PairRotate(windowS int) (map[string]any, int) {
+	f.rotates++
+	if windowS <= 0 {
+		windowS = 86400
+	}
+	old := f.pair
+	if old == nil {
+		old = testPairing(CapManage)
+	}
+	kb := make([]byte, 32)
+	if _, err := crand.Read(kb); err != nil {
+		return map[string]any{"detail": err.Error()}, CodeInternal
+	}
+	np := &PairingConfig{UUID: old.UUID, Caps: old.Caps, Ver: 1}
+	copy(np.Key[:], kb)
+	line := np.Line()
+	content := line + "\n# created=1700000000\n" +
+		"# oldkey=" + base64.StdEncoding.EncodeToString(old.Key[:]) + "\n" +
+		"# oldkey_expires=" + strconv.FormatInt(time.Now().Unix()+int64(windowS), 10) + "\n"
+	writeAtomicTest(filepath.Join(f.dir, ".pairing"), content)
+	return map[string]any{"watp1": line, "uuid": np.UUIDString(), "window_s": windowS}, CodeOK
+}
+
+// Mute flips the fake's per-path muted state (the production ops' bond check and metrics POST are pinned
+// by the cmd/wattun tests over real files and a real HTTP endpoint; this fake covers the handler/journal
+// layer). muteOps counts EXECUTED flips so a journal replay proves at-most-once.
+func (f *fakeOps) Mute(name, carrier string, mute bool) (map[string]any, int) {
+	if !f.has(name) {
+		return map[string]any{"name": name}, CodeNotFound
+	}
+	if carrier == "" {
+		return nil, CodeBadRequest
+	}
+	cur := f.muted[carrier]
+	if cur == mute {
+		return map[string]any{"name": name, "carrier": carrier, "muted": mute, "changed": false}, CodeOK
+	}
+	f.muted[carrier] = mute
+	f.muteOps++
+	return map[string]any{"name": name, "carrier": carrier, "muted": mute, "changed": true}, CodeOK
+}
+
+// ResetLimits records the reset requests; limits.reset is deliberately NOT a mutation (re-executable
+// bookkeeping), so the journal test counts executions instead of replays.
+func (f *fakeOps) ResetLimits(name string, port int) (map[string]any, int) {
+	if !f.has(name) {
+		return map[string]any{"name": name}, CodeNotFound
+	}
+	f.resets = append(f.resets, port)
+	return map[string]any{"name": name, "reset": []int{port}}, CodeOK
+}
+
 // dirSource is the ScepterSource reading the fake ops' CONF dir, so the state document reflects what the
 // write intents did to the files (create/delete round-trips are visible in tunnels.list).
 type dirSource struct{ dir string }
@@ -1473,8 +1560,437 @@ func TestScepterPresetApply(t *testing.T) {
 		t.Fatalf("stealth preset did not land: %q", b)
 	}
 	p, code := c.Call("preset.apply", map[string]any{"name": "pr1", "preset": "nope"})
-	if code != CodeBadRequest || p["presets"] != "plain,stealth" {
+	if code != CodeBadRequest || p["presets"] != "blackout,cf,irancell,low-churn,mci,off,plain,rst-fast,stealth" {
 		t.Fatalf("unknown preset: %v %v", code, p)
+	}
+}
+
+// preset.list serves the engine-owned catalog with descriptions, and the catalog itself must keep mirroring
+// the bash manager's anti-censor presets (wattun-manager apply_preset): the cockpit and the bash console
+// must offer the same settings under the same names, or a preset applied from one side is invisible to the
+// other. The extraction is live (reads ../wattun-manager), so a bash-side preset change fails this test.
+func TestScepterPresetCatalog(t *testing.T) {
+	c, _ := newScepterPair(t, CapManage, "", &fakeSource{}) // no ops: the catalog is engine data
+	p, code := c.Call("preset.list", nil)
+	if code != CodeOK {
+		t.Fatalf("preset.list code %d", code)
+	}
+	list, ok := p["presets"].([]any)
+	if !ok || len(list) != len(scepterPresets) {
+		t.Fatalf("preset.list returned %#v, want %d entries", p["presets"], len(scepterPresets))
+	}
+	seen := map[string]bool{}
+	for _, e := range list {
+		m, _ := e.(map[string]any)
+		n, _ := m["name"].(string)
+		d, _ := m["desc"].(string)
+		if n == "" || d == "" {
+			t.Fatalf("preset.list entry without name or desc: %v", m)
+		}
+		if _, known := scepterPresets[n]; !known {
+			t.Fatalf("preset.list served a name outside the catalog: %q", n)
+		}
+		seen[n] = true
+	}
+	if len(seen) != len(scepterPresets) {
+		t.Fatalf("preset.list duplicated names: %v", seen)
+	}
+	// mirror check: every bash anti-censor preset, as the key-patch the engine must hold
+	mirror := map[string]string{"cloudflare": "cf", "conservative": "low-churn",
+		"rst-fast": "rst-fast", "mci": "mci", "irancell": "irancell", "blackout": "blackout", "off": "off"}
+	bash := bashAntiCensorPresets(t)
+	if len(bash) != len(mirror) {
+		t.Fatalf("wattun-manager defines anti-censor presets %v — teach the mirror map and the catalog", keysOf(bash))
+	}
+	for name, want := range bash {
+		ent, known := scepterPresets[mirror[name]]
+		if !known {
+			t.Fatalf("bash preset %q has no engine catalog entry", name)
+		}
+		if !sameScepterPatch(ent.patch, want) {
+			t.Fatalf("engine preset %q drifted from the bash definition:\n got %+v\nwant %+v", mirror[name], ent.patch, want)
+		}
+	}
+	for _, n := range []string{"stealth", "plain", "cf", "rst-fast", "mci", "irancell", "blackout", "low-churn", "off"} {
+		if !seen[n] {
+			t.Fatalf("catalog lost preset %q", n)
+		}
+	}
+	if len(scepterPresets) != len(bash)+2 { // + stealth/plain, the shaping pair the bash has no twin for
+		t.Fatalf("catalog holds %d entries, want %d bash presets + stealth + plain", len(scepterPresets), len(bash)+2)
+	}
+}
+
+func keysOf(m map[string]ScepterPatch) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sameScepterPatch(got, want ScepterPatch) bool {
+	if len(got.Set) != len(want.Set) {
+		return false
+	}
+	for k, v := range want.Set {
+		if got.Set[k] != v {
+			return false
+		}
+	}
+	gd, wd := append([]string{}, got.Drop...), append([]string{}, want.Drop...)
+	sort.Strings(gd)
+	sort.Strings(wd)
+	if len(gd) != len(wd) {
+		return false
+	}
+	for i := range wd {
+		if gd[i] != wd[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// bashAntiCensorPresets extracts the canonical anti-censor preset definitions from wattun-manager's
+// apply_preset (the `name)` case labels with their fs/fm/rot/… assignments) and renders each as the
+// key-patch the engine catalog must mirror: set when non-empty, drop when empty — the bash's
+// "set_value / unset_value-if-set" per key (a drop of an absent key is a no-op). Governor is the documented
+// asymmetry (see scepterPresets): off drops it (the bash unsets it for icmp carriers; inert on pool
+// carriers), cf/rst-fast leave it alone, exactly like the bash.
+func bashAntiCensorPresets(t *testing.T) map[string]ScepterPatch {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "wattun-manager"))
+	if err != nil {
+		t.Fatalf("wattun-manager not readable: %v", err)
+	}
+	inCase, cur := false, ""
+	vars := map[string]string{}
+	out := map[string]ScepterPatch{}
+	flush := func() {
+		if cur == "" {
+			return
+		}
+		if cur == "off" {
+			out["off"] = ScepterPatch{Drop: []string{"fake-sni", "fake-mode", "fake-ttl",
+				"pool-rotate", "pool-rotate-bytes", "ech", "governor"}}
+		} else {
+			p := ScepterPatch{Set: map[string]string{}, Drop: []string{"fake-ttl"}}
+			p.Set["fake-sni"], p.Set["fake-mode"] = vars["fs"], vars["fm"]
+			setOrDrop := func(key, v string) {
+				if v != "" {
+					p.Set[key] = v
+				} else {
+					p.Drop = append(p.Drop, key)
+				}
+			}
+			setOrDrop("pool-rotate", vars["rot"])
+			setOrDrop("pool-rotate-bytes", vars["rbytes"])
+			setOrDrop("ech", vars["ech"])
+			if v := vars["gov"]; v != "" {
+				p.Set["governor"] = v
+			}
+			// sessions/conns are only ever SET by the bash (apply_preset's `if [ -n "$sess" ]`), never
+			// unset — only rst-fast carries them
+			if v := vars["sess"]; v != "" {
+				p.Set["sessions"] = v
+			}
+			if v := vars["conns"]; v != "" {
+				p.Set["conns"] = v
+			}
+			out[cur] = p
+		}
+		cur = ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !inCase {
+			if strings.TrimSpace(line) == `case "$pr" in` {
+				inCase = true
+			}
+			continue
+		}
+		if strings.TrimSpace(line) == "esac" {
+			flush()
+			break
+		}
+		if lbl := strings.TrimSpace(line); strings.HasSuffix(lbl, ")") && !strings.HasPrefix(lbl, "*") {
+			flush()
+			cur = strings.TrimSuffix(lbl, ")")
+			if strings.HasPrefix(cur, "off") {
+				cur = "off" // the bash label is "off|clear|none"
+			}
+			vars = map[string]string{}
+			continue
+		}
+		for _, m := range bashPresetVar.FindAllStringSubmatch(line, -1) {
+			vars[m[1]] = m[2]
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no presets found in wattun-manager apply_preset — the extraction needs updating")
+	}
+	return out
+}
+
+var bashPresetVar = regexp.MustCompile(`\b(fs|fm|ft|rot|rbytes|ech|gov|sess|conns)="?([A-Za-z0-9./_-]*)"?`)
+
+// tunnel.keyrotate round trip (U0 audit): the ops rewrite yml + key file, the response carries the new key
+// and the token, the event is tunnel_edited {why:keyrotate}, rejections are typed, base_seq rides the
+// response tail, and a retried id replays at-most-once.
+func TestScepterKeyRotate(t *testing.T) {
+	ops := newFakeOps(t)
+	jp := filepath.Join(t.TempDir(), ".journal")
+	c, state := newScepterPair(t, CapManage, jp, dirSource{ops.dir}, ops)
+	ops.writeDirect("k1", t)
+	seq0 := state.StateSeq()
+	p, code := c.Call("tunnel.keyrotate", map[string]any{"name": "k1"})
+	if code != CodeOK {
+		t.Fatalf("keyrotate: %v %v", code, p)
+	}
+	if p["name"] != "k1" || p["key"] == "" || p["token"] != "wat1:fake" {
+		t.Fatalf("keyrotate params: %v", p)
+	}
+	newKey, _ := p["key"].(string)
+	b, _ := os.ReadFile(ops.yml("k1"))
+	if !strings.Contains(string(b), "key: "+newKey) {
+		t.Fatalf("yml not rotated: %q", b)
+	}
+	kb, err := os.ReadFile(filepath.Join(ops.dir, "k1.key"))
+	if err != nil || strings.TrimSpace(string(kb)) != newKey {
+		t.Fatalf("key file: %v %q", err, kb)
+	}
+	if state.StateSeq() != seq0+1 {
+		t.Fatalf("state_seq moved %d for one applied rotation", state.StateSeq()-seq0)
+	}
+	// rejections: missing name, unknown tunnel, wrong type
+	if _, code = c.Call("tunnel.keyrotate", map[string]any{}); code != CodeBadRequest {
+		t.Fatalf("no-name code %d", code)
+	}
+	if _, code = c.Call("tunnel.keyrotate", map[string]any{"name": "nope"}); code != CodeNotFound {
+		t.Fatalf("unknown tunnel code %d", code)
+	}
+	if _, code = c.Call("tunnel.keyrotate", map[string]any{"name": 7}); code != CodeBadRequest {
+		t.Fatalf("wrong type code %d", code)
+	}
+	// base_seq tail: matching seq applies silently, a stale one carries the fresh document
+	p, code = c.Call("tunnel.keyrotate", map[string]any{"name": "k1", "base_seq": float64(state.StateSeq())})
+	if code != CodeOK || p["state"] != nil {
+		t.Fatalf("matching base_seq: %v %v", code, p)
+	}
+	p, code = c.Call("tunnel.keyrotate", map[string]any{"name": "k1", "base_seq": float64(1)})
+	if code != CodeOK || p["state"] == nil {
+		t.Fatalf("stale base_seq: %v %v", code, p)
+	}
+	// journal replay: a fixed id runs the op once, both answers identical
+	rotBefore := ops.rotates
+	p1, _ := c.call("tunnel.keyrotate", map[string]any{"name": "k1"}, "kr-fixed", time.Now().Unix(), 30*time.Second)
+	p2, _ := c.call("tunnel.keyrotate", map[string]any{"name": "k1"}, "kr-fixed", time.Now().Unix(), 30*time.Second)
+	if ops.rotates != rotBefore+1 {
+		t.Fatalf("op ran %d times for one fixed id", ops.rotates-rotBefore)
+	}
+	b1, _ := json.Marshal(p1)
+	b2, _ := json.Marshal(p2)
+	if string(b1) != string(b2) {
+		t.Fatalf("replay outcome differs: %s vs %s", b1, b2)
+	}
+	// the event ring holds tunnel_edited {why:keyrotate}
+	p, code = c.Call("events.since", map[string]any{"seq": 0})
+	if code != CodeOK {
+		t.Fatal(code)
+	}
+	found := false
+	for _, e := range p["events"].([]any) {
+		m := e.(map[string]any)
+		if m["type"] == EvTunnelEdited {
+			if d, _ := m["detail"].(map[string]any); d != nil && d["why"] == "keyrotate" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no tunnel_edited {why:keyrotate} event")
+	}
+}
+
+// keyrotate rollback drill (U0 audit): the unit refuses to come up with the new key → CodeInternal
+// rolled_back, the old key is restored in the yml, the state_seq does not move (no event on a failed
+// intent), and the failure is NOT journaled — a retry re-runs the op, which is the recovery.
+func TestScepterKeyRotateRollback(t *testing.T) {
+	ops := newFakeOps(t)
+	c, state := newScepterPair(t, CapManage, "", dirSource{ops.dir}, ops)
+	ops.writeDirect("rb", t)
+	seq0 := state.StateSeq()
+	ops.failStart["rb"] = true
+	p, code := c.Call("tunnel.keyrotate", map[string]any{"name": "rb"})
+	if code != CodeInternal || p["rolled_back"] != true {
+		t.Fatalf("rollback: %v %v", code, p)
+	}
+	b, _ := os.ReadFile(ops.yml("rb"))
+	if strings.Contains(string(b), "key: ") {
+		t.Fatalf("rollback left a key line in the yml: %q", b)
+	}
+	if state.StateSeq() != seq0 {
+		t.Fatal("a rolled-back intent must not bump state_seq (no change, no event)")
+	}
+	// the failure was not journaled: a fresh-id retry re-runs the op (and rolls back again)
+	rotBefore := ops.rotates
+	p, code = c.Call("tunnel.keyrotate", map[string]any{"name": "rb"})
+	if code != CodeInternal || p["rolled_back"] != true {
+		t.Fatalf("re-executed failure: %v %v", code, p)
+	}
+	if ops.rotates != rotBefore+1 {
+		t.Fatal("the failed rotation was journaled: the retry replayed instead of re-running the op")
+	}
+	// once the unit comes up again, the rotation applies
+	ops.failStart["rb"] = false
+	if p, code = c.Call("tunnel.keyrotate", map[string]any{"name": "rb"}); code != CodeOK {
+		t.Fatalf("rotation after rollback fix: %v %v", code, p)
+	}
+}
+
+// pair.rotate (U0 audit): the store is rewritten in the manager's contract shape, the state adopts the new
+// credential immediately (the live channel keeps serving), the old key survives only as the store's
+// oldkey comment, the rate bucket is update-rate-like, and a retried id replays at-most-once.
+func TestScepterPairRotate(t *testing.T) {
+	ops := newFakeOps(t)
+	jp := filepath.Join(t.TempDir(), ".journal")
+	c, state := newScepterPair(t, CapManage, jp, dirSource{ops.dir}, ops)
+	ops.pair = testPairing(CapManage)
+	oldKey := ops.pair.Key
+	var secs atomic.Int64 // the fake clock drives the rotate bucket deterministically
+	base := time.Now()
+	state.nowf = func() time.Time { return base.Add(time.Duration(secs.Load()) * time.Second) }
+	p, code := c.Call("pair.rotate", map[string]any{"window_s": 3600})
+	if code != CodeOK {
+		t.Fatalf("pair.rotate: %v %v", code, p)
+	}
+	line, _ := p["watp1"].(string)
+	np, err := ParsePairingLine(line)
+	if err != nil {
+		t.Fatalf("returned line: %v", err)
+	}
+	if np.UUIDString() != ops.pair.UUIDString() || np.Caps != ops.pair.Caps || np.Key == oldKey {
+		t.Fatalf("rotated credential: uuid %s caps %d key-unchanged %v", np.UUIDString(), np.Caps, np.Key == oldKey)
+	}
+	// adoption: future commands are checked against the new credential (ReloadPairing semantics)
+	state.mu.Lock()
+	adopted := state.pair != nil && state.pair.Key == np.Key
+	state.mu.Unlock()
+	if !adopted {
+		t.Fatal("the state did not adopt the rotated credential")
+	}
+	// the store contract: line 1 = the returned credential; the old key only as the # oldkey comment;
+	// created preserved, the window recorded
+	b, err := os.ReadFile(filepath.Join(ops.dir, ".pairing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if !strings.HasPrefix(s, line+"\n") {
+		t.Fatalf("store line 1 is not the returned credential: %q", s)
+	}
+	if !strings.Contains(s, "# oldkey="+base64.StdEncoding.EncodeToString(oldKey[:])) {
+		t.Fatalf("store lost the oldkey comment: %q", s)
+	}
+	if !strings.Contains(s, "# oldkey_expires=") || !strings.Contains(s, "# created=1700000000") {
+		t.Fatalf("store bookkeeping comments: %q", s)
+	}
+	// the bucket: one rotation per 5 min
+	if p, code = c.Call("pair.rotate", nil); code != CodeRateLimited || p["resource"] != "pair.rotate" {
+		t.Fatalf("second rotation must hit the bucket: %v %v", code, p)
+	}
+	// journal replay: at +400 s the bucket refilled one token; a fixed id then replays at-most-once
+	secs.Store(400)
+	p1, code1 := c.call("pair.rotate", map[string]any{"window_s": 7200}, "pr-fixed", time.Now().Unix(), 30*time.Second)
+	if code1 != CodeOK {
+		t.Fatalf("fixed-id rotate: %v %v", code1, p1)
+	}
+	rot := ops.rotates
+	p2, _ := c.call("pair.rotate", map[string]any{"window_s": 7200}, "pr-fixed", time.Now().Unix(), 30*time.Second)
+	if ops.rotates != rot {
+		t.Fatal("the replayed rotation ran the op again")
+	}
+	b1, _ := json.Marshal(p1)
+	b2, _ := json.Marshal(p2)
+	if string(b1) != string(b2) {
+		t.Fatalf("replay outcome differs: %s vs %s", b1, b2)
+	}
+	// pair_rotated fired for each adopted rotation (400 s apart: no coalescing)
+	p, code = c.Call("events.since", map[string]any{"seq": 0})
+	if code != CodeOK {
+		t.Fatal(code)
+	}
+	n := 0
+	for _, e := range p["events"].([]any) {
+		if m := e.(map[string]any); m["type"] == EvPairRotated {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("pair_rotated events: %d, want 2", n)
+	}
+}
+
+// carrier.mute and limits.reset (U0 audit): round trips, typed rejections, and their journal split — the
+// mute is a mutation (a retried id replays, the flip ran once), the quota reset is deliberately not
+// (a retried id re-executes, clearing the same counters — replaying a stale quota state would be worse).
+func TestScepterMuteAndLimitsReset(t *testing.T) {
+	ops := newFakeOps(t)
+	jp := filepath.Join(t.TempDir(), ".journal")
+	c, _ := newScepterPair(t, CapManage, jp, dirSource{ops.dir}, ops)
+	ops.writeDirect("m1", t)
+	// mute round trip and the absent-mute default (unmute, the strictly-typed zero value)
+	if p, code := c.Call("carrier.mute", map[string]any{"name": "m1", "carrier": "udp", "mute": true}); code != CodeOK || p["muted"] != true {
+		t.Fatalf("mute: %v %v", code, p)
+	}
+	if !ops.muted["udp"] {
+		t.Fatal("the fake did not mute")
+	}
+	if p, code := c.Call("carrier.mute", map[string]any{"name": "m1", "carrier": "udp"}); code != CodeOK || p["muted"] != false {
+		t.Fatalf("unmute by default: %v %v", code, p)
+	}
+	// rejections: missing carrier, non-bool mute, unknown tunnel
+	if _, code := c.Call("carrier.mute", map[string]any{"name": "m1"}); code != CodeBadRequest {
+		t.Fatalf("no carrier: %d", code)
+	}
+	if _, code := c.Call("carrier.mute", map[string]any{"name": "m1", "carrier": "udp", "mute": "yes"}); code != CodeBadRequest {
+		t.Fatalf("non-bool mute: %d", code)
+	}
+	if _, code := c.Call("carrier.mute", map[string]any{"name": "nope", "carrier": "udp"}); code != CodeNotFound {
+		t.Fatalf("unknown tunnel: %d", code)
+	}
+	// journal: the mute is a mutation — a fixed id replays the recorded outcome, one flip total
+	// (2 executed flips so far: the mute and the unmute above)
+	p1, _ := c.call("carrier.mute", map[string]any{"name": "m1", "carrier": "udp", "mute": true}, "mu-fixed", time.Now().Unix(), 30*time.Second)
+	p2, _ := c.call("carrier.mute", map[string]any{"name": "m1", "carrier": "udp", "mute": true}, "mu-fixed", time.Now().Unix(), 30*time.Second)
+	if p1["muted"] != true || p2["muted"] != true {
+		t.Fatalf("mute replay: %v %v", p1, p2)
+	}
+	if ops.muteOps != 3 {
+		t.Fatalf("mute executed %d flips, want 3 (round trips + one fixed id; the replay is a no-op)", ops.muteOps)
+	}
+	// limits.reset round trip; not journaled: the fixed id re-executes (three executions total — the
+	// round trip plus both fixed-id calls; replaying a stale quota state would be worse)
+	if p, code := c.Call("limits.reset", map[string]any{"name": "m1"}); code != CodeOK || p["name"] != "m1" {
+		t.Fatalf("limits.reset: %v %v", code, p)
+	}
+	r1, _ := c.call("limits.reset", map[string]any{"name": "m1", "port": 20030}, "lr-fixed", time.Now().Unix(), 30*time.Second)
+	r2, _ := c.call("limits.reset", map[string]any{"name": "m1", "port": 20030}, "lr-fixed", time.Now().Unix(), 30*time.Second)
+	if r1["name"] != "m1" || r2["name"] != "m1" {
+		t.Fatalf("reset: %v %v", r1, r2)
+	}
+	if len(ops.resets) != 3 || ops.resets[1] != 20030 || ops.resets[2] != 20030 {
+		t.Fatalf("reset executions %v, want the fixed id to re-execute twice", ops.resets)
+	}
+	if _, code := c.Call("limits.reset", map[string]any{}); code != CodeBadRequest {
+		t.Fatalf("no-name reset: %d", code)
+	}
+	if _, code := c.Call("limits.reset", map[string]any{"name": "nope"}); code != CodeNotFound {
+		t.Fatalf("unknown tunnel reset: %d", code)
+	}
+	if _, code := c.Call("limits.reset", map[string]any{"name": "m1", "port": -1}); code != CodeBadRequest {
+		t.Fatalf("negative port: %d", code)
 	}
 }
 

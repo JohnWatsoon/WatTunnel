@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1460,5 +1461,399 @@ func TestScepterUpdateSigPubMatchesInstallSh(t *testing.T) {
 	if body != scepterSigPub {
 		t.Fatalf("scepterSigPub drifted from install.sh SIG_PUB:\n--- engine ---\n%s\n--- install.sh ---\n%s",
 			scepterSigPub, body)
+	}
+}
+
+// ---- U0 audit coverage (2026-11-23): keyrotate, pair.rotate, mute, limits.reset ----
+
+// tokenFields decodes a wat1: token into its pipe fields (the manager's read_token layout).
+func tokenFields(t *testing.T, tok string) []string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(tok, "wat1:"))
+	if err != nil {
+		t.Fatalf("token base64: %v", err)
+	}
+	return strings.Split(string(raw), "|")
+}
+
+// KeyRotate drill (U0 audit): the new key lands in yml + key file, the rebuilt token carries the NEW key
+// and every existing field (both the .token-file path and the yml-composition fallback), the .bak set keeps
+// the old state, the unit restarts, and self/missing tunnels are refused.
+func TestFileScepterOpsKeyRotate(t *testing.T) {
+	o, fu, _ := testOps2(t)
+	spec := wat.ScepterTunnelSpec{Name: "kr", Carrier: "udp", Ports: "20030,8443:443/udp",
+		Params: map[string]string{"peer": "198.51.100.7", "ping-every": "5"},
+		Key:    "k1234567890123456789012345678901234567890"}
+	if p, code := o.Create(spec); code != wat.CodeOK {
+		t.Fatalf("create: %d %v", code, p)
+	}
+	oldTok := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "kr.token")))
+	p, code := o.KeyRotate("kr")
+	if code != wat.CodeOK {
+		t.Fatalf("keyrotate: %d %v", code, p)
+	}
+	newKey, _ := p["key"].(string)
+	if newKey == "" || newKey == spec.Key {
+		t.Fatalf("rotated key: %v", p)
+	}
+	// files carry the new key
+	y := mustReadExisting(t, filepath.Join(o.conf, "kr.yml"))
+	if !strings.Contains(y, "key: "+newKey) || strings.Contains(y, spec.Key) {
+		t.Fatalf("yml not rotated:\n%s", y)
+	}
+	if kf := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "kr.key"))); kf != newKey {
+		t.Fatalf("key file: %q", kf)
+	}
+	// the rebuilt token: same fields, new key
+	tok, _ := p["token"].(string)
+	got := tokenFields(t, tok)
+	want := tokenFields(t, oldTok)
+	if len(got) != len(want) {
+		t.Fatalf("token shape changed: %v vs %v", got, want)
+	}
+	for i := range want {
+		w := want[i]
+		if i == 2 {
+			w = newKey
+		}
+		if got[i] != w {
+			t.Fatalf("token field %d: got %q, want %q", i, got[i], w)
+		}
+	}
+	if tf := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "kr.token"))); tf != tok {
+		t.Fatalf("token file not rewritten: %q", tf)
+	}
+	// the .bak set holds the pre-rotation state
+	if bak := mustReadExisting(t, filepath.Join(o.conf, "kr.yml.bak")); !strings.Contains(bak, spec.Key) {
+		t.Fatalf("yml .bak is not the old config:\n%s", bak)
+	}
+	if bak := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "kr.key.bak"))); bak != spec.Key {
+		t.Fatalf("key .bak: %q", bak)
+	}
+	if bak := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "kr.token.bak"))); bak != oldTok {
+		t.Fatalf("token .bak: %q", bak)
+	}
+	if !fu.did("kr:restart") {
+		t.Fatal("unit was not restarted on the new key")
+	}
+	// second rotation with no token file: rebuilt from the yml fields instead (same shape)
+	os.Remove(filepath.Join(o.conf, "kr.token"))
+	p2, code := o.KeyRotate("kr")
+	if code != wat.CodeOK {
+		t.Fatalf("second rotation: %d %v", code, p2)
+	}
+	got = tokenFields(t, p2["token"].(string))
+	if len(got) != 7 || got[0] != "udp" || got[1] != "198.51.100.7" || got[2] != p2["key"] || got[6] != "20030,443" {
+		t.Fatalf("yml-composed token: %v", got)
+	}
+	// rejections: the channel's own unit, a missing tunnel
+	if p, code = o.KeyRotate("self"); code != wat.CodeBadRequest || p["self"] != "self" {
+		t.Fatalf("self rotate: %d %v", code, p)
+	}
+	if _, code = o.KeyRotate("nope"); code != wat.CodeNotFound {
+		t.Fatalf("missing tunnel: %d", code)
+	}
+}
+
+// The keyrotate rollback drill: the unit refuses to come up with the new key → CodeInternal rolled_back,
+// the old key is back in yml + key + token, and the unit was restarted on it.
+func TestFileScepterOpsKeyRotateRollback(t *testing.T) {
+	o, fu, _ := testOps2(t)
+	spec := wat.ScepterTunnelSpec{Name: "rb", Carrier: "udp", Ports: "20030",
+		Params: map[string]string{"peer": "198.51.100.7"}, Key: "k1234567890123456789012345678901234567890"}
+	if p, code := o.Create(spec); code != wat.CodeOK {
+		t.Fatalf("create: %d %v", code, p)
+	}
+	oldTok := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "rb.token")))
+	fu.dead["rb"] = true
+	p, code := o.KeyRotate("rb")
+	if code != wat.CodeInternal || p["rolled_back"] != true {
+		t.Fatalf("rollback: %d %v", code, p)
+	}
+	y := mustReadExisting(t, filepath.Join(o.conf, "rb.yml"))
+	if !strings.Contains(y, "key: "+spec.Key) {
+		t.Fatalf("rollback did not restore the old yml:\n%s", y)
+	}
+	if kf := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "rb.key"))); kf != spec.Key {
+		t.Fatalf("rollback key file: %q", kf)
+	}
+	if tf := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "rb.token"))); tf != oldTok {
+		t.Fatalf("rollback token file: %q", tf)
+	}
+	if fu.count("rb:restart") < 2 {
+		t.Fatal("rollback did not restart the unit on the restored key")
+	}
+}
+
+// PairRotate (U0 audit): the store is rewritten in the manager's pairing_store_write shape — the watp1:
+// credential line first, then the # created / # oldkey / # oldkey_expires comments; same UUID+caps, new
+// 32-byte key; the original creation time survives; a missing or broken store refuses.
+func TestFileScepterOpsPairRotate(t *testing.T) {
+	o, _, _ := testOps2(t)
+	fullCaps, _ := wat.CapFromName("full") // the cumulative mask, as ParsePairingLine issues it
+	old := &wat.PairingConfig{Ver: 1, Caps: fullCaps}
+	for i := range old.UUID {
+		old.UUID[i] = byte(i + 3)
+	}
+	for i := range old.Key {
+		old.Key[i] = byte(200 - i)
+	}
+	if err := writePairingFile(filepath.Join(o.conf, ".pairing"), old); err != nil {
+		t.Fatal(err)
+	}
+	p, code := o.PairRotate(3600)
+	if code != wat.CodeOK {
+		t.Fatalf("rotate: %d %v", code, p)
+	}
+	line, _ := p["watp1"].(string)
+	np, err := wat.ParsePairingLine(line)
+	if err != nil {
+		t.Fatalf("returned line: %v", err)
+	}
+	if np.UUIDString() != old.UUIDString() || np.Caps != old.Caps || np.Key == old.Key {
+		t.Fatalf("rotated credential: uuid %s caps %d", np.UUIDString(), np.Caps)
+	}
+	// the store contract, pinned: line 1 is the returned credential, the old key only as the comment
+	s := mustReadExisting(t, filepath.Join(o.conf, ".pairing"))
+	if !strings.HasPrefix(s, line+"\n") {
+		t.Fatalf("store line 1 is not the returned credential:\n%s", s)
+	}
+	if strings.Contains(strings.SplitN(s, "\n", 2)[1], "watp1:") {
+		t.Fatalf("a second credential line smuggled into the store:\n%s", s)
+	}
+	if !strings.Contains(s, "# oldkey="+base64.StdEncoding.EncodeToString(old.Key[:])) {
+		t.Fatalf("store lost the oldkey comment:\n%s", s)
+	}
+	created := ""
+	for _, l := range strings.Split(s, "\n") {
+		if strings.HasPrefix(l, "# created=") {
+			created = strings.TrimPrefix(l, "# created=")
+		}
+	}
+	if created == "" {
+		t.Fatalf("store has no created comment:\n%s", s)
+	}
+	// second rotation (window omitted → the 24 h default): created preserved, oldkey is the FIRST new key
+	firstKey := np.Key
+	p2, code := o.PairRotate(0)
+	if code != wat.CodeOK || p2["window_s"] != pairRotateWindowDefault {
+		t.Fatalf("default window: %d %v", code, p2)
+	}
+	np2, err := wat.ParsePairingLine(p2["watp1"].(string))
+	if err != nil || np2.UUIDString() != old.UUIDString() {
+		t.Fatalf("second rotation: %v %v", err, p2)
+	}
+	if np2.Key == firstKey {
+		t.Fatal("the second rotation minted the same key")
+	}
+	s2 := mustReadExisting(t, filepath.Join(o.conf, ".pairing"))
+	if !strings.Contains(s2, "# created="+created+"\n") {
+		t.Fatalf("the second rotation lost the original creation time:\n%s", s2)
+	}
+	if !strings.Contains(s2, "# oldkey="+base64.StdEncoding.EncodeToString(firstKey[:])) {
+		t.Fatalf("the second rotation kept the wrong oldkey:\n%s", s2)
+	}
+	// no store: nothing to rotate (a token-bootstrap pair rotates by issuing a new token)
+	o2, _, _ := testOps2(t)
+	if _, code := o2.PairRotate(0); code != wat.CodeNotFound {
+		t.Fatalf("rotate without a store: %d", code)
+	}
+	// a broken store refuses too (it may hold the only copy of the credential)
+	if err := os.WriteFile(filepath.Join(o2.conf, ".pairing"), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p, code := o2.PairRotate(0); code != wat.CodeNotFound || p["why"] == "" {
+		t.Fatalf("rotate over a broken store: %d %v", code, p)
+	}
+}
+
+// scepterTestMetrics is a stand-in for the tunnel's own metrics server: the /stats carriers list plus the
+// two POST endpoints the bash console and the ops talk to (/carrier/toggle, /quota/reset). The returned
+// closures are the observation seams.
+func scepterTestMetrics(t *testing.T, carriers []map[string]any) (addr string, toggleCalls func() int, posted func() []string) {
+	t.Helper()
+	mu := sync.Mutex{}
+	muted := map[string]bool{}
+	calls := 0
+	var posts []string
+	mux := http.NewServeMux()
+	for _, c := range carriers { // seed the live muted state from the initial carriers
+		if b, _ := c["muted"].(bool); b {
+			muted[c["name"].(string)] = true
+		}
+	}
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		out := make([]map[string]any, 0, len(carriers))
+		for _, c := range carriers {
+			out = append(out, map[string]any{"name": c["name"], "alive": c["alive"],
+				"muted": muted[c["name"].(string)]})
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"carriers": out})
+	})
+	mux.HandleFunc("/carrier/toggle", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		c := r.URL.Query().Get("carrier")
+		mu.Lock()
+		muted[c] = !muted[c]
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"path":0,"carrier":%q,"muted":%t}`+"\n", c, muted[c])
+	})
+	mux.HandleFunc("/quota/reset", func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Query().Get("port")
+		mu.Lock()
+		posts = append(posts, p)
+		mu.Unlock()
+		if p == "20999" {
+			http.Error(w, "unknown port", http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"port":%s,"reset":true}`+"\n", p)
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go http.Serve(ln, mux)
+	return ln.Addr().String(),
+		func() int { mu.Lock(); defer mu.Unlock(); return calls },
+		func() []string { mu.Lock(); defer mu.Unlock(); return append([]string{}, posts...) }
+}
+
+// scepterBondedYML writes a bonded tunnel's yml (the mute ops' input).
+func scepterBondedYML(t *testing.T, path, metrics string) {
+	t.Helper()
+	yml := "# created by scepter tunnel.create\nmode: server\nkey: k1234567890123456789012345678901234567890\n" +
+		"carrier: udp+udp\nmetrics: " + metrics + "\nports:\n  - 20030\n"
+	if err := os.WriteFile(path, []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// carrier.mute (U0 audit): the mute flips a bonded path over the tunnel's own metrics server (the bash
+// console's carrier_toggle_cmd), the aligned no-op does not toggle, non-bond tunnels and unknown paths are
+// refused, and a mute answered muted:false is a refusal — the bash interpretation.
+func TestFileScepterOpsMute(t *testing.T) {
+	o, _, _ := testOps2(t)
+	addr, toggleCalls, _ := scepterTestMetrics(t, []map[string]any{
+		{"name": "udp", "alive": true, "muted": false},
+		{"name": "udp:up", "alive": false, "muted": false},
+	})
+	scepterBondedYML(t, filepath.Join(o.conf, "b.yml"), addr)
+	// mute → flip
+	p, code := o.Mute("b", "udp", true)
+	if code != wat.CodeOK || p["muted"] != true || p["changed"] != true {
+		t.Fatalf("mute: %d %v", code, p)
+	}
+	if toggleCalls() != 1 {
+		t.Fatalf("toggle calls: %d", toggleCalls())
+	}
+	// already muted: aligned, no flip
+	if p, code = o.Mute("b", "udp", true); code != wat.CodeOK || p["changed"] != false {
+		t.Fatalf("aligned mute: %d %v", code, p)
+	}
+	if toggleCalls() != 1 {
+		t.Fatal("the aligned mute toggled anyway")
+	}
+	// unmute; the suffixed duplicate leg is a valid path too (names come from /stats, not the yml split)
+	if p, code = o.Mute("b", "udp", false); code != wat.CodeOK || p["muted"] != false {
+		t.Fatalf("unmute: %d %v", code, p)
+	}
+	if p, code = o.Mute("b", "udp:up", true); code != wat.CodeOK || p["muted"] != true {
+		t.Fatalf("suffixed leg: %d %v", code, p)
+	}
+	// unknown path, non-bond tunnel, no metrics endpoint, dead metrics server, missing tunnel
+	if p, code = o.Mute("b", "gre", true); code != wat.CodeBadRequest || p["why"] == "" {
+		t.Fatalf("unknown path: %d %v", code, p)
+	}
+	if err := os.WriteFile(filepath.Join(o.conf, "s.yml"),
+		[]byte("mode: server\nkey: k\ncarrier: udp\nmetrics: "+addr+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p, code = o.Mute("s", "udp", true); code != wat.CodeBadRequest || p["why"] == "" {
+		t.Fatalf("non-bond: %d %v", code, p)
+	}
+	scepterBondedYML(t, filepath.Join(o.conf, "nm.yml"), "")
+	if p, code = o.Mute("nm", "udp", true); code != wat.CodeBadRequest || p["why"] == "" {
+		t.Fatalf("no metrics: %d %v", code, p)
+	}
+	scepterBondedYML(t, filepath.Join(o.conf, "dead.yml"), "127.0.0.1:1")
+	if _, code = o.Mute("dead", "udp", true); code != wat.CodeInternal {
+		t.Fatalf("dead metrics: %d", code)
+	}
+	if _, code = o.Mute("nope", "udp", true); code != wat.CodeNotFound {
+		t.Fatalf("missing tunnel: %d", code)
+	}
+	// the muted:false refusal (the single-carrier engine's answer) via the seams
+	ors, _, _ := testOps2(t)
+	ors.httpGet = func(string, string) (map[string]any, error) {
+		return map[string]any{"carriers": []any{map[string]any{"name": "udp", "muted": false}}}, nil
+	}
+	ors.httpPost = func(string, string) (map[string]any, int, error) {
+		return map[string]any{"muted": false}, 200, nil // ToggleMute's single-carrier answer
+	}
+	scepterBondedYML(t, filepath.Join(ors.conf, "r.yml"), "127.0.0.1:19700")
+	if p, code := ors.Mute("r", "udp", true); code != wat.CodeBadRequest || p["why"] == "" {
+		t.Fatalf("muted:false refusal: %d %v", code, p)
+	}
+}
+
+// limits.reset (U0 audit): every quota'd port of the limits: list is reset over the tunnel's own metrics
+// server (the bash console's quota reset), a single port can be picked, a 404 (no counter) is tolerated,
+// and the refusals are typed.
+func TestFileScepterOpsResetLimits(t *testing.T) {
+	o, _, _ := testOps2(t)
+	addr, _, posted := scepterTestMetrics(t, nil)
+	yml := "# created by scepter tunnel.create\nmode: server\nkey: k\ncarrier: udp\n" +
+		"metrics: " + addr + "\nports:\n  - 20030\n  - 20031\n  - 20032\nlimits:\n" +
+		"  - 20030 rate=5MB quota=100GB\n  - 20031 rate=1MB\n  - 20032 quota=1GB period=day\n"
+	if err := os.WriteFile(filepath.Join(o.conf, "q.yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, code := o.ResetLimits("q", 0)
+	if code != wat.CodeOK {
+		t.Fatalf("reset all: %d %v", code, p)
+	}
+	if got := fmt.Sprint(p["reset"]); got != "[20030 20032]" {
+		t.Fatalf("reset ports: %s (want the two quota'd ports, in order)", got)
+	}
+	if got := posted(); len(got) != 2 || got[0] != "20030" || got[1] != "20032" {
+		t.Fatalf("posted ports: %v", got)
+	}
+	// a single port resets just that one (even a non-quota'd limit: the counter exists)
+	if p, code = o.ResetLimits("q", 20031); code != wat.CodeOK || fmt.Sprint(p["reset"]) != "[20031]" {
+		t.Fatalf("single port: %d %v", code, p)
+	}
+	// 404 = no counter for that port: tolerated, nothing reported
+	if p, code = o.ResetLimits("q", 20999); code != wat.CodeOK || len(p["reset"].([]int)) != 0 {
+		t.Fatalf("404 port: %d %v", code, p)
+	}
+	// refusals
+	if p, code = o.ResetLimits("nope", 0); code != wat.CodeNotFound {
+		t.Fatalf("missing tunnel: %d %v", code, p)
+	}
+	if err := os.WriteFile(filepath.Join(o.conf, "nm.yml"), []byte("mode: server\nkey: k\ncarrier: udp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p, code = o.ResetLimits("nm", 0); code != wat.CodeBadRequest || p["why"] == "" {
+		t.Fatalf("no metrics: %d %v", code, p)
+	}
+	// a dead metrics server with an actual quota to reset: the POST fails, the op answers internal
+	if err := os.WriteFile(filepath.Join(o.conf, "dead.yml"),
+		[]byte("mode: server\nkey: k\ncarrier: udp\nmetrics: 127.0.0.1:1\nlimits:\n  - 20030 quota=1GB\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, code = o.ResetLimits("dead", 0); code != wat.CodeInternal {
+		t.Fatalf("dead metrics: %d", code)
 	}
 }

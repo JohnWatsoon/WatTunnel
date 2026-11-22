@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	crand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -36,6 +37,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +88,12 @@ type fileScepterOps struct {
 	probeMaxS   int
 	probeDefS   int
 	orphanSweep bool // true once the constructor swept restart-orphaned probes (once per process)
+
+	// U0 audit coverage (2026-11-23) seams — nil falls back to the production loopback clients (the phase C
+	// convention). carrier.mute and limits.reset talk to the tunnel's OWN metrics server (GET /stats, POST
+	// /carrier/toggle and /quota/reset), exactly the bash console's mute/unmute and quota-reset actions.
+	httpGet  func(addr, path string) (map[string]any, error)      // metrics GET (nil = probeGetJSON)
+	httpPost func(addr, path string) (map[string]any, int, error) // metrics POST (nil = probePostJSON; the status is separate so ResetLimits can tolerate a 404)
 
 	// Phase D (update orchestration) seams — nil falls back to the production implementation, so a
 	// struct-literal test can stub one seam without rebuilding the rest (the phase C convention).
@@ -1520,6 +1528,355 @@ func (o *fileScepterOps) SetLimits(name string, items []string) (map[string]any,
 	}
 	o.logf("scepter ops: set %d limit(s) on tunnel %s (hot-reloaded)", len(clean), name)
 	return map[string]any{"name": name, "limits": len(clean)}, wat.CodeOK
+}
+
+// ---- U0 audit coverage (2026-11-23): keyrotate, pair.rotate, mute, limits.reset ----
+
+// KeyRotate: tunnel.keyrotate {name} — the tunnel PSK rotates, the edit drill over the three-file set
+// (yml + key + token): backup → mint → rewrite atomically → restart → verify, and the edit path's rollback
+// (the .bak set restored, unit restarted) when the new key does not come up. The response carries the new
+// key and the rebuilt wat1: token mirroring the manager's make_token with the NEW key and the tunnel's
+// existing fields — the cockpit needs it to update the Iran side, which still runs on the old key and is
+// otherwise cut off at the restart. Self-unit refusal applies: the channel rides this unit.
+func (o *fileScepterOps) KeyRotate(name string) (map[string]any, int) {
+	if p, code := o.refuseSelf(name); code != wat.CodeOK {
+		return p, code
+	}
+	ymlPath := o.path(name, "yml")
+	oldYml, err := os.ReadFile(ymlPath)
+	if err != nil {
+		return map[string]any{"name": name}, wat.CodeNotFound
+	}
+	cfg, err := parseConfig(string(oldYml), nil)
+	if err != nil { // a tunnel whose yml no longer parses is not rotatable blind: a human reads the .bak
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	oldKey, _ := cfg.get("key")
+	if oldKey == "" {
+		return map[string]any{"detail": "tunnel yml has no key to rotate"}, wat.CodeInternal
+	}
+	newKey := wat.ScepterNewKey()
+	if newKey == "" {
+		return map[string]any{"detail": "key generation failed"}, wat.CodeInternal
+	}
+	// rebuild the token FIRST, from the old artifacts: nothing has moved yet, and whether a token is
+	// derivable decides the response shape before any file changes
+	newTok := o.rotateToken(name, cfg, newKey)
+	newYml, err := scepterPatchYML(string(oldYml), wat.ScepterPatch{Set: map[string]string{"key": newKey}})
+	if err != nil { // a single-key patch cannot fail the ports parse; kept for the never-trust-caller shape
+		return map[string]any{"detail": err.Error()}, wat.CodeBadRequest
+	}
+	if cfg2, err := parseConfig(newYml, nil); err != nil { // round-2 F5 discipline: re-parse before writing
+		return map[string]any{"detail": err.Error()}, wat.CodeBadRequest
+	} else if k, _ := cfg2.get("key"); k != newKey {
+		return map[string]any{"detail": "the new key does not survive the yml round trip"}, wat.CodeBadRequest
+	}
+	// backup → apply → verify → rollback, the edit flow's shape over yml+key+token
+	hadToken := false
+	for _, ext := range []string{"yml", "key", "token"} {
+		if b, err := os.ReadFile(o.path(name, ext)); err == nil {
+			if ext == "token" {
+				hadToken = true // a rotate may CREATE a token file (yml-derived): the rollback must remove it
+			}
+			if err := o.writeAtomic(o.path(name, ext)+".bak", string(b)); err != nil {
+				return map[string]any{"detail": err.Error()}, wat.CodeInternal
+			}
+		}
+	}
+	if err := o.writeAtomic(ymlPath, newYml); err != nil {
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	if err := o.writeAtomic(o.path(name, "key"), newKey+"\n"); err != nil {
+		o.rotateRollback(name, oldYml, oldKey, hadToken)
+		return map[string]any{"detail": err.Error(), "rolled_back": true}, wat.CodeInternal
+	}
+	if newTok != "" {
+		if err := o.writeAtomic(o.path(name, "token"), newTok+"\n"); err != nil {
+			o.rotateRollback(name, oldYml, oldKey, hadToken)
+			return map[string]any{"detail": err.Error(), "rolled_back": true}, wat.CodeInternal
+		}
+	}
+	if err := o.unit(name, "restart"); err != nil {
+		o.rotateRollback(name, oldYml, oldKey, hadToken)
+		return map[string]any{"detail": err.Error(), "rolled_back": true}, wat.CodeInternal
+	}
+	if !o.waitActive(name, true) {
+		o.rotateRollback(name, oldYml, oldKey, hadToken)
+		return map[string]any{"detail": "unit did not come up with the new key", "rolled_back": true}, wat.CodeInternal
+	}
+	p := map[string]any{"name": name, "key": newKey}
+	if newTok != "" {
+		p["token"] = newTok // "" when nothing is derivable: the cockpit knows the peer itself
+	}
+	o.logf("scepter ops: rotated the key of tunnel %s (token %s)", name, map[bool]string{true: "rebuilt", false: "not derivable"}[newTok != ""])
+	return p, wat.CodeOK
+}
+
+// rotateToken builds the rotated tunnel's token: the .token file's existing fields with the key swapped in
+// when one exists (the manager-minted tokens carry per-leg and auto fields this side cannot rebuild), else
+// the make_token twin over the yml's own fields (scepterToken over the parsed config). "" when neither is
+// derivable (no token file, no peer in the yml).
+func (o *fileScepterOps) rotateToken(name string, cfg *fileConfig, newKey string) string {
+	if b, err := os.ReadFile(o.path(name, "token")); err == nil {
+		if tok := scepterTokenSwapKey(strings.TrimSpace(string(b)), newKey); tok != "" {
+			return tok
+		}
+	}
+	carrier, _ := cfg.get("carrier")
+	peer, _ := cfg.get("peer")
+	if carrier == "" || peer == "" {
+		return ""
+	}
+	params := map[string]string{}
+	for _, k := range []string{"peer", "path", "sni", "icmp-type", "reverse"} {
+		v, _ := cfg.get(k)
+		params[k] = v
+	}
+	spec := wat.ScepterTunnelSpec{Carrier: carrier, Key: newKey, Params: params}
+	return scepterToken(spec, cfg.Ports)
+}
+
+// scepterTokenSwapKey swaps field 3 (the PSK) of a wat1: token, preserving every other field byte-for-byte
+// (the manager's make_token/read_token layout; parseTokenKey in pairing.go is the parser reference, including
+// the unpadded-base64 tolerance). "" when the line is not a parsable token with a key field.
+func scepterTokenSwapKey(tok, newKey string) string {
+	b64 := strings.TrimPrefix(tok, "wat1:")
+	d, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		if d, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(b64, "=")); err != nil {
+			return ""
+		}
+	}
+	f := strings.Split(string(d), "|")
+	if len(f) < 3 || f[2] == "" {
+		return ""
+	}
+	f[2] = newKey
+	return "wat1:" + base64.StdEncoding.EncodeToString([]byte(strings.Join(f, "|")))
+}
+
+// rotateRollback restores the pre-rotation files (yml and key from the parsed originals, token from its
+// .bak, or removed when the rotation created one) and restarts the unit on the old key — the edit path's
+// rollback over the three-file set, best effort: the response already says rolled_back and the .baks stay
+// on disk for a human.
+func (o *fileScepterOps) rotateRollback(name string, oldYml []byte, oldKey string, hadToken bool) {
+	o.writeAtomic(o.path(name, "yml"), string(oldYml))
+	o.writeAtomic(o.path(name, "key"), oldKey+"\n")
+	if b, err := os.ReadFile(o.path(name, "token") + ".bak"); err == nil {
+		o.writeAtomic(o.path(name, "token"), string(b))
+	} else if !hadToken {
+		os.Remove(o.path(name, "token")) // the rotation minted it; the old tunnel had none
+	}
+	o.unit(name, "restart")
+}
+
+// pairRotateWindowDefault is the rotation window the store's oldkey_expires comment carries when the intent
+// omits window_s: the bash console's own default (scepter_rotate, 86400 = 24 h). The window is bookkeeping
+// only — the engine accepts only the current credential and reloads from the store within the poll
+// interval (TECHNICAL.md accepted limits) — so it is recorded, never enforced.
+const pairRotateWindowDefault = 86400
+
+// PairRotate: pair.rotate {window_s?} — the pairing credential rotates ITSELF (a credential may always
+// rotate at its own tier; caps CHANGES stay a Kharej-console action, plan D3). The store is rewritten
+// atomically in the manager's pairing_store_write shape: the watp1: line first (same UUID, same caps, new
+// 32-byte key), then the # created / # oldkey / # oldkey_expires comments — the engine's parser skips the
+// comments (readPairingFile), the manager's console reads them. The engine handler adopts the returned
+// credential (ReloadPairing), so THIS channel keeps working and the response line is for the OTHER cockpits.
+// pair.revoke stays Kharej-local BY DESIGN (plan D3): the channel must not be able to revoke itself.
+func (o *fileScepterOps) PairRotate(windowS int) (map[string]any, int) {
+	if windowS <= 0 {
+		windowS = pairRotateWindowDefault
+	}
+	ppath := filepath.Join(o.conf, ".pairing") // main wires the ops conf to filepath.Dir(pairPath): the store
+	old, err := readPairingFile(ppath)         // sits exactly there, file-backed or not
+	if err != nil {
+		// the console's rotate refuses the same way (pairing_active/pairing_check_readable): a
+		// token-bootstrap pair rotates by issuing a new token, a broken store needs a human
+		return map[string]any{"why": "no parsable .pairing store to rotate (" + err.Error() + ")"}, wat.CodeNotFound
+	}
+	kb := make([]byte, 32)
+	if _, err := crand.Read(kb); err != nil {
+		return map[string]any{"detail": "key generation failed"}, wat.CodeInternal
+	}
+	np := &wat.PairingConfig{UUID: old.UUID, Caps: old.Caps, Ver: 1}
+	copy(np.Key[:], kb)
+	line := np.Line()
+	created := strconv.FormatInt(o.now().Unix(), 10)
+	if b, err := os.ReadFile(ppath); err == nil { // a rotation keeps the original creation time (the manager)
+		for _, l := range strings.Split(string(b), "\n") {
+			if t := strings.TrimSpace(l); strings.HasPrefix(t, "# created=") {
+				created = strings.TrimPrefix(t, "# created=")
+				break
+			}
+		}
+	}
+	store := line + "\n# created=" + created + "\n" +
+		"# oldkey=" + base64.StdEncoding.EncodeToString(old.Key[:]) + "\n" +
+		"# oldkey_expires=" + strconv.FormatInt(o.now().Unix()+int64(windowS), 10) + "\n"
+	if err := o.writeAtomic(ppath, store); err != nil { // writeAtomic is tmp+rename 0600: the manager's umask 077 shape
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	o.logf("scepter ops: pairing %s rotated (window %ds); the channel adopts the new key immediately", old.UUIDString(), windowS)
+	return map[string]any{"watp1": line, "uuid": old.UUIDString(), "window_s": windowS}, wat.CodeOK
+}
+
+// ---- carrier.mute / limits.reset: the tunnel's own metrics server ----
+//
+// Both ride the LOCAL metrics endpoint, exactly the bash console (carrier_toggle_cmd / the limits menu):
+// the engine process runs where the metrics server is (loopback), so a scepter command is the same HTTP
+// call the manager makes with curl. The httpGet/httpPost seams stand in for the clients in tests.
+
+func (o *fileScepterOps) metricsGet(addr, path string) (map[string]any, error) {
+	if o.httpGet != nil {
+		return o.httpGet(addr, path)
+	}
+	return probeGetJSON("http://"+addr+path, 3*time.Second)
+}
+
+func (o *fileScepterOps) metricsPost(addr, path string) (map[string]any, int, error) {
+	if o.httpPost != nil {
+		return o.httpPost(addr, path)
+	}
+	return probePostJSON("http://"+addr+path, 3*time.Second)
+}
+
+// probePostJSON is the POST twin of probeGetJSON: one empty-body POST to a loopback metrics endpoint.
+// Non-200 answers carry the status separately (ResetLimits tolerates a 404: no counter, nothing to reset)
+// with the server's short error text in the error.
+func probePostJSON(url string, timeout time.Duration) (map[string]any, int, error) {
+	c := &http.Client{Timeout: timeout}
+	resp, err := c.Post(url, "application/json", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, resp.StatusCode, fmt.Errorf("%s: HTTP %d %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var m map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&m); err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return m, resp.StatusCode, nil
+}
+
+// tunnelCfg loads and parses one tunnel's yml: the shared front door of the metrics-backed ops (mute,
+// limits.reset) and keyrotate.
+func (o *fileScepterOps) tunnelCfg(name string) (*fileConfig, int, map[string]any) {
+	b, err := os.ReadFile(o.path(name, "yml"))
+	if err != nil {
+		return nil, wat.CodeNotFound, map[string]any{"name": name}
+	}
+	cfg, err := parseConfig(string(b), nil)
+	if err != nil {
+		return nil, wat.CodeInternal, map[string]any{"detail": err.Error()}
+	}
+	return cfg, wat.CodeOK, nil
+}
+
+// Mute: carrier.mute {name, carrier, mute} — bonded-path mute/unmute over POST /carrier/toggle. The engine
+// endpoint TOGGLES, so the current state is read from /stats first and a no-op request is answered without
+// a flip (the bash console's aligned check). A mute answered muted:false is a REFUSAL, not a success (the
+// bash interpretation, 2026-11-20 review F2): the engine's ToggleMute answers it on a single-carrier server
+// too. Deliberately NO self-unit refusal: muting a path of the channel's own unit re-routes the bond (the
+// session survives; the bash console has the same power over the same tunnel). Non-bond tunnels are
+// refused: muting a single-carrier tunnel would cut it with no way back from here.
+func (o *fileScepterOps) Mute(name, carrier string, mute bool) (map[string]any, int) {
+	if carrier == "" {
+		return nil, wat.CodeBadRequest
+	}
+	cfg, code, p := o.tunnelCfg(name)
+	if code != wat.CodeOK {
+		return p, code
+	}
+	cr, _ := cfg.get("carrier")
+	if !strings.Contains(cr, "+") {
+		return map[string]any{"name": name, "why": "muting needs a bonded tunnel (carrier with + legs)"}, wat.CodeBadRequest
+	}
+	metrics, _ := cfg.get("metrics")
+	if metrics == "" {
+		return map[string]any{"name": name, "why": "tunnel has no metrics endpoint in its yml"}, wat.CodeBadRequest
+	}
+	st, err := o.metricsGet(metrics, "/stats")
+	if err != nil {
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	cur, found := statsCarrierMuted(st, carrier)
+	if !found {
+		return map[string]any{"carrier": carrier, "why": "no such path on this tunnel"}, wat.CodeBadRequest
+	}
+	if cur == mute { // already in the wanted state: no flip (the endpoint toggles)
+		return map[string]any{"name": name, "carrier": carrier, "muted": mute, "changed": false}, wat.CodeOK
+	}
+	res, _, err := o.metricsPost(metrics, "/carrier/toggle?carrier="+url.QueryEscape(carrier))
+	if err != nil {
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	got, _ := res["muted"].(bool)
+	if got != mute {
+		return map[string]any{"carrier": carrier, "muted": got,
+			"why": "the engine refused (muted:false): muting needs a bonded tunnel"}, wat.CodeBadRequest
+	}
+	o.logf("scepter ops: path %s of tunnel %s muted=%t", carrier, name, got)
+	return map[string]any{"name": name, "carrier": carrier, "muted": got, "changed": true}, wat.CodeOK
+}
+
+// statsCarrierMuted finds one carrier leg in a /stats document's "carriers" list and returns its muted
+// state (the names are exactly what /carrier/toggle matches: the leg names as /stats lists them,
+// suffixed for duplicate legs).
+func statsCarrierMuted(st map[string]any, carrier string) (muted, found bool) {
+	cs, ok := st["carriers"].([]any)
+	if !ok {
+		return false, false
+	}
+	for _, c := range cs {
+		m, ok := c.(map[string]any)
+		if !ok || m["name"] != carrier {
+			continue
+		}
+		b, _ := m["muted"].(bool)
+		return b, true
+	}
+	return false, false
+}
+
+// ResetLimits: limits.reset {name, port?} — quota reset over POST /quota/reset?port=N
+// (quotaResetHandler, loopback + POST only), the bash console's "reset a port quota". port == 0 resets
+// every quota'd port of the tunnel's limits: list. A port the engine has no counter for answers 404:
+// nothing to reset, not a failure — the quota that would be cleared does not exist.
+func (o *fileScepterOps) ResetLimits(name string, port int) (map[string]any, int) {
+	cfg, code, p := o.tunnelCfg(name)
+	if code != wat.CodeOK {
+		return p, code
+	}
+	metrics, _ := cfg.get("metrics")
+	if metrics == "" {
+		return map[string]any{"name": name, "why": "tunnel has no metrics endpoint in its yml"}, wat.CodeBadRequest
+	}
+	var ports []int
+	if port > 0 {
+		ports = []int{port}
+	} else {
+		for _, l := range cfg.Limits {
+			if l.Quota > 0 {
+				ports = append(ports, l.Port)
+			}
+		}
+		sort.Ints(ports) // deterministic response order
+	}
+	reset := []int{}
+	for _, pt := range ports {
+		if _, status, err := o.metricsPost(metrics, fmt.Sprintf("/quota/reset?port=%d", pt)); err != nil {
+			if status == http.StatusNotFound {
+				continue // no counter for that port: its quota is already "reset" (nothing used)
+			}
+			return map[string]any{"detail": err.Error()}, wat.CodeInternal
+		}
+		reset = append(reset, pt)
+	}
+	o.logf("scepter ops: reset quota on tunnel %s for port(s) %v", name, reset)
+	return map[string]any{"name": name, "reset": reset}, wat.CodeOK
 }
 
 // ---- -scepter-call: the one-shot client action ----

@@ -418,6 +418,15 @@ var scepterMutations = map[string]bool{
 	"test.open":      true,
 	"test.close":     true,
 	"update.run":     true,
+
+	// U0 audit coverage (2026-11-23): a PSK rotation rewrites the tunnel files, a credential rotation
+	// rewrites the .pairing store, a mute flips a bonded path's manual state — all change Kharej, so all
+	// replay at-most-once. limits.reset is deliberately NOT here: a quota reset is idempotent bookkeeping
+	// (re-running it clears the same counters), and a replayed reset would pin stale quota state —
+	// re-execution is the recovery, like the reads and the failed writes.
+	"tunnel.keyrotate": true,
+	"pair.rotate":      true,
+	"carrier.mute":     true,
 }
 
 // scepterJournalKeep bounds the in-memory replay set (H1/F4, 2026-11-22): insertion-ordered ids, the oldest
@@ -742,7 +751,11 @@ type ScepterState struct {
 	autoRate  scepterRate
 	// updateRate bounds update.run (phase D): one at once, then one per 5 min — an update is the most
 	// structural op the cockpit can ask for, and a retry loop must never machine-gun restarts of the host.
-	updateRate  scepterRate
+	updateRate scepterRate
+	// rotateRate bounds pair.rotate (U0 audit, 2026-11-23): update-rate-like, one per 5 min — a credential
+	// may rotate itself, but a rotation loop would churn the .pairing store and strand every OTHER cockpit
+	// that still holds the previous line.
+	rotateRate  scepterRate
 	updateWatch atomic.Bool // the status watcher is spawned once per state (SetOps)
 	// watchStop/watchDone shut the tunnel liveness watcher down (Stop); watchSnap is its last per-tunnel
 	// snapshot: the last-observed direction, the direction the SCEPTER path last announced (watchAnnounced,
@@ -784,6 +797,7 @@ func NewScepterState(pair *PairingConfig, src ScepterSource, journalPath string)
 		probeRate:  scepterRate{rate: 1.0 / 30, burst: 3},
 		autoRate:   scepterRate{rate: 1.0 / 60, burst: 2},
 		updateRate: scepterRate{rate: 1.0 / 300, burst: 1},
+		rotateRate: scepterRate{rate: 1.0 / 300, burst: 1},
 		evFire:     map[string]time.Time{},
 		evWindow:   scepterEvWindow,
 		nowf:       time.Now,
@@ -1122,14 +1136,24 @@ var scepterCmds = map[string]scepterCmd{
 	"events.since":  {minCap: CapManage, fn: cmdEventsSince},
 	"history":       {minCap: CapManage, fn: cmdHistory},
 
-	"tunnel.create":  {minCap: CapCreate, fn: cmdTunnelCreate, needsOps: true},
-	"tunnel.edit":    {minCap: CapManage, fn: cmdTunnelEdit, needsOps: true},
-	"tunnel.delete":  {minCap: CapManage, fn: cmdTunnelDelete, needsOps: true},
-	"tunnel.start":   {minCap: CapManage, fn: cmdTunnelUnit("start"), needsOps: true},
-	"tunnel.stop":    {minCap: CapManage, fn: cmdTunnelUnit("stop"), needsOps: true},
-	"tunnel.restart": {minCap: CapManage, fn: cmdTunnelUnit("restart"), needsOps: true},
-	"limits.set":     {minCap: CapManage, fn: cmdLimitsSet, needsOps: true},
-	"preset.apply":   {minCap: CapManage, fn: cmdPresetApply, needsOps: true},
+	"tunnel.create":    {minCap: CapCreate, fn: cmdTunnelCreate, needsOps: true},
+	"tunnel.edit":      {minCap: CapManage, fn: cmdTunnelEdit, needsOps: true},
+	"tunnel.delete":    {minCap: CapManage, fn: cmdTunnelDelete, needsOps: true},
+	"tunnel.start":     {minCap: CapManage, fn: cmdTunnelUnit("start"), needsOps: true},
+	"tunnel.stop":      {minCap: CapManage, fn: cmdTunnelUnit("stop"), needsOps: true},
+	"tunnel.restart":   {minCap: CapManage, fn: cmdTunnelUnit("restart"), needsOps: true},
+	"limits.set":       {minCap: CapManage, fn: cmdLimitsSet, needsOps: true},
+	"limits.reset":     {minCap: CapManage, fn: cmdLimitsReset, needsOps: true},
+	"preset.list":      {minCap: CapManage, fn: cmdPresetList}, // the catalog is engine-owned: no ops, no phase-B server needed
+	"preset.apply":     {minCap: CapManage, fn: cmdPresetApply, needsOps: true},
+	"tunnel.keyrotate": {minCap: CapManage, fn: cmdTunnelKeyRotate, needsOps: true},
+
+	// U0 audit coverage (2026-11-23): the credential rotates itself at the same tier (a credential may
+	// always rotate; caps CHANGES stay a Kharej-console action, plan D3), and the bonded-path / quota
+	// runtime ops ride the tunnel's own metrics server. New commands are registry entries only — an old
+	// peer never opens sid 0 toward them (the mixed-version rule), so the wire contract is unchanged.
+	"pair.rotate":  {minCap: CapManage, fn: cmdPairRotate, needsOps: true},
+	"carrier.mute": {minCap: CapManage, fn: cmdCarrierMute, needsOps: true},
 
 	// Phase C (remote carrier work): probe listeners, the link-verified carrier change and the fleet auto-test.
 	"test.open":      {minCap: CapManage, fn: cmdTestOpen, needsOps: true},
@@ -1566,6 +1590,20 @@ type ScepterOps interface {
 	Doctor() (map[string]any, int)
 	BackupExport() (map[string]any, int)
 	AuditTail(n int) (map[string]any, int)
+
+	// U0 audit coverage (2026-11-23). KeyRotate swaps a tunnel's PSK (the edit drill: backup → mint →
+	// rewrite yml+key+token → restart → verify, rollback on failure) and answers the rebuilt wat1: token
+	// (the cockpit needs it to update the Iran side, which still runs on the old key). PairRotate rewrites
+	// the .pairing store (same UUID+caps, new 32-byte key, the manager's oldkey/window comment contract)
+	// and answers the new watp1: line — the state adopts it via ReloadPairing so the live channel keeps
+	// serving. Mute flips a bonded path's manual mute over the tunnel's local metrics server (the bash
+	// console's POST /carrier/toggle); ResetLimits resets quota counters the same way (POST /quota/reset).
+	// pair.revoke stays Kharej-local BY DESIGN (plan D3's trust boundary): the channel must not be able to
+	// revoke itself — do not add it.
+	KeyRotate(name string) (map[string]any, int)
+	PairRotate(windowS int) (map[string]any, int)
+	Mute(name, carrier string, mute bool) (map[string]any, int)
+	ResetLimits(name string, port int) (map[string]any, int)
 }
 
 // ValidScepterName is the tunnel-name rule: a name becomes the systemd instance (wattun@NAME) and the config
@@ -1606,12 +1644,55 @@ func ScepterNewKey() string {
 	return string(b)
 }
 
-// scepterPresets is the preset.apply catalog (plan B.1). Values are long-shipped config keys (flag names) so
-// a preset cannot name a knob an existing unit would fail to parse; a preset goes through the edit path, so
-// a unit that still refuses to come up rolls back like any edit.
-var scepterPresets = map[string]ScepterPatch{
-	"stealth": {Set: map[string]string{"shape-data": "8", "noise": "med"}}, // pad stream packets (≤8 % extra bytes) and send idle filler while quiet (3.3.0 knobs)
-	"plain":   {Drop: []string{"shape-data", "noise"}},                     // back to the unshaped defaults
+// scepterPreset is one catalog entry: the pure key-patch preset.apply pushes through the edit path, and the
+// one-line description preset.list serves (the panel and the TUI read the same list).
+type scepterPreset struct {
+	patch ScepterPatch
+	desc  string
+}
+
+// scepterPresets is the preset.apply catalog (plan B.1): the bash manager's anti-censor presets
+// (wattun-manager apply_preset, mirrored 2026-11-23 — TestScepterPresetCatalog pins the mirror) as pure
+// key-patches, plus the shaping pair. Values are long-shipped config keys (flag names) so a preset cannot
+// name a knob an existing unit would fail to parse; a preset goes through the edit path, so a unit that
+// still refuses to come up rolls back like any edit. The bash semantics per key are "set when non-empty,
+// unset when empty" — a static patch expresses the unset half as an unconditional drop, which is a no-op
+// when the key is absent. Governor is the one asymmetry: the bash touches it only for icmp carriers (and
+// always unsets it for off), so "off" drops it (inert on non-icmp carriers) while cf/rst-fast leave it
+// alone, exactly like the bash. rst-fast sets sessions/conns like the bash; the bash skips them on a
+// REVERSE tunnel (sessions > 1 is refused there), a static patch cannot — such a unit refuses its restart
+// and the edit path rolls it back, the same protection any bad preset gets.
+var scepterPresets = map[string]scepterPreset{
+	"stealth": {patch: ScepterPatch{Set: map[string]string{"shape-data": "8", "noise": "med"}},
+		desc: "pad stream packets (<=8% extra bytes) and send idle filler while quiet (shaping)"},
+	"plain": {patch: ScepterPatch{Drop: []string{"shape-data", "noise"}},
+		desc: "remove traffic shaping (back to the unshaped defaults)"},
+	"cf": {patch: ScepterPatch{
+		Set:  map[string]string{"fake-sni": "www.cloudflare.com", "fake-mode": "rst"},
+		Drop: []string{"fake-ttl", "pool-rotate", "pool-rotate-bytes", "ech"}},
+		desc: "Cloudflare edge: fake hello + bad-checksum RST, no churn (field-tested)"},
+	"rst-fast": {patch: ScepterPatch{
+		Set:  map[string]string{"fake-sni": "www.cloudflare.com", "fake-mode": "rst", "pool-rotate": "30m", "sessions": "4", "conns": "4"},
+		Drop: []string{"fake-ttl", "pool-rotate-bytes", "ech"}},
+		desc: "fastest direct: bad-checksum RST, 4 sessions of 4 conns, 30m pool rotation"},
+	"mci": {patch: ScepterPatch{
+		Set:  map[string]string{"fake-sni": "mci.ir", "fake-mode": "rst", "pool-rotate": "30m", "pool-rotate-bytes": "500MB", "ech": "ladder", "governor": "true"},
+		Drop: []string{"fake-ttl"}},
+		desc: "MCI (Hamrah Aval) whitelist: RST, ECH ladder, governor, 30m/500MB pool rotation"},
+	"irancell": {patch: ScepterPatch{
+		Set:  map[string]string{"fake-sni": "irancell.ir", "fake-mode": "seq", "pool-rotate": "20m", "pool-rotate-bytes": "300MB", "ech": "ladder", "governor": "true"},
+		Drop: []string{"fake-ttl"}},
+		desc: "Irancell/TCI whitelist: seq, ECH ladder, governor, 20m/300MB pool rotation"},
+	"blackout": {patch: ScepterPatch{
+		Set:  map[string]string{"fake-sni": "mci.ir", "fake-mode": "rst", "pool-rotate": "90s", "pool-rotate-bytes": "100MB", "ech": "ladder", "governor": "true"},
+		Drop: []string{"fake-ttl"}},
+		desc: "emergency blackout: aggressive RST, 90s pool rotation, ECH ladder, governor"},
+	"low-churn": {patch: ScepterPatch{
+		Set:  map[string]string{"fake-sni": "mci.ir", "fake-mode": "seq", "pool-rotate": "4h", "pool-rotate-bytes": "4GB", "ech": "auto", "governor": "true"},
+		Drop: []string{"fake-ttl"}},
+		desc: "conservative/low-churn: seq, 4h rotation for stable links under mild DPI"},
+	"off": {patch: ScepterPatch{Drop: []string{"fake-sni", "fake-mode", "fake-ttl", "pool-rotate", "pool-rotate-bytes", "ech", "governor"}},
+		desc: "clear every anti-censorship setting (plain dialing)"},
 }
 
 // cmdTunnelCreate: tunnel.create {name?, carrier, ports, params…, base_seq, ttl_s} (plan B.1).
@@ -1747,6 +1828,22 @@ func cmdLimitsSet(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
 	return p, code
 }
 
+// cmdPresetList: preset.list — the engine-owned catalog (name + one-line description). No ops: the catalog
+// is static engine data, so a phase-A server answers it too, and every client (TUI, panel) reads the same
+// list preset.apply accepts.
+func cmdPresetList(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	names := make([]string, 0, len(scepterPresets))
+	for n := range scepterPresets {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]map[string]any, 0, len(names))
+	for _, n := range names {
+		out = append(out, map[string]any{"name": n, "desc": scepterPresets[n].desc})
+	}
+	return map[string]any{"presets": out}, CodeOK
+}
+
 // cmdPresetApply: preset.apply {name, preset} — a named patch from the engine-owned catalog through the edit
 // path, so every client (TUI, panel) sees the same preset names and a preset rolls back like any edit.
 func cmdPresetApply(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
@@ -1758,7 +1855,7 @@ func cmdPresetApply(ss *ScepterState, req ScepterRequest) (map[string]any, int) 
 	if !ok || preset == "" {
 		return nil, CodeBadRequest
 	}
-	patch, known := scepterPresets[preset]
+	ent, known := scepterPresets[preset]
 	if !known {
 		names := make([]string, 0, len(scepterPresets))
 		for n := range scepterPresets {
@@ -1768,12 +1865,103 @@ func cmdPresetApply(ss *ScepterState, req ScepterRequest) (map[string]any, int) 
 		return map[string]any{"presets": strings.Join(names, ",")}, CodeBadRequest
 	}
 	pre := ss.StateSeq()
-	p, code := ss.ops.Edit(name, patch)
+	p, code := ss.ops.Edit(name, ent.patch)
 	if code == CodeOK {
 		ss.AddEvent(EvTunnelEdited, map[string]any{"name": name, "preset": preset})
 		p = ss.writeTail(p, req, pre)
 	}
 	return p, code
+}
+
+// cmdTunnelKeyRotate: tunnel.keyrotate {name, base_seq?, ttl_s?} — the tunnel PSK rotates (U0 audit,
+// 2026-11-23). The ops run the edit-shaped drill (backup → mint → rewrite yml+key+token atomically →
+// restart → verify, rollback on failure) and answer the rebuilt wat1: token mirroring the manager's
+// make_token with the NEW key and the tunnel's existing fields — the cockpit needs it to update the Iran
+// side, which still runs on the old key. Event tunnel_edited {why:"keyrotate"}.
+func cmdTunnelKeyRotate(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok || name == "" {
+		return nil, CodeBadRequest
+	}
+	pre := ss.StateSeq() // see cmdTunnelCreate: base_seq is judged against the pre-apply seq
+	p, code := ss.ops.KeyRotate(name)
+	if code == CodeOK {
+		ss.AddEvent(EvTunnelEdited, map[string]any{"name": name, "why": "keyrotate"})
+		p = ss.writeTail(p, req, pre)
+	}
+	return p, code
+}
+
+// ---- U0 audit coverage (2026-11-23): the credential, the bond paths, the quota counters ----
+
+// cmdPairRotate: pair.rotate {window_s?} — the pairing credential rotates ITSELF (a credential may always
+// rotate at its own tier; caps CHANGES stay a Kharej-console action, plan D3). The ops rewrite the .pairing
+// store (new key, same UUID+caps, the manager's oldkey/window comment contract) and answer the new watp1:
+// line for the OTHER cockpits; this handler adopts the new credential here (ReloadPairing semantics) so
+// future commands on the live channel are checked against it — the store poller would only catch up within
+// its interval. The current channel keeps working (the stream is not reset; sessions key off the tunnel
+// PSK, which is untouched) and the caller re-attaches its own stored line on its next start. The
+// pair_rotated event fires from ReloadPairing; the store poller's later reload of the same credential is a
+// second, harmless ring entry. Rate bucket: update-rate-like, one per 5 min (rotateRate).
+func cmdPairRotate(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	window, ok := argInt(req.Args, "window_s")
+	if !ok || window < 0 {
+		return nil, CodeBadRequest
+	}
+	if !ss.rotateRate.allow(ss.nowf()) {
+		return map[string]any{"resource": "pair.rotate"}, CodeRateLimited
+	}
+	p, code := ss.ops.PairRotate(window)
+	if code == CodeOK {
+		line, _ := p["watp1"].(string)
+		np, perr := ParsePairingLine(line)
+		if perr != nil || np == nil {
+			// the ops wrote a store this engine cannot parse: answer, do not adopt (the next store poll
+			// would disarm the channel — the ops bug is the caller's to fix, never a silent half-state)
+			return map[string]any{"detail": "the ops returned an unparsable credential: " + perr.Error()}, CodeInternal
+		}
+		ss.ReloadPairing(np) // adopts for future commands; fires EvPairRotated; the live stream survives
+	}
+	return p, code
+}
+
+// cmdCarrierMute: carrier.mute {name, carrier, mute} — bonded-path mute/unmute. The bash console does it
+// with a local POST to the tunnel's own metrics server (wattun-manager carrier_toggle_cmd); ops run on
+// Kharej where that server is loopback-local, so the ops make the same call. `mute` is optional and
+// strictly boolean (absent = false = unmute, the strictly-typed convention's zero value).
+func cmdCarrierMute(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok || name == "" {
+		return nil, CodeBadRequest
+	}
+	carrier, ok := argString(req.Args, "carrier")
+	if !ok || carrier == "" {
+		return nil, CodeBadRequest
+	}
+	mute := false
+	if v, present := req.Args["mute"]; present {
+		b, isBool := v.(bool)
+		if !isBool {
+			return nil, CodeBadRequest
+		}
+		mute = b
+	}
+	return ss.ops.Mute(name, carrier, mute)
+}
+
+// cmdLimitsReset: limits.reset {name, port?} — quota reset over the tunnel's local metrics server, the bash
+// console's "reset a port quota" (POST /quota/reset?port=N). port absent or 0 resets every quota'd port of
+// the tunnel's limits: list. Not journaled (scepterMutations): a reset re-executes safely.
+func cmdLimitsReset(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok || name == "" {
+		return nil, CodeBadRequest
+	}
+	port, ok := argInt(req.Args, "port")
+	if !ok || port < 0 {
+		return nil, CodeBadRequest
+	}
+	return ss.ops.ResetLimits(name, port)
 }
 
 // ---- remote carrier work (phase C) ----
