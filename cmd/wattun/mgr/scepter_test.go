@@ -951,14 +951,20 @@ func TestScepterTunnelPageBaseSeq(t *testing.T) {
 	okRes := ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "web"}}
 	for _, c := range []struct {
 		name, keys, cmd string
+		docs            int // state.get answers: page entry + menu refetch + refresh
 	}{
-		{"ports", "p443\nx0", "tunnel.edit"},
-		{"config key", "ksmax-mbps\n5\nx0", "tunnel.edit"},
-		{"preset", "zsx0", "preset.apply"},
+		{"ports", "p443\nx0", "tunnel.edit", 2},
+		{"config key set", "km5\n0", "tunnel.edit", 3},
+		{"config key drop", "ku-\n0", "tunnel.edit", 3},
+		{"preset fallback", "zsx0", "preset.apply", 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			docs := make([]scriptAns, c.docs)
+			for i := range docs {
+				docs[i] = scriptAns{r: doc}
+			}
 			cl := &scriptClient{byCmd: map[string][]scriptAns{
-				"state.get": {{r: doc}, {r: doc}}, // page entry + the post-action refresh
+				"state.get": docs, // page entry + (the key menu's seq refetch) + the post-action refresh
 				c.cmd:       {{r: okRes}},
 			}}
 			defer feed(c.keys)() // page key, the action's prompts, a pause key, then leave
@@ -972,6 +978,29 @@ func TestScepterTunnelPageBaseSeq(t *testing.T) {
 			}
 		})
 	}
+	// the key menu's set and drop shapes, and the post-edit seq refetch that
+	// keeps the NEXT edit off the stale path
+	t.Run("config key shapes", func(t *testing.T) {
+		docs := []scriptAns{{r: doc}, {r: doc}, {r: doc}, {r: doc}}
+		cl := &scriptClient{byCmd: map[string][]scriptAns{
+			"state.get":   docs,
+			"tunnel.edit": {{r: okRes}, {r: okRes}},
+		}}
+		defer feed("km5\nku-\n00")() // set max-mbps 5, then drop mtu, then leave twice
+		out := capture(t, func() { scepterTunnelPage("ir", cl, CapTunnel|CapCreate|CapManage, "web") })
+		sent := cl.cmds["tunnel.edit"]
+		if len(sent) != 2 {
+			t.Fatalf("edits = %d, want 2:\n%s", len(sent), out)
+		}
+		set, _ := sent[0]["set"].(map[string]string)
+		if set["max-mbps"] != "5" {
+			t.Errorf("first edit set = %v, want max-mbps 5", sent[0]["set"])
+		}
+		drop, _ := sent[1]["drop"].([]string)
+		if len(drop) != 1 || drop[0] != "mtu" {
+			t.Errorf("second edit drop = %v, want [mtu]", sent[1]["drop"])
+		}
+	})
 }
 
 // Token-bootstrap pairing (owner directive 2026-11-22): field 10 of the tunnel's
@@ -1113,5 +1142,289 @@ func TestScepterACVerdict(t *testing.T) {
 		if probes != before {
 			t.Errorf("%s: %d probes ran, want none\n%s", tc.name, probes-before, out)
 		}
+	}
+}
+
+// ---- wave-2 cockpit coverage (preset catalog, per-key menu, keyrotate,
+// mute, quota reset, the local page's pair status and Kharej view) ----
+
+func TestScepterParsePresets(t *testing.T) {
+	rows := scepterParsePresets(map[string]any{"presets": []any{
+		map[string]any{"name": "stealth", "desc": "pad and filler"},
+		map[string]any{"name": "plain"},   // desc optional
+		map[string]any{"desc": "no name"}, // skipped
+		"junk",                            // skipped
+	}})
+	if len(rows) != 2 || rows[0].Name != "stealth" || rows[0].Desc != "pad and filler" || rows[1].Desc != "" {
+		t.Errorf("rows = %+v", rows)
+	}
+	// an answer without a presets list is not trusted (the caller falls back)
+	if scepterParsePresets(nil) != nil || scepterParsePresets(map[string]any{"presets": "stealth,plain"}) != nil {
+		t.Error("a non-list presets field must parse as nil")
+	}
+}
+
+func TestScepterRemotePresetCatalog(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"preset.list": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+			"presets": []any{
+				map[string]any{"name": "stealth", "desc": "pad and filler"},
+				map[string]any{"name": "plain", "desc": "remove both"},
+				map[string]any{"name": "fortress", "desc": "the blackout bond"},
+			}}}}},
+		"preset.apply": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "web"}}}},
+	}}
+	defer feed("\ry")() // enter picks the first catalog row, y confirms
+	out := capture(t, func() { scepterRemotePreset(cl, "web", 6) })
+	for _, want := range []string{"stealth", "plain", "fortress", "the blackout bond"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("catalog row %q missing:\n%s", want, out)
+		}
+	}
+	sent := cl.cmds["preset.apply"]
+	if len(sent) != 1 {
+		t.Fatalf("preset.apply sends = %d, want 1:\n%s", len(sent), out)
+	}
+	if sent[0]["preset"] != "stealth" || sent[0]["name"] != "web" || sent[0]["base_seq"] != uint64(6) {
+		t.Errorf("args = %v", sent[0])
+	}
+}
+
+// an old peer answers unknown_cmd for preset.list: the built-in stealth/plain
+// menu takes over (and its preset still rides the same intent shape).
+func TestScepterRemotePresetFallbackUnknownCmd(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"preset.list":  {{r: ScepterResult{Code: scepterCodeUnknownCmd}}},
+		"preset.apply": {{r: ScepterResult{Code: scepterCodeOK}}},
+	}}
+	defer feed("p")() // the plain row of the built-in pair
+	out := capture(t, func() { scepterRemotePreset(cl, "web", 6) })
+	if !strings.Contains(out, "preset.list") {
+		t.Errorf("the old-peer hint is missing:\n%s", out)
+	}
+	sent := cl.cmds["preset.apply"]
+	if len(sent) != 1 || sent[0]["preset"] != "plain" {
+		t.Errorf("fallback args = %v", sent)
+	}
+}
+
+// TestScepterRemoteKeyrotateTwin pins the twin rewrite: the rotated token's
+// key lands in the local twin's .key (what it dials with) and .token, and the
+// old field-10 pair capability survives (F7) even though the rotated token
+// itself carries none.
+func TestScepterRemoteKeyrotateTwin(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.key"), []byte("old-key\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.token"),
+		[]byte(MakeToken("udp", "198.51.100.7:4443", "old-key", "", "", "", "", "", "", "pair=manage")+"\n"), 0o600)
+	newTok := MakeToken("udp", "198.51.100.7:4443", "brand-new-key-42", "", "", "", "", "", "")
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.keyrotate": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "ir", "token": newTok}}}},
+	}}
+	defer feed("yn")() // y rotates, n skips the twin restart
+	out := capture(t, func() { scepterRemoteKeyrotate("ir", cl, "ir", 6) })
+	sent := cl.cmds["tunnel.keyrotate"]
+	if len(sent) != 1 || sent[0]["name"] != "ir" {
+		t.Fatalf("keyrotate args = %v:\n%s", sent, out)
+	}
+	if key := mustRead(filepath.Join(dir, "ir.key")); !strings.Contains(key, "brand-new-key-42") {
+		t.Errorf("the twin's key file was not rewritten: %q", key)
+	}
+	// the token file carries the rotated token, reminted with the old pair
+	// capability (the token itself is opaque base64 — compare whole)
+	want := MakeToken("udp", "198.51.100.7:4443", "brand-new-key-42", "", "", "", "", "", "", "pair=manage") + "\n"
+	if tok := mustRead(filepath.Join(dir, "ir.token")); tok != want {
+		t.Errorf("the twin's token file = %q, want %q", tok, want)
+	}
+	if scepterRotSuffix("ir") == "" {
+		t.Error("the rotation marker is missing from the pair status")
+	}
+	if !strings.Contains(out, "now to dial with the new key") {
+		t.Errorf("the restart offer is missing:\n%s", out)
+	}
+}
+
+// A non-twin remote tunnel: the token is shown and may be saved to a file.
+func TestScepterRemoteKeyrotateSavePath(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n"), 0o600)
+	newTok := MakeToken("udp", "198.51.100.7:4443", "brand-new-key-42", "", "", "", "", "", "")
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.keyrotate": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "web", "token": newTok}}}},
+	}}
+	save := filepath.Join(dir, "saved-token.txt")
+	defer feed("y" + save + "\n")() // y rotates, then the save path line
+	out := capture(t, func() { scepterRemoteKeyrotate("ir", cl, "web", 6) })
+	if len(cl.cmds["tunnel.keyrotate"]) != 1 {
+		t.Fatalf("keyrotate not sent:\n%s", out)
+	}
+	if !strings.Contains(out, "New token for this tunnel's Iran side") {
+		t.Errorf("the token is not shown:\n%s", out)
+	}
+	if got := mustRead(save); got != newTok+"\n" {
+		t.Errorf("the saved token = %q, want the rotated token", got)
+	}
+}
+
+func TestScepterRemoteMute(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	// the gate: a lone carrier has no leg to mute, nothing is sent
+	cl := &scriptClient{}
+	out := capture(t, func() { scepterRemoteMute(cl, "web", scepterTunRow{Carrier: "udp"}) })
+	if len(cl.cmds["carrier.mute"]) != 0 {
+		t.Errorf("a lone carrier must not send carrier.mute:\n%s", out)
+	}
+	// a bond: pick the first leg, mute it — {name, carrier, mute} on the wire
+	cl = &scriptClient{byCmd: map[string][]scriptAns{
+		"carrier.mute": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+			"name": "web", "carrier": "udp", "muted": true}}}},
+	}}
+	defer feed("\rm")() // enter picks leg 1, m mutes
+	out = capture(t, func() { scepterRemoteMute(cl, "web", scepterTunRow{Carrier: "udp+tcp"}) })
+	sent := cl.cmds["carrier.mute"]
+	if len(sent) != 1 {
+		t.Fatalf("carrier.mute sends = %d, want 1:\n%s", len(sent), out)
+	}
+	if sent[0]["name"] != "web" || sent[0]["carrier"] != "udp" || sent[0]["mute"] != true {
+		t.Errorf("args = %v", sent[0])
+	}
+	if !strings.Contains(out, "muted on Kharej") {
+		t.Errorf("outcome missing:\n%s", out)
+	}
+}
+
+func TestScepterRemoteLimitsReset(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	cl := &scriptClient{}
+	defer feed("n")() // the confirm defaults to no: n cancels, nothing sent
+	capture(t, func() { scepterRemoteLimitsReset(cl, "web") })
+	if len(cl.cmds["limits.reset"]) != 0 {
+		t.Error("a declined reset must not send")
+	}
+	cl = &scriptClient{byCmd: map[string][]scriptAns{
+		"limits.reset": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "web"}}}},
+	}}
+	defer feed("y")()
+	out := capture(t, func() { scepterRemoteLimitsReset(cl, "web") })
+	sent := cl.cmds["limits.reset"]
+	if len(sent) != 1 || sent[0]["name"] != "web" {
+		t.Errorf("args = %v:\n%s", sent, out)
+	}
+	if !strings.Contains(out, "Quota counters reset") {
+		t.Errorf("outcome missing:\n%s", out)
+	}
+}
+
+// The local tunnel page's pair status: hello-derived, cached (one fetch per
+// TTL, never per redraw), empty for an unpaired tunnel.
+func TestScepterPairStatusCache(t *testing.T) {
+	InitColor(false, 8)
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	calls := 0
+	oldFetch, oldTTL, oldBy := scepterStatusFetch, scepterStatusTTL, scepterStatusBy
+	scepterStatusFetch = func(string) string { calls++; return "Kharej 3.5.0 · manage · seq 4" }
+	scepterStatusTTL = time.Hour
+	scepterStatusBy = map[string]scepterStatusEntry{}
+	defer func() { scepterStatusFetch, scepterStatusTTL, scepterStatusBy = oldFetch, oldTTL, oldBy }()
+	if s := ScepterPairStatus("nope"); s != "" {
+		t.Errorf("unpaired status = %q, want empty", s)
+	}
+	s1 := ScepterPairStatus("ir")
+	if calls != 1 || !strings.Contains(s1, "3.5.0") || !strings.Contains(s1, "seq 4") {
+		t.Errorf("first status = %q (calls %d)", s1, calls)
+	}
+	ScepterPairStatus("ir")
+	if calls != 1 {
+		t.Errorf("the cached status refetched (calls %d)", calls)
+	}
+	scepterStatusTTL = 0 // expired: the next call fetches again
+	ScepterPairStatus("ir")
+	if calls != 2 {
+		t.Errorf("an expired cache must refetch (calls %d)", calls)
+	}
+}
+
+// The Kharej view jump: the same-named remote tunnel opens its remote page;
+// without one, the pair screen (the honest "which one?" list) opens.
+func TestScepterKharejView(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\npairing: true\n"), 0o600)
+	hello := ScepterResult{Code: scepterCodeOK, Params: map[string]any{"ver": "3.5.0", "caps": "manage", "uuid": "u1"}}
+	doc := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"ver": "3.5.0", "state_seq": float64(6), "uptime_s": float64(60),
+		"pair":    map[string]any{"uuid": "u1", "caps": "manage"},
+		"tunnels": []any{map[string]any{"name": "ir", "carrier": "udp", "state": "active", "health": "ok"}},
+	}}
+	oldDial := scepterDial
+	defer func() { scepterDial = oldDial }()
+	scepterDial = func(string) (ScepterClient, error) {
+		return &scriptClient{byCmd: map[string][]scriptAns{
+			"scepter.hello": {{r: hello}},
+			"state.get":     {{r: doc}, {r: doc}},
+		}}, nil
+	}
+	defer feed("0")()
+	ok := false
+	out := capture(t, func() { ok = ScepterKharejView("ir") })
+	if !ok || !strings.Contains(out, "on Kharej ir") {
+		t.Errorf("the twin's remote page did not open (ok %v):\n%s", ok, out)
+	}
+	// no same-named remote tunnel: the pair screen lists instead
+	doc.Params["tunnels"] = []any{map[string]any{"name": "web", "carrier": "udp", "state": "active", "health": "ok"}}
+	scepterDial = func(string) (ScepterClient, error) {
+		return &scriptClient{byCmd: map[string][]scriptAns{
+			"scepter.hello": {{r: hello}, {r: hello}},
+			"state.get":     {{r: doc}, {r: doc}},
+		}}, nil
+	}
+	defer feed("0")()
+	ok = false
+	out = capture(t, func() { ok = ScepterKharejView("ir") })
+	if !ok || !strings.Contains(out, "Iran cockpit") {
+		t.Errorf("the pair screen did not open (ok %v):\n%s", ok, out)
+	}
+}
+
+// The home lane wires the fleet through the registry under scepter_fleet.
+func TestScepterFleetEntryRegistered(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	defer feed("0")() // the empty fleet's pause
+	if !registered("scepter_fleet") {
+		t.Fatal("scepter_fleet is not registered")
+	}
+	if rc := dispatch("scepter_fleet"); rc != 0 {
+		t.Errorf("dispatch rc = %d, want 0", rc)
 	}
 }
