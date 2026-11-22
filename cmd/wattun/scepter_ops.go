@@ -240,9 +240,25 @@ func (o *fileScepterOps) Create(spec wat.ScepterTunnelSpec) (map[string]any, int
 		return map[string]any{"resource": "tunnels", "cap": o.maxTunnels}, wat.CodeRateLimited
 	}
 	metrics := o.pickMetricsPort(name) // best effort: a busy host creates without a private /stats
+	yml := scepterTunnelYML(spec, ports, metrics)
+	// round-2 F5 (2026-11-22): applyEdit re-parses the composed yml before writing; Create wrote blind — a
+	// value containing ` #` was silently truncated by stripComment and the unit ran with a different value
+	// than the cockpit asked for. Re-parse here: a parse error, or a value that does not survive the
+	// round trip, fails BEFORE any file moves (nothing to roll back).
+	if cfg, err := parseConfig(yml, nil); err != nil {
+		return map[string]any{"detail": err.Error()}, wat.CodeBadRequest
+	} else {
+		for _, k := range sortedParamKeys(spec.Params) {
+			if got, _ := cfg.get(k); got != spec.Params[k] {
+				return map[string]any{"key": k,
+						"detail": fmt.Sprintf("value does not survive the yml round trip (%q became %q)", spec.Params[k], got)},
+					wat.CodeBadRequest
+			}
+		}
+	}
 	// apply: files first (atomic), then the unit, then the liveness verify; any failure removes what was
 	// written — the original state of a create is "nothing there", so the rollback is a clean removal.
-	if err := o.writeTunnel(name, spec, ports, metrics); err != nil {
+	if err := o.writeTunnel(name, spec, ports, metrics, yml); err != nil {
 		o.removeFiles(name)
 		return map[string]any{"detail": err.Error()}, wat.CodeInternal
 	}
@@ -288,9 +304,11 @@ func (o *fileScepterOps) tunnelCount() int {
 	return len(m)
 }
 
-// writeTunnel writes NAME.yml (+ NAME.key, and NAME.token when the token is derivable) atomically. The yml
-// carries a provenance comment so an owner can tell a remote create from a hand-written config.
-func (o *fileScepterOps) writeTunnel(name string, spec wat.ScepterTunnelSpec, ports []portSpec, metrics string) error {
+// scepterTunnelYML composes the tunnel.create yml body: a provenance comment line 1 (the sweep and every
+// owner can tell a remote create from a hand-written config), then the fixed keys, then the params in
+// sorted order. Separated from writeTunnel so Create can re-parse the exact text it is about to write
+// (round-2 F5, 2026-11-22).
+func scepterTunnelYML(spec wat.ScepterTunnelSpec, ports []portSpec, metrics string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# created by scepter tunnel.create %s (wat %s)\n", time.Now().UTC().Format(time.RFC3339), wat.Version)
 	b.WriteString("mode: server\n")
@@ -299,19 +317,31 @@ func (o *fileScepterOps) writeTunnel(name string, spec wat.ScepterTunnelSpec, po
 	if metrics != "" {
 		fmt.Fprintf(&b, "metrics: %s\n", metrics)
 	}
-	ks := make([]string, 0, len(spec.Params))
-	for k := range spec.Params {
-		ks = append(ks, k)
-	}
-	sort.Strings(ks) // deterministic file: the cfgWatcher's restart-needed diff must not jitter
-	for _, k := range ks {
+	for _, k := range sortedParamKeys(spec.Params) { // deterministic file: the cfgWatcher's restart-needed diff must not jitter
 		fmt.Fprintf(&b, "%s: %s\n", k, scepterYMLValue(spec.Params[k]))
 	}
 	b.WriteString("ports:\n")
 	for _, p := range ports {
 		fmt.Fprintf(&b, "  - %s\n", portItemStr(p))
 	}
-	if err := o.writeAtomic(o.path(name, "yml"), b.String()); err != nil {
+	return b.String()
+}
+
+// sortedParamKeys is the deterministic param order both the yml composition (here) and the create-path
+// validation iterate in.
+func sortedParamKeys(params map[string]string) []string {
+	ks := make([]string, 0, len(params))
+	for k := range params {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
+// writeTunnel writes NAME.yml (+ NAME.key, and NAME.token when the token is derivable) atomically. yml is
+// the text Create already composed and re-parsed (round-2 F5) — never a second composition.
+func (o *fileScepterOps) writeTunnel(name string, spec wat.ScepterTunnelSpec, ports []portSpec, metrics, yml string) error {
+	if err := o.writeAtomic(o.path(name, "yml"), yml); err != nil {
 		return err
 	}
 	if err := o.writeAtomic(o.path(name, "key"), spec.Key+"\n"); err != nil {
@@ -401,11 +431,15 @@ var scepterParamDeny = map[string]bool{
 	"mode": true, "key": true, "carrier": true, "ports": true, "limits": true, "header": true,
 	"config": true, "version": true, "pair": true, "pair-to": true, "pairing": true, "update-job": true,
 	"latch-port": true, "latch-dial": true, "scepter-call": true, "scepter-args": true,
+	"metrics":   true, // round-2 F4 (2026-11-22): the ops write metrics themselves (pickMetricsPort); a param
+	"key-file":  true, // one would double the key, and a key-file one would shadow the ops-written key
 	"state-dir": true, // M8: a unit's CWD is /, a hand-set relative state-dir would scatter state files
 }
 
 // checkCreateParams: every param key must be one the unit's own config parser accepts (the `known` set, the
-// same check the cfgWatcher enforces on a hand-edited yml) and must not fight a key the ops write themselves.
+// same check the cfgWatcher enforces on a hand-edited yml), must not fight a key the ops write themselves,
+// and its value must be one line — a \n or \r would let a value plant arbitrary yml lines (a provenance
+// comment, a second key) in the composed file (round-2 F1, 2026-11-22).
 func (o *fileScepterOps) checkCreateParams(params map[string]string) (int, map[string]any) {
 	ks := make([]string, 0, len(params))
 	for k := range params {
@@ -416,6 +450,9 @@ func (o *fileScepterOps) checkCreateParams(params map[string]string) (int, map[s
 		if scepterParamDeny[k] {
 			return wat.CodeBadRequest, map[string]any{"key": k, "why": "owned by tunnel.create itself"}
 		}
+		if strings.ContainsAny(params[k], "\n\r") {
+			return wat.CodeBadRequest, map[string]any{"key": k, "why": "a param value must be one line"}
+		}
 		if o.known != nil && !o.known(k) {
 			return wat.CodeBadRequest, map[string]any{"key": k, "why": "unknown config key"}
 		}
@@ -424,7 +461,8 @@ func (o *fileScepterOps) checkCreateParams(params map[string]string) (int, map[s
 }
 
 // checkEditParams: the edit patch may switch the carrier (phase C adds the link-verified change around it)
-// but fights none of the other owned keys; limits go through limits.set.
+// but fights none of the other owned keys; limits go through limits.set. Same one-line value rule as
+// checkCreateParams (round-2 F1, 2026-11-22): scepterPatchYML writes the value raw.
 func (o *fileScepterOps) checkEditParams(patch wat.ScepterPatch) (int, map[string]any) {
 	ks := make([]string, 0, len(patch.Set))
 	for k := range patch.Set {
@@ -434,6 +472,9 @@ func (o *fileScepterOps) checkEditParams(patch wat.ScepterPatch) (int, map[strin
 	for _, k := range ks {
 		if scepterParamDeny[k] && k != "carrier" {
 			return wat.CodeBadRequest, map[string]any{"key": k, "why": "owned key; use its own command"}
+		}
+		if strings.ContainsAny(patch.Set[k], "\n\r") {
+			return wat.CodeBadRequest, map[string]any{"key": k, "why": "a param value must be one line"}
 		}
 		if o.known != nil && !o.known(k) {
 			return wat.CodeBadRequest, map[string]any{"key": k, "why": "unknown config key"}
@@ -840,14 +881,31 @@ func (o *fileScepterOps) sweepOrphanProbes() {
 	files, _ := filepath.Glob(filepath.Join(o.conf, "probe-*.yml"))
 	for _, f := range files {
 		b, err := os.ReadFile(f)
-		if err != nil || !strings.Contains(string(b), probeProvenance) {
+		if err != nil || !probeProvenanceFirst(b) {
 			continue
 		}
 		name := strings.TrimSuffix(filepath.Base(f), ".yml")
 		o.unit(name, "stop")
+		o.disableUnit(name) // start was enable --now: the sweep must leave no enabled unit behind either
 		o.removeFiles(name)
 		o.logf("scepter ops: swept orphaned probe %s (left by a previous engine run)", name)
 	}
+}
+
+// probeProvenanceFirst reports whether the yml's FIRST non-empty line is the probe provenance comment —
+// exactly where openProbe writes it (line 1). Matching only line 1 (round-2 F1, 2026-11-22) closes the
+// injection hole strings.Contains had: a param value with an embedded newline could plant the provenance
+// text mid-file and get a user tunnel destroyed on the next restart. The value-side half of the fix is the
+// one-line rule in checkCreateParams/checkEditParams.
+func probeProvenanceFirst(b []byte) bool {
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		return strings.HasPrefix(t, "# "+probeProvenance)
+	}
+	return false
 }
 
 // probeProvenance marks a yml as this machinery's product (the sweep reads it; the count is what keeps a
@@ -1021,6 +1079,9 @@ func (o *fileScepterOps) closeProbe(pr *scepterProbe) {
 		pr.timer.Stop()
 	}
 	o.unit(pr.id, "stop")
+	o.disableUnit(pr.id) // round-2 F2 (2026-11-22): openProbe's start was enable --now, so ttl expiry,
+	// test.close and auto-test done must disable too — a stop+removeFiles alone left an enabled fileless
+	// unit failing every boot (the F10 rollback rule; the sweep below had the same hole)
 	o.removeFiles(pr.id)
 }
 
@@ -1139,6 +1200,13 @@ func (o *fileScepterOps) ApplyRow(name string, row int) (map[string]any, int) {
 		return p, wat.CodeNotFound
 	}
 	pick := rs[row-1]
+	if !pick.OK {
+		// round-2 F3 (2026-11-22): a failed row has Port 0, and CarrierChange over an empty bind map made
+		// the link check trivially pass — applying it would switch the carrier to a shape this host
+		// measurably cannot serve. The cockpit picks from auto.rows: refuse the row instead.
+		return map[string]any{"row": row, "carrier": pick.Carrier,
+			"why": fmt.Sprintf("row %d is a failed measurement", row)}, wat.CodeBadRequest
+	}
 	p, code := o.CarrierChange(name, pick.Carrier, map[string]string{"listen": fmt.Sprintf(":%d", pick.Port)})
 	if code == wat.CodeOK {
 		p["row"] = row
@@ -1369,7 +1437,8 @@ func (o *fileScepterOps) Delete(name string) (map[string]any, int) {
 	if !o.waitActive(name, false) {
 		return map[string]any{"detail": "unit would not stop"}, wat.CodeInternal
 	}
-	runSystemctl("disable", "wattun@"+name) // best effort: a never-enabled unit is fine
+	o.disableUnit(name) // best effort: a never-enabled unit is fine (round-2 F6, 2026-11-22: through the
+	// o.unit seam like every other unit action — Delete was the one direct runSystemctl caller left)
 	// reversible by construction (plan D3): everything moves aside to .bak, nothing is destroyed. Undone
 	// (renamed back) if any step fails, so a half-deleted tunnel cannot exist.
 	var moved []string
@@ -1519,12 +1588,20 @@ func runScepterCall(tun *tunnel, cmd, argsJSON string) int {
 // (wat.ScepterState) fires the update_applied/update_failed events.
 
 const (
-	scepterUpdateDirF    = ".update"        // staging dir under the config dir
-	scepterJobFile       = "job.json"       // the staged job's parameters, read by -update-job
-	scepterUpdateGrace   = 3 * time.Second  // response-flush grace before the worker touches anything
-	scepterUpdateWatch   = 40 * time.Second // job liveness watch window (latch arm delay is 30 s — must exceed it)
-	scepterUpdateStable  = 10 * time.Second // the units must stay active this long before "applied"
-	scepterUpdateMax     = 64 << 20         // staged binary download cap (release binaries are ~10-15 MB)
+	scepterUpdateDirF   = ".update"        // staging dir under the config dir
+	scepterJobFile      = "job.json"       // the staged job's parameters, read by -update-job
+	scepterUpdateGrace  = 3 * time.Second  // response-flush grace before the worker touches anything
+	scepterUpdateWatch  = 40 * time.Second // job liveness watch window (latch arm delay is 30 s — must exceed it)
+	scepterUpdateStable = 10 * time.Second // the units must stay active this long before "applied"
+
+	// updatePhaseStaged is a reserved mailbox phase the launch-time re-arm may adopt once wat's watcher
+	// learns it (round-2 F7, 2026-11-22): the swap restarts this engine, and the revived engine's update.run
+	// gate must count from the swap, not from an accept-time Ts a long download left behind. updateJobInFlight
+	// already trusts it, but the worker re-arms the STARTED record instead for now — the watcher treats every
+	// fresh non-started phase as a failure event, so "staged" would fire a spurious update_failed per
+	// successful update until a wat-side follow-up teaches it the phase (then the flip is one line).
+	updatePhaseStaged    = "staged"
+	scepterUpdateMax     = 64 << 20 // staged binary download cap (release binaries are ~10-15 MB)
 	scepterRepo          = "JohnWatsoon/WatTunnel"
 	scepterUpdateUnitPfx = "wattun-update-" // transient unit name prefix
 )
@@ -1759,12 +1836,15 @@ func (o *fileScepterOps) selfBinPath() (string, error) {
 	return filepath.EvalSymlinks(bin)
 }
 
-// updateJobInFlight reports whether a mailbox record says an update job is (or may be) mid-flight: a started
-// record is trusted for the job's whole watch window (watch + two rollback passes) and never longer — a
-// started record that old belongs to a job that died, and the next update.run must be able to proceed.
+// updateJobInFlight reports whether a mailbox record says an update job is (or may be) mid-flight: a
+// started or staged record is trusted for the job's whole watch window (watch + two rollback passes) from
+// its Ts and never longer — a record that old belongs to a job that died, and the next update.run must be
+// able to proceed. Round-2 F7 (2026-11-22): staged counts because the worker rewrites the record at LAUNCH
+// with a fresh Ts — the gate then covers the swap, the engine restart and the job's watch that follow it,
+// where the started record's accept-time Ts had already gone stale after a long download.
 func updateJobInFlight(conf string) (string, bool) {
 	st, err := readUpdateStatus(conf)
-	if err != nil || st.Phase != wat.UpdatePhaseStarted {
+	if err != nil || (st.Phase != wat.UpdatePhaseStarted && st.Phase != updatePhaseStaged) {
 		return "", false
 	}
 	if time.Now().Unix()-st.Ts >= int64((scepterUpdateWatch+2*scepterUpdateStable)/time.Second) {
@@ -1831,6 +1911,17 @@ func (o *fileScepterOps) updateWorker(run, bin, toN string) {
 		fail("job file: " + err.Error())
 		return
 	}
+	// round-2 F7 (2026-11-22): the launch moment RE-ARMS the mailbox — same phase, fresh Ts. The started
+	// record's Ts is accept time, but the job only launches after a download that can outlive
+	// updateJobInFlight's watch+2*stable window — and the swap restarts THIS engine, whose revived process
+	// would find the started record stale and accept a second update.run while the job still owns the swap
+	// (wattun.prev overwritten mid-watch). Re-writing started (not a new phase) is deliberate: the status
+	// watcher (wat) treats every fresh non-started phase as a failure event, so a "staged" phase would fire
+	// a spurious update_failed per successful update until the watcher learns it (updatePhaseStaged is
+	// already trusted by the gate below, so the flip is a one-line wat-side follow-up). A launch failure
+	// still lands in fail() as failed.
+	writeUpdateStatus(o.conf, wat.ScepterUpdateStatus{Phase: wat.UpdatePhaseStarted, Run: run,
+		From: wat.Version, To: got, Ts: o.now().Unix()})
 	if err := o.launchFn()(stage, bin); err != nil {
 		fail("launch: " + err.Error())
 		return

@@ -27,7 +27,9 @@ import (
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
 
-const (
+// Var, not const (the pairingPollInterval precedent): the tests shrink the cadences to drive the run loop
+// and the contact consumer without sleeping seconds.
+var (
 	latchPoll     = 5 * time.Second  // monitor cadence
 	latchArmAfter = 30 * time.Second // quiet time before arming: must outlive the 10 s alive window flaps
 )
@@ -50,6 +52,7 @@ type latchMonitor struct {
 	mu       sync.Mutex
 	srv      *wat.Server
 	lastBind time.Time // last bind failure, to rate-limit the log, not the retry
+	loopUp   bool      // the run loop marks itself (round-2 F9): rePair reads it under mu to revive a loop a revocation ended
 
 	contacts atomic.Int64
 	rejected atomic.Int64
@@ -64,11 +67,22 @@ func startLatch(m *latchMonitor) *latchMonitor {
 }
 
 func (m *latchMonitor) run() {
+	m.mu.Lock()
+	if m.loopUp { // rePair revives the loop after a revocation; never two loops (round-2 F9)
+		m.mu.Unlock()
+		return
+	}
+	m.loopUp = true
+	m.mu.Unlock()
 	var inactiveSince time.Time
 	for range time.Tick(latchPoll) {
+		m.mu.Lock()
 		if m.revoked.Load() { // the pairing poller disarmed the channel: no listener for a revoked pair
+			m.loopUp = false // cleared under mu BEFORE the return so rePair's revival check is exact: if
+			m.mu.Unlock()    // it runs first (clearing revoked), this tick never sees the old revocation
 			return
 		}
+		m.mu.Unlock()
 		if m.alive() {
 			inactiveSince = time.Time{}
 			m.standDown()
@@ -90,14 +104,19 @@ func (m *latchMonitor) run() {
 
 // arm opens the latch listener. Losing the bind (another paired unit holds the port) is logged once per
 // 10 minutes and retried on a later cycle, so the winner dying hands the latch over within latchPoll.
+// Round-2 F8 (2026-11-22): the credential is snapshotted ONCE under mu at entry — arm used to read m.pair
+// three times unsnapshot, so a concurrent rePair could mix the old path with the new key (or the reverse),
+// and before installing the server it re-checks revoked so a revoke racing the bind cannot leave a
+// listener accepting key proofs for a credential that no longer exists.
 func (m *latchMonitor) arm() {
 	m.mu.Lock()
-	if m.srv != nil {
+	if m.srv != nil || m.revoked.Load() {
 		m.mu.Unlock()
 		return
 	}
+	pair := m.pair // one snapshot for the path, the PSK and the served key (see above)
 	m.mu.Unlock()
-	ps, err := wat.NewWSPoolServer(fmt.Sprintf(":%d", m.port), wat.HTTPServerOptions{Path: wat.LatchPath(m.pair), Secure: true})
+	ps, err := wat.NewWSPoolServer(fmt.Sprintf(":%d", m.port), wat.HTTPServerOptions{Path: wat.LatchPath(pair), Secure: true})
 	if err != nil {
 		if time.Since(m.lastBind) > 10*time.Minute {
 			m.lastBind = time.Now()
@@ -107,36 +126,83 @@ func (m *latchMonitor) arm() {
 	}
 	m.lastBind = time.Time{}
 	cfg := m.base
-	cfg.Key = wat.LatchKey(m.pair) // the latch PSK: distinct from the tunnel PSK, derived from the pairing key
-	cfg.Pairing = m.pair
+	cfg.Key = wat.LatchKey(pair) // the latch PSK: distinct from the tunnel PSK, derived from the pairing key
+	cfg.Pairing = pair
 	srv := wat.NewServer(cfg, ps)
 	srv.MaxSessions = 1 // one session at a time (plan D2); further dials get no session
 	m.mu.Lock()
+	if m.revoked.Load() { // revoke raced the bind: nothing was published or served — close and quit
+		m.mu.Unlock()
+		srv.Close() // closes the pool listener with it
+		return
+	}
 	m.srv = srv
 	m.mu.Unlock()
 	m.logf("scepter latch: armed on port %d (pairing inactive; one key-proven contact revives the cockpit)", m.port)
 	go func() {
-		s, ok := <-srv.New
-		if !ok {
-			return
-		}
-		ps.StopListen() // first contact: stand the listener down without cutting this session's connections
-		m.logf("scepter latch: contact; listener stands down until the pair needs it again")
-		// Management only: no serveDgrams here — the latch carries the scepter stream, not UDP forwarding.
-		go serveLatch(s, m.lo, m.hi, m.al, m.scepter, wat.LatchKey(m.pair), m)
-		go func() { // reap when the contact session ends, so the monitor can re-arm if still inactive
-			for range time.Tick(latchPoll) {
-				if srv.Sessions() == 0 {
-					srv.Close()
-					m.mu.Lock()
-					if m.srv == srv {
-						m.srv = nil
+		// round-2 F10 (2026-11-22): wait for the first contact OR the server going away. A stand-down
+		// without contact (the unit came alive, the credential rotated or was revoked) used to block on
+		// srv.New forever — wat.Server.Close closes stop but not New, so this consumer leaked. The
+		// gone-signal is m.srv != srv: standDown (alive again), rePair and revoke are the only writers.
+		contact := func(s *wat.Session) {
+			ps.StopListen() // first contact: stand the listener down without cutting this session's connections
+			m.logf("scepter latch: contact; listener stands down until the pair needs it again")
+			// Management only: no serveDgrams here — the latch carries the scepter stream, not UDP forwarding.
+			go serveLatch(s, m.lo, m.hi, m.al, m.scepter, wat.LatchKey(pair), m)
+			go func() { // reap when the contact session ends, so the monitor can re-arm if still inactive
+				for range time.Tick(latchPoll) {
+					if srv.Sessions() == 0 {
+						srv.Close()
+						m.mu.Lock()
+						if m.srv == srv {
+							m.srv = nil
+						}
+						m.mu.Unlock()
+						return
 					}
-					m.mu.Unlock()
+				}
+			}()
+		}
+		tk := time.NewTicker(latchPoll)
+		defer tk.Stop()
+		for {
+			select {
+			case s, ok := <-srv.New:
+				if !ok {
+					return
+				}
+				contact(s)
+				return
+			case <-tk.C:
+				// select picks randomly among ready cases: a contact that landed while the tick fired
+				// must still win over the stand-down check, so drain New non-blockingly first.
+				select {
+				case s, ok := <-srv.New:
+					if ok {
+						contact(s)
+						return
+					}
+				default:
+				}
+				m.mu.Lock()
+				gone := m.srv != srv
+				m.mu.Unlock()
+				if gone && srv.Sessions() == 0 {
+					srv.Close() // stood down with no contact: nothing to preserve — exit, do not leak
+					return
+				}
+				if gone { // a contact session raced the stand-down and still holds the server: serve what
+					select { // New holds; the session ends on its own (standDown's rule)
+					case s, ok := <-srv.New:
+						if ok {
+							contact(s)
+						}
+					default:
+					}
 					return
 				}
 			}
-		}()
+		}
 	}()
 }
 
@@ -164,12 +230,23 @@ func (m *latchMonitor) revoke() {
 
 // rePair swaps the credential after a rotation: the next arm derives the latch PSK from the NEW key. The
 // old listener's PSK is stale, so the listener stands down and re-arms on a later cycle; a live contact
-// session is left alone (standDown's rule — it ends on its own).
+// session is left alone (standDown's rule — it ends on its own). Round-2 F9 (2026-11-22): a re-pair after
+// a revocation also REVIVES the latch — the run loop exited on the revocation and never cleared it, so the
+// cockpit could revive the pair and the latch would stay dead until a process restart with no hint. The
+// revoked clear sits under mu, where the run loop's exit check also sits, so the two are atomic: either
+// this section runs first and the loop never sees the old revocation, or the loop already exited and the
+// spawn below brings a fresh one up.
 func (m *latchMonitor) rePair(p *wat.PairingConfig) {
 	m.mu.Lock()
 	m.pair = p
+	m.revoked.Store(false)
+	revive := !m.loopUp
 	m.mu.Unlock()
 	m.standDown()
+	if revive {
+		m.logf("scepter latch: pairing restored after revocation — the latch watches again")
+		go m.run() // run's own loopUp guard keeps this single even if two revivals race
+	}
 }
 
 // contacted counts an authenticated latch contact (the proof in wat.ServeScepterLatch passed).

@@ -97,7 +97,10 @@ func setPairingKey(path string) error {
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
 	}
-	for _, line := range strings.Split(string(b), "\n") {
+	txt := strings.TrimPrefix(string(b), "\xef\xbb\xbf") // a BOM (Notepad, PowerShell) must not hide the first
+	// line's key from this scan — parseConfig's own rule (round-2 F12, 2026-11-22): a BOM'd `pairing: true`
+	// first line went undetected and a second key was appended, which killed the boot
+	for _, line := range strings.Split(txt, "\n") {
 		t := strings.TrimSpace(stripComment(line))
 		if t == "" || strings.HasPrefix(t, "- ") {
 			continue
@@ -136,6 +139,44 @@ func attachPairing(cfgPath, line string, logf func(string, ...any)) error {
 	return nil
 }
 
+// scepterAttach is main's Scepter attach switch, extracted as a function so the decision is testable
+// (round-2 F11, 2026-11-22). pairingKey is the `pairing:` config value ("" when the key is absent): a full
+// watp1: value wins, `true` (or any other non-flag value) loads the stored file, and an explicit `false`
+// opts out entirely — no attach, no arm, nothing logged (it used to fall to the default attach, so the key
+// could not actually turn the channel off). Returns the credential (nil = run unpaired), whether it came
+// off disk (the only pollable kind), and the error that stays fatal in main (an explicitly provided
+// invalid watp1: line).
+func scepterAttach(pairingKey, pairPath string, logf func(string, ...any)) (*wat.PairingConfig, bool, error) {
+	switch {
+	case pairingKey == "false":
+		return nil, false, nil // explicit opt-out: a normal configuration, not a warning
+	case pairingKey != "":
+		if strings.HasPrefix(pairingKey, "watp1:") {
+			p, err := wat.ParsePairingLine(pairingKey)
+			if err != nil {
+				return nil, false, err
+			}
+			return p, false, nil
+		}
+		p, aerr := attachStoredPairing(pairPath, logf)
+		if aerr == nil {
+			return p, true, nil
+		}
+		if errors.Is(aerr, os.ErrNotExist) {
+			// `pairing: true` (yml or flag) but the stored credential is missing: run unpaired with one
+			// warning (F2, 2026-11-22 — an owner may move the file; the cockpit degrades, the tunnel keeps
+			// working). An unusable (present, unparsable) file was already warned by attachStoredPairing.
+			logf("scepter: pairing key set but the stored pairing %s is missing; running without the cockpit channel", pairPath)
+		}
+		return nil, false, nil
+	default:
+		if p, aerr := attachStoredPairing(pairPath, logf); aerr == nil {
+			return p, true, nil
+		}
+		return nil, false, nil
+	}
+}
+
 // pairingPollInterval is the .pairing watch cadence (F8-revoke). Var, not const: the tests shrink it.
 var pairingPollInterval = 5 * time.Second
 
@@ -156,6 +197,13 @@ type pairingPoller struct {
 	logf     func(string, ...any)
 	interval time.Duration
 
+	// round-2 F13 (2026-11-22): the optional seed. main stats the store right after the attach read and
+	// passes that state here, so a rotation in the startup gap between the read and the poller's own first
+	// stat is seen as a change on the first check instead of being armed over.
+	seedMt time.Time
+	seedSz int64
+	seeded bool
+
 	mu    sync.Mutex
 	mt    time.Time
 	sz    int64
@@ -163,7 +211,9 @@ type pairingPoller struct {
 }
 
 func startPairingPoller(p *pairingPoller) {
-	if st, err := os.Stat(p.path); err == nil { // the credential was just loaded from this file: arm from its state
+	if p.seeded {
+		p.mt, p.sz = p.seedMt, p.seedSz
+	} else if st, err := os.Stat(p.path); err == nil { // the credential was just loaded from this file: arm from its state
 		p.mt, p.sz = st.ModTime(), st.Size()
 	}
 	p.armed = true

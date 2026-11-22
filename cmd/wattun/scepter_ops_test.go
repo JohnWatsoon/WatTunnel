@@ -183,6 +183,21 @@ func TestFileScepterOpsCreateRejections(t *testing.T) {
 			t.Fatalf("param %q accepted: %d %v", bad, code, p)
 		}
 	}
+	// round-2 F4 (2026-11-22): metrics and key-file are keys the ops write themselves — a param metrics
+	// would double the key, a param key-file would shadow the ops-written key. known accepts everything
+	// here on purpose: only the deny list stops them.
+	o.known = func(string) bool { return true }
+	for _, bad := range []string{"metrics", "key-file"} {
+		p, code := o.Create(wat.ScepterTunnelSpec{Carrier: "udp", Ports: "1", Key: "kk",
+			Params: map[string]string{bad: "1"}})
+		if code != wat.CodeBadRequest || p["why"] != "owned by tunnel.create itself" {
+			t.Fatalf("param %q must hit the deny list: %d %v", bad, code, p)
+		}
+	}
+	o.known = func(k string) bool {
+		return map[string]bool{"peer": true, "ping-every": true, "listen": true, "reverse": true,
+			"sni": true, "path": true, "host": true, "icmp-type": true, "metrics": true, "carrier": true}[k]
+	}
 	// port_busy {port, user}: another tunnel already binds the udp default :4443
 	if err := os.WriteFile(filepath.Join(o.conf, "t-old.yml"),
 		[]byte("mode: server\ncarrier: udp\nmetrics: 127.0.0.1:19700\n"), 0o600); err != nil {
@@ -262,6 +277,70 @@ func TestFileScepterOpsCreateDeniesUpdateJob(t *testing.T) {
 	if _, code := o.Edit("u2", wat.ScepterPatch{Set: map[string]string{"update-job": "/tmp/staged"}}); code != wat.CodeBadRequest {
 		t.Fatalf("edit with update-job param: %d", code)
 	}
+}
+
+// TestScepterParamValueOneLine (round-2 F1, 2026-11-22): a param value carrying \n or \r would plant
+// arbitrary yml lines in the composed file — the provenance-injection vector (a planted `# probe tunnel
+// created by scepter test.open` comment got a user tunnel destroyed by the orphan sweep on restart). Both
+// create and edit reject a multi-line value outright, before anything is written.
+func TestScepterParamValueOneLine(t *testing.T) {
+	o, _, _ := testOps2(t)
+	o.Create(wat.ScepterTunnelSpec{Name: "ol1", Carrier: "udp", Ports: "20030", Key: "kk"})
+	for _, v := range []string{
+		":20600\n# probe tunnel created by scepter test.open 2026-11-22T00:00:00Z",
+		":20601\r\nfake: line", "a\nb",
+	} {
+		v := v
+		p, code := o.Create(wat.ScepterTunnelSpec{Carrier: "udp", Ports: "20031", Key: "kk",
+			Params: map[string]string{"listen": v}})
+		if code != wat.CodeBadRequest || p["why"] != "a param value must be one line" {
+			t.Fatalf("create multi-line value %q: %d %v", v, code, p)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(o.conf, "tunnel.yml")); !os.IsNotExist(err) {
+		t.Fatal("a rejected multi-line value must not write any file")
+	}
+	if _, code := o.Edit("ol1", wat.ScepterPatch{Set: map[string]string{"peer": "1.2.3.4\n# injected"}}); code != wat.CodeBadRequest {
+		t.Fatal("edit must reject a multi-line value too")
+	}
+	if p, code := o.Create(wat.ScepterTunnelSpec{Carrier: "udp", Ports: "20032", Key: "kk",
+		Params: map[string]string{"listen": ":20602"}}); code != wat.CodeOK {
+		t.Fatalf("single-line values must still create: %d %v", code, p)
+	}
+	o.removeFiles("tunnel")
+}
+
+// TestFileScepterOpsCreateReparse (round-2 F5, 2026-11-22): Create used to write blind — applyEdit
+// re-parses the composed yml before writing, Create did not, so a value containing ` #` was silently
+// truncated by stripComment and the unit ran with a different value than the cockpit asked for. The
+// composed text is now re-parsed (and round-trip checked) BEFORE any file moves.
+func TestFileScepterOpsCreateReparse(t *testing.T) {
+	o, _, _ := testOps2(t)
+	// `a"b'c" #d` carries BOTH quote kinds balanced before the ` #`, so scepterYMLValue gives up and writes
+	// it raw, stripComment cuts ` #d` off, and the unit would run with `a"b'c"` instead of what the cockpit
+	// asked for. (One quote kind alone survives via that kind's wrapping; an unbalanced quote keeps the
+	// `#` inside the quote — those round-trip, which is exactly why the re-parse check is needed.)
+	p, code := o.Create(wat.ScepterTunnelSpec{Name: "rp1", Carrier: "udp", Ports: "20030", Key: "kk",
+		Params: map[string]string{"peer": `a"b'c" #d`}})
+	if code != wat.CodeBadRequest {
+		t.Fatalf("a value that truncates on re-parse must be refused: %d %v", code, p)
+	}
+	for _, ext := range []string{"yml", "key", "token"} {
+		if _, err := os.Stat(filepath.Join(o.conf, "rp1."+ext)); !os.IsNotExist(err) {
+			t.Fatalf("the refused create left rp1.%s behind", ext)
+		}
+	}
+	// values that survive the round trip still create: the check is exact, not over-broad
+	if p, code = o.Create(wat.ScepterTunnelSpec{Name: "rp2", Carrier: "udp", Ports: "20030", Key: "kk",
+		Params: map[string]string{"peer": `a"b'c`}}); code != wat.CodeOK {
+		t.Fatalf("a both-quote value must still create: %d %v", code, p)
+	}
+	o.removeFiles("rp2")
+	if p, code = o.Create(wat.ScepterTunnelSpec{Name: "rp3", Carrier: "udp", Ports: "20030", Key: "kk",
+		Params: map[string]string{"peer": `a" #b`}}); code != wat.CodeOK {
+		t.Fatalf("a single-quote-wrappable value must still create: %d %v", code, p)
+	}
+	o.removeFiles("rp3")
 }
 
 // TestFileScepterOpsProbeCap (F7, 2026-11-22): probe units count toward scepterMaxTunnels — openProbe checks
@@ -381,6 +460,10 @@ func TestFileScepterOpsDeleteAndUnit(t *testing.T) {
 	}
 	if !fu.did("d1:stop") {
 		t.Fatal("delete did not stop the unit")
+	}
+	if !fu.did("d1:disable") { // round-2 F6 (2026-11-22): the disable goes through the o.unit seam like
+		// every other unit action — Delete was the one direct runSystemctl caller left
+		t.Fatal("delete did not disable the unit")
 	}
 	if _, code := o.Delete("d1"); code != wat.CodeNotFound {
 		t.Fatalf("second delete: %d", code)
@@ -601,6 +684,11 @@ func TestFileScepterOpsTestOpenLifecycle(t *testing.T) {
 	if !fu.did(id + ":stop") {
 		t.Fatal("closed probe did not stop its unit")
 	}
+	// round-2 F2 (2026-11-22): start is enable --now, so every probe teardown must disable too — a
+	// stopped-but-enabled unit with no yml fails every boot (the F10 rollback rule).
+	if !fu.did(id + ":disable") {
+		t.Fatal("closed probe did not disable its unit")
+	}
 	if _, code = o.TestClose(id); code != wat.CodeNotFound {
 		t.Fatalf("double close: %v", code)
 	}
@@ -622,6 +710,9 @@ func TestFileScepterOpsTestOpenLifecycle(t *testing.T) {
 	}
 	if !fu.did(id3 + ":stop") {
 		t.Fatal("expired probe did not stop its unit")
+	}
+	if !fu.did(id3 + ":disable") { // round-2 F2: the ttl teardown disables like test.close does
+		t.Fatal("expired probe did not disable its unit")
 	}
 	o.TestClose(p2["id"].(string))
 	// the restart-orphan sweep (what newFileScepterOps runs at startup) takes exactly the ymls carrying the
@@ -650,10 +741,27 @@ func TestFileScepterOpsTestOpenLifecycle(t *testing.T) {
 	if !fu.did(orphan + ":stop") {
 		t.Fatal("orphan sweep did not stop the orphaned probe unit")
 	}
+	if !fu.did(orphan + ":disable") { // round-2 F2: the sweep disables like the probe teardowns do
+		t.Fatal("orphan sweep did not disable the orphaned probe unit")
+	}
 	if _, err := os.Stat(userYML); err != nil {
 		t.Fatal("sweep removed a user tunnel named probe-*")
 	}
 	os.Remove(userYML)
+	// round-2 F1 (2026-11-22): the sweep matches the provenance only as the FIRST line of the yml — the
+	// injection was a param value with an embedded newline planting the provenance comment mid-file, which
+	// strings.Contains happily matched and got a user tunnel destroyed on restart. (New creates reject
+	// multi-line values; ymls written before that rule are what this pin guards.)
+	inj := filepath.Join(o.conf, "probe-injected.yml")
+	if err := os.WriteFile(inj, []byte("mode: server\ncarrier: udp\nlisten: :20610\nnote: \"a\n# "+probeProvenance+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o.orphanSweep = false
+	o.sweepOrphanProbes()
+	if _, err := os.Stat(inj); err != nil {
+		t.Fatal("the sweep destroyed a user tunnel whose mid-file value planted the provenance comment")
+	}
+	os.Remove(inj)
 }
 
 func TestFileScepterOpsCarrierChangeRollback(t *testing.T) {
@@ -832,6 +940,15 @@ func TestFileScepterOpsAutoTest(t *testing.T) {
 	if p, code = o.ApplyRow("t1", 9); code != wat.CodeNotFound || p["why"] == nil {
 		t.Fatalf("out-of-range row: %v %v", code, p)
 	}
+	// round-2 F3 (2026-11-22): a failed row (Port 0, nothing to check) must not apply — CarrierChange over
+	// an empty bind map made the link check trivially pass and would switch the carrier to a shape this
+	// host measurably cannot serve. Row 4 is the failed udp row (ranked last).
+	if p, code = o.ApplyRow("t1", 4); code != wat.CodeBadRequest || !strings.Contains(p["why"].(string), "row 4 is a failed measurement") {
+		t.Fatalf("apply failed row: %v %v", code, p)
+	}
+	if y := mustReadExisting(t, filepath.Join(o.conf, "t1.yml")); !strings.Contains(y, "carrier: tcp") {
+		t.Fatalf("the refused row must not touch the config:\n%s", y)
+	}
 	// the run's probes are closed: nothing lingers
 	if m, _ := filepath.Glob(filepath.Join(o.conf, "probe-*.yml")); len(m) != 0 {
 		t.Fatalf("auto-test left probe units: %v", m)
@@ -994,6 +1111,18 @@ func TestFileScepterOpsUpdateRunGates(t *testing.T) {
 	if _, busy := updateJobInFlight(conf); busy {
 		t.Fatal("a terminal record counts as in flight")
 	}
+	// round-2 F7 (2026-11-22): staged — the worker rewrites the mailbox phase=staged with a fresh Ts at
+	// LAUNCH, so the revived engine's gate counts from the swap, not from an accept time a long download
+	// left behind. Same window semantics as started.
+	writeUpdateStatus(conf, wat.ScepterUpdateStatus{Phase: updatePhaseStaged, Run: "swap", Ts: time.Now().Unix()})
+	if run, busy := updateJobInFlight(conf); !busy || run != "swap" {
+		t.Fatalf("fresh staged record not in flight: %q %v", run, busy)
+	}
+	writeUpdateStatus(conf, wat.ScepterUpdateStatus{Phase: updatePhaseStaged, Run: "old-swap",
+		Ts: time.Now().Unix() - int64((scepterUpdateWatch+2*scepterUpdateStable)/time.Second) - 10})
+	if _, busy := updateJobInFlight(conf); busy {
+		t.Fatal("a stale staged record still counts as in flight")
+	}
 }
 
 // The update drill in a sandbox (plan D.3, the manager tests' pattern): the REAL worker and the REAL job
@@ -1113,6 +1242,37 @@ func TestFileScepterOpsUpdateDrill(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(conf, scepterUpdateDirF)); !os.IsNotExist(err) {
 			t.Fatal("a failed staging left the .update dir behind")
+		}
+	})
+	t.Run("re-armed_at_launch", func(t *testing.T) {
+		// round-2 F7 (2026-11-22): the worker re-arms the mailbox at LAUNCH — the moment the swap becomes
+		// imminent — with a FRESH Ts, so the gate (and the revived engine after the swap) counts from there
+		// instead of from an accept time a long download left behind. The phase stays started (the wat
+		// watcher treats every fresh non-started phase as a failure event; updatePhaseStaged is reserved for
+		// the wat-side follow-up). Captured by wrapping the launch seam.
+		o, fu, conf, bin, prev := newDrill(t)
+		var atLaunch *wat.ScepterUpdateStatus
+		var gateRun string
+		var gateBusy bool
+		o.updLaunch = func(stage, bin string) error {
+			st, err := readUpdateStatus(conf)
+			if err != nil {
+				return err
+			}
+			atLaunch = st
+			gateRun, gateBusy = updateJobInFlight(conf) // the gate as the revived engine would see it
+			return launchViaJob(t, fu, prev, false)(stage, bin)
+		}
+		o.updateWorker("upd-5", bin, "latest")
+		if atLaunch == nil || atLaunch.Phase != wat.UpdatePhaseStarted || atLaunch.Run != "upd-5" || atLaunch.To != "3.6.0" {
+			t.Fatalf("mailbox at launch must be the re-armed started record: %+v", atLaunch)
+		}
+		if time.Since(time.Unix(atLaunch.Ts, 0)) > 5*time.Second {
+			t.Fatalf("the launch re-arm Ts is not fresh: %d", atLaunch.Ts)
+		}
+		// the fresh Ts keeps the in-flight gate closed across the restart (what the fix is for)
+		if !gateBusy || gateRun != "upd-5" {
+			t.Fatalf("the launch re-arm must keep the gate closed: %q %v", gateRun, gateBusy)
 		}
 	})
 }

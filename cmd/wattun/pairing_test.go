@@ -270,8 +270,9 @@ func TestPairingPollerLatchFollows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mon := &latchMonitor{pair: p1, scepter: st, alive: func() bool { return false }, port: 20999,
-		logf: func(string, ...any) {}}
+	mon := &latchMonitor{pair: p1, scepter: st, alive: func() bool { return true }, port: 20999,
+		logf: func(string, ...any) {}} // alive stays true: a rePair may spawn the run loop (round-2 F9),
+	// and an inert loop (stand-down every tick, never arms) must not bind the test's port behind our back
 	logs := []string{}
 	pl := &pairingPoller{path: path, scepter: st, latch: mon,
 		logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }, interval: time.Hour}
@@ -304,5 +305,118 @@ func TestPairingPollerLatchFollows(t *testing.T) {
 	pl.check()
 	if !mon.status()["revoked"].(bool) {
 		t.Fatal("a removed store must revoke the monitor")
+	}
+}
+
+// TestScepterAttachSwitch (round-2 F11, 2026-11-22): the attach switch is a function now, and `pairing:
+// false` is an explicit opt-out — the stored file stays unattached (it used to fall to the default attach,
+// so the key could not actually turn the channel off). Absent key and `true` attach the stored file; a
+// watp1: value is never file-backed; an explicitly provided invalid one stays fatal for main.
+func TestScepterAttachSwitch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".pairing")
+	logs := []string{}
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+
+	// explicit false: no attach, no arm, nothing logged
+	p, fromFile, err := scepterAttach("false", path, logf)
+	if err != nil || p != nil || fromFile || len(logs) != 0 {
+		t.Fatalf("pairing: false must opt out silently: %v %v %v %v", p, fromFile, err, logs)
+	}
+	// absent key + stored file: attach, file-backed
+	writePairingStore(t, path, testPairingLine("manage")+"\n")
+	p, fromFile, err = scepterAttach("", path, logf)
+	if err != nil || p == nil || !fromFile || wat.CapName(p.Caps) != "manage" {
+		t.Fatalf("absent key must attach the stored file: %v %v %v", p, fromFile, err)
+	}
+	// true + stored file: attach, file-backed
+	p, fromFile, err = scepterAttach("true", path, logf)
+	if err != nil || p == nil || !fromFile {
+		t.Fatalf("true must attach the stored file: %v %v %v", p, fromFile, err)
+	}
+	// true + missing file: unpaired with the one missing warning
+	os.Remove(path)
+	logs = nil
+	p, fromFile, err = scepterAttach("true", path, logf)
+	if err != nil || p != nil || fromFile || len(logs) != 1 {
+		t.Fatalf("true with a missing store: %v %v %v %v", p, fromFile, err, logs)
+	}
+	// a watp1: value: attached but NOT file-backed (the static, unpollable kind)
+	p, fromFile, err = scepterAttach(testPairingLine("full"), path, logf)
+	if err != nil || p == nil || fromFile || wat.CapName(p.Caps) != "full" {
+		t.Fatalf("watp1: value: %v %v %v", p, fromFile, err)
+	}
+	// an explicitly provided invalid watp1: line: the error main turns into log.Fatalf
+	if _, _, err = scepterAttach("watp1:1|x|y|manage", path, logf); err == nil {
+		t.Fatal("an invalid watp1: line must fail")
+	}
+}
+
+// TestSetPairingKeyBOM (round-2 F12, 2026-11-22): a BOM'd first line must not defeat the existing-key scan
+// — parseConfig trims the BOM, setPairingKey did not, so a BOM'd `pairing: true` went undetected and a
+// second key was appended, which killed the boot.
+func TestSetPairingKeyBOM(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "t1.yml")
+	marked := "\xef\xbb\xbfpairing: true\nmode: client\nkey: kk\nports:\n  - 10001\n"
+	if err := os.WriteFile(cfg, []byte(marked), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setPairingKey(cfg); err != nil {
+		t.Fatalf("setPairingKey: %v", err)
+	}
+	if got := mustReadExisting(t, cfg); strings.Count(got, "pairing:") != 1 {
+		t.Fatalf("a BOM'd pairing key must be detected (no duplicate key, no boot kill):\n%q", got)
+	}
+	// a BOM'd file without the key still gains it, and the result parses (the BOM stays — parseConfig
+	// trims it the same way)
+	if err := os.WriteFile(cfg, []byte("\xef\xbb\xbfmode: client\nkey: kk\nports:\n  - 10001\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setPairingKey(cfg); err != nil {
+		t.Fatalf("setPairingKey on a BOM'd file: %v", err)
+	}
+	got := mustReadExisting(t, cfg)
+	if strings.Count(got, "pairing:") != 1 {
+		t.Fatalf("the key must be appended exactly once:\n%q", got)
+	}
+	if fc, err := parseConfig(got, nil); err != nil || len(fc.Ports) != 1 {
+		t.Fatalf("the BOM'd marked yml must still parse: %v", err)
+	}
+}
+
+// TestPairingPollerSeed (round-2 F13, 2026-11-22): main stats the store right after the attach read and
+// seeds the poller with that state, so a rotation in the startup gap between the read and the poller's own
+// first stat is detected on the first check instead of being armed over.
+func TestPairingPollerSeed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".pairing")
+	writePairingStore(t, path, testPairingLine("manage")+"\n")
+	p1, err := wat.ParsePairingLine(testPairingLine("manage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := wat.NewScepterState(p1, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the attach read happened; the seed is main's post-read stat
+	seed, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// rotation during startup: the disk already holds the NEW credential when the poller starts
+	writePairingStore(t, path, testPairingLine("full")+"\n")
+	fut := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, fut, fut); err != nil {
+		t.Fatal(err)
+	}
+	pl := &pairingPoller{path: path, scepter: st,
+		logf: func(f string, a ...any) {}, interval: time.Hour,
+		seedMt: seed.ModTime(), seedSz: seed.Size(), seeded: true}
+	startPairingPoller(pl)
+	pl.check() // the seeded state (old) vs disk (new): the rotation is a change on the very first check
+	if _, caps := st.PairingInfo(); wat.CapName(caps) != "full" {
+		t.Fatalf("the startup-gap rotation must be reloaded on the first check: caps %d", caps)
 	}
 }

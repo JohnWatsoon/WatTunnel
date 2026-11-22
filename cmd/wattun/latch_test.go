@@ -11,9 +11,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
@@ -38,7 +41,8 @@ func TestLatchMonitorArmStandDown(t *testing.T) {
 	var alive atomic.Bool
 	m := &latchMonitor{pair: pair, scepter: state, alive: func() bool { return alive.Load() },
 		port: 0, lo: 1, hi: 65535, al: newAllow("", ""), logf: func(string, ...any) {}}
-	m.arm() // port 0: an ephemeral loopback-free bind still succeeds (":0")
+	t.Cleanup(m.standDown) // the final re-arm would otherwise leave a parked arm goroutine behind
+	m.arm()                // port 0: an ephemeral loopback-free bind still succeeds (":0")
 	if m.status()["armed"] != true {
 		t.Fatalf("latch must be armed while inactive: %v", m.status())
 	}
@@ -57,6 +61,193 @@ func TestLatchMonitorArmStandDown(t *testing.T) {
 	m.arm()
 	if m.status()["armed"] != true {
 		t.Fatal("latch must re-arm after the unit goes inactive again")
+	}
+}
+
+// TestLatchRevokeBlocksArm (round-2 F8, 2026-11-22): a revoked monitor must not arm at all — arm snapshots
+// the credential once under mu and re-checks revoked before installing the listener, so a revoke racing an
+// in-flight arm cannot leave a listener accepting key proofs for a credential that no longer exists. The
+// concurrent interleaving itself (rePair/revoke mid-bind) is exercised by TestLatchArmCredentialHammer and
+// CI's -race run; arm used to read m.pair unsnapshot three times, so a rotation mid-arm could mix one
+// credential's path with another's key.
+func TestLatchRevokeBlocksArm(t *testing.T) {
+	pair := testLatchPairing()
+	state, err := wat.NewScepterState(pair, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &latchMonitor{pair: pair, scepter: state, alive: func() bool { return false },
+		port: 0, lo: 1, hi: 65535, al: newAllow("", ""), logf: func(string, ...any) {}}
+	m.revoke()
+	m.arm()
+	st := m.status()
+	if st["armed"] != false || st["revoked"] != true {
+		t.Fatalf("a revoked monitor must not arm: %v", st)
+	}
+}
+
+// TestLatchArmCredentialHammer (round-2 F8, 2026-11-22): arm, rePair and stand-down churned together must
+// never wedge the monitor — every arm works from ONE credential snapshot (the fix) and settles back into a
+// state that arms and stands down cleanly. alive stays true through the churn so the run loop rePair may
+// spawn stays inert (it only stands down, never arms); the settle flips it so the loop cannot stand down
+// what the settle arm installed.
+func TestLatchArmCredentialHammer(t *testing.T) {
+	oldPoll := latchPoll
+	latchPoll = 10 * time.Millisecond
+	t.Cleanup(func() { latchPoll = oldPoll })
+	pair := testLatchPairing()
+	pair2, err := wat.ParsePairingLine(testPairingLine("full"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := wat.NewScepterState(pair, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alive atomic.Bool
+	alive.Store(true)
+	m := &latchMonitor{pair: pair, scepter: state, alive: func() bool { return alive.Load() },
+		port: 0, lo: 1, hi: 65535, al: newAllow("", ""), logf: func(string, ...any) {}}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { // the rotation churn (the poller's shape)
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				m.rePair(pair2)
+			}
+		}
+	}()
+	go func() { // the arm churn (the monitor loop's shape)
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				m.arm()
+				m.standDown()
+			}
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	m.standDown()
+	alive.Store(false)
+	m.arm()                          // settle: the monitor must still arm on the current credential (the loop will not stand it
+	if m.status()["armed"] != true { // down now — alive is false and its arm quiet time is far away)
+		t.Fatalf("arm after the churn: %v", m.status())
+	}
+	m.standDown() // ...and stand down cleanly
+	if m.status()["armed"] != false {
+		t.Fatalf("stand-down after the churn: %v", m.status())
+	}
+}
+
+// TestLatchRePairRevivesAfterRevoke (round-2 F9, 2026-11-22): revoke ends the run loop, and rePair used to
+// leave it dead — revoked stayed set, the cockpit could revive the pair and the latch never armed again
+// until a process restart with no hint. rePair must clear the revocation and bring the loop back up: the
+// monitor arms again on liveness. Driven by the shrunk poll/arm seams (latchPoll, latchArmAfter).
+func TestLatchRePairRevivesAfterRevoke(t *testing.T) {
+	oldPoll, oldArm := latchPoll, latchArmAfter
+	latchPoll, latchArmAfter = 10*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { latchPoll, latchArmAfter = oldPoll, oldArm })
+	pair := testLatchPairing()
+	state, err := wat.NewScepterState(pair, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alive atomic.Bool
+	m := &latchMonitor{pair: pair, scepter: state, alive: func() bool { return alive.Load() },
+		port: 0, lo: 1, hi: 65535, al: newAllow("", ""), logf: func(string, ...any) {}}
+	go m.run()
+	m.revoke()
+	// the loop exits on the next tick; wait for it to be gone
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m.mu.Lock()
+		dead := !m.loopUp
+		m.mu.Unlock()
+		if dead && m.status()["revoked"] == true {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the run loop must have exited on the revocation")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// rePair after the revoke: revoked cleared, loop restarted, and it arms from the NEW credential
+	p2, err := wat.ParsePairingLine(testPairingLine("full"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.rePair(p2)
+	if m.status()["revoked"] != false {
+		t.Fatalf("rePair must clear the revocation: %v", m.status())
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if m.status()["armed"] == true {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the revived loop must arm again while the unit is inactive: %v", m.status())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	alive.Store(true) // and the normal rule resumes: alive again → stands down
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if m.status()["armed"] == false {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the revived loop must stand down when the unit is alive: %v", m.status())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestLatchConsumerExitsOnStandDown (round-2 F10, 2026-11-22): arm then stand down with no contact — the
+// pre-contact consumer used to block on srv.New forever (wat.Server.Close closes stop but not New), one
+// leaked goroutine per stand-down. Pinned by goroutine-stack scan: after the stand-down no arm goroutine
+// may remain parked.
+func TestLatchConsumerExitsOnStandDown(t *testing.T) {
+	oldPoll := latchPoll
+	latchPoll = 10 * time.Millisecond
+	t.Cleanup(func() { latchPoll = oldPoll })
+	pair := testLatchPairing()
+	state, err := wat.NewScepterState(pair, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &latchMonitor{pair: pair, scepter: state, alive: func() bool { return false },
+		port: 0, lo: 1, hi: 65535, al: newAllow("", ""), logf: func(string, ...any) {}}
+	buf := make([]byte, 1<<20)
+	parked := func() int { // arm goroutines parked anywhere in the process (other tests may keep some)
+		n := runtime.Stack(buf, true)
+		return strings.Count(string(buf[:n]), "(*latchMonitor).arm")
+	}
+	base := parked()
+	m.arm()
+	if m.status()["armed"] != true {
+		t.Fatalf("must arm for the drill: %v", m.status())
+	}
+	m.standDown()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if parked() <= base {
+			return // the consumer (and the server internals with it) are gone
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the pre-contact consumer leaked: an arm goroutine is still parked on srv.New")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
