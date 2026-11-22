@@ -1077,3 +1077,27 @@ PHASE D READY FOR REVIEW. Proceeding to phase E: Lane K (engine event coalescing
 audit-per-command with credential UUID + rotation test), Lane L (bash mgr probe-listing filter +
 MGR_VERSION, README content-sync for cockpit/ops, docs sweep).
 Commit: a86676a, e92fe35
+
+## 2026-11-22 · supervisor · Phase E closed — engine hardening (78113db), manager/docs (8b7fa8e), help fix; PHASE E READY FOR REVIEW
+- Lane K (engine E.1-E.3) self-committed 78113db: event coalescing (same (type,subject) inside 1 s
+  dropped, state_seq still advances; subject = name/id/run/pair-scoped; bounded 4096-key table),
+  backpressure pinned (ring is history only, oldest evicted, command queue never blocks on it),
+  per-command audit (EVERY outcome with credential uuid, appended to $CONF/.pairing.audit in the
+  manager's exact line shape, event token scepter_cmd, printable-ASCII 64 B collapse, 1 MiB rotation
+  to .pairing.audit.1 one-generation-kept, OpenScepterAudit failure fatal). Full wat suite 726.1 s
+  exit 0. NOTE: this commit also carries Lane L's TECHNICAL.md table edits (both lanes owned that
+  file — supervisor dispatch overlap; content correct at HEAD, attribution muddled across the two
+  commits, recorded here rather than rewriting history).
+- Lane L committed as 8b7fa8e: probe-listing filter in wattun-manager (provenance-line discriminator
+  ^probe-N(-N)?$ + "probe tunnel created by scepter test.open" + mode: server; tunnels()/stale_
+  tunnels() hide them, tunnels_all keeps for cleanup, port-collision helpers still see them),
+  MGR_VERSION 2026112210, 7 new test-manager checks, READMEs content-synced (native Farsi),
+  TECHNICAL sweep (rest rode in 78113db as noted). ALSO: -update-job (a86676a) was missing from
+  CFG_FILE_ONLY — the A5 config-coverage gate had been red at HEAD since phase D; Lane L caught and
+  fixed it; test-manager ALL OK (1056) re-run confirmed.
+- Supervisor fix from Lane L's -h accuracy report: -pairing help now says the pairing is stored by
+  -pair-to (was -pair). Gates green.
+- Phase E commits: 78113db -> 8b7fa8e -> (this commit).
+PHASE E READY FOR REVIEW. All five plan phases committed. Proceeding to debug wave 1 (four parallel
+adversarial reviewers: wire protocol, state, managers, compat).
+Commit: 78113db, 8b7fa8e
