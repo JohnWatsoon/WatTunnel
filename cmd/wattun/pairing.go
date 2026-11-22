@@ -65,8 +65,8 @@ func dirOf(path string) string {
 }
 
 // attachStoredPairing is the run's default attach (F2, 2026-11-22): both roles pick up the stored credential
-// when it exists (-pair wrote it on Kharej, -pair-to on Iran — the -pair help promises "server and client
-// alike", which the old code only did for the server). A missing file is the normal unpaired case and stays
+// when it exists (-pair wrote it on Kharej, -pair-to on Iran — both roles attach, which is what the
+// pre-wave-2 code only did for the server). A missing file is the normal unpaired case and stays
 // silent; a present but unusable one (a legacy key=value store from an old manager, a corrupted store) warns
 // with the path and the reason and the tunnel runs unpaired — the cockpit degrades, forwarding must not die
 // because the owner moved a file. The read error is returned so a caller that explicitly opted in

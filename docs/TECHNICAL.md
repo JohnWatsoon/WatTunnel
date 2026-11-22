@@ -2729,7 +2729,7 @@ pairing is static by definition (restart the unit without the key to revoke).
   the future web panel needs the panel-era design (keyed hello proofs or per-credential sessions).
 - **Mixed version, 3.5 client → 3.4 server.** The client cannot know the server's version before it speaks,
   so opening the reserved stream toward an old peer sends one hello line; a 3.4 server reads its first two
-  bytes as a target port (`{"` = 31778), tries ONE local dial on its own allowlist, fails and resets the
+  bytes as a target port (`{"` = 31522 (0x7b22), tries ONE local dial on its own allowlist, fails and resets the
   stream. At most one dial attempt, no data delivered; the client degrades to the "needs 3.5.0" state.
 - **Rotation window is manager bookkeeping.** The 24 h old-key overlap lives in the manager's store
   comments; the ENGINE accepts only the current credential (an old-key cockpit must re-attach the new

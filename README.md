@@ -129,7 +129,8 @@ finalized tunnels reopen automatically on update.
 3.5.0 adds an optional pairing between the two servers (both ends need 3.5.0). `install.sh` prints a `watp1:`
 pairing line next to the first token; `wattun -pair 'watp1:…'` stores it on Kharej, `-pair-to` (or
 `pairing: true` in the config) attaches it on Iran, and Kharej's own console (`wattun scepter`) can pair,
-rotate the key (the old one is accepted for 24 h more) and revoke. The tunnel then carries a hidden, encrypted
+rotate the key (the engine switches to the new key when the store changes; the 24 h overlap window
+is bookkeeping that reminds you to re-attach the new line on Iran) and revoke. The tunnel then carries a hidden, encrypted
 management channel — a reserved stream inside the session's encryption, with a capability tier on the
 credential (`tunnel` < `create` < `manage` < `full`) and every command checked, rate-limited and journaled on
 Kharej. If every tunnel of the pair dies, Kharej's **scepter latch** (`-latch-port`, opt-in) opens a shaped

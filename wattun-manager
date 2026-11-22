@@ -1078,9 +1078,10 @@ token_bond_legs() { # T_CARRIER (a bond) + T_PEER -> T_LEG_C/T_LEG_P arrays; T_P
 #     the pre-2026112211 manager wrote a key=value file there that the engine cannot
 #     parse, so a manager-paired Kharej never armed the channel. `# ` comment lines
 #     after line 1 are this manager's bookkeeping (created=, oldkey=,
-#     oldkey_expires=) and are ignored by the engine (the engine skips everything
-#     after line 1; the pre-fix engine, which parses the whole file as one line, must
-#     be updated together with this manager). The old key=value store still parses
+#     oldkey_expires=) and are ignored by the engine (the engine takes the first watp1:
+#     line and skips blank/# lines; the pre-fix engine, which parses the whole file as
+#     one line, was updated together with this manager). The old key=value store still
+#     parses for READING; nothing writes that shape any more.
 #     for READING; nothing writes that shape any more.
 #  Hidden infrastructure: the store and the audit log are dotfiles, never *.yml
 #  tunnels, so tunnels()/listed_tunnels()/dashboards can never list them (the
@@ -1271,7 +1272,9 @@ scepter_pair() { # generate (or adopt a pasted watp1: line) and store the pairin
   hint "Give this watp1: line to Iran (pairs the cockpit; wattun 3.5.0 on both ends)."
   return 0
 }
-scepter_rotate() { # [window_secs=86400] : new key; the old key stays valid for the window (default 24 h)
+scepter_rotate() { # [window_secs=86400] : new key; the window (default 24 h) is bookkeeping that reminds
+  # you to re-attach the new watp1: line on Iran BEFORE rotating - the engine accepts only the current
+  # credential and reloads within the poll interval once the store changes (TECHNICAL.md accepted limits)
   local win=${1:-86400} uuid caps key nk
   case "$win" in ''|*[!0-9]*) err "The rotation window is a number of seconds."; return 1 ;; esac
   scepter_kharej_only || return 1
@@ -1282,10 +1285,10 @@ scepter_rotate() { # [window_secs=86400] : new key; the old key stays valid for 
   nk=$(new_pair_key)
   pairing_store_write "$uuid" "$nk" "$caps" "$key" "$(( $(date +%s) + win ))" || { err "Could not write $PAIR_STORE."; return 1; }
   pairing_audit pair_rotated "$uuid window=${win}s"
-  ok "Pairing key rotated; the old key is accepted for $(( win / 3600 )) h more."
+  ok "Pairing key rotated; the engine switches to the new key within its poll interval."
   echo
   printf '  %s%s%s\n\n' "$BOLD$YEL" "$(make_pairing 1 "$uuid" "$nk" "$caps")" "$RST"
-  hint "Give this new watp1: line to Iran before the window closes."
+  hint "Attach this new watp1: line on Iran NOW (rotation takes effect at the next store poll)."
   return 0
 }
 scepter_revoke() { # revoke = unpair: drop the credential locally; tunnels keep running (plan D3)
