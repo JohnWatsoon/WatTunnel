@@ -1297,3 +1297,21 @@ gofmt/vet + GOOS=linux clean; bash -n install.sh OK; SIG_PUB cmp identical. The 
 environmental cmd failures (TestDNSRelayGuards/TestDialLocalIPv6) unchanged, proven at baseline.
 READY FOR REVIEW (48b4445) extended by this pass.
 Commit: 137a34c, 5aaa9dc, 41ec0a9, (this entry)
+
+## 2026-11-22 · supervisor · UI/UX swarm (overnight pass) dispatched — 3-swarm night per owner
+Owner directive: three swarms while they sleep — (1) UI/UX (Iran as the MAIN dashboard, every setting
+from both sides, the best possible look: gradients + animations; skills unslop/frontend-design/
+design-taste-frontend loaded and distilled), (2) debugging, (3) fix-everything-from-swarm-2. Sequenced
+by dependency: UI swarm first (everything else reviews/fixes its output), then the debug swarm over
+the new tree, then the fix clusters. Design interpretation recorded: the owner's "insane gradients"
+lands as ONE bright gradient moment per screen (header band + live rate meter, the Firouzeh→saffron
+palette A ramp) with quiet chrome everywhere else — that is the unslop law the owner's own skills
+enforce; animations are purposeful only (spinners on work, tweened live numbers), never looping
+decoration. The existing foundation (theme.go palette A, truecolor tiers, UseAnim, home.go) is
+elevated, not rewritten; no new dependencies (pure ANSI/stdlib).
+Wave 1 dispatched: U1 (design-system elevation: gradient band/bar/header renderer, animation
+primitives, panel/layout primitives — commits own) + U0 (read-only settings-coverage matrix: every
+bash-manager feature vs the Go manager's local+remote surface, engine-gap list, recommended
+Iran-dashboard screen map). Wave 2 (U2 dashboard / U3 coverage screens / U4 scepter restyle) follows
+U1+U0; wave 3 = integration gate. Then debug swarm, then fixes.
+Commit: none (dispatch record)
