@@ -2713,7 +2713,37 @@ host:port` (with the pairing attached) is the contact primitive: it proves, runs
 
 Hidden infrastructure: the latch listener and the scepter session appear in NO user-facing listing or dashboard
 and never in `/stats`. The only visible trace is the doctor's, served by the loopback `/scepter` endpoint on the
-metrics address: pairing UUID, capability, latch state (armed/port/contacts/rejected) and the last 16 commands.
+metrics address: pairing UUID, capability, latch state (armed/port/contacts/rejected/revoked) and the last 16
+commands.
+
+Revocation and rotation are engine-live for FILE-backed credentials: a poller (5 s) watches `.pairing` — a
+removed or unparsable store disarms the channel and revokes the latch (`ReloadPairing(nil)`; the tunnel keeps
+running), a changed store reloads the credential and re-arms the latch from the NEW key. A config-key `watp1:`
+pairing is static by definition (restart the unit without the key to revoke).
+
+### Accepted limitations (review wave 1, 2026-11-22 — recorded, not bugs to fix today)
+
+- **Capabilities are per-process.** The channel's capability mask comes from the server's STORED pairing;
+  the in-band hello carries no keyed proof, so any holder of the tunnel PSK commands with the stored mask.
+  That is exactly the rooted-Iran = rooted-Kharej trust model (the plan's D3); per-credential scoping for
+  the future web panel needs the panel-era design (keyed hello proofs or per-credential sessions).
+- **Mixed version, 3.5 client → 3.4 server.** The client cannot know the server's version before it speaks,
+  so opening the reserved stream toward an old peer sends one hello line; a 3.4 server reads its first two
+  bytes as a target port (`{"` = 31778), tries ONE local dial on its own allowlist, fails and resets the
+  stream. At most one dial attempt, no data delivered; the client degrades to the "needs 3.5.0" state.
+- **Rotation window is manager bookkeeping.** The 24 h old-key overlap lives in the manager's store
+  comments; the ENGINE accepts only the current credential (an old-key cockpit must re-attach the new
+  `watp1:` line). Existing sessions keep working through a rotation — the session keys derive from the
+  tunnel PSK, not the pairing key; only the latch re-arms from the new key.
+- **Downgrade with scepter keys present.** A 3.4 binary refuses a yml carrying `pairing:`/`latch-port:`/… on
+  start (unknown key). The engine never writes these keys into tunnel ymls itself (the ops deny list), and
+  the dotfiles (`.pairing`, `.pairing.journal`, `.pairing.audit`, `.update.status`, `.update/`) are ignored
+  by 3.4 — only a HAND-edited `pairing: true` needs removing before a downgrade.
+- **Small accepted warts:** a stream that dies mid-session tombstones sid 0 for ~2 min (a re-open
+  black-holes until the tombstone expires; shipped clients use fresh sessions); the mgr-side
+  `ScepterClient` is single-threaded by contract; error answers to undecodable lines carry no request id
+  (the client's deadline expires instead of failing fast); `.bak` keeps ONE generation (the `wattun.prev`
+  precedent); two concurrent probe opens can race a port (the loser's verification rolls it back cleanly).
 
 ## Pacing on TCP-based and CDN carriers
 
