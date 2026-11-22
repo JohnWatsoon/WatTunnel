@@ -1169,3 +1169,49 @@ overlap stays manager bookkeeping (engine accepts only the current credential �
 Proceeding to wave 3: fresh read-only regression sweep (full battery, mixed-version retest,
 user-visible string review) → READY FOR REVIEW.
 Commit: 2233fb0, f9429a0, b24af32, 8192c2a, 468d960, a33aec9
+
+## 2026-11-22 · supervisor · Debug wave 3 complete — READY FOR REVIEW (Handoff 3: Scepter, the full plan)
+Wave-3 regression sweep (fresh read-only agent, final tree dc9ec7f): FULL BATTERY GREEN — gofmt empty;
+go build+vet and GOOS=linux build+vet clean; go test -count=1 ./cmd/... ok (wattun 42.0 s, mgr 1.3 s,
+wprobe 0.1 s); FULL go test -count=1 -timeout 15m ./wat/ ok 718.7 s exit 0 (TestMultiPeerSkipsDeadAtOnce
+green this run — the 2026-11-21 environmental caveat did not reproduce); bash -n ×3 clean;
+bash test-manager.sh ALL OK (1079 checks); DPI self-test SELFTEST OK (38 checks; python3 is the
+Windows Store stub here, ran via python). Mixed-version re-test: PASS with no contract drift (hello
+floor, sid-0 never served to old/unpaired peers, L5-strict field 10, mgr↔engine fake-binary contract).
+String review: PASS (no misspellings, canonical "pairing key", codes-not-strings holds, Farsi native
+digits correct, flag help matches behavior). Four-way watp1 format consistency: PASS (engine/mgr/bash/
+docs agree; one benign read-side asymmetry logged — engine requires padded base64, mgr/bash tolerate
+unpadded, all writers emit padded). ZERO regressions; four doc/comment drifts found and FIXED in
+8348219 (rotation wording in READMEs+manager, 31778→31522 hex slip, two stale comments;
+test-manager re-run ALL OK 1079 after).
+
+HANDOFF 3 (docs/handoff/PLAN-pairing.md) IS COMPLETE. Version 3.5.0, unreleased; the owner releases on
+request (no push, no tag, no release was made).
+
+Commits (33 total, oldest→newest):
+- Phase A: d354660 engine channel · 4ef462a mgr surface · 9fbe625 latch/drill/docs/installer ·
+  eae9c41 bash console · 83d481f log
+- Phase B: bc26b3a write intents+ops+queue+-scepter-call (incl. the serveScepterLoop hot-spin fix that
+  also explains the old TestSlowReaderBuffersBounded churn caveat — suite fully green since) ·
+  73eb08f CFG coverage · f264005 cockpit · e659b1d log
+- Phase C: b1ffbeb probes/carrier.change/auto-test · fcfee6c test.close probe-arg fix · 1be4dfb
+  cockpit · 608b588 log
+- Phase D: a86676a ops engine (update orchestration via systemd-run + SIG_PUB-verified staging,
+  doctor/backup/audit) · e92fe35 Operations console · 7a6c1db+e2c2c8d logs
+- Phase E: 78113db event coalescing/backpressure/audit-per-command · 8b7fa8e probe-listing filter +
+  README sync + TECHNICAL sweep · 39b1245 -pairing help fix · 353d10f log
+- Wave 1-2: 2233fb0 W engine hardening · f9429a0 Y bash store format · b24af32 X engine wiring (latch
+  PSK, store format, revocation poller, -pair-to standalone, deny list, backup exclusion, probe cap) ·
+  8192c2a latch follows the credential · 468d960 accepted-limitations docs · a33aec9 Z mgr contracts ·
+  d76f55e+dc9ec7f logs
+- Wave 3: 8348219 drift fixes · this entry
+
+Total: 41 files, +17068/−59 since 834427f. Every phase's gates, wave findings and fixes are in the
+entries above; AGENT-HANDOFF.md carries the per-change local record.
+
+Deliberately left (none are blockers): spawnProbeClient and the update-job swap need first live proof
+on a sim pair with real systemd units (Windows dev cannot run probe units; CI has no engine-process
+test); the web panel consumes the RPC later; watp1: QR code, fleet dashboard, cross-Kharej commands
+are the plan's Later list; mgr ScepterClient is single-threaded by documented contract; the mgr
+accepts unpadded base64 keys on read (all writers emit padded; the engine fails loudly otherwise).
+Commit: 8348219 (fixes); this entry = READY FOR REVIEW
