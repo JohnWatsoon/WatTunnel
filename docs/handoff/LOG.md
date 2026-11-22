@@ -1315,3 +1315,25 @@ bash-manager feature vs the Go manager's local+remote surface, engine-gap list, 
 Iran-dashboard screen map). Wave 2 (U2 dashboard / U3 coverage screens / U4 scepter restyle) follows
 U1+U0; wave 3 = integration gate. Then debug swarm, then fixes.
 Commit: none (dispatch record)
+
+## 2026-11-23 · supervisor · UI/UX swarm closed — Iran main dashboard live (3 waves, 6 lanes)
+Wave 1: U0 coverage audit (Scepter cockpit was CLI-only; Settings lost boost + Kharej console; six
+engine gaps) + U1 design system (c0a22d2: GradRGB/GradBand/GradBar/GradRows, Spinner/Tween/Fill,
+Panel/KV/spacing, banner truecolor sheen; zero new deps; colour-off byte-stable). Wave 2: U2 3cd9e88
+(home = Iran main dashboard: tweened meters, pair status line, menu Tunnels/New/Scepter/Find/Blackout/
+Tools/Settings/Exit, kernel boost restored, Kharej scepter console ported, Tools regrouped), U3 6e3ee88
+(cockpit at full coverage: ScepterFleetEntry in the menu, 28-key per-key remote editor mirroring local
+validators, preset.list catalog picker, keyrotate with twin rewrite, mute, limits reset, restyled
+states), U4 1748dba (carrier/ops screens restyled: bands, spinners, honest relative meters, unit
+normalization, usage text), U5e 74db690 (engine: preset catalog mirroring bash live-tested,
+preset.list, tunnel.keyrotate, pair.rotate with ReloadPairing adoption, carrier.mute, limits.reset;
+pair.revoke deliberately NOT added — D3 trust boundary; full wat suite green twice). Supervisor
+integration: tunnels.go K row + pair status line, stray binary removed, registry collision checked
+(scepter_menu/scepter_fleet single registrations). Final battery on the integrated tree: gofmt empty,
+build+vet x2 platforms clean, mgr suite ok, cmd suite only the 2 documented Windows environmental
+failures. Design language recorded: ONE gradient moment per screen (Firouzeh→saffron), quiet chrome,
+purposeful motion only, every state designed — the owner's three design skills distilled for TUI.
+Deliberately left: sys.go spinner adoption, test.go legacy display unit (noted by U4), wat/version bump
+(release pass), web-panel era gaps (state-dir/port-offset rows stay greyed with hints).
+Next: debug swarm (12 reviewers over the new tree), then fix clusters.
+Commit: c0a22d2, 74db690, 3cd9e88, 6e3ee88, 1748dba, (wires), (this entry)
