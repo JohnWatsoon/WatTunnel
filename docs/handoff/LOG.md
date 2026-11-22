@@ -1337,3 +1337,12 @@ Deliberately left: sys.go spinner adoption, test.go legacy display unit (noted b
 (release pass), web-panel era gaps (state-dir/port-offset rows stay greyed with hints).
 Next: debug swarm (12 reviewers over the new tree), then fix clusters.
 Commit: c0a22d2, 74db690, 3cd9e88, 6e3ee88, 1748dba, (wires), (this entry)
+
+## 2026-11-23 · supervisor · Debug swarm over the UI pass dispatched — 12 parallel reviewers
+Night-2 swarm per the owner's three-swarm plan. Scopes: R3-1 primitives (grad/anim/panel/theme),
+R3-2 home dashboard, R3-3 cockpit editor (28-key + keyrotate twin), R3-4 restyle + usage docs,
+R3-5 engine commands (74db690), R3-6 navigation seams, R3-7 engine regression, R3-8 concurrency/
+races, R3-9 mgr-wide collateral, R3-10 docs accuracy, R3-11 bash parity + test-manager run, R3-12
+test honesty (delete-test + race coverage). Findings will be verified by the supervisor, then fix
+clusters dispatch (night 3).
+Commit: none (dispatch record)
