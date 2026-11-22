@@ -253,3 +253,56 @@ func TestPairingPollerNotForConfigKeyPairing(t *testing.T) {
 		t.Fatal("the config-key-pairing caveat must be documented where the attach happens")
 	}
 }
+
+// TestPairingPollerLatchFollows: the latch follows the credential (2026-11-22 wave 2) — a rotation swaps
+// the monitor's pairing (the next arm derives the latch PSK from the NEW key), a revocation revokes the
+// monitor itself so a revoked pair's latch can never accept proofs again.
+func TestPairingPollerLatchFollows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".pairing")
+	writePairingStore(t, path, testPairingLine("manage")+"\n")
+
+	p1, err := wat.ParsePairingLine(testPairingLine("manage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := wat.NewScepterState(p1, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon := &latchMonitor{pair: p1, scepter: st, alive: func() bool { return false }, port: 20999,
+		logf: func(string, ...any) {}}
+	logs := []string{}
+	pl := &pairingPoller{path: path, scepter: st, latch: mon,
+		logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }, interval: time.Hour}
+	startPairingPoller(pl)
+	if mon.status()["revoked"].(bool) {
+		t.Fatal("fresh monitor must not be revoked")
+	}
+
+	// rotation: the monitor's pairing is swapped (status stays enabled, not revoked)
+	writePairingStore(t, path, testPairingLine("full")+"\n")
+	fut := time.Now().Add(2 * time.Second)
+	os.Chtimes(path, fut, fut)
+	pl.check()
+	if mon.status()["revoked"].(bool) {
+		t.Fatal("a rotation must not revoke the monitor")
+	}
+	p2, err := wat.ParsePairingLine(testPairingLine("full"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mon.mu.Lock()
+	swapped := mon.pair != nil && mon.pair.UUIDString() == p2.UUIDString()
+	mon.mu.Unlock()
+	if !swapped {
+		t.Fatal("rotation must swap the monitor's pairing (the next arm derives the PSK from the new key)")
+	}
+
+	// revocation: the monitor is revoked and its listener stands down — the run loop exits on the next tick
+	os.Remove(path)
+	pl.check()
+	if !mon.status()["revoked"].(bool) {
+		t.Fatal("a removed store must revoke the monitor")
+	}
+}

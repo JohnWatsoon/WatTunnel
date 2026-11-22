@@ -53,6 +53,7 @@ type latchMonitor struct {
 
 	contacts atomic.Int64
 	rejected atomic.Int64
+	revoked  atomic.Bool // the pairing was revoked under the running process (poller); the latch never arms again
 }
 
 // startLatch runs the monitor loop in the background and publishes it to /scepter.
@@ -65,6 +66,9 @@ func startLatch(m *latchMonitor) *latchMonitor {
 func (m *latchMonitor) run() {
 	var inactiveSince time.Time
 	for range time.Tick(latchPoll) {
+		if m.revoked.Load() { // the pairing poller disarmed the channel: no listener for a revoked pair
+			return
+		}
 		if m.alive() {
 			inactiveSince = time.Time{}
 			m.standDown()
@@ -149,6 +153,25 @@ func (m *latchMonitor) standDown() {
 	}
 }
 
+// revoke marks the credential gone (the .pairing poller disarmed the ScepterState, 2026-11-22 wave 2):
+// the latch stops arming and its listener stands down — a revoked pair's latch must not keep accepting
+// key proofs (the arm-time LatchKey would otherwise stay valid forever).
+func (m *latchMonitor) revoke() {
+	m.revoked.Store(true)
+	m.standDown()
+	m.logf("scepter latch: pairing revoked — the latch stands down permanently")
+}
+
+// rePair swaps the credential after a rotation: the next arm derives the latch PSK from the NEW key. The
+// old listener's PSK is stale, so the listener stands down and re-arms on a later cycle; a live contact
+// session is left alone (standDown's rule — it ends on its own).
+func (m *latchMonitor) rePair(p *wat.PairingConfig) {
+	m.mu.Lock()
+	m.pair = p
+	m.mu.Unlock()
+	m.standDown()
+}
+
 // contacted counts an authenticated latch contact (the proof in wat.ServeScepterLatch passed).
 func (m *latchMonitor) contacted() { m.contacts.Add(1) }
 
@@ -167,7 +190,7 @@ func (m *latchMonitor) status() map[string]any {
 	m.mu.Lock()
 	armed := m.srv != nil
 	m.mu.Unlock()
-	return map[string]any{"enabled": true, "port": m.port, "armed": armed,
+	return map[string]any{"enabled": true, "port": m.port, "armed": armed, "revoked": m.revoked.Load(),
 		"contacts": m.contacts.Load(), "rejected": m.rejected.Load()}
 }
 

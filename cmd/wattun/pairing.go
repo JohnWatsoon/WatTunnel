@@ -152,6 +152,7 @@ var pairingPollInterval = 5 * time.Second
 type pairingPoller struct {
 	path     string
 	scepter  *wat.ScepterState
+	latch    *latchMonitor // optional: the latch follows the credential (revoke = stand down permanently, rotate = re-arm from the new key)
 	logf     func(string, ...any)
 	interval time.Duration
 
@@ -183,6 +184,9 @@ func (p *pairingPoller) check() {
 	if err != nil {
 		if p.armed {
 			p.scepter.ReloadPairing(nil)
+			if p.latch != nil {
+				p.latch.revoke()
+			}
 			p.armed = false
 			p.logf("scepter: pairing file %s removed — management channel disarmed, the tunnel keeps running", p.path)
 		}
@@ -198,6 +202,9 @@ func (p *pairingPoller) check() {
 	if perr != nil {
 		if p.armed {
 			p.scepter.ReloadPairing(nil)
+			if p.latch != nil {
+				p.latch.revoke()
+			}
 			p.armed = false
 			p.logf("scepter: pairing file %s unusable (%v) — management channel disarmed, the tunnel keeps running", p.path, perr)
 		}
@@ -209,6 +216,9 @@ func (p *pairingPoller) check() {
 		p.logf("scepter: pairing file %s restored — management channel armed (pairing %s, capability %s)", p.path, pair.UUIDString(), wat.CapName(pair.Caps))
 	}
 	p.scepter.ReloadPairing(pair)
+	if p.latch != nil {
+		p.latch.rePair(pair)
+	}
 	p.armed = true
 }
 

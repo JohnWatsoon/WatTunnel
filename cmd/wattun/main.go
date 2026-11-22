@@ -1434,16 +1434,18 @@ func main() {
 			scepter.SetOps(newFileScepterOps(filepath.Dir(pairPath), unitName, known, log.Printf))
 			scepterNow.Store(scepter) // the /scepter handler reads this (it registered before arming)
 			// The scepter latch (3.5.0, phase A item 4): opt-in with -latch-port next to the stored pairing.
+			var mon *latchMonitor
 			if *latchPort > 0 {
-				startLatch(&latchMonitor{pair: cfg.Pairing, scepter: scepter, alive: alive, port: *latchPort,
+				mon = startLatch(&latchMonitor{pair: cfg.Pairing, scepter: scepter, alive: alive, port: *latchPort,
 					lo: *allowLo, hi: *allowHi, al: al, base: cfg, logf: log.Printf})
 				log.Printf("scepter latch: watching port %d (arms %s after every unit of the pairing goes inactive)", *latchPort, latchArmAfter)
 			}
 			// F8-revoke (2026-11-22): watch the stored pairing — file gone/unparsable disarms, a changed file
 			// reloads. File-backed credentials only (see the attach switch): a config-key watp1: pairing is
-			// static by definition, and revoking it means restarting the unit without the key.
+			// static by definition, and revoking it means restarting the unit without the key. The latch
+			// follows the credential: revoke stands it down permanently, a rotation re-arms from the new key.
 			if pairingFromFile {
-				startPairingPoller(&pairingPoller{path: pairPath, scepter: scepter, logf: log.Printf, interval: pairingPollInterval})
+				startPairingPoller(&pairingPoller{path: pairPath, scepter: scepter, latch: mon, logf: log.Printf, interval: pairingPollInterval})
 			}
 		}
 		go func() {
