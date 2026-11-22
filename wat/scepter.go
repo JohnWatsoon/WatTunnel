@@ -210,6 +210,14 @@ const (
 	scepterTTL     = 600         // default intent TTL, seconds (plan: 600)
 	scepterSkew    = time.Minute // tolerated client/server clock error for the TTL check
 	scepterEvents  = 512         // event ring size (plan: last 512 events replayable)
+
+	// Event coalescing (plan E.1): a flapping tunnel must not flood the ring or the channel — at most one
+	// event per scepterEvWindow per (type, subject) reaches the ring; repeats are dropped, never queued,
+	// while state_seq still advances. scepterEvKeys caps the subject table (probes mint new ids forever);
+	// when the cap is hit, entries older than the window are pruned — always safe, an expired entry could
+	// never coalesce anything (the next event for that key fires and refreshes it).
+	scepterEvWindow = time.Second
+	scepterEvKeys   = 4096
 )
 
 // ScepterRequest is one command line. TS is the client's unix-seconds timestamp; TTL the intent's lifetime
@@ -507,6 +515,99 @@ func (j *ScepterJournal) Lookup(id string) (ScepterResponse, bool) {
 	return ScepterResponse{}, false
 }
 
+// ---- command audit (plan E.3): every command, every outcome, with the credential UUID ----
+
+// ScepterAuditFile is the shared credential+command audit file, relative to the config dir: wattun-manager's
+// console appends its pairing events (pair_created/pair_rotated/pair_revoked) here, the engine appends one
+// line per handled command (ScepterAudit below), and audit.tail (cmd/wattun/scepter_ops.go, the `audit`
+// source) returns the tail raw. Defined here so the three sides cannot drift on the path or the format.
+const ScepterAuditFile = ".pairing.audit"
+
+// scepterAuditEvent is the <event> token of an engine-written audit line; the manager uses pair_* tokens.
+// The shared line shape is "<RFC3339 UTC> <event> <detail>" (documented in docs/TECHNICAL.md, audit.tail).
+const scepterAuditEvent = "scepter_cmd"
+
+// ScepterAudit is the append-only command audit (plan E.3): every handled command — every outcome, not just
+// the journaled ones — lands as one line
+//
+//	<RFC3339 UTC> scepter_cmd uuid=<pairing UUID> cmd=<cmd> code=<code> id=<id>
+//
+// in ScepterAuditFile, the SAME file and line shape the manager's pairing_audit writes, so audit.tail (and
+// the manager's audit view) read ONE credential+command trail and "who tried what" covers denied/stale/
+// rate_limited/unknown commands too. The journal above stays outcomes-only (applied intents and rolled-back
+// writes) for at-most-once replay; the audit is evidence. Rotation reuses the journal's threshold
+// (scepterJournalRotate) but preserves the old generation: the live file is RENAMED to ScepterAuditFile+".1"
+// (the journal's rotate instead keeps only live ids in place — the audit's old content is evidence, it moves
+// aside and is never rewritten away; one generation, so the file set stays bounded). audit.tail reads the
+// live file only.
+//
+// Writer shape, deliberately different from the journal's held fd: one open-append-close per record. The
+// manager REWRITES this file (read-modify-write + rename) on each console append, which re-points the path —
+// a held fd would keep appending to the replaced inode and silently lose audit lines. Per-record opens
+// always follow the live file; the cost is three syscalls per command, bounded by the per-pair rate bucket
+// (20 commands/s). Lines never interleave mid-line: every write and the rotation decision hold one mutex.
+type ScepterAudit struct {
+	mu   sync.Mutex
+	path string
+	size int64 // last known size, refreshed from the file itself (the manager's rewrites resize it too)
+}
+
+// OpenScepterAudit probes the audit file (creating it) and returns the writer.
+func OpenScepterAudit(path string) (*ScepterAudit, error) {
+	a := &ScepterAudit{path: path}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if st, err := f.Stat(); err == nil {
+		a.size = st.Size()
+	}
+	f.Close()
+	return a, nil
+}
+
+// record appends one line. Write errors are best effort (the tunnel keeps serving when the disk fills; the
+// journal's semantics differ because replayed outcomes, not evidence, ride on it).
+func (a *ScepterAudit) record(now time.Time, uuid, cmd, id string, code int) {
+	if a == nil || a.path == "" {
+		return
+	}
+	line := fmt.Sprintf("%s %s uuid=%s cmd=%s code=%d id=%s\n", now.UTC().Format(time.RFC3339),
+		scepterAuditEvent, uuid, scepterAuditToken(cmd), code, scepterAuditToken(id))
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return
+	}
+	_, werr := f.Write([]byte(line))
+	f.Close()
+	if st, serr := os.Stat(a.path); serr == nil {
+		a.size = st.Size() // the truth, wherever the manager's console rewrites left it
+	} else if werr == nil {
+		a.size += int64(len(line))
+	}
+	if a.size >= scepterJournalRotate {
+		os.Rename(a.path, a.path+".1") // one generation preserved (type comment); the next record starts fresh
+		a.size = 0
+	}
+}
+
+// scepterAuditToken keeps one audit line ONE line: cmd and id come from the peer (authenticated, but an
+// embedded newline would forge audit entries), so anything outside printable ASCII collapses to '_' and the
+// token is capped at 64 bytes.
+func scepterAuditToken(s string) string {
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return strings.Map(func(r rune) rune {
+		if r >= 0x20 && r < 0x7f {
+			return r
+		}
+		return '_'
+	}, s)
+}
+
 // scepterRate is the per-pair token bucket on commands (plan: commands/s). Generous for a human cockpit, tight
 // for a runaway loop; a journaled retry still costs a token so replay-spam is bounded too.
 type scepterRate struct {
@@ -535,10 +636,15 @@ type ScepterState struct {
 	started time.Time
 	seq     uint64
 	events  []ScepterEvent // ring: capped at scepterEvents, oldest dropped
-	src     ScepterSource
-	ops     ScepterOps // the write side (phase B); nil until SetOps — then write commands answer unknown_cmd
-	journal *ScepterJournal
-	rate    scepterRate
+	evFire  map[string]time.Time
+	// evWindow is the coalescing window (scepterEvWindow); a field so tests can disable coalescing (0) to
+	// drill the raw ring behaviour — the same seam pattern as nowf.
+	evWindow time.Duration
+	src      ScepterSource
+	ops      ScepterOps // the write side (phase B); nil until SetOps — then write commands answer unknown_cmd
+	journal  *ScepterJournal
+	audit    *ScepterAudit // the shared command audit (plan E.3); nil without a persistent journal dir
+	rate     scepterRate
 	// createRate is the slower per-pair "structural" bucket on the unit-restarting ops — tunnel.create (plan
 	// B.2: "creation/test rate limits per pair"), carrier.change and auto.apply (phase C): five at once, then
 	// one per 10 s — a human cockpit never feels it, a runaway loop stops.
@@ -567,21 +673,35 @@ type ScepterRec struct {
 const scepterRecent = 16
 
 // NewScepterState builds the state for a pairing. journalPath may be empty (no journal). src may be nil (the
-// tunnel-listing commands answer empty until the binary wires a source).
+// tunnel-listing commands answer empty until the binary wires a source). When journalPath is set, the shared
+// command audit (ScepterAuditFile) is opened next to it — the same config dir the manager's console writes and
+// audit.tail reads — and a failing audit is fatal, like a failing journal: an audit that silently never
+// writes is exactly the gap plan E.3 closes.
 func NewScepterState(pair *PairingConfig, src ScepterSource, journalPath string) (*ScepterState, error) {
 	j, err := OpenScepterJournal(journalPath)
 	if err != nil {
 		return nil, err
 	}
-	return &ScepterState{
+	ss := &ScepterState{
 		pair: pair, src: src, journal: j, started: time.Now(),
 		rate:       scepterRate{rate: 20, burst: 40},
 		createRate: scepterRate{rate: 0.1, burst: 5},
 		probeRate:  scepterRate{rate: 1.0 / 30, burst: 3},
 		autoRate:   scepterRate{rate: 1.0 / 60, burst: 2},
 		updateRate: scepterRate{rate: 1.0 / 300, burst: 1},
+		evFire:     map[string]time.Time{},
+		evWindow:   scepterEvWindow,
 		nowf:       time.Now,
-	}, nil
+	}
+	if journalPath != "" {
+		a, err := OpenScepterAudit(filepath.Join(filepath.Dir(journalPath), ScepterAuditFile))
+		if err != nil {
+			j.Close()
+			return nil, err
+		}
+		ss.audit = a
+	}
+	return ss, nil
 }
 
 // SetOps arms the write side (phase B). Without it every write command answers unknown_cmd — a phase-A binary,
@@ -607,15 +727,49 @@ func (ss *ScepterState) statusPath() string {
 	return filepath.Join(filepath.Dir(ss.journal.path), ScepterUpdateStatusFile)
 }
 
-// AddEvent records a state change and returns its seq (the state_seq counter increments on EVERY change).
+// scepterEvSubject picks the coalescing subject of an event (plan E.1): the tunnel name when the event is
+// about one (tunnel_up/down/edited/deleted, heal_action, carrier_switched), else the object id (probe
+// open/close, update runs), else the pair itself (scepter_up/down, auto_test). Repeats about the SAME
+// subject inside the window are the flood the plan caps; different subjects never coalesce against each
+// other, so two probes opened in one second both land in the ring.
+func scepterEvSubject(detail map[string]any) string {
+	for _, k := range []string{"name", "id", "run"} {
+		if s, ok := detail[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// AddEvent records a state change and returns its seq (the state_seq counter increments on EVERY change —
+// a coalesced event still moves the cursor, so a client that diffs by seq sees that state moved and
+// re-polls state.get). Coalescing (plan E.1): at most one event per evWindow per (type, subject) reaches
+// the ring; a repeat is DROPPED, never queued. Backpressure rule (plan E.1): drop HISTORY first, never
+// commands — a full ring evicts its oldest entries, and nothing here can block or refuse a command: the
+// check is two map lookups under the lock AddEvent already holds, there is no channel and no consumer
+// goroutine between the producers and the ring (the only reader, events.since, copies under this same
+// lock), so the command queue (qmu) never waits on event traffic.
 func (ss *ScepterState) AddEvent(kind string, detail map[string]any) uint64 {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.seq++
-	ev := ScepterEvent{Seq: ss.seq, Type: kind, TS: ss.nowf().Unix(), Detail: detail}
+	key := kind + "\x00" + scepterEvSubject(detail)
+	now := ss.nowf()
+	if len(ss.evFire) > scepterEvKeys {
+		for k, t := range ss.evFire { // bound the table: expired entries cannot coalesce anything (above)
+			if now.Sub(t) >= ss.evWindow {
+				delete(ss.evFire, k)
+			}
+		}
+	}
+	if last, ok := ss.evFire[key]; ok && now.Sub(last) < ss.evWindow {
+		return ss.seq // coalesced: dropped, not queued — the ring keeps the last full-fidelity event per window
+	}
+	ss.evFire[key] = now
+	ev := ScepterEvent{Seq: ss.seq, Type: kind, TS: now.Unix(), Detail: detail}
 	ss.events = append(ss.events, ev)
 	if len(ss.events) > scepterEvents {
-		ss.events = ss.events[len(ss.events)-scepterEvents:]
+		ss.events = ss.events[len(ss.events)-scepterEvents:] // history is what gets dropped, never commands
 	}
 	return ev.Seq
 }
@@ -703,8 +857,21 @@ var scepterCmds = map[string]scepterCmd{
 
 // Handle validates and runs one request. Order (each step is a trust-boundary check, cheapest first):
 // registry → ops presence → rate → journal replay (idempotency) → TTL → capability → execute → journal.
-// The caller stamps Seq.
+// The caller stamps Seq. EVERY outcome is audited (plan E.3): the wrapper appends one ScepterAuditFile line
+// with the credential UUID for ok/denied/stale/rate_limited/bad_request/unknown alike — "who tried what" is
+// answerable from the audit alone — while the journal inside stays outcomes-only for replay. The audit write
+// runs AFTER handle returned (the command queue is released), so the queue never waits on audit I/O either.
 func (ss *ScepterState) Handle(req ScepterRequest, caps uint32) ScepterResponse {
+	resp := ss.handle(req, caps)
+	uuid := ""
+	if ss.pair != nil {
+		uuid = ss.pair.UUIDString()
+	}
+	ss.audit.record(ss.nowf(), uuid, req.Cmd, req.ID, resp.Code)
+	return resp
+}
+
+func (ss *ScepterState) handle(req ScepterRequest, caps uint32) ScepterResponse {
 	c, ok := scepterCmds[req.Cmd]
 	if req.ID == "" || !ok {
 		return ScepterResponse{ID: req.ID, Code: CodeUnknownCmd}

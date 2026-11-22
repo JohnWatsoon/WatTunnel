@@ -1795,6 +1795,8 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `state-dir` | empty (next to the config) | both, needs `-config` (3.3.0) | Directory that holds the quota-usage and lifetime-totals files (`<config>.quota.json`, `<config>.totals.json`). Created 0700 when missing; an existing directory with wider permissions is tightened to 0700 (chmod failure stops startup). The file names keep the config's base name, so one directory can hold several tunnels. Point it at tmpfs (`/run/wattun`) to spare the disk: the shipped unit creates that directory and keeps it across a service restart, but the counters are still lost on reboot. See "State files". |
 | `state-save` | 30 | both (3.3.0) | Seconds between state-file saves (quota usage and lifetime totals); `0` = only on shutdown, at most 2592000 (30 days; a larger value stops startup). The save itself is atomic (tmp + rename), as before. |
 | `debug` | false | both | Log every stream open and close. |
+| `pairing` | empty (off) | client | Attach the Scepter pairing credential (3.5.0): `true` opens the management stream with the pairing stored by `-pair-to` (`.pairing` in the config dir), a full `watp1:` line as the value uses it directly, `false` = off with no credential read. The server needs no key in its config: it serves the channel whenever a stored pairing exists. See [Scepter](#scepter-the-pairing-and-management-plane-350). |
+| `latch-port` | 0 (off) | server | Scepter (3.5.0): port of the scepter latch — the fallback wss listener that arms while every unit of the pairing is inactive, so the cockpit can revive the pair; the first contact must prove the pairing key. 0 = off, and the latch never exists without a stored pairing. File-only in the manager. See [Scepter](#scepter-the-pairing-and-management-plane-350). |
 
 ### Example: ICMP (the production setup)
 
@@ -1972,6 +1974,14 @@ Every flag can also be a config key. Flags win over the file.
 | `-state-save SECONDS` | 30 | Both ends (3.3.0): seconds between state-file saves; 0 = only on shutdown, at most 2592000 (30 days; a larger value stops startup). |
 | `-metrics ADDR` | off | Serve `/stats` and pprof. |
 | `-debug` | off | Log every stream. |
+| `-pair LINE` | | Server, standalone action (3.5.0): store a `watp1:` pairing line as this server's Scepter pairing (`.pairing` in the config dir, mode 0600, atomic write) and exit; the management channel serves from the next restart on. See [Scepter](#scepter-the-pairing-and-management-plane-350). |
+| `-pair-to LINE` | | Client (3.5.0): attach this `watp1:` pairing line to the tunnel — the credential is stored and the reserved management stream (sid 0) opens alongside normal forwarding. |
+| `-pairing V` | empty | Client (3.5.0): `true` opens the management stream with the pairing stored by `-pair-to`; a full `watp1:` line as the value is used directly; `false` = off. Same key as the config key `pairing`. |
+| `-latch-port N` | 0 (off) | Server (3.5.0): arm the scepter latch on port N (the fallback listener; see [Scepter](#scepter-the-pairing-and-management-plane-350)). |
+| `-latch-dial HOST:PORT` | | Client, standalone (3.5.0): contact the scepter latch at host:port with the pairing attached, prove the key, run the hello and one ping, then exit — the cockpit revival primitive and drill tool. |
+| `-scepter-call CMD` | | Client, standalone one-shot (3.5.0): dial the paired session's reserved stream, run ONE command, print every response line as JSONL on stdout and exit; exit 0 once the command was answered (the machine code rides the JSON), 1 on a transport failure. |
+| `-scepter-args JSON` | | With `-scepter-call`: the command's args as a JSON object; a top-level `"id"` becomes the command id, so a retried call replays the journaled outcome at-most-once. |
+| `-update-job DIR` | | Internal (3.5.0): run one Scepter update job from a staged dir (backup → install → restart units → watch → roll back); `update.run` launches it through `systemd-run` so the watchdog outlives the engine restart it performs. Not a human entry point. |
 | `-version` | | Print `wattun X.Y.Z` and exit. |
 
 Signals: `SIGTERM` or `SIGINT` stops. On a server, `SIGUSR1` starts a drain (below).
@@ -2365,8 +2375,11 @@ and RTT were unchanged.
 Scepter turns a tunnel token into a live pairing: Kharej and Iran **pair once**, and from then on Iran is the
 cockpit — reading state, stats, logs and events of its tunnels on Kharej over an encrypted management channel,
 with no SSH to Kharej. It landed in phases inside 3.5.0: the read-only channel (A), write intents (B), remote
-carrier work (C) and operations (D: update orchestration, doctor, backup, audit). Everything is API-first: a
-future web panel is just another client.
+carrier work (C), operations (D: update orchestration, doctor, backup, audit) and the event-hardening /
+audit-completeness pass (E). Everything is API-first: a future web panel is just another client. Humans reach
+the plane through two consoles — Kharej's local `wattun scepter` (pair / rotate / revoke / audit tail, the bash
+manager) and Iran's cockpit, the Go manager's `wattun scepter` (fleet view, create wizard, remote tunnel pages,
+remote carrier tests, operations) — plus the scriptable one-shot `wattun -scepter-call`.
 
 **Version matrix: both ends need 3.5.0** for any Scepter feature. A 3.4.x Kharej paired by a 3.5 Iran degrades
 to today's behavior: no scepter traffic beyond at most one rejected hello, the tunnel itself is untouched.
@@ -2424,6 +2437,25 @@ accepted / the new engine verified up / the update failed or rolled back), `heal
 recorded outcome (at-most-once application). Applied intents and rolled-back Kharej-side failures
 (`code=internal`) are journaled; pure rejections (`denied`/`stale`/`rate_limited`/`bad_request`) are
 recomputed on a retry. Intents carry `ttl_s` (default 600); expired ones answer `code=stale`.
+
+**Coalescing (phase E).** A flapping tunnel must not flood the channel: at most ONE event per second per
+(type, subject) reaches the ring. The subject is what the event is about — the tunnel name (`tunnel_up`/
+`down`/`edited`/`deleted`, `heal_action`, `carrier_switched`), else the object id (`test_opened`/`test_closed`
+probes, update runs), else the pair itself (`scepter_up`/`scepter_down`, `auto_test`) — so two probes opened
+in the same second both land, and only true repeats collapse. A coalesced repeat is DROPPED, never queued,
+and `state_seq` still advances: a client that sees the cursor move knows the state changed and re-polls
+`state.get` (the ring keeps the last full-fidelity event per window).
+
+**Backpressure drops history, never commands (phase E).** The ring is history only: when full it evicts its
+OLDEST entries (replay stays consistent — `events.since` still returns an ascending, contiguous window and
+the cursor keeps being the newest seq), and the command queue never blocks on the event ring: no command is
+refused, delayed or lost because of event traffic, no matter how full the ring is or how slowly a client
+replays.
+
+Every handled command — every outcome, the pure rejections included — is additionally written to the
+credential audit (`.pairing.audit`, shared with the Kharej console; format under `audit.tail` below) with
+the pairing UUID, so "who tried what" is answerable independently of the journal, which stays
+outcomes-only for replay.
 
 ### Phase A commands
 
@@ -2629,11 +2661,26 @@ returns them inside the session AEAD). Caps: one member > 4 MB or a total > 5 MB
 — the chunked transfer tops out at 512 x 16 KiB. The doc carries the tar's sha256 and size so the cockpit
 can verify the decode.
 
-**audit.tail** reads the two append-only sources on Kharej: `.pairing.audit` (the Kharej console's
-credential audit — pair/rotate/revoke events, written by wattun-manager as `<RFC3339> <event> <detail>`
-lines) and `.pairing.journal` (the scepter command journal). Lines are returned RAW, parse-free on purpose:
-the audit's schema is the manager's, and re-encoding it in the engine would couple the two. Files are read
-from the end (2 MB window); a missing file is an empty entries list, not an error.
+**audit.tail** reads the two append-only sources on Kharej: `.pairing.audit` (the credential audit) and
+`.pairing.journal` (the scepter command journal). Lines are returned RAW, parse-free on purpose. Files are
+read from the end (2 MB window); a missing file is an empty entries list, not an error.
+
+`.pairing.audit` is ONE shared file in ONE line format, written by two writers:
+
+```
+<RFC3339 UTC> <event> <detail…>
+```
+
+The Kharej console (wattun-manager) appends its pairing events — `pair_created`, `pair_rotated`,
+`pair_revoked` — and since phase E the ENGINE appends one line per handled command:
+`<RFC3339 UTC> scepter_cmd uuid=<pairing UUID> cmd=<cmd> code=<code> id=<id>`, every outcome
+(`denied`/`stale`/`rate_limited`/`bad_request`/`unknown_cmd` included), so the file answers "who tried what"
+end to end. `cmd` and `id` are peer-supplied, so the engine collapses anything outside printable ASCII to
+`_` and caps both at 64 bytes — an authenticated peer cannot forge audit lines with embedded newlines. The
+engine's writer REOPENS the file per record (the console rewrites it with tmp + rename; a held file
+descriptor would keep appending to the replaced inode and silently lose lines) and rotates at the journal's
+1 MB threshold by renaming the live file to `.pairing.audit.1` — one generation preserved on disk for the
+owner (the old content is evidence, it is never rewritten away); `audit.tail` reads the live file only.
 
 ### The one-shot client action: `wattun -scepter-call`
 

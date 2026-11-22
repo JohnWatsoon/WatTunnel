@@ -203,9 +203,11 @@ func TestScepterSIDZeroReserved(t *testing.T) {
 	}
 }
 
-// events.since replays the ring; the ring keeps the last 512.
+// events.since replays the ring; the ring keeps the last 512. Coalescing is disabled (evWindow 0) so the
+// drill exercises the raw ring: the coalescing and backpressure behaviour have their own tests below.
 func TestScepterEventReplay(t *testing.T) {
 	c, state := newScepterPair(t, CapManage, "", &fakeSource{})
+	state.evWindow = 0
 	var seqs []uint64
 	for i := 0; i < 5; i++ {
 		seqs = append(seqs, state.AddEvent(EvTunnelUp, map[string]any{"name": "t1", "i": i}))
@@ -235,6 +237,152 @@ func TestScepterEventReplay(t *testing.T) {
 	}
 	if cur := p["cursor"]; cur == float64(0) {
 		t.Fatal("cursor is zero after events")
+	}
+}
+
+// Event coalescing (plan E.1): a flapping tunnel must not flood the ring or the channel — max 1 event per
+// window per (type, subject); coalesced repeats are dropped, never queued, and state_seq still advances so
+// clients diffing by seq see that state moved. A fake clock drives the windows deterministically.
+func TestScepterEventCoalescing(t *testing.T) {
+	ss, err := NewScepterState(testPairing(CapManage), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.journal.Close() })
+	var secs atomic.Int64 // the fake clock: whole seconds from base
+	base := time.Now()
+	ss.nowf = func() time.Time { return base.Add(time.Duration(secs.Load()) * time.Second) }
+	ring := func() []ScepterEvent {
+		ss.mu.Lock()
+		defer ss.mu.Unlock()
+		return append([]ScepterEvent{}, ss.events...)
+	}
+	// a flapping tunnel: 10 up/down pairs inside one second — every change bumps state_seq (20), but only
+	// the first up and the first down reach the ring; the other 18 are dropped, not queued
+	for i := 0; i < 10; i++ {
+		ss.AddEvent(EvTunnelUp, map[string]any{"name": "t1"})
+		ss.AddEvent(EvTunnelDown, map[string]any{"name": "t1"})
+	}
+	if ss.StateSeq() != 20 {
+		t.Fatalf("state_seq = %d after 20 changes, want 20 (coalescing advances seq even when it drops)", ss.StateSeq())
+	}
+	evs := ring()
+	if len(evs) != 2 || evs[0].Type != EvTunnelUp || evs[1].Type != EvTunnelDown || evs[0].Seq != 1 || evs[1].Seq != 2 {
+		t.Fatalf("flap kept %d ring events: %#v (want [up@1 down@2], one per type per window)", len(evs), evs)
+	}
+	// a different tunnel is a different subject: it fires inside the same window
+	if s := ss.AddEvent(EvTunnelUp, map[string]any{"name": "t2"}); s != 21 {
+		t.Fatalf("second subject coalesced against the first: seq %d", s)
+	}
+	// pair-scoped events (nil detail) coalesce too: reconnect churn keeps one scepter_up per window
+	ss.AddEvent(EvScepterUp, nil)
+	ss.AddEvent(EvScepterUp, nil)
+	if n := len(ring()); n != 4 {
+		t.Fatalf("ring has %d events, want 4 (up@1, down@2, up-t2@21, scepter_up@22)", n)
+	}
+	if ss.StateSeq() != 23 {
+		t.Fatalf("state_seq = %d, want 23", ss.StateSeq())
+	}
+	// the window passes: the same key fires again, carrying the NEW state; different probes (ids) and
+	// different update runs never coalesce against each other
+	secs.Store(2)
+	if s := ss.AddEvent(EvTunnelUp, map[string]any{"name": "t1"}); s != 24 {
+		t.Fatalf("event after the window coalesced: seq %d", s)
+	}
+	evs = ring()
+	if last := evs[len(evs)-1]; last.Seq != 24 || last.Type != EvTunnelUp {
+		t.Fatalf("post-window event missing from the ring: %#v", last)
+	}
+}
+
+// Backpressure (plan E.1): drop HISTORY first, never commands. A full ring evicts its oldest entries,
+// events.since stays consistent at every cut (seq > since, ascending, cursor = newest), and the command
+// queue path completes while the ring is full and a reader is hammering it — commands never block on the
+// event ring.
+func TestScepterEventRingBackpressure(t *testing.T) {
+	ss, err := NewScepterState(testPairing(CapManage), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.journal.Close() })
+	ss.evWindow = 0 // fill fast: every event fires (coalescing off for this drill)
+	const extra = 100
+	for i := 0; i < scepterEvents+extra; i++ {
+		ss.AddEvent(EvHealAction, map[string]any{"name": "t" + itoa(i)})
+	}
+	ss.mu.Lock()
+	first, last := ss.events[0].Seq, ss.events[len(ss.events)-1].Seq
+	ss.mu.Unlock()
+	if first != extra+1 || last != scepterEvents+extra {
+		t.Fatalf("ring holds seqs %d..%d, want %d..%d (oldest evicted)", first, last, extra+1, scepterEvents+extra)
+	}
+	// consistency at three cuts: exactly the events after `since`, ascending, none below the cut, cursor newest
+	// (cmdEventsSince called directly returns the []ScepterEvent slice, pre-JSON)
+	for _, cut := range []int{0, extra, int(last) - 50} {
+		p, code := cmdEventsSince(ss, ScepterRequest{Args: map[string]any{"seq": float64(cut)}})
+		if code != CodeOK {
+			t.Fatalf("events.since(%d) code %d", cut, code)
+		}
+		raw := p["events"].([]ScepterEvent)
+		wantN := int(last) - cut
+		if wantN > scepterEvents {
+			wantN = scepterEvents
+		}
+		if len(raw) != wantN {
+			t.Fatalf("events.since(%d) returned %d, want %d", cut, len(raw), wantN)
+		}
+		prev := uint64(cut)
+		for _, e := range raw {
+			if e.Seq <= prev {
+				t.Fatalf("events.since(%d) not ascending above the cut: %d after %d", cut, e.Seq, prev)
+			}
+			prev = e.Seq
+		}
+		if cur := p["cursor"].(uint64); cur != last {
+			t.Fatalf("cursor %v, want %d", cur, last)
+		}
+	}
+	// the surviving window is contiguous (eviction never tears a hole in the middle of the ring)
+	p, _ := cmdEventsSince(ss, ScepterRequest{Args: map[string]any{"seq": 0}})
+	raw := p["events"].([]ScepterEvent)
+	for i, e := range raw {
+		if e.Seq != first+uint64(i) {
+			t.Fatalf("ring torn at offset %d: seq %d, want %d", i, e.Seq, first+uint64(i))
+		}
+	}
+	// commands never block on the ring: with it full and a reader hammering events.since, a command
+	// completes promptly and further churn keeps the ring bounded — history is what gets dropped
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				cmdEventsSince(ss, ScepterRequest{Args: map[string]any{"seq": 0}})
+			}
+		}
+	}()
+	start := time.Now()
+	resp := ss.Handle(ScepterRequest{ID: "bp-1", V: scepterV, Cmd: "scepter.ping", TS: time.Now().Unix()}, testPairing(CapManage).Caps)
+	if resp.Code != CodeOK {
+		t.Fatalf("command over a full ring: code %d", resp.Code)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("command blocked on the event ring for %v", el)
+	}
+	for i := 0; i < 50; i++ {
+		ss.AddEvent(EvHealAction, map[string]any{"name": "post" + itoa(i)})
+	}
+	close(stop)
+	<-done
+	ss.mu.Lock()
+	n := len(ss.events)
+	ss.mu.Unlock()
+	if n != scepterEvents {
+		t.Fatalf("ring grew past the cap under churn: %d", n)
 	}
 }
 
@@ -1695,6 +1843,169 @@ func TestScepterAuditTailRPC(t *testing.T) {
 	if _, code = c.Call("audit.tail", map[string]any{"n": -1}); code != CodeBadRequest {
 		t.Fatal("negative n accepted")
 	}
+}
+
+// Audit completeness (plan E.3): EVERY handled command lands in the shared audit file with the credential
+// UUID — ok, denied, stale, rate_limited and unknown_cmd alike (the journal stays outcomes-only for replay)
+// — in THE SAME file and line shape wattun-manager's console writes ("<RFC3339> <event> <detail>"), so
+// audit.tail reads one credential+command trail. A newline in a peer-supplied id cannot forge audit lines.
+func TestScepterAuditPerCommand(t *testing.T) {
+	dir := t.TempDir()
+	jp := filepath.Join(dir, ".pairing.journal")
+	ss, err := NewScepterState(testPairing(CapFull), nil, jp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.journal.Close() })
+	pair := testPairing(CapFull)
+	ap := filepath.Join(dir, ScepterAuditFile)
+
+	// the manager's console wrote here first: the shared file keeps both writers' lines
+	mgr := "2026-11-22T09:00:00Z pair_created " + pair.UUIDString() + " caps=full\n"
+	if err := os.WriteFile(ap, []byte(mgr), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if r := ss.Handle(ScepterRequest{ID: "ok-1", V: scepterV, Cmd: "scepter.ping", TS: now}, pair.Caps); r.Code != CodeOK {
+		t.Fatalf("ok command: code %d", r.Code)
+	}
+	if r := ss.Handle(ScepterRequest{ID: "den-1", V: scepterV, Cmd: "tunnel.stats", Args: map[string]any{"name": "t1"}, TS: now}, CapTunnel); r.Code != CodeDenied {
+		t.Fatalf("denied command: code %d", r.Code)
+	}
+	if r := ss.Handle(ScepterRequest{ID: "old-1", V: scepterV, Cmd: "scepter.ping", TS: now - scepterTTL - 120}, pair.Caps); r.Code != CodeStale {
+		t.Fatalf("stale command: code %d", r.Code)
+	}
+	if r := ss.Handle(ScepterRequest{ID: "unk-1", V: scepterV, Cmd: "nope.cmd", TS: now}, pair.Caps); r.Code != CodeUnknownCmd {
+		t.Fatalf("unknown command: code %d", r.Code)
+	}
+	ss.rate = scepterRate{rate: 0.0001, burst: 0} // burst-only bucket drained: the next attempt is rate_limited
+	if r := ss.Handle(ScepterRequest{ID: "rl-1", V: scepterV, Cmd: "scepter.ping", TS: now}, pair.Caps); r.Code != CodeRateLimited {
+		t.Fatalf("rate limited: code %d", r.Code)
+	}
+	ss.rate = scepterRate{rate: 20, burst: 40}
+	// a journaled retry replays the recorded outcome and is audited as the attempt it was
+	if r := ss.Handle(ScepterRequest{ID: "ok-1", V: scepterV, Cmd: "scepter.ping", TS: now}, pair.Caps); r.Code != CodeOK {
+		t.Fatalf("replayed retry: code %d", r.Code)
+	}
+	// a newline in the id collapses: one command, one line, no forged entries
+	if r := ss.Handle(ScepterRequest{ID: "evil\nid", V: scepterV, Cmd: "scepter.ping", TS: now}, pair.Caps); r.Code != CodeOK {
+		t.Fatalf("sanitized command: code %d", r.Code)
+	}
+
+	b, err := os.ReadFile(ap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	want := []struct {
+		cmd, id string
+		code    int
+	}{
+		{"scepter.ping", "ok-1", CodeOK},
+		{"tunnel.stats", "den-1", CodeDenied},
+		{"scepter.ping", "old-1", CodeStale},
+		{"nope.cmd", "unk-1", CodeUnknownCmd},
+		{"scepter.ping", "rl-1", CodeRateLimited},
+		{"scepter.ping", "ok-1", CodeOK}, // the replay, audited again
+		{"scepter.ping", "evil_id", CodeOK},
+	}
+	if len(lines) != len(want)+1 || lines[0] != strings.TrimRight(mgr, "\n") {
+		t.Fatalf("audit lines (%d): %q", len(lines), lines)
+	}
+	for i, w := range want {
+		l := lines[i+1]
+		pre := " scepter_cmd uuid=" + pair.UUIDString() + " cmd=" + w.cmd + " code=" + itoa(w.code) + " id=" + w.id
+		if !strings.HasSuffix(l, pre) {
+			t.Fatalf("audit line %d = %q, want suffix %q", i+1, l, pre)
+		}
+		if !isRFC3339Stamp(l) { // "<RFC3339> <event> <detail>" — the manager's line shape, seconds resolution
+			t.Fatalf("audit line %d does not start with an RFC3339 UTC stamp: %q", i+1, l)
+		}
+	}
+	// the journal stayed outcomes-only: only the applied pings are there, none of the rejections is
+	jb, err := os.ReadFile(jp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jl := strings.Split(strings.TrimRight(string(jb), "\n"), "\n")
+	if len(jl) != 2 { // ok-1 (the retry replays, never re-records) and the sanitized ping — both code 0
+		t.Fatalf("journal holds %d records, want the 2 applied pings only", len(jl))
+	}
+	for _, l := range jl {
+		if strings.Contains(l, "den-1") || strings.Contains(l, "old-1") || strings.Contains(l, "unk-1") || strings.Contains(l, "rl-1") {
+			t.Fatalf("a pure rejection was journaled: %q", l)
+		}
+		if !strings.Contains(l, `"code":0`) {
+			t.Fatalf("journal line is not an outcome record: %q", l)
+		}
+	}
+}
+
+// isRFC3339Stamp reports whether s starts with a "YYYY-MM-DDTHH:MM:SSZ" UTC stamp (the shared audit line
+// shape; kept tiny and dependency-free on purpose).
+func isRFC3339Stamp(s string) bool {
+	if len(s) < 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':' || s[19] != 'Z' {
+		return false
+	}
+	for _, i := range []int{0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18} {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Audit rotation (plan E.3): past the 1 MiB journal threshold the live file is renamed to
+// ScepterAuditFile+".1" — a fresh live file, the old generation preserved wholesale (never rewritten away).
+func TestScepterAuditRotation(t *testing.T) {
+	dir := t.TempDir()
+	a, err := OpenScepterAudit(filepath.Join(dir, ScepterAuditFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, old := filepath.Join(dir, ScepterAuditFile), filepath.Join(dir, ScepterAuditFile+".1")
+	now := time.Now()
+	for i := 0; ; i++ { // write past the threshold; ~75 B/line so this is a few thousand quick records
+		a.record(now, "uu", "scepter.ping", itoa(i), CodeOK)
+		if _, err := os.Stat(old); err == nil {
+			break
+		}
+		if i > 200000 {
+			t.Fatal("audit never rotated past the threshold")
+		}
+	}
+	st, err := os.Stat(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() < scepterJournalRotate {
+		t.Fatalf("rotated at %d bytes, below the %d threshold", st.Size(), scepterJournalRotate)
+	}
+	oldLines := strings.Count(mustRead(t, old), "\n")
+	if oldLines < 2 {
+		t.Fatalf("old generation holds %d lines, want the whole pre-rotation content", oldLines)
+	}
+	// the live file starts fresh; the old generation is untouched by later records
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Fatalf("live audit after rotation: %v (want gone until the next record)", err)
+	}
+	a.record(now, "uu", "scepter.ping", "post", CodeOK)
+	b := mustRead(t, live)
+	if n := strings.Count(b, "\n"); n != 1 || !strings.HasSuffix(strings.TrimSpace(b), "id=post") {
+		t.Fatalf("fresh live audit holds %d line(s): %q", n, b)
+	}
+	if st2, err := os.Stat(old); err != nil || st2.Size() != st.Size() {
+		t.Fatalf("old generation changed after rotation: %v vs %d bytes", st2, st.Size())
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 // The channel-survival semantics (plan D.1/D.3), end to end over real sessions and a real journal file:
