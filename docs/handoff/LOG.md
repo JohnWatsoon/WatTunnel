@@ -955,3 +955,46 @@ PHASE B READY FOR REVIEW. Proceeding to phase C (remote carrier work): Lane G en
 probe lifecycle, carrier.change with link-check rollback, auto.test cockpit trigger/read/apply)
 first, then the mgr surfaces on the committed RPC.
 Commit: f264005
+
+## 2026-11-22 03:29 · Lane G (engine, phase C) · Remote carrier work committed (b1ffbeb)
+- Six scepter commands landed: test.open/test.close (probe listeners as short-lived speed-test-only
+  units: bare `ports:` = empty allowlist so only target 0 is ever answered, engine-generated key in the
+  AEAD, ports 20500-20999, ttl 10..3600 def 300, removal at expiry/explicit close, provenance sweep at
+  engine start, probe bucket 3/30 s), carrier.change (edit path + link check: TCP connect, UDP
+  bind-conflict - Windows never surfaces ICMP port-unreachable reliably; auto-rollback restores .bak and
+  restarts), auto.test/auto.rows/auto.apply (triggerable core in the engine ops per the plan: Kharej
+  measures which shapes it can SERVE with the fast preset's method - throw-away self-exec client, /stats
+  alive wait, /speedtest?mb=4&streams=4 - ranked rows stored ops-side, row apply rides carrier.change;
+  async run, already_running guard, auto_test event, autoRate 2/60 s). Events test_opened/test_closed/
+  auto_test appended; ScepterOps +6 methods; ScepterNewKey exported; Edit refactored into applyEdit
+  (linkVerify flag). TECHNICAL.md: phase C command table + probe/carrier-change/auto-test sections +
+  version matrix (both ends 3.5.0) + the Iran-side restart contract (Kharej changes/verifies its side;
+  the cockpit rewrites its tunnel and runs its own link check - the pass-traffic verdict).
+- Tests: 4 engine RPC drills in wat/scepter_test.go (probe lifecycle + clamps + events + probe bucket;
+  carrier.change happy/rollback + journal replay + structural bucket; auto round-trip with ranking and
+  row apply) and 6 real-ops drills in cmd/wattun/scepter_ops_test.go (probe lifecycle vs fake units incl.
+  ttl expiry + orphan sweep; carrier-change rollback drills A/B; multi-tunnel port bookkeeping - two
+  creates, live probe blocks its port, probes count toward the cap; auto-test with held runProbe seam;
+  dialBindPort against real loopback sockets; probeClientArgs). Gates: gofmt EMPTY, build+vet clean,
+  GOOS=linux clean, go test ./cmd/... ok, full wat suite ok 708.6 s EXIT 0. Not run: diag suite (not in
+  gate), race (CI only), test-manager.sh (no manager changes). Caveat: production spawnProbeClient
+  (self-exec) wired but unexercised by tests on this checkout - first live proof belongs to a sim pair
+  with real units.
+Commit: b1ffbeb
+
+## 2026-11-22 · supervisor · Phase C engine lane committed (b1ffbeb) — remote carrier work live
+- Lane G reviewed and verified after self-committing b1ffbeb: test.open/test.close (probe = a
+  short-lived server unit probe-<unix> through the proven create machinery, EMPTY allowlist so a
+  probe answers only the built-in speed test, ports 20500-20999, ttl 10-3600 s default 300,
+  constructor sweeps orphans), carrier.change (edit + re-listen + link check: unit liveness plus
+  loopback probe of every bound port, 4 s retry; rollback restores .bak and restarts), auto.test
+  async (queue never held ~1 min; already_running on re-trigger; EvAutoTested on finish),
+  auto.rows/auto.apply (rows ranked; apply rides carrier.change). Per-pair probe/auto rate buckets.
+  Supervisor-verified honest placement: Kharej measures what it can SERVE and how fast; the DPI
+  verdict stays Iran's (documented). 4 RPC + 6 ops drills green. Full wat suite green (708.6 s,
+  exit 0) run once for this commit; gofmt/vet/build+vet-linux clean; cmd suite ok.
+- Lane G self-review caught a real bug pre-commit: probes armed at the 10 s ttl floor could expire
+  mid-measurement; fixed to the 300 s default.
+- Left for later: spawnProbeClient first live proof on a sim pair with real units (Windows dev
+  cannot run probe units); mgr surfaces (Lane H dispatching now).
+Commit: b1ffbeb
