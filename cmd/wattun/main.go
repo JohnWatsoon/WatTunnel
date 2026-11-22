@@ -185,7 +185,7 @@ func main() {
 	// Scepter (3.5.0, phase A): -pair stores a pairing credential on Kharej, -pair-to attaches one on Iran.
 	// Both are opt-in; without them nothing changes (no pairing file, no reserved-stream traffic).
 	pair := flag.String("pair", "", "accept a watp1: pairing line (version|UUID|key|capability, printed by install.sh next to the first token), store it as this server's Scepter pairing and exit; the file is .pairing in the config dir (/etc/wattun/.pairing on Linux), mode 0600; the management channel serves after the next restart (both ends need 3.5.0)")
-	pairTo := flag.String("pair-to", "", "client: attach this watp1: pairing line to the tunnel: the reserved management stream (sid 0) is opened toward the paired server and the cockpit channel runs alongside normal forwarding; equivalent config key: `pairing: true` with the stored pairing file (3.5.0)")
+	pairTo := flag.String("pair-to", "", "client, standalone: attach this watp1: pairing line to the tunnel — stores the credential (.pairing next to the config, mode 0600), marks the tunnel config `pairing: true` (only when the key is not already there) and exits; the next tunnel start opens the reserved management stream (sid 0) toward the paired server and the cockpit channel runs alongside normal forwarding (3.5.0)")
 	pairingKey := flag.String("pairing", "", "config-file key: `pairing: true` opens the management stream with the pairing stored by -pair-to; the value may also be a full watp1: line (3.5.0)")
 	latchPort := flag.Int("latch-port", 0, "server, Scepter (3.5.0): port of the scepter latch — a shaped wss listener (key-derived path) that arms while every unit of the pairing is inactive, so the cockpit can revive the pair; the first contact must prove the pairing key and the listener stands down on it. 0 = off (the default; the latch also never exists without a stored pairing)")
 	latchDial := flag.String("latch-dial", "", "client, standalone: contact the scepter latch on Kharej at host:port with the pairing from -pair-to (or the stored pairing file), prove the key, run the pairing hello and one ping, then exit — the cockpit revival primitive and the drill tool (3.5.0)")
@@ -308,10 +308,10 @@ func main() {
 		log.Printf("pairing %s stored in %s (capability %s); the management channel serves after the next restart", p.UUIDString(), ppath, wat.CapName(p.Caps))
 		return
 	}
-	// -latch-dial (3.5.0): standalone cockpit contact, like -pair a setup/drill action, not a run mode.
 	if *updateJob != "" { // the systemd-run update job body (3.5.0 phase D): runs unsandboxed by design —
 		os.Exit(runUpdateJobMain(*updateJob)) // it must swap /usr/local/bin/wattun, which the engine unit cannot
 	}
+	// -latch-dial (3.5.0): standalone cockpit contact, like -pair a setup/drill action, not a run mode.
 	if *latchDial != "" {
 		var pairing *wat.PairingConfig
 		var perr error
@@ -324,6 +324,23 @@ func main() {
 		}
 		if err := contactLatch(*latchDial, pairing); err != nil {
 			log.Fatalf("-latch-dial %s: %v", *latchDial, err)
+		}
+		return
+	}
+	// -pair-to (F2, 2026-11-22): the standalone attach action, like -pair — validate, store the credential,
+	// mark the tunnel yml `pairing: true`, EXIT. It used to store the file and then fall through into the run
+	// mode: the Go manager's attach flow (exec + CombinedOutput) hung forever, and the stored file was never
+	// re-read at start (the default branch attached only on the server). After the -latch-dial block on
+	// purpose: that drill takes -pair-to as its pairing-line source.
+	if *pairTo != "" && *latchDial == "" {
+		if *cfgPath == "" {
+			log.Fatal("-pair-to needs -config: it attaches the pairing to a tunnel config")
+		}
+		if *scepterCall != "" {
+			log.Fatal("-pair-to is a standalone attach action: it cannot be combined with -scepter-call (attach first, then call)")
+		}
+		if err := attachPairing(*cfgPath, *pairTo, log.Printf); err != nil {
+			log.Fatalf("-pair-to: %v", err)
 		}
 		return
 	}
@@ -1009,38 +1026,35 @@ func main() {
 		// no CDN can sit in a reverse pool (Kharej dials Iran's IP) or in front of raw tcp/tls: TCP paces (2.4.18)
 		Direct: allReliableDirect(bases, *reverse),
 	}
-	// Scepter attach (3.5.0): the client opens the reserved management stream with -pair-to LINE or the config
-	// key `pairing: true` (or a full watp1: line as the value); the server arms it whenever a stored pairing
-	// exists. No credential anywhere = exactly the pre-3.5 behavior: sid 0 is never opened, never accepted.
+	// Scepter attach (3.5.0): the client opens the reserved management stream with the config key `pairing:`
+	// (a full watp1: line as the value, or `true` for the stored file); the server arms it whenever a pairing
+	// exists. -pair-to LINE is the standalone attach action above (it stores, marks and exits). No credential
+	// anywhere = exactly the pre-3.5 behavior: sid 0 is never opened, never accepted. pairingFromFile marks a
+	// credential that came off disk — the only kind the F8-revoke poller can watch (a config-key watp1: line
+	// is static by definition; revoking it means restarting the unit without the key).
 	pairPath := pairingFilePath(*cfgPath)
+	var pairingFromFile bool
 	switch {
-	case *pairTo != "":
-		pairing, perr := wat.ParsePairingLine(*pairTo)
-		if perr != nil {
-			log.Fatalf("-pair-to: %v", perr)
-		}
-		if werr := writePairingFile(pairPath, pairing); werr != nil {
-			log.Fatalf("-pair-to: %v", werr)
-		}
-		cfg.Pairing = pairing
-		log.Printf("scepter: pairing %s attached (stored in %s); the cockpit channel opens with the tunnel", pairing.UUIDString(), pairPath)
 	case *pairingKey != "" && *pairingKey != "false":
 		if strings.HasPrefix(*pairingKey, "watp1:") {
 			pairing, perr := wat.ParsePairingLine(*pairingKey)
 			if perr != nil {
-				log.Fatalf("pairing: %v", perr)
+				log.Fatalf("pairing: %v", perr) // an explicitly provided invalid watp1: value stays fatal
 			}
 			cfg.Pairing = pairing
-		} else if pairing, perr := readPairingFile(pairPath); perr == nil {
+		} else if pairing, aerr := attachStoredPairing(pairPath, log.Printf); aerr == nil {
 			cfg.Pairing = pairing
-		} else {
-			log.Fatalf("pairing: %v (store one first with -pair-to, or set the key to a watp1: line)", perr)
+			pairingFromFile = true
+		} else if errors.Is(aerr, os.ErrNotExist) {
+			// `pairing: true` (yml or flag) but the stored credential is missing: run unpaired with one
+			// warning (F2, 2026-11-22 — an owner may move the file; the cockpit degrades, the tunnel keeps
+			// working). An unusable (present, unparsable) file was already warned by attachStoredPairing.
+			log.Printf("scepter: pairing key set but the stored pairing %s is missing; running without the cockpit channel", pairPath)
 		}
 	default:
-		if server { // Kharej serves the channel whenever the credential is present (-pair wrote it)
-			if pairing, perr := readPairingFile(pairPath); perr == nil {
-				cfg.Pairing = pairing
-			}
+		if pairing, aerr := attachStoredPairing(pairPath, log.Printf); aerr == nil {
+			cfg.Pairing = pairing
+			pairingFromFile = true
 		}
 	}
 	// Scepter's tunnel.logs reads the process log (pairing.go logRing); installed only when paired, so the
@@ -1424,6 +1438,12 @@ func main() {
 				startLatch(&latchMonitor{pair: cfg.Pairing, scepter: scepter, alive: alive, port: *latchPort,
 					lo: *allowLo, hi: *allowHi, al: al, base: cfg, logf: log.Printf})
 				log.Printf("scepter latch: watching port %d (arms %s after every unit of the pairing goes inactive)", *latchPort, latchArmAfter)
+			}
+			// F8-revoke (2026-11-22): watch the stored pairing — file gone/unparsable disarms, a changed file
+			// reloads. File-backed credentials only (see the attach switch): a config-key watp1: pairing is
+			// static by definition, and revoking it means restarting the unit without the key.
+			if pairingFromFile {
+				startPairingPoller(&pairingPoller{path: pairPath, scepter: scepter, logf: log.Printf, interval: pairingPollInterval})
 			}
 		}
 		go func() {

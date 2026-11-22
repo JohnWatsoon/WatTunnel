@@ -235,6 +235,53 @@ func TestFileScepterOpsCreateRollback(t *testing.T) {
 	if !fu.did("rb1:stop") {
 		t.Fatal("the dead unit was not stopped before cleanup")
 	}
+	// F10 (2026-11-22): start is enable --now, so the rollback must also DISABLE — a stopped-but-enabled
+	// unit whose yml was just removed fails every boot until someone disables it (Delete always did).
+	if !fu.did("rb1:disable") {
+		t.Fatal("the rolled-back unit was not disabled (enabled unit with no yml fails every boot)")
+	}
+}
+
+// TestFileScepterOpsCreateDeniesUpdateJob (F3, 2026-11-22): update-job is a standalone action flag the yml
+// parser flag.Set()s from config keys — a planted `update-job: X` in a created tunnel's yml re-enters the
+// update-job path and exits on every unit start (a crash loop), so the param must be denied on create AND
+// edit. known accepts it here on purpose: in production update-job IS a flag name, so only the deny list
+// stops it.
+func TestFileScepterOpsCreateDeniesUpdateJob(t *testing.T) {
+	o, _, _ := testOps2(t)
+	o.known = func(k string) bool { return k == "peer" || k == "update-job" }
+	p, code := o.Create(wat.ScepterTunnelSpec{Name: "u1", Carrier: "udp", Ports: "20030", Key: "kk",
+		Params: map[string]string{"peer": "198.51.100.7", "update-job": "/tmp/staged"}})
+	if code != wat.CodeBadRequest || p["key"] != "update-job" {
+		t.Fatalf("create with update-job param: %d %v", code, p)
+	}
+	if p, code := o.Create(wat.ScepterTunnelSpec{Name: "u2", Carrier: "udp", Ports: "20031", Key: "kk",
+		Params: map[string]string{"peer": "198.51.100.7"}}); code != wat.CodeOK {
+		t.Fatalf("create without the denied param: %d %v", code, p)
+	}
+	if _, code := o.Edit("u2", wat.ScepterPatch{Set: map[string]string{"update-job": "/tmp/staged"}}); code != wat.CodeBadRequest {
+		t.Fatalf("edit with update-job param: %d", code)
+	}
+}
+
+// TestFileScepterOpsProbeCap (F7, 2026-11-22): probe units count toward scepterMaxTunnels — openProbe checks
+// the cap like create does (their ymls live in the conf dir, so tunnelCount already counts them; the check
+// just never ran here), and a sustained test.open is rate-limited instead of holding units past the cap.
+func TestFileScepterOpsProbeCap(t *testing.T) {
+	o, _, _ := testOps2(t)
+	o.maxTunnels = 1 // one unit total, probes included
+	link, _ := linkStub()
+	o.linkCheck = link
+	p, code := o.TestOpen("udp", 0)
+	if code != wat.CodeOK {
+		t.Fatalf("first probe under the cap: %v %v", code, p)
+	}
+	if _, code = o.TestOpen("tcp", 0); code != wat.CodeRateLimited {
+		t.Fatalf("second probe must hit the cap: %d", code)
+	}
+	if p, code = o.TestOpen("udp", 0); code != wat.CodeRateLimited || p["resource"] != "probes" || p["cap"] != 1 {
+		t.Fatalf("rate_limited must name the resource: %d %v", code, p)
+	}
 }
 
 func TestFileScepterOpsEdit(t *testing.T) {
@@ -1077,7 +1124,7 @@ func TestFileScepterOpsBackupExport(t *testing.T) {
 	o, _, conf := testOps2(t)
 	files := map[string]string{
 		"t1.yml": "mode: server\ncarrier: udp\n", "t1.key": "kk\n", "t1.token": "wat1:abc\n",
-		"t1.yml.bak": "mode: server\n", ".pairing": "version=1\nuuid=u\n", ".pairing.audit": "2026-11-22T10:00:00Z pair_created u\n",
+		"t1.yml.bak": "mode: server\n", ".pairing.audit": "2026-11-22T10:00:00Z pair_created u\n",
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(conf, name), []byte(content), 0o600); err != nil {
@@ -1087,7 +1134,19 @@ func TestFileScepterOpsBackupExport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(conf, ".pairing.journal"), []byte(`{"id":"x"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// F3b (owner decision 2026-11-22): the pairing credential itself is NOT restore data for this command —
+	// backup.export serves any manage-tier credential, and shipping .pairing (the pairing KEY) would let a
+	// manage holder re-mint the pairing elsewhere (manage→full escalation). The audit stays: evidence, not a
+	// secret.
+	if err := os.WriteFile(filepath.Join(conf, ".pairing"), []byte("watp1:1|u|k|manage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(conf, "junk.tmp"), []byte("tmp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// F9 (2026-11-22): the manager's crashed rewrites leave ".tmp.XXXXXX"-prefixed partials — a partial
+	// .pairing rewrite must never travel in the tarball.
+	if err := os.WriteFile(filepath.Join(conf, ".tmp.abc123"), []byte("partial .pairing"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(conf, scepterUpdateDirF), 0o700); err != nil {
@@ -1129,7 +1188,7 @@ func TestFileScepterOpsBackupExport(t *testing.T) {
 			t.Fatalf("tar %q = %q, want %q", name, got[name], content)
 		}
 	}
-	for _, absent := range []string{".pairing.journal", "junk.tmp", "wattun.new"} {
+	for _, absent := range []string{".pairing.journal", ".pairing", "junk.tmp", ".tmp.abc123", "wattun.new"} {
 		if _, ok := got[absent]; ok {
 			t.Fatalf("machine state %q must not be in the backup", absent)
 		}

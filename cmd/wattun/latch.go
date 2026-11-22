@@ -209,7 +209,10 @@ func contactLatch(addr string, pair *wat.PairingConfig) error {
 	if err != nil {
 		return err
 	}
-	sess, err := wat.NewSession(wat.Config{Pairing: pair, Logf: log.Printf}, pc)
+	// Key = the latch PSK, same derivation as the server's arm (latchMonitor.arm): sessionAEAD mixes cfg.Key,
+	// so a Key-less config seals packets the server cannot open (H2, 2026-11-22 — the wat drill never caught
+	// this because it hand-builds both configs with wat.LatchKey).
+	sess, err := wat.NewSession(wat.Config{Key: wat.LatchKey(pair), Pairing: pair, Logf: log.Printf}, pc)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -28,17 +29,32 @@ func writePairingFile(path string, p *wat.PairingConfig) error {
 	return os.Rename(tmp, path)
 }
 
-// readPairingFile loads the stored credential.
+// readPairingFile loads the stored credential: the first content line must be the watp1: line, everything
+// after it (and blank lines before it) is the manager's '# ' bookkeeping and is ignored (F1, 2026-11-22 — the
+// whole file was once fed to ParsePairingLine, so any store with a comment tail failed to load). A first
+// content line that is not a watp1: credential is rejected; the key=value shape of the pre-2026112211 manager
+// stores gets its own error naming the format — the manager knows how to convert those, this parser must not
+// guess at them.
 func readPairingFile(path string) (*wat.PairingConfig, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	p, err := wat.ParsePairingLine(strings.TrimSpace(string(b)))
-	if err != nil {
-		return nil, fmt.Errorf("%s: %v", path, err)
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		p, perr := wat.ParsePairingLine(t)
+		if perr == nil {
+			return p, nil
+		}
+		if !strings.HasPrefix(t, "watp1:") && strings.Contains(t, "=") {
+			return nil, fmt.Errorf("%s: legacy key=value pairing store (pre-2026112211 manager format); re-pair to convert it to a watp1: store", path)
+		}
+		return nil, fmt.Errorf("%s: %v", path, perr)
 	}
-	return p, nil
+	return nil, fmt.Errorf("%s: no watp1: credential line in the pairing store", path)
 }
 
 func dirOf(path string) string {
@@ -46,6 +62,154 @@ func dirOf(path string) string {
 		return path[:i]
 	}
 	return "."
+}
+
+// attachStoredPairing is the run's default attach (F2, 2026-11-22): both roles pick up the stored credential
+// when it exists (-pair wrote it on Kharej, -pair-to on Iran — the -pair help promises "server and client
+// alike", which the old code only did for the server). A missing file is the normal unpaired case and stays
+// silent; a present but unusable one (a legacy key=value store from an old manager, a corrupted store) warns
+// with the path and the reason and the tunnel runs unpaired — the cockpit degrades, forwarding must not die
+// because the owner moved a file. The read error is returned so a caller that explicitly opted in
+// (`pairing: true`) can warn on the missing file too; the caller marks an attached pairing file-backed
+// (pollable, F8-revoke).
+func attachStoredPairing(path string, logf func(string, ...any)) (*wat.PairingConfig, error) {
+	p, err := readPairingFile(path)
+	if err == nil {
+		return p, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		logf("scepter: stored pairing %s unusable (%v); running without the cockpit channel", path, err)
+	}
+	return nil, err
+}
+
+// setPairingKey marks the tunnel yml with `pairing: true` (F2a, 2026-11-22): the -pair-to attach action
+// writes this so every later start opens the cockpit channel without the line being passed again. tmp + rename
+// (the manager-file discipline — the unit's cfgWatcher polls this file every 3 s, so a half-written yml must
+// never land), and the original mode is kept. A pairing key already present (true, false or a full watp1:
+// line) is left alone: whatever is there stays the owner's authority.
+func setPairingKey(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	mode := os.FileMode(0o600)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		t := strings.TrimSpace(stripComment(line))
+		if t == "" || strings.HasPrefix(t, "- ") {
+			continue
+		}
+		if k, _, ok := strings.Cut(t, ":"); ok && strings.TrimSpace(k) == "pairing" {
+			return nil
+		}
+	}
+	// appended at the end: an unindented key line closes any ports:/limits: list context (config.go), so the
+	// position is safe no matter how the file is laid out
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.TrimRight(string(b), "\n")+"\npairing: true\n"), mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// attachPairing is the -pair-to action body (F2a, 2026-11-22): validate the watp1: line, store the
+// credential, mark the tunnel yml. main() log.Fatal-wraps the error and exits 0 on success — the old
+// -pair-to stored the file and then ran the tunnel forever, hanging the Go manager's attach flow
+// (exec + CombinedOutput) and never re-reading the file at start.
+func attachPairing(cfgPath, line string, logf func(string, ...any)) error {
+	p, err := wat.ParsePairingLine(line)
+	if err != nil {
+		return err
+	}
+	ppath := pairingFilePath(cfgPath)
+	if err := writePairingFile(ppath, p); err != nil {
+		return err
+	}
+	if err := setPairingKey(cfgPath); err != nil {
+		return fmt.Errorf("cannot mark %s: %v", cfgPath, err)
+	}
+	logf("pairing %s attached to %s (stored in %s, capability %s); restart the tunnel to open the cockpit channel",
+		p.UUIDString(), cfgPath, ppath, wat.CapName(p.Caps))
+	return nil
+}
+
+// pairingPollInterval is the .pairing watch cadence (F8-revoke). Var, not const: the tests shrink it.
+var pairingPollInterval = 5 * time.Second
+
+// pairingPoller watches the stored pairing file — the ENGINE side wiring of the plan security requirement
+// "revocation is instant and local" (F8-revoke, 2026-11-22; the .pairing store is Kharej's revocation
+// surface): file gone or now unparsable → ScepterState.ReloadPairing(nil) disarms the management channel
+// (live scepter streams reset mid-line, new ones refused; the tunnel and its sessions keep running), a
+// changed file (mtime+size differ, the cfgWatcher's own test) → the new credential is loaded. Every
+// transition logs once, not per tick.
+//
+// File-backed pairings only. A pairing handed over as a config-key watp1: line is static by definition:
+// there is no file to poll, and revoking it means restarting the unit without the key. Started in main's
+// server path only, when cfg.Pairing came from readPairingFile.
+type pairingPoller struct {
+	path     string
+	scepter  *wat.ScepterState
+	logf     func(string, ...any)
+	interval time.Duration
+
+	mu    sync.Mutex
+	mt    time.Time
+	sz    int64
+	armed bool
+}
+
+func startPairingPoller(p *pairingPoller) {
+	if st, err := os.Stat(p.path); err == nil { // the credential was just loaded from this file: arm from its state
+		p.mt, p.sz = st.ModTime(), st.Size()
+	}
+	p.armed = true
+	go p.run()
+}
+
+func (p *pairingPoller) run() {
+	for range time.Tick(p.interval) {
+		p.check()
+	}
+}
+
+// check is one poll step; split from run so the tests drive transitions without sleeping.
+func (p *pairingPoller) check() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st, err := os.Stat(p.path)
+	if err != nil {
+		if p.armed {
+			p.scepter.ReloadPairing(nil)
+			p.armed = false
+			p.logf("scepter: pairing file %s removed — management channel disarmed, the tunnel keeps running", p.path)
+		}
+		p.mt, p.sz = time.Time{}, -1
+		return
+	}
+	changed := !st.ModTime().Equal(p.mt) || st.Size() != p.sz
+	if !changed {
+		return
+	}
+	p.mt, p.sz = st.ModTime(), st.Size()
+	pair, perr := readPairingFile(p.path)
+	if perr != nil {
+		if p.armed {
+			p.scepter.ReloadPairing(nil)
+			p.armed = false
+			p.logf("scepter: pairing file %s unusable (%v) — management channel disarmed, the tunnel keeps running", p.path, perr)
+		}
+		return
+	}
+	if p.armed {
+		p.logf("scepter: pairing file %s changed — credential reloaded (pairing %s, capability %s)", p.path, pair.UUIDString(), wat.CapName(pair.Caps))
+	} else {
+		p.logf("scepter: pairing file %s restored — management channel armed (pairing %s, capability %s)", p.path, pair.UUIDString(), wat.CapName(pair.Caps))
+	}
+	p.scepter.ReloadPairing(pair)
+	p.armed = true
 }
 
 // unitSource adapts THIS wattun process to the Scepter read commands. One process serves one unit (the systemd

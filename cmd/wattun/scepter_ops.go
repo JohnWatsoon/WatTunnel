@@ -71,7 +71,7 @@ type fileScepterOps struct {
 	conf       string // the tunnel dir: /etc/wattun in production, the -config dir in dev
 	self       string // this unit's own config name; write ops refuse it — the cockpit channel rides this unit
 	maxTunnels int
-	unit       func(name, action string) error // systemd action: start | stop | restart
+	unit       func(name, action string) error // systemd action: start | stop | restart | disable
 	active     func(name string) bool          // unit liveness (systemctl is-active equivalent)
 	known      func(key string) bool           // is key a config key this binary accepts (nil = accept all)
 	logf       func(string, ...any)
@@ -158,6 +158,8 @@ func newFileScepterOps(conf, self string, known func(string) bool, logf func(str
 				return runSystemctl("stop", u)
 			case "restart":
 				return runSystemctl("restart", u)
+			case "disable": // the rollback half of start (F10, 2026-11-22); Delete's best-effort disable
+				return runSystemctl("disable", u)
 			}
 			return fmt.Errorf("scepter ops: unknown unit action %q", action)
 		},
@@ -246,11 +248,13 @@ func (o *fileScepterOps) Create(spec wat.ScepterTunnelSpec) (map[string]any, int
 	}
 	if err := o.unit(name, "start"); err != nil {
 		o.unit(name, "stop") // best effort: the unit may be in auto-restart despite the failed command
+		o.disableUnit(name)
 		o.removeFiles(name)
 		return map[string]any{"detail": err.Error(), "rolled_back": true}, wat.CodeInternal
 	}
 	if !o.waitActive(name, true) {
 		o.unit(name, "stop")
+		o.disableUnit(name)
 		o.removeFiles(name)
 		return map[string]any{"detail": "unit did not come up", "rolled_back": true}, wat.CodeInternal
 	}
@@ -327,6 +331,13 @@ func (o *fileScepterOps) removeFiles(name string) {
 	}
 }
 
+// disableUnit is the rollback half of "start" (F10, 2026-11-22): start is enable --now, so a failed create
+// or probe whose stop+removeFiles just ran would leave wattun@NAME still ENABLED with no yml — failing every
+// boot until someone disables it (Delete always disabled; the rollbacks forgot). Best effort, like Delete's.
+func (o *fileScepterOps) disableUnit(name string) {
+	o.unit(name, "disable")
+}
+
 // parseScepterPortItems parses the intent's ports string with the config parser's own rules — a remote create
 // accepts exactly what a yml ports: list accepts, duplicates included in the rejection.
 func parseScepterPortItems(s string) ([]portSpec, error) {
@@ -382,10 +393,13 @@ func (o *fileScepterOps) checkCarrier(carrier string) (int, map[string]any) {
 
 // scepterParamDeny: keys the ops write themselves (a duplicate would fail the unit's own yml parse at start),
 // repeatable keys set semantics break (header), and the standalone action flags, which have no business in a
-// created tunnel. carrier is denied on create (the ops write it) but allowed in edit patches.
+// created tunnel. carrier is denied on create (the ops write it) but allowed in edit patches. update-job
+// (F3, 2026-11-22) is a standalone action flag too, and the nastiest one: the yml parser flag.Set()s config
+// keys, so a planted `update-job: X` re-enters the update-job path and exits on every unit start — a crash
+// loop.
 var scepterParamDeny = map[string]bool{
 	"mode": true, "key": true, "carrier": true, "ports": true, "limits": true, "header": true,
-	"config": true, "version": true, "pair": true, "pair-to": true, "pairing": true,
+	"config": true, "version": true, "pair": true, "pair-to": true, "pairing": true, "update-job": true,
 	"latch-port": true, "latch-dial": true, "scepter-call": true, "scepter-args": true,
 	"state-dir": true, // M8: a unit's CWD is /, a hand-set relative state-dir would scatter state files
 }
@@ -861,6 +875,9 @@ func (o *fileScepterOps) TestOpen(carrier string, ttlS int) (map[string]any, int
 	}
 	pr, code, detail := o.openProbe(carrier, ttlS)
 	if code != wat.CodeOK {
+		if code == wat.CodeRateLimited { // F7: same params shape as tunnel.create's cap answer
+			return map[string]any{"resource": "probes", "cap": o.maxTunnels}, code
+		}
 		return map[string]any{"detail": detail, "rolled_back": code == wat.CodeInternal}, code
 	}
 	p := map[string]any{"id": pr.id, "carrier": carrier, "port": pr.port, "key": pr.key, "ttl": ttlS}
@@ -876,8 +893,14 @@ func (o *fileScepterOps) TestOpen(carrier string, ttlS int) (map[string]any, int
 
 // openProbe is the probe machinery both test.open and the auto-test core use: validate nothing (callers
 // did), pick a port, write the speed-test-only yml, start the unit, verify liveness AND that the listener
-// accepts, then arm the ttl timer. Failures remove everything they wrote.
+// accepts, then arm the ttl timer. Failures remove everything they wrote (and disable what they enabled).
 func (o *fileScepterOps) openProbe(carrier string, ttlS int) (*scepterProbe, int, string) {
+	// F7 (2026-11-22): probes are units too — their ymls live in the conf dir, so tunnelCount already counts
+	// them, but nothing here ever CHECKED, and sustained test.open held probe units far past the cap the
+	// create path respects. Same answer shape as tunnel.create's cap (rate_limited, resource=probes).
+	if o.tunnelCount() >= o.maxTunnels {
+		return nil, wat.CodeRateLimited, fmt.Sprintf("tunnel cap %d reached (probes count toward it)", o.maxTunnels)
+	}
 	name := fmt.Sprintf("probe-%d", o.now().Unix())
 	for i := 0; o.exists(name); i++ { // same-second collision: suffix up
 		name = fmt.Sprintf("probe-%d-%d", o.now().Unix(), i+2)
@@ -910,16 +933,19 @@ func (o *fileScepterOps) openProbe(carrier string, ttlS int) (*scepterProbe, int
 	}
 	if err := o.unit(name, "start"); err != nil {
 		o.unit(name, "stop")
+		o.disableUnit(name)
 		o.removeFiles(name)
 		return nil, wat.CodeInternal, err.Error()
 	}
 	if !o.waitActive(name, true) {
 		o.unit(name, "stop")
+		o.disableUnit(name)
 		o.removeFiles(name)
 		return nil, wat.CodeInternal, "probe unit did not come up"
 	}
 	if err := o.checkLink(carrier, map[int]string{port: carrier}); err != nil {
 		o.unit(name, "stop")
+		o.disableUnit(name)
 		o.removeFiles(name)
 		return nil, wat.CodeInternal, err.Error()
 	}
@@ -2166,12 +2192,18 @@ func (o *fileScepterOps) Doctor() (map[string]any, int) {
 
 // backupExclude names the one state file backup.export deliberately leaves out: the command journal is
 // machine replay state (id -> recorded response), not restore data — a rebuilt Kharej does not need it and
-// it is the one file that grows with command traffic. The audit (.pairing.audit) IS included: it is the
-// who-did-what record the plan keeps append-only.
+// it is the one file that grows with command traffic.
 const backupExclude = ".pairing.journal"
 
-// BackupExport builds a tarball of the config dir: every regular file except the journal (above), the
-// staging dir (engine machinery) and tmp files. Keys and the pairing store are INCLUDED on purpose: the
+// backupExcludePairing is the pairing credential itself (F3b, owner decision 2026-11-22): backup.export
+// serves ANY manage-tier credential, and shipping .pairing (the pairing KEY) in the tarball would let a
+// manage holder re-mint the pairing elsewhere — a manage→full escalation. The holder keeps running with
+// this pairing's channel but cannot take it home; a Kharej rebuild re-pairs from the console. .pairing.audit
+// stays included: it is evidence (the who-did-what record), not a secret.
+const backupExcludePairing = ".pairing"
+
+// BackupExport builds a tarball of the config dir: every regular file except the journal and the pairing
+// credential (above), the staging dir (engine machinery) and tmp files. Keys are INCLUDED on purpose: the
 // tarball exists to restore a Kharej after a host rebuild, a config dir without keys restores nothing, and
 // keys already travel this channel (tunnel.create returns them inside the session AEAD). Caps: one file
 // > 4 MB and a total > 5 MB are refused (code=too_large) — the chunked transfer tops out at 512 x 16 KiB.
@@ -2189,7 +2221,9 @@ func (o *fileScepterOps) BackupExport() (map[string]any, int) {
 			continue
 		}
 		name := e.Name()
-		if name == backupExclude || name == scepterUpdateDirF || strings.HasSuffix(name, ".tmp") {
+		// F9 (2026-11-22): ".tmp" anywhere in the basename, not just a suffix — the manager's crashed
+		// rewrites leave ".tmp.XXXXXX"-prefixed partials, and a partial .pairing must never travel.
+		if name == backupExclude || name == backupExcludePairing || name == scepterUpdateDirF || strings.Contains(name, ".tmp") {
 			continue
 		}
 		fi, err := e.Info()

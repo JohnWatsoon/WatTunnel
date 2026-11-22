@@ -6,6 +6,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -99,6 +101,41 @@ func TestScepterEndpointIsDoctorOnly(t *testing.T) {
 	scepterServeHTTP()(w2, httptest.NewRequest(http.MethodGet, "/scepter", nil))
 	if strings.TrimSpace(w2.Body.String()) != "null" {
 		t.Fatalf("unpaired /scepter must be null, got %q", w2.Body.String())
+	}
+}
+
+// TestContactLatchDrill pins the shipped -latch-dial path end to end (H2, 2026-11-22): contactLatch against a
+// real armed latch monitor on loopback, hello + one ping. Regression: contactLatch once built its session
+// without the latch PSK (Config{Pairing: pair} had no Key) while the server arms with Key = wat.LatchKey(pair)
+// — every packet failed the AEAD and the dial could never connect; the wat drill (TestLatchDrill) masked it
+// because it hand-builds BOTH configs with the derived key.
+func TestContactLatchDrill(t *testing.T) {
+	pair := testLatchPairing()
+	state, err := wat.NewScepterState(pair, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a free port for the monitor to bind: arm() builds its own pool, so the address must be reserved here
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	m := &latchMonitor{pair: pair, scepter: state, alive: func() bool { return false },
+		port: port, lo: 1, hi: 65535, al: newAllow("", ""), logf: func(string, ...any) {}}
+	m.arm()
+	if m.status()["armed"] != true {
+		t.Fatalf("latch must be armed for the drill: %v", m.status())
+	}
+	t.Cleanup(m.standDown)
+	if err := contactLatch(fmt.Sprintf("127.0.0.1:%d", port), pair); err != nil {
+		t.Fatalf("contactLatch (the shipped -latch-dial path): %v", err)
+	}
+	// the ping was answered by the time contactLatch returned, so the server state recorded it
+	last := state.Recent()
+	if len(last) == 0 || last[len(last)-1].Cmd != "scepter.ping" {
+		t.Fatalf("the drill's ping never reached the latch state: %+v", last)
 	}
 }
 
