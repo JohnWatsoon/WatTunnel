@@ -409,6 +409,19 @@ func TestParseScepterCallArgs(t *testing.T) {
 	if _, _, err = parseScepterCallArgs("{bad json"); err == nil {
 		t.Fatal("bad JSON accepted")
 	}
+	// test.close regression (2026-11-22): the probe rides "probe", NOT "id" — a top-level "id" is
+	// lifted as the command id and deleted, so a probe sent as "id" never reached the engine and
+	// every cockpit test.close came back code=1 (bad_request). Pin both halves of the split.
+	a, id, err = parseScepterCallArgs(`{"probe":"p-42","id":"retry-9"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "retry-9" || a["probe"] != "p-42" {
+		t.Fatalf("probe/id split broken: id=%q args=%v", id, a)
+	}
+	if _, ok := a["id"]; ok {
+		t.Fatal("lifted id left in the args")
+	}
 }
 
 // The token builder is the manager's make_token twin: same 7 base fields, field 8 only when reverse.

@@ -1229,9 +1229,11 @@ func cmdTestOpen(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
 	return p, code
 }
 
-// cmdTestClose: test.close {id} — close a probe listener before its ttl.
+// cmdTestClose: test.close {probe} — close a probe listener before its ttl. The arg is "probe", not "id":
+// the -scepter-call CLI lifts a top-level args["id"] as the command id (journal replay), so a probe id sent
+// as "id" never reached this handler through the cockpit's transport (found by lane H, 2026-11-22).
 func cmdTestClose(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
-	id, ok := argString(req.Args, "id")
+	id, ok := argString(req.Args, "probe")
 	if !ok || id == "" {
 		return nil, CodeBadRequest
 	}

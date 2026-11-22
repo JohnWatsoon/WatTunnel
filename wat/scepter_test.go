@@ -1271,14 +1271,14 @@ func TestScepterTestOpenLifecycle(t *testing.T) {
 	if p, code = c.Call("test.open", map[string]any{"carrier": "h2c"}); code != CodeRateLimited || p["resource"] != "probe" {
 		t.Fatalf("the fourth probe must hit the per-pair bucket: %v %v", code, p)
 	}
-	if _, code = c.Call("test.close", map[string]any{"id": id1}); code != CodeOK {
+	if _, code = c.Call("test.close", map[string]any{"probe": id1}); code != CodeOK {
 		t.Fatal("close")
 	}
-	if p, code = c.Call("test.close", map[string]any{"id": id1}); code != CodeNotFound {
+	if p, code = c.Call("test.close", map[string]any{"probe": id1}); code != CodeNotFound {
 		t.Fatalf("double close: %v %v", code, p)
 	}
 	if p, code = c.Call("test.close", map[string]any{}); code != CodeBadRequest {
-		t.Fatalf("close without id: %v %v", code, p)
+		t.Fatalf("close without probe: %v %v", code, p)
 	}
 	// the event ring saw the lifecycle
 	p, code = c.Call("events.since", map[string]any{"seq": 0})

@@ -2487,7 +2487,7 @@ listeners are separate units and the link check dials loopback sockets, so tunne
 | Command | Args | Capability | Notes |
 |---|---|---|---|
 | `test.open` | `{carrier, ttl?}` | manage | opens a probe listener of the requested shape for `ttl` seconds (default 300, clamped to 10..3600, the effective value is echoed); answers `{id, carrier, port, key, path?, metrics?, ttl}` |
-| `test.close` | `{id}` | manage | closes a probe before its ttl |
+| `test.close` | `{probe}` | manage | closes a probe before its ttl (`probe`, not `id` — the one-shot CLI lifts a top-level `id` as the command id) |
 | `carrier.change` | `{name, carrier, params?, base_seq?, ttl_s?}` | manage | the edit path plus a link check with automatic rollback; answers `{name, carrier, listen?, link:"ok"}` |
 | `auto.test` | `{mode?}` | manage | triggers the ranking run and answers `{run, mode, shapes}` BEFORE it finishes; `EvAutoTested` fires when done; a second trigger answers `{run, already_running:true}` |
 | `auto.rows` | — | manage | the stored ranked table `{run, mode, done, ok, rows:[{rank, carrier, port, ok, down_mbps?, why?}]}` |
