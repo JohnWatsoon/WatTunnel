@@ -330,6 +330,118 @@ func TestContactLatchDrill(t *testing.T) {
 	}
 }
 
+// TestLatchAutoRevive pins the client-side automatic revival (owner directive 2026-11-22: the latch
+// contact must not wait for a manual -latch-dial). Tunnel down + `latch-port: N` → the contact happens
+// within the rate limit, proves the key and STAYS OPEN (the channel is kept warm); tunnel back → the
+// contact is dropped and the in-band channel re-opened exactly once per revival; down again → the
+// monitor's re-arm hands the latch over and a second contact succeeds, still rate-limited. Driven by the
+// shrunk cadence seams (latchRevivePoll, latchRetryEvery, latchPoll, latchArmAfter), ticks called directly.
+func TestLatchAutoRevive(t *testing.T) {
+	oldPoll, oldRetry, oldRvPoll := latchPoll, latchRetryEvery, latchRevivePoll
+	oldArm := latchArmAfter
+	latchPoll, latchArmAfter = 10*time.Millisecond, 20*time.Millisecond
+	latchRevivePoll, latchRetryEvery = 10*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() {
+		latchPoll, latchArmAfter = oldPoll, oldArm
+		latchRevivePoll, latchRetryEvery = oldRvPoll, oldRetry
+	})
+
+	pair := testLatchPairing()
+	state, err := wat.NewScepterState(pair, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a free port for the monitor to bind: arm() builds its own pool, so the address must be reserved here
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	m := &latchMonitor{pair: pair, scepter: state, alive: func() bool { return false },
+		port: port, lo: 1, hi: 65535, al: newAllow("", ""), logf: func(string, ...any) {}}
+	m.arm()
+	t.Cleanup(m.standDown)
+	go m.run() // re-arms after each contact ends (the revived monitor hands the latch over for contact 2)
+
+	var alive atomic.Bool
+	var inbands atomic.Int64
+	r := &latchRevive{
+		alive:  func() bool { return alive.Load() },
+		pair:   pair,
+		addr:   fmt.Sprintf("127.0.0.1:%d", port),
+		logf:   t.Logf,
+		inband: func() { inbands.Add(1) },
+	}
+
+	// tunnel down: the contact happens within the rate limit and the channel stays open (kept warm)
+	deadline := time.Now().Add(3 * time.Second)
+	for r.contacts.Load() == 0 {
+		r.tick()
+		if time.Now().After(deadline) {
+			t.Fatal("the latch contact must happen within the rate limit")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	r.mu.Lock()
+	open := r.sess != nil
+	r.mu.Unlock()
+	if !open {
+		t.Fatal("a revived contact must stay open (the channel is kept warm while the tunnel is down)")
+	}
+	last := state.Recent()
+	if len(last) == 0 || last[len(last)-1].Cmd != "scepter.ping" {
+		t.Fatalf("the automatic contact's ping never reached the latch state: %+v", last)
+	}
+
+	// tunnel back: the contact is dropped, the in-band channel re-opened exactly once per revival
+	alive.Store(true)
+	r.tick()
+	r.mu.Lock()
+	open = r.sess != nil
+	r.mu.Unlock()
+	if open {
+		t.Fatal("the latch contact must be dropped when the tunnel is back")
+	}
+	if inbands.Load() != 1 {
+		t.Fatalf("the in-band channel must be re-opened once per revival, got %d", inbands.Load())
+	}
+
+	// tunnel down again: the monitor re-arms after the contact ends, and a second contact succeeds. The
+	// stand-down here drives what production reaches on its own (the contact session ends → the reaper
+	// closes the server → the run loop re-arms); the test cannot wait for the janitor, because the test
+	// monitor's zero Config carries the 45 s IdleTimeout floor (in production the revived channel is kept
+	// warm at 30 s, under the floor, so a live contact never idles out).
+	alive.Store(false)
+	m.mu.Lock()
+	old := m.srv
+	m.srv = nil
+	m.mu.Unlock()
+	if old != nil {
+		old.Close() // fully reaps the old server (its lingering session included) — standDown's own move
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for m.status()["armed"] != true { // the run loop binds a fresh listener within latchArmAfter
+		if time.Now().After(deadline) {
+			t.Fatalf("the monitor must re-arm after the ended contact: %v", m.status())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for r.contacts.Load() < 2 {
+		r.tick()
+		if time.Now().After(deadline) {
+			t.Fatalf("a second contact must succeed after the re-arm (rate-limited): contacts %d", r.contacts.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	alive.Store(true)
+	r.tick()
+	if inbands.Load() != 2 {
+		t.Fatalf("each revival re-opens the in-band channel once, got %d", inbands.Load())
+	}
+}
+
 // TestStatsHandlerHidesScepter pins the hidden-infrastructure rule at the source (plan D2): the /stats handler
 // in main.go must not mention the management plane — no "scepter", "pairing" or "latch" key. A static pin,
 // because the handler is built inline in main(): adding a key there fails this test before any dashboard

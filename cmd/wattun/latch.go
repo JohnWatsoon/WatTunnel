@@ -19,7 +19,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -304,28 +306,171 @@ func scepterServeHTTP() http.HandlerFunc {
 // commands) or just reads state. A denied proof or a dead latch is an error, never a hang: the pool dials
 // carry their own timeouts.
 func contactLatch(addr string, pair *wat.PairingConfig) error {
-	key := wat.LatchKey(pair)
-	pc, err := wat.NewWSPoolClient(addr, 2, wat.HTTPClientOptions{Path: wat.LatchPath(pair), Secure: true})
-	if err != nil {
-		return err
-	}
-	// Key = the latch PSK, same derivation as the server's arm (latchMonitor.arm): sessionAEAD mixes cfg.Key,
-	// so a Key-less config seals packets the server cannot open (H2, 2026-11-22 — the wat drill never caught
-	// this because it hand-builds both configs with wat.LatchKey).
-	sess, err := wat.NewSession(wat.Config{Key: wat.LatchKey(pair), Pairing: pair, Logf: log.Printf}, pc)
+	sess, c, err := dialLatchSession(addr, pair)
 	if err != nil {
 		return err
 	}
 	defer sess.Close()
-	c, err := wat.DialScepterLatch(sess, key)
-	if err != nil {
-		return err
-	}
 	defer c.Close()
 	seq, _ := c.Hello["state_seq"].(float64)
 	log.Printf("scepter latch: revived (peer %s, caps %s, state_seq %.0f)", c.Hello["ver"], c.Hello["caps"], seq)
-	if _, code := c.Call("scepter.ping", nil); code != wat.CodeOK {
-		return fmt.Errorf("scepter latch: ping answered code %d", code)
-	}
 	return nil
+}
+
+// dialLatchSession is one latch contact: pool client → session (the latch PSK) → key proof → pairing hello
+// → one ping. Shared by the -latch-dial drill and the automatic revival below so the two never drift (the
+// drill once built its session without the latch PSK and could never connect — H2, 2026-11-22; Key = the
+// latch PSK, same derivation as the server's arm in latchMonitor.arm: sessionAEAD mixes cfg.Key, so a
+// Key-less config seals packets the server cannot open). On success the caller owns sess and c; on any
+// error everything is already closed.
+func dialLatchSession(addr string, pair *wat.PairingConfig) (*wat.Session, *wat.ScepterClient, error) {
+	pc, err := wat.NewWSPoolClient(addr, 2, wat.HTTPClientOptions{Path: wat.LatchPath(pair), Secure: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	sess, err := wat.NewSession(wat.Config{Key: wat.LatchKey(pair), Pairing: pair, Logf: log.Printf}, pc)
+	if err != nil {
+		return nil, nil, err
+	}
+	c, err := wat.DialScepterLatch(sess, wat.LatchKey(pair))
+	if err != nil {
+		sess.Close()
+		return nil, nil, err
+	}
+	if _, code := c.Call("scepter.ping", nil); code != wat.CodeOK {
+		c.Close()
+		sess.Close()
+		return nil, nil, fmt.Errorf("scepter latch: ping answered code %d", code)
+	}
+	return sess, c, nil
+}
+
+// ---- client-side automatic revival (owner directive 2026-11-22) ----
+//
+// The latch contact used to wait for a manual -latch-dial; with `latch-port: N` in a client config it is
+// automatic: while the tunnel is DOWN the client dials peerhost:N, proves the pairing key and keeps the
+// revived channel warm, so the cockpit stays reachable while the tunnel is dark. The tunnel's own recovery
+// stays with the existing mechanisms (pool-carrier self-heal, the manager's heal timer): the engine adds no
+// restart loop, the latch only keeps the management channel alive — and when the tunnel comes back, the
+// in-band channel is re-opened once per revival (the loop main started dies with the tunnel).
+
+// Var, not const (the latchPoll precedent): the tests shrink the cadences.
+var (
+	latchRevivePoll = 5 * time.Second  // revival loop cadence
+	latchRetryEvery = 30 * time.Second // rate limit: at most one latch attempt per 30 s while the tunnel is down
+	latchWarmEvery  = 30 * time.Second // ping cadence of a revived channel
+)
+
+// latchPeerHost is the host half of the tunnel's peer address (the first endpoint of a bond/pool list,
+// port stripped): the latch is dialed at peerhost:N where N is the config's latch-port.
+func latchPeerHost(peer string) string {
+	if i := strings.Index(peer, ","); i >= 0 {
+		peer = peer[:i]
+	}
+	if h, _, err := net.SplitHostPort(peer); err == nil {
+		return h
+	}
+	return peer
+}
+
+// latchRevive is the client-side revival loop (see the section comment above). Started only when the run
+// is a client, cfg.Pairing != nil and latch-port > 0 — without a pairing there is no key to prove and no
+// path to dial. Skew note: after a rotation the server's .pairing store and the client's token drift
+// apart, the derived latch key no longer matches, and every contact fails at the proof, logged at the
+// retry cadence until the new token is pasted — the same mixed-credential posture as the in-band channel's
+// hello, which tolerates the drift; the latch cannot (the proof is key-bound by design).
+type latchRevive struct {
+	alive  func() bool // the tunnel's liveness (tunnel.alive in main; tests drive it directly)
+	pair   *wat.PairingConfig
+	addr   string // peerhost:N
+	inband func() // called once per revival when the tunnel is back: re-open the in-band channel
+	logf   func(string, ...any)
+
+	mu      sync.Mutex
+	sess    *wat.Session // the open latch contact (nil = none; while set, no new attempt)
+	revived bool         // a contact succeeded and has not yet been handed back to the in-band channel
+	lastTry time.Time
+
+	contacts atomic.Int64 // successful automatic contacts (test seam; not exported anywhere user-facing)
+}
+
+func startLatchRevive(r *latchRevive) { go r.run() }
+
+func (r *latchRevive) run() {
+	for range time.Tick(latchRevivePoll) {
+		r.tick()
+	}
+}
+
+// tick is one revival-loop step (split from run so the tests drive it without sleeping).
+func (r *latchRevive) tick() {
+	if r.alive() {
+		r.resume()
+		return
+	}
+	r.mu.Lock()
+	due := r.sess == nil && time.Since(r.lastTry) >= latchRetryEvery
+	if due {
+		r.lastTry = time.Now()
+	}
+	r.mu.Unlock()
+	if !due {
+		return
+	}
+	sess, c, err := dialLatchSession(r.addr, r.pair)
+	if err != nil {
+		r.logf("scepter latch: automatic contact with %s failed (%v); retrying while the tunnel is down", r.addr, err)
+		return
+	}
+	r.mu.Lock()
+	r.sess, r.revived = sess, true
+	r.mu.Unlock()
+	r.contacts.Add(1)
+	seq, _ := c.Hello["state_seq"].(float64)
+	r.logf("scepter latch: revived automatically via %s (peer %s, caps %s, state_seq %.0f); the tunnel keeps its normal recovery",
+		r.addr, c.Hello["ver"], c.Hello["caps"], seq)
+	go r.keepWarm(sess, c)
+}
+
+// keepWarm pings the revived channel until the tunnel is back (resume closes the contact on its next tick)
+// or the contact is no longer ours (closed by resume or superseded) or a ping fails (the retry loop takes
+// over, still rate-limited by lastTry).
+func (r *latchRevive) keepWarm(sess *wat.Session, c *wat.ScepterClient) {
+	for range time.Tick(latchWarmEvery) {
+		r.mu.Lock()
+		mine := r.sess == sess
+		r.mu.Unlock()
+		if !mine || r.alive() {
+			return
+		}
+		if _, code := c.Call("scepter.ping", nil); code != wat.CodeOK {
+			r.mu.Lock()
+			if r.sess == sess {
+				r.sess = nil
+			}
+			r.mu.Unlock()
+			sess.Close()
+			r.logf("scepter latch: revived channel down (code %d); the revival loop retries", code)
+			return
+		}
+	}
+}
+
+// resume drops the latch contact when the tunnel is back and re-opens the in-band channel once per
+// revival — the loop main started exits when the channel goes down, so the revival is the moment to try
+// again (at most one contact at a time keeps this from ever stacking in-band loops).
+func (r *latchRevive) resume() {
+	r.mu.Lock()
+	sess := r.sess
+	r.sess = nil
+	wasRevived := r.revived
+	r.revived = false
+	r.mu.Unlock()
+	if sess != nil {
+		sess.Close()
+		r.logf("scepter latch: tunnel is back; the latch contact is dropped, the in-band channel serves")
+	}
+	if wasRevived && r.inband != nil {
+		r.inband()
+	}
 }

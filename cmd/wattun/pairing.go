@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -139,42 +140,108 @@ func attachPairing(cfgPath, line string, logf func(string, ...any)) error {
 	return nil
 }
 
+// tokenPair is the pairing bootstrap carried by a classic wat1: token used as the tunnel key (plan D5's
+// classic-token bootstrap, wired per the owner directive of 2026-11-22: the setup is fully automated — the
+// credential the user already pastes must set the pairing up with no extra steps). field10 is the token's
+// optional 10th pipe field, "pair" or "pair=<tier>", strictly shaped (wat.ParsePairingTokenField); key is
+// the token's key field, the secret the pairing credential (UUID included) is derived from. Both ends of
+// the pair derive from the same token, so UUID, LatchKey and LatchPath agree without anything being
+// distributed. A token without field 10 parses to nil: exactly today's behavior.
+type tokenPair struct {
+	field10, key string
+}
+
+// parseTokenKey splits the tunnel's key material when it is a classic wat1: token (the manager's layout:
+// carrier|peer|key|path|sni|icmp|ports[|rev][|auto][|pair], base64-wrapped — the Go manager's ReadToken is
+// the layout reference; unpadded base64 tolerated like base64 -d). It returns the PSK the tunnel runs on
+// (field 3) and, when field 10 is present and non-empty, the pairing bootstrap. Anything that does not
+// start with wat1: is returned untouched — a plain PSK is exactly today's behavior, and no legitimate PSK
+// can collide (the manager mints alphanumerics only). A wat1:-prefixed value that does not parse is an
+// error: a pasted token can never work as a literal PSK, so failing loud beats a tunnel that silently
+// cannot connect. Only field 3 is read here — the carrier/peer/path fields are the manager's business, the
+// yml's own keys rule the engine.
+func parseTokenKey(raw []byte) ([]byte, *tokenPair, error) {
+	s := strings.TrimSpace(string(raw))
+	if !strings.HasPrefix(s, "wat1:") {
+		return raw, nil, nil
+	}
+	b64 := strings.TrimPrefix(s, "wat1:")
+	d, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		if d, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(b64, "=")); err != nil {
+			return nil, nil, fmt.Errorf("the key is a wat1: token but its base64 does not parse: %v", err)
+		}
+	}
+	f := strings.Split(string(d), "|")
+	if len(f) < 3 || f[2] == "" {
+		return nil, nil, fmt.Errorf("the key is a wat1: token without a key field (want carrier|peer|key|...)")
+	}
+	var tp *tokenPair
+	if len(f) >= 10 && f[9] != "" { // field 10 written only when set, like fields 8/9 — old tokens end at 7
+		tp = &tokenPair{field10: f[9], key: f[2]}
+	}
+	return []byte(f[2]), tp, nil
+}
+
+// scepterOrigin marks where the attached credential came from — it decides the revocation surface.
+type scepterOrigin int
+
+const (
+	scepterNone     scepterOrigin = iota // no credential: the pre-3.5 unpaired run
+	scepterFromFile                      // the stored .pairing file: the pollable, revocation-live kind
+	scepterFromKey                       // a config-key watp1: line: static by definition (no file to poll; revoking
+	// it means restarting the unit without the key)
+	scepterFromToken // derived from the tunnel token's field 10: armed at load; a .pairing that appears later
+	// IS the rotate/revoke store and overrides it (the derived-mode poller), but the file is not required
+)
+
 // scepterAttach is main's Scepter attach switch, extracted as a function so the decision is testable
-// (round-2 F11, 2026-11-22). pairingKey is the `pairing:` config value ("" when the key is absent): a full
-// watp1: value wins, `true` (or any other non-flag value) loads the stored file, and an explicit `false`
-// opts out entirely — no attach, no arm, nothing logged (it used to fall to the default attach, so the key
-// could not actually turn the channel off). Returns the credential (nil = run unpaired), whether it came
-// off disk (the only pollable kind), and the error that stays fatal in main (an explicitly provided
-// invalid watp1: line).
-func scepterAttach(pairingKey, pairPath string, logf func(string, ...any)) (*wat.PairingConfig, bool, error) {
-	switch {
-	case pairingKey == "false":
-		return nil, false, nil // explicit opt-out: a normal configuration, not a warning
-	case pairingKey != "":
-		if strings.HasPrefix(pairingKey, "watp1:") {
-			p, err := wat.ParsePairingLine(pairingKey)
-			if err != nil {
-				return nil, false, err
-			}
-			return p, false, nil
+// (round-2 F11, 2026-11-22). pairingKey is the `pairing:` config value ("" when the key is absent); tok is
+// the tunnel token's pairing bootstrap (nil when the key material was not a wat1: token carrying field 10).
+// Precedence, highest first: an explicit `false` opts out entirely (no attach, no arm, nothing logged —
+// the key must actually turn the channel off); a full watp1: value is that credential; a readable stored
+// .pairing file WINS over the token bootstrap (the file is the rotate/revoke store — a corrupt one stays
+// unpaired rather than silently resurrecting a credential the file superseded); the token bootstrap fills
+// the gap (D5, owner directive 2026-11-22 — `pairing: true` is no longer needed for the channel to open).
+// Returns the credential (nil = run unpaired), where it came from, and the error that stays fatal in main
+// (an explicitly provided invalid watp1: line; a token-derived failure only warns — the cockpit degrades,
+// forwarding must not die, the same posture as the stored-file branch).
+func scepterAttach(pairingKey, pairPath string, tok *tokenPair, logf func(string, ...any)) (*wat.PairingConfig, scepterOrigin, error) {
+	if pairingKey == "false" {
+		return nil, scepterNone, nil // explicit opt-out beats everything, the token bootstrap included
+	}
+	if pairingKey != "" && strings.HasPrefix(pairingKey, "watp1:") {
+		p, err := wat.ParsePairingLine(pairingKey)
+		if err != nil {
+			return nil, scepterNone, err
 		}
-		p, aerr := attachStoredPairing(pairPath, logf)
-		if aerr == nil {
-			return p, true, nil
-		}
-		if errors.Is(aerr, os.ErrNotExist) {
-			// `pairing: true` (yml or flag) but the stored credential is missing: run unpaired with one
-			// warning (F2, 2026-11-22 — an owner may move the file; the cockpit degrades, the tunnel keeps
-			// working). An unusable (present, unparsable) file was already warned by attachStoredPairing.
+		return p, scepterFromKey, nil
+	}
+	if p, aerr := attachStoredPairing(pairPath, logf); aerr == nil {
+		return p, scepterFromFile, nil
+	} else if !errors.Is(aerr, os.ErrNotExist) {
+		return nil, scepterNone, nil // present but unusable: attachStoredPairing warned; the store's
+		// presence is authoritative — falling back to the token could revive a credential it superseded
+	}
+	if tok == nil {
+		if pairingKey != "" {
+			// `pairing: true` (yml or flag) but neither a stored credential nor a token bootstrap: run
+			// unpaired with one warning (F2, 2026-11-22 — an owner may move the file; the cockpit degrades,
+			// the tunnel keeps working). An unusable file was already warned by attachStoredPairing.
 			logf("scepter: pairing key set but the stored pairing %s is missing; running without the cockpit channel", pairPath)
 		}
-		return nil, false, nil
-	default:
-		if p, aerr := attachStoredPairing(pairPath, logf); aerr == nil {
-			return p, true, nil
-		}
-		return nil, false, nil
+		return nil, scepterNone, nil
 	}
+	p, derr := wat.ParsePairingTokenField(tok.field10, []byte(tok.key))
+	if derr != nil {
+		logf("scepter: token pairing bootstrap unusable (%v); running without the cockpit channel", derr)
+		return nil, scepterNone, nil
+	}
+	if p == nil { // a lookalike field ("pairxyz"): not a pairing credential (L5-strict), silently none
+		return nil, scepterNone, nil
+	}
+	logf("scepter: pairing derived from token field 10 (pairing %s, capability %s)", p.UUIDString(), wat.CapName(p.Caps))
+	return p, scepterFromToken, nil
 }
 
 // pairingPollInterval is the .pairing watch cadence (F8-revoke). Var, not const: the tests shrink it.
@@ -187,15 +254,23 @@ var pairingPollInterval = 5 * time.Second
 // changed file (mtime+size differ, the cfgWatcher's own test) → the new credential is loaded. Every
 // transition logs once, not per tick.
 //
-// File-backed pairings only. A pairing handed over as a config-key watp1: line is static by definition:
-// there is no file to poll, and revoking it means restarting the unit without the key. Started in main's
-// server path only, when cfg.Pairing came from readPairingFile.
+// Two modes. File-backed (derived == nil, main starts it when the credential came off disk): the file is
+// the credential, a missing file disarms. Derived-mode (derived set, started over a token-bootstrap
+// credential, owner directive 2026-11-22): the file is the OVERRIDE store — it does not exist yet and that
+// is normal (the token armed the channel); a file that appears or changes overrides the derived
+// credential, and its later removal disarms the channel without falling back to the token (the file's
+// existence marked the token superseded; a restart re-derives per the attach switch's precedence —
+// revoking a token-derived pair means issuing a new token). A config-key watp1: pairing is static by
+// definition: there is no file to poll, and revoking it means restarting the unit without the key.
 type pairingPoller struct {
 	path     string
 	scepter  *wat.ScepterState
 	latch    *latchMonitor // optional: the latch follows the credential (revoke = stand down permanently, rotate = re-arm from the new key)
 	logf     func(string, ...any)
 	interval time.Duration
+
+	// Derived-mode base: the token-bootstrap credential the channel was armed with. nil = file-backed.
+	derived *wat.PairingConfig
 
 	// round-2 F13 (2026-11-22): the optional seed. main stats the store right after the attach read and
 	// passes that state here, so a rotation in the startup gap between the read and the poller's own first
@@ -204,19 +279,23 @@ type pairingPoller struct {
 	seedSz int64
 	seeded bool
 
-	mu    sync.Mutex
-	mt    time.Time
-	sz    int64
-	armed bool
+	mu       sync.Mutex
+	mt       time.Time
+	sz       int64
+	armed    bool
+	fileSeen bool // a store was present at least once: its later removal is a revocation, never a
+	// fall back to the derived credential
 }
 
 func startPairingPoller(p *pairingPoller) {
 	if p.seeded {
 		p.mt, p.sz = p.seedMt, p.seedSz
+		p.fileSeen = true
 	} else if st, err := os.Stat(p.path); err == nil { // the credential was just loaded from this file: arm from its state
 		p.mt, p.sz = st.ModTime(), st.Size()
+		p.fileSeen = true
 	}
-	p.armed = true
+	p.armed = true // the caller armed cfg.Pairing (from the file or the token bootstrap) before starting us
 	go p.run()
 }
 
@@ -232,7 +311,11 @@ func (p *pairingPoller) check() {
 	defer p.mu.Unlock()
 	st, err := os.Stat(p.path)
 	if err != nil {
-		if p.armed {
+		if p.armed && p.fileSeen {
+			// Derived-mode runs with no store on disk keep the token-derived credential: the file is the
+			// override store, not a requirement (owner directive 2026-11-22). Only a store that existed at
+			// least once is a revocation when it disappears — falling back to the token would revive a
+			// credential the file superseded.
 			p.scepter.ReloadPairing(nil)
 			if p.latch != nil {
 				p.latch.revoke()
@@ -256,6 +339,7 @@ func (p *pairingPoller) check() {
 				p.latch.revoke()
 			}
 			p.armed = false
+			p.fileSeen = true // a broken override store counts as seen: its removal revokes, never falls back
 			p.logf("scepter: pairing file %s unusable (%v) — management channel disarmed, the tunnel keeps running", p.path, perr)
 		}
 		return
@@ -269,7 +353,7 @@ func (p *pairingPoller) check() {
 	if p.latch != nil {
 		p.latch.rePair(pair)
 	}
-	p.armed = true
+	p.armed, p.fileSeen = true, true
 }
 
 // unitSource adapts THIS wattun process to the Scepter read commands. One process serves one unit (the systemd

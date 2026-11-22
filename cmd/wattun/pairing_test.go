@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -311,7 +312,8 @@ func TestPairingPollerLatchFollows(t *testing.T) {
 // TestScepterAttachSwitch (round-2 F11, 2026-11-22): the attach switch is a function now, and `pairing:
 // false` is an explicit opt-out — the stored file stays unattached (it used to fall to the default attach,
 // so the key could not actually turn the channel off). Absent key and `true` attach the stored file; a
-// watp1: value is never file-backed; an explicitly provided invalid one stays fatal for main.
+// watp1: value is never file-backed; an explicitly provided invalid one stays fatal for main. The token
+// bootstrap is nil here: no field 10 = exactly the pre-bootstrap behavior.
 func TestScepterAttachSwitch(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".pairing")
@@ -319,36 +321,233 @@ func TestScepterAttachSwitch(t *testing.T) {
 	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
 
 	// explicit false: no attach, no arm, nothing logged
-	p, fromFile, err := scepterAttach("false", path, logf)
-	if err != nil || p != nil || fromFile || len(logs) != 0 {
-		t.Fatalf("pairing: false must opt out silently: %v %v %v %v", p, fromFile, err, logs)
+	p, origin, err := scepterAttach("false", path, nil, logf)
+	if err != nil || p != nil || origin != scepterNone || len(logs) != 0 {
+		t.Fatalf("pairing: false must opt out silently: %v %v %v %v", p, origin, err, logs)
 	}
 	// absent key + stored file: attach, file-backed
 	writePairingStore(t, path, testPairingLine("manage")+"\n")
-	p, fromFile, err = scepterAttach("", path, logf)
-	if err != nil || p == nil || !fromFile || wat.CapName(p.Caps) != "manage" {
-		t.Fatalf("absent key must attach the stored file: %v %v %v", p, fromFile, err)
+	p, origin, err = scepterAttach("", path, nil, logf)
+	if err != nil || p == nil || origin != scepterFromFile || wat.CapName(p.Caps) != "manage" {
+		t.Fatalf("absent key must attach the stored file: %v %v %v", p, origin, err)
 	}
 	// true + stored file: attach, file-backed
-	p, fromFile, err = scepterAttach("true", path, logf)
-	if err != nil || p == nil || !fromFile {
-		t.Fatalf("true must attach the stored file: %v %v %v", p, fromFile, err)
+	p, origin, err = scepterAttach("true", path, nil, logf)
+	if err != nil || p == nil || origin != scepterFromFile {
+		t.Fatalf("true must attach the stored file: %v %v %v", p, origin, err)
 	}
-	// true + missing file: unpaired with the one missing warning
+	// true + missing file + no token: unpaired with the one missing warning
 	os.Remove(path)
 	logs = nil
-	p, fromFile, err = scepterAttach("true", path, logf)
-	if err != nil || p != nil || fromFile || len(logs) != 1 {
-		t.Fatalf("true with a missing store: %v %v %v %v", p, fromFile, err, logs)
+	p, origin, err = scepterAttach("true", path, nil, logf)
+	if err != nil || p != nil || origin != scepterNone || len(logs) != 1 {
+		t.Fatalf("true with a missing store: %v %v %v %v", p, origin, err, logs)
 	}
 	// a watp1: value: attached but NOT file-backed (the static, unpollable kind)
-	p, fromFile, err = scepterAttach(testPairingLine("full"), path, logf)
-	if err != nil || p == nil || fromFile || wat.CapName(p.Caps) != "full" {
-		t.Fatalf("watp1: value: %v %v %v", p, fromFile, err)
+	p, origin, err = scepterAttach(testPairingLine("full"), path, nil, logf)
+	if err != nil || p == nil || origin != scepterFromKey || wat.CapName(p.Caps) != "full" {
+		t.Fatalf("watp1: value: %v %v %v", p, origin, err)
 	}
 	// an explicitly provided invalid watp1: line: the error main turns into log.Fatalf
-	if _, _, err = scepterAttach("watp1:1|x|y|manage", path, logf); err == nil {
+	if _, _, err = scepterAttach("watp1:1|x|y|manage", path, nil, logf); err == nil {
 		t.Fatal("an invalid watp1: line must fail")
+	}
+}
+
+// testToken builds a classic wat1: token the way the manager's MakeToken does (7 pipe fields, fields 8/9
+// riding along only when the optional field 10 is set, base64-wrapped).
+func testToken(key, field10 string) string {
+	f := "udp|198.51.100.7:20030|" + key + "|/wat|||20030"
+	if field10 != "" {
+		f += "|1||" + field10
+	}
+	return "wat1:" + base64.StdEncoding.EncodeToString([]byte(f))
+}
+
+// TestParseTokenKey: the tunnel key may BE the classic wat1: token (D5 bootstrap, owner directive
+// 2026-11-22) — field 3 is the PSK the tunnel runs on, field 10 (written only when set) is the pairing
+// bootstrap; a plain PSK and a field-10-less token are exactly today's behavior, and a wat1:-prefixed
+// value that does not parse fails loud (a pasted token can never work as a literal PSK).
+func TestParseTokenKey(t *testing.T) {
+	k, tp, err := parseTokenKey([]byte("plain-psk-40-chars-alphanumeric-only"))
+	if err != nil || string(k) != "plain-psk-40-chars-alphanumeric-only" || tp != nil {
+		t.Fatalf("plain PSK must pass through untouched: %q %v %v", k, tp, err)
+	}
+	k, tp, err = parseTokenKey([]byte(testToken("kk", "")))
+	if err != nil || string(k) != "kk" || tp != nil {
+		t.Fatalf("field-10-less token: no bootstrap, PSK from field 3: %q %v %v", k, tp, err)
+	}
+	k, tp, err = parseTokenKey([]byte(testToken("kk", "pair=manage")))
+	if err != nil || string(k) != "kk" || tp == nil || tp.field10 != "pair=manage" || tp.key != "kk" {
+		t.Fatalf("token with field 10: %q %+v %v", k, tp, err)
+	}
+	// unpadded base64 tolerated (base64 -d parity with the manager's ReadToken)
+	raw := "udp|h:1|kk2||||20030|1||pair"
+	unpadded := "wat1:" + base64.RawStdEncoding.EncodeToString([]byte(raw))
+	k, tp, err = parseTokenKey([]byte(unpadded))
+	if err != nil || string(k) != "kk2" || tp == nil || tp.field10 != "pair" {
+		t.Fatalf("unpadded token: %q %v %v", k, tp, err)
+	}
+	// quoted yml value shape: the unquote already stripped, whitespace tolerated
+	k, _, err = parseTokenKey([]byte("  " + testToken("kk", "pair") + "\n"))
+	if err != nil || string(k) != "kk" {
+		t.Fatalf("whitespace around a token key: %q %v", k, err)
+	}
+	if _, _, err = parseTokenKey([]byte("wat1:!!!not-base64!!!")); err == nil {
+		t.Fatal("a wat1:-prefixed key with bad base64 must fail loud")
+	}
+	if _, _, err = parseTokenKey([]byte("wat1:" + base64.StdEncoding.EncodeToString([]byte("udp|peer:1")))); err == nil {
+		t.Fatal("a token without a key field must fail loud")
+	}
+}
+
+// TestScepterAttachTokenDerived (D5 bootstrap, owner directive 2026-11-22): a token carrying field 10 arms
+// BOTH roles with no `pairing:` key and no .pairing file — the pasted tunnel token is the only credential.
+// Precedence: `pairing: false` beats everything; a readable stored file wins over the token (it is the
+// rotate/revoke store); a present-but-unusable file stays unpaired rather than resurrecting a credential
+// the file superseded; the token fills every remaining gap (`pairing: true` included); a malformed or
+// lookalike field 10 degrades to unpaired with a warning, never fatal.
+func TestScepterAttachTokenDerived(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".pairing")
+	logs := []string{}
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	tok := func(field10 string) *tokenPair {
+		_, tp, err := parseTokenKey([]byte(testToken("kk", field10)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tp
+	}
+
+	// default attach, no file, token with pair=manage: derived, one exact log line
+	p, origin, err := scepterAttach("", path, tok("pair=manage"), logf)
+	if err != nil || p == nil || origin != scepterFromToken || wat.CapName(p.Caps) != "manage" {
+		t.Fatalf("token-derived attach: %v %v %v", p, origin, err)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "scepter: pairing derived from token field 10 (pairing ") ||
+		!strings.Contains(logs[0], "capability manage)") {
+		t.Fatalf("derivation log line: %v", logs)
+	}
+	// the derivation is deterministic per token key (both ends derive the same UUID)
+	p2, _, _ := scepterAttach("", path, tok("pair=manage"), func(string, ...any) {})
+	if p.UUIDString() != p2.UUIDString() {
+		t.Fatal("the derived UUID must be stable per token key")
+	}
+
+	// a stored .pairing file WINS over the token bootstrap (file = rotate/revoke store)
+	writePairingStore(t, path, testPairingLine("full")+"\n")
+	logs = nil
+	p, origin, err = scepterAttach("", path, tok("pair=manage"), logf)
+	if err != nil || p == nil || origin != scepterFromFile || wat.CapName(p.Caps) != "full" {
+		t.Fatalf("the stored file must win over the token: %v %v %v", p, origin, err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("file-wins must not log a derivation: %v", logs)
+	}
+
+	// pairing: false beats the token bootstrap too
+	p, origin, err = scepterAttach("false", path, tok("pair=full"), logf)
+	if err != nil || p != nil || origin != scepterNone || len(logs) != 0 {
+		t.Fatalf("pairing: false must beat the token bootstrap: %v %v %v %v", p, origin, err, logs)
+	}
+
+	// pairing: true + missing file + token: the bootstrap fills the gap, no missing-file warning
+	os.Remove(path)
+	logs = nil
+	p, origin, err = scepterAttach("true", path, tok("pair=manage"), logf)
+	if err != nil || p == nil || origin != scepterFromToken || wat.CapName(p.Caps) != "manage" || len(logs) != 1 {
+		t.Fatalf("pairing: true with a missing store and a token: %v %v %v %v", p, origin, err, logs)
+	}
+
+	// a present-but-unusable file: unpaired, no token fallback (the store's presence is authoritative)
+	writePairingStore(t, path, "version=1\nuuid=u\n")
+	logs = nil
+	p, origin, err = scepterAttach("", path, tok("pair=manage"), logf)
+	if err != nil || p != nil || origin != scepterNone || len(logs) != 1 {
+		t.Fatalf("unusable store beats the token: %v %v %v %v", p, origin, err, logs)
+	}
+
+	// malformed field 10: warn + unpaired, never fatal (the cockpit degrades, forwarding must not die)
+	os.Remove(path)
+	logs = nil
+	if p, origin, err = scepterAttach("", path, tok("pair=bogus"), logf); err != nil || p != nil || origin != scepterNone {
+		t.Fatalf("malformed field 10 must not be fatal: %v %v %v", p, origin, err)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "token pairing bootstrap unusable") {
+		t.Fatalf("malformed-field log: %v", logs)
+	}
+
+	// lookalike field ("pairxyz"): not a pairing credential (L5-strict), silently unpaired
+	logs = nil
+	if p, origin, err = scepterAttach("", path, tok("pairxyz"), logf); err != nil || p != nil || origin != scepterNone || len(logs) != 0 {
+		t.Fatalf("lookalike field must be silently none: %v %v %v %v", p, origin, err, logs)
+	}
+
+	// regression: no token, no file = exactly today's behavior (nil, silent)
+	if p, origin, err = scepterAttach("", path, nil, logf); err != nil || p != nil || origin != scepterNone || len(logs) != 0 {
+		t.Fatalf("no token no file: %v %v %v %v", p, origin, err, logs)
+	}
+}
+
+// TestPairingPollerDerivedMode: a token-derived run's poller watches the override store without requiring
+// it — no file: the derived credential keeps serving; a file that appears overrides (the rotate/revoke
+// store); its later removal disarms without falling back to the token (the file marked it superseded);
+// a restored file re-arms.
+func TestPairingPollerDerivedMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".pairing")
+	tok := "kk"
+	dp, err := wat.ParsePairingTokenField("pair=manage", []byte(tok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := wat.NewScepterState(dp, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := []string{}
+	pl := &pairingPoller{path: path, scepter: st, derived: dp,
+		logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }, interval: time.Hour}
+	startPairingPoller(pl) // no store on disk: the derived credential is armed, fileSeen false
+
+	// the store is absent: no disarm, no log — the token bootstrap is the running credential
+	pl.check()
+	if u, caps := st.PairingInfo(); u != dp.UUIDString() || wat.CapName(caps) != "manage" {
+		t.Fatalf("derived credential must stay armed with no store: %s %d", u, caps)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("absent store on a derived run must stay silent: %v", logs)
+	}
+
+	// the store appears (the rotate/revoke store): it overrides
+	writePairingStore(t, path, testPairingLine("full")+"\n")
+	pl.check()
+	if _, caps := st.PairingInfo(); wat.CapName(caps) != "full" {
+		t.Fatalf("an appearing store must override the derived credential: caps %d", caps)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "changed — credential reloaded") {
+		t.Fatalf("override log: %v", logs)
+	}
+
+	// the store is removed after having existed: disarmed, never a token fallback
+	os.Remove(path)
+	logs = nil
+	pl.check()
+	if u, _ := st.PairingInfo(); u != "" {
+		t.Fatalf("removing a seen store must disarm (no token fallback): %s", u)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "removed") {
+		t.Fatalf("removal log: %v", logs)
+	}
+
+	// the store is back: re-armed
+	writePairingStore(t, path, testPairingLine("manage")+"\n")
+	fut := time.Now().Add(2 * time.Second)
+	os.Chtimes(path, fut, fut)
+	pl.check()
+	if u, caps := st.PairingInfo(); u == "" || wat.CapName(caps) != "manage" {
+		t.Fatalf("a restored store must re-arm: %s %d", u, caps)
 	}
 }
 
