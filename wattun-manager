@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112210   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112211   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -1065,13 +1065,23 @@ token_bond_legs() { # T_CARRIER (a bond) + T_PEER -> T_LEG_C/T_LEG_P arrays; T_P
 
 # ======================================================================================
 #  Scepter pairing (3.5.0, Phase A; plan D3/D4/D5/D6): the pairing credential is
-#  {pairing UUID, 32-byte key, capability tier, version}. Kharej owns the store
-#  $CONF/.pairing (atomic tmp+rename, 0600); Iran consumes a watp1: line (UNWRAPPED,
-#  plan D5 literal text, matching the engine parser and the Go manager):
+#  {pairing UUID, 32-byte key, capability tier, version}. Iran consumes a watp1:
+#  line (UNWRAPPED, plan D5 literal text, matching the engine parser and the Go
+#  manager):
 #     watp1:1|<36-char pairing UUID>|<base64 of exactly 32 bytes>|<capability>
 #  The classic token's optional field 10 carries the same capability for a
 #  token-bootstrap pairing (see make_token). Capability tiers (D4):
 #     tunnel < create < manage < full
+#  Store format (F1-B, 2026-11-22) — $CONF/.pairing, written 0600:
+#     line 1 is the credential in the ENGINE's format above, because `wattun -pair`
+#     (Kharej) and `wattun -pair-to` (Iran) read exactly that one line from the file;
+#     the pre-2026112211 manager wrote a key=value file there that the engine cannot
+#     parse, so a manager-paired Kharej never armed the channel. `# ` comment lines
+#     after line 1 are this manager's bookkeeping (created=, oldkey=,
+#     oldkey_expires=) and are ignored by the engine (the engine skips everything
+#     after line 1; the pre-fix engine, which parses the whole file as one line, must
+#     be updated together with this manager). The old key=value store still parses
+#     for READING; nothing writes that shape any more.
 #  Hidden infrastructure: the store and the audit log are dotfiles, never *.yml
 #  tunnels, so tunnels()/listed_tunnels()/dashboards can never list them (the
 #  scepter latch follows the same rule on the engine side). Both ends need 3.5.0
@@ -1096,7 +1106,7 @@ new_pair_uuid() {
   printf '%s\n' "${u,,}"
 }
 new_pair_key() { head -c 32 /dev/urandom | base64 -w0; } # the D5 credential: base64 of exactly 32 bytes
-P_VERSION=''; P_UUID=''; P_KEY=''; P_CAPS=''
+P_VERSION=''; P_UUID=''; P_KEY=''; P_CAPS=''; P_CREATED=''; P_OLDKEY=''; P_OLDKEY_EXP=''
 # The watp1: line is UNWRAPPED (plan D5 literal text; matches the engine parser committed in d354660 and the Go
 # manager): watp1:<version>|<pairing UUID>|<base64 32-byte key>|<capability> — no outer base64 of the payload.
 make_pairing() { # version uuid key caps -> watp1: line (pure; field order is the wire format, D5)
@@ -1116,31 +1126,88 @@ read_pairing() { # line -> P_VERSION P_UUID P_KEY P_CAPS ; rc 1 + its own error 
   v_pair_caps "$P_CAPS" || return 1
 }
 v_pairing() { read_pairing "$1"; }
-pairing_get() { local v; v=$(sed -n "s/^$1=//p" "$PAIR_STORE" 2>/dev/null | tail -1); printf '%s' "$v"; }
+pairing_load() { # $PAIR_STORE -> P_VERSION P_UUID P_KEY P_CAPS P_CREATED P_OLDKEY P_OLDKEY_EXP
+  # rc 0 = parsed, 1 = the file exists but holds nothing parsable, 2 = no store. Lenient on purpose:
+  # the engine owns the credential's shape, and refusing a store the engine accepts would lock this
+  # console out of a future format; only a store with no uuid/key/caps at all counts as unreadable.
+  P_VERSION=''; P_UUID=''; P_KEY=''; P_CAPS=''; P_CREATED=''; P_OLDKEY=''; P_OLDKEY_EXP=''
+  [ -f "$PAIR_STORE" ] || return 2
+  local line k v
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      watp1:*) # the engine's credential line (line 1; a stray further one is ignored)
+        [ -n "$P_UUID" ] && continue
+        IFS='|' read -r P_VERSION P_UUID P_KEY P_CAPS <<<"${line#watp1:}" ;;
+      \#*) # bookkeeping comments written by pairing_store_write: created=, oldkey=, oldkey_expires=
+        k=${line#'#'}; k=${k# }; k=${k%%=*}; v=${line#*=}
+        case "$k" in
+          created) [ -n "$P_CREATED" ] || P_CREATED=$v ;;
+          oldkey) [ -n "$P_OLDKEY" ] || P_OLDKEY=$v ;;
+          oldkey_expires) [ -n "$P_OLDKEY_EXP" ] || P_OLDKEY_EXP=$v ;;
+        esac ;;
+      *) # the pre-2026112211 manager's key=value store: read-only compat, never written again
+        k=${line%%=*}; v=${line#*=}
+        case "$k" in
+          version) P_VERSION=$v ;;
+          uuid) [ -n "$P_UUID" ] || P_UUID=$v ;;
+          key) [ -n "$P_KEY" ] || P_KEY=$v ;;
+          caps) [ -n "$P_CAPS" ] || P_CAPS=$v ;;
+          created) [ -n "$P_CREATED" ] || P_CREATED=$v ;;
+          oldkey) [ -n "$P_OLDKEY" ] || P_OLDKEY=$v ;;
+          oldkey_expires) [ -n "$P_OLDKEY_EXP" ] || P_OLDKEY_EXP=$v ;;
+        esac ;;
+    esac
+  done <"$PAIR_STORE"
+  { [ -n "$P_UUID" ] && [ -n "$P_KEY" ] && [ -n "$P_CAPS" ]; } || return 1
+  return 0
+}
+pairing_get() { # field -> value ('' when absent, or there is no store, or it cannot be parsed)
+  pairing_load
+  case "$1" in
+    version) printf '%s' "${P_VERSION:-}" ;;
+    uuid) printf '%s' "$P_UUID" ;;
+    key) printf '%s' "$P_KEY" ;;
+    caps) printf '%s' "$P_CAPS" ;;
+    created) printf '%s' "$P_CREATED" ;;
+    oldkey) printf '%s' "$P_OLDKEY" ;;
+    oldkey_expires) printf '%s' "$P_OLDKEY_EXP" ;;
+  esac
+  return 0
+}
 pairing_active() { [ -f "$PAIR_STORE" ]; }
+pairing_check_readable() { # refuse to touch a store this manager cannot parse: it may be a newer engine's
+  # format holding the only copy of the credential, and pair/rotate/revoke would destroy it (F1-B, 2026-11-22)
+  [ -f "$PAIR_STORE" ] || return 0
+  pairing_load && return 0
+  err "$PAIR_STORE exists but this manager cannot read it; nothing was changed."
+  hint "Pair or rotate with the engine (wattun -pair) or delete the file by hand, then try again."
+  return 1
+}
 pairing_store_write() { # uuid key caps [oldkey oldkey-expires-epoch] : the whole store, atomically (tmp+rename, 0600)
+  # Line 1 is the credential in the ENGINE's format — `wattun -pair` reads exactly that line and cannot
+  # parse anything else (F1-B); the `# ` lines carry this manager's bookkeeping and the engine skips them.
   local tmp old created
   mkdir -p "$CONF"
   created=$(pairing_get created); [ -n "$created" ] || created=$(date +%s) # a rotation keeps the original creation time
   old=$(umask); umask 077
   tmp=$(mktemp "$CONF/.tmp.XXXXXX") || { umask "$old"; return 1; }
   {
-    echo "# WatTunnel Scepter pairing store. Written by wattun-manager; keep it 0600. Iran consumes the watp1: line."
-    echo "version=1"
-    echo "uuid=$1"
-    echo "key=$2"
-    echo "caps=$3"
-    echo "created=$created"
-    if [ -n "${4:-}" ]; then echo "oldkey=$4"; echo "oldkey_expires=$5"; fi # the 24 h rotation window (plan D-rotation)
+    make_pairing 1 "$1" "$2" "$3"; echo
+    echo "# created=$created"
+    if [ -n "${4:-}" ]; then echo "# oldkey=$4"; echo "# oldkey_expires=$5"; fi # the 24 h rotation window (plan D-rotation)
   } >"$tmp" || { rm -f "$tmp"; umask "$old"; return 1; }
   chmod 600 "$tmp"; mv -f "$tmp" "$PAIR_STORE"; umask "$old"
 }
-pairing_audit() { # event detail : append one line (content is append-only; the write is tmp+rename)
-  local f="$PAIR_AUDIT" tmp
+pairing_audit() { # event detail : append one line, never rewrite the file
+  # Append-only for real (F5, 2026-11-22): the ENGINE appends audit records with open-append-close per
+  # entry, so the old cat->tmp->mv rewrite dropped anything appended in the read->rename window (the
+  # engine kept writing the renamed-away inode). One small O_APPEND write is atomic enough on a regular
+  # file; a missing file is created 0600 via umask (>> never truncates an existing one).
+  local f="$PAIR_AUDIT" old
   mkdir -p "$CONF"
-  tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
-  { [ -f "$f" ] && cat "$f"; printf '%s %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$2"; } >"$tmp" \
-    && chmod 600 "$tmp" && mv -f "$tmp" "$f" || rm -f "$tmp"
+  old=$(umask); umask 077
+  printf '%s %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$2" >>"$f"
+  umask "$old"
   return 0
 }
 pairing_audit_tail() { # [n=20]
@@ -1153,22 +1220,37 @@ pairing_status() {
     say "  $(kv pairing "${GRY}off${RST} ${GRY}(no credential; this server cannot be paired)${RST}")"
     return 0
   fi
-  caps=$(pairing_get caps)
+  if ! pairing_load; then
+    say "  $(kv pairing "${YEL}unreadable${RST} ${GRY}($PAIR_STORE is not a format this manager reads)${RST}")"
+    return 0
+  fi
+  caps=$P_CAPS
   say "  $(kv pairing "${GRN}on${RST}")"
-  say "  $(kv uuid "$(pairing_get uuid)")"
+  say "  $(kv uuid "$P_UUID")"
   say "  $(kv caps "$caps")"
-  created=$(pairing_get created)
+  created=$P_CREATED
   [ -n "$created" ] && say "  $(kv created "$(date -u -d "@$created" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "$created")")"
-  exp=$(pairing_get oldkey_expires)
-  if [ -n "$(pairing_get oldkey)" ] && [ -n "$exp" ]; then
+  exp=$P_OLDKEY_EXP
+  if [ -n "$P_OLDKEY" ] && [ -n "$exp" ]; then
     left=$(( exp - $(date +%s) ))
     if [ "$left" -gt 0 ]; then say "  $(kv rotation "${YEL}old key accepted ${left}s more${RST}")"
     else say "  $(kv rotation "${GRY}old key expired${RST}")"; fi
   fi
   return 0
 }
+scepter_kharej_only() { # F1-C (2026-11-22): pair/rotate/revoke write Kharej's SERVER-side credential.
+  # On Iran the same path ($CONF/.pairing) holds the CLIENT credential written by `wattun -pair-to`;
+  # rewriting it here would desync the pair, so Iran only reads (status/audit) and pairs from the Go
+  # cockpit. Refusing on an explicit Iran side only: side is saved at install/first tunnel, and an
+  # undetermined side must not lock Kharej's first pairing out.
+  [ "$(server_side)" = iran ] || return 0
+  err "This is the Kharej-side action; Iran's pairing is managed by the Go cockpit (wattun -pair-to)."
+  return 1
+}
 scepter_pair() { # generate (or adopt a pasted watp1: line) and store the pairing; prints the line for Iran
   local line uuid key caps
+  scepter_kharej_only || return 1
+  pairing_check_readable || return 1
   if pairing_active; then
     confirm "A pairing already exists ($(pairing_get uuid)). Replace it? Iran must be given the new line." n || return 0
   fi
@@ -1192,8 +1274,11 @@ scepter_pair() { # generate (or adopt a pasted watp1: line) and store the pairin
 scepter_rotate() { # [window_secs=86400] : new key; the old key stays valid for the window (default 24 h)
   local win=${1:-86400} uuid caps key nk
   case "$win" in ''|*[!0-9]*) err "The rotation window is a number of seconds."; return 1 ;; esac
+  scepter_kharej_only || return 1
   pairing_active || { err "No pairing to rotate (pair first)."; return 1; }
-  uuid=$(pairing_get uuid); caps=$(pairing_get caps); key=$(pairing_get key)
+  pairing_check_readable || return 1
+  pairing_load || return 1 # check_readable just proved the store parses; belt and braces
+  uuid=$P_UUID; caps=$P_CAPS; key=$P_KEY
   nk=$(new_pair_key)
   pairing_store_write "$uuid" "$nk" "$caps" "$key" "$(( $(date +%s) + win ))" || { err "Could not write $PAIR_STORE."; return 1; }
   pairing_audit pair_rotated "$uuid window=${win}s"
@@ -1204,7 +1289,9 @@ scepter_rotate() { # [window_secs=86400] : new key; the old key stays valid for 
   return 0
 }
 scepter_revoke() { # revoke = unpair: drop the credential locally; tunnels keep running (plan D3)
+  scepter_kharej_only || return 1
   pairing_active || { err "No pairing to revoke."; return 1; }
+  pairing_check_readable || return 1
   if [ "$NONINTERACTIVE" = 1 ]; then
     [ "${NI_YES:-0}" = 1 ] || { err "scepter revoke without a terminal needs --yes"; return 1; }
   else
@@ -1215,7 +1302,24 @@ scepter_revoke() { # revoke = unpair: drop the credential locally; tunnels keep 
   ok "Pairing revoked. The audit log is kept in $PAIR_AUDIT."
   return 0
 }
-scepter_menu() { # Kharej's local Scepter console: status, pair, rotate, revoke, audit tail
+scepter_menu() { # Kharej's local Scepter console: status, pair, rotate, revoke, audit tail.
+  # F1-C: on Iran the console is read-only (status/audit) — Iran's credential is the client side,
+  # written by `wattun -pair-to`, and pair/rotate/revoke here would overwrite it.
+  local sd; sd=$(server_side)
+  if [ "$sd" = iran ]; then
+    while :; do
+      page "Scepter" "Iran · read-only"
+      pairing_status
+      echo
+      hint "Pairing is managed on Kharej. On Iran run: wattun -pair-to <watp1: line> (Go cockpit)."
+      menu_line a 'audit tail' 0 back
+      key_read
+      case "$KEY" in
+        a|A) echo; pairing_audit_tail 20; pause ;;
+        b|0|q|enter|esc) return 0 ;;
+      esac
+    done
+  fi
   while :; do
     page "Scepter" "Kharej pairing console"
     pairing_status
@@ -5821,7 +5925,9 @@ auto_apply() { # name : write the chosen variant (T_*, AT_EXTRA) into NAME.yml, 
       set_value "$n" listen "\":$sp\""; fw_open "$sp/udp"
     fi
     if [ "$(role "$n")" = Iran ] && [ -n "${T_KEY:-}" ]; then # a reusable token describing the chosen shape
-      ( umask 077; make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "${T_PATH:-}" "${T_SNI:-}" "${T_ICMP:-}" "${T_PORTS:-}" "" "${T_PAIR:-}" >"$CONF/$n.token" )
+      # F11 (2026-11-22): T_PAIR is make_token's $10 (the pair capability); it sat in $9 (auto plan) here,
+      # so a field-10 token was rewritten with its capability as a bogus plan. $9 stays empty on an apply.
+      ( umask 077; make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "${T_PATH:-}" "${T_SNI:-}" "${T_ICMP:-}" "${T_PORTS:-}" "" "" "${T_PAIR:-}" >"$CONF/$n.token" )
     fi
   fi
   if [ -n "$T_SNI" ]; then set_value "$n" sni "$T_SNI"; set_value "$n" host "$T_SNI"; fi

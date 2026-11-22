@@ -2232,8 +2232,10 @@ EOF
 
 # ======================================================================================
 # Scepter pairing (3.5.0, Phase A manager lane): the watp1: line (D5), token field 10, the
-# .pairing store (pair / rotate with an old-key window / revoke) and the audit tail. The
-# store and the audit log are dotfiles, never *.yml tunnels, so no listing may show them.
+# .pairing store in the engine's format (line 1 = the watp1: credential, `# ` lines = the
+# manager's bookkeeping; F1-B 2026-11-22), pair / rotate with an old-key window / revoke,
+# the Iran-side read-only gate (F1-C) and the append-only audit (F5). The store and the
+# audit log are dotfiles, never *.yml tunnels, so no listing may show them.
 # Pure file/bash work: no root, no systemd, no binary.
 # ======================================================================================
 (
@@ -2272,32 +2274,73 @@ EOF
   read_token "$_p10tok"
   chk "token: field 10 carries the pair capability" "$T_CARRIER/$T_PAIR" "tcp/manage"
   chk "token: a field-10 token has exactly 10 pipe fields" "$(sed 's/^wat1://' <<<"$_p10tok" | base64 -d | tr -cd '|' | wc -c | tr -d ' ')" "9"
+  # F11 (2026-11-22): auto_apply's token rewrite passes T_PAIR as make_token's $10; $9 (auto plan) stays empty
+  _f11pat='make_token "$T_CARRIER" "$T_PEER" "$T_KEY" "${T_PATH:-}" "${T_SNI:-}" "${T_ICMP:-}" "${T_PORTS:-}" "" "" "${T_PAIR:-}"'
+  chk "f11: auto_apply rewrites the token with T_PAIR in field 10" "$(grep -cF -- "$_f11pat" wattun-manager)" "1"
+  read_token "$(make_token auto 198.51.100.3 kauto1234567 /wat '' '' '' '' '' manage)"
+  chk "f11: a rewritten auto token keeps the plan empty and the cap in field 10" "$T_CARRIER/$T_AUTO/$T_PAIR" "auto//manage"
 
-  # the .pairing store
+  # the .pairing store (F1-B, 2026-11-22): line 1 is the ENGINE's credential line (watp1:...), the
+  # manager's metadata rides as `# ` comments the engine ignores; the old key=value file still reads,
+  # but nothing writes that shape any more.
+  conf_set side kharej # scepter_pair/rotate/revoke write Kharej's credential only (F1-C); role() is stubbed Iran here
   chk "store: no pairing before the first pair" "$(pairing_active && echo y || echo n)" "n"
-  pairing_store_write "$PUUID" kold1234567890123 manage
+  pairing_store_write "$PUUID" "$PKEY" manage
   chk "store: written and active" "$(pairing_active && echo y || echo n)" "y"
+  chk "store: line 1 is the engine credential" "$(head -n 1 "$PAIR_STORE")" "$(make_pairing 1 "$PUUID" "$PKEY" manage)"
   chk "store: fields read back" "$(pairing_get uuid)/$(pairing_get caps)" "$PUUID/manage"
-  # 0600 cannot be proven on a noacl MSYS mount: pin the writer's discipline instead (Linux CI exercises the real mode)
+  chk "store: created stamp rides as a comment" "$(grep -c '^# created=' "$PAIR_STORE")" "1"
+  # 0600 cannot be proven on a noacl MSYS mount: pin the writers' discipline instead (Linux CI exercises the real mode)
   _psw=$(sed -n '/^pairing_store_write() {/,/^}/p' wattun-manager)
   chk "store: written under umask 077 and chmod 600" "$([ "$(grep -c 'umask 077' <<<"$_psw")" = 1 ] && [ "$(grep -c 'chmod 600' <<<"$_psw")" = 1 ] && echo y)" "y"
+  _pau=$(sed -n '/^pairing_audit() {/,/^}/p' wattun-manager)
+  chk "audit: appends in place (no tmp+rename rewrite) and creates 0600" \
+    "$([ "$(grep -c 'umask 077' <<<"$_pau")" = 1 ] && [ "$(grep -c 'mv -f' <<<"$_pau")" = 0 ] && echo y)" "y"
   _rot=$(scepter_rotate 3600 2>&1)
-  chk "rotate: the new key differs" "$( [ "$(pairing_get key)" != kold1234567890123 ] && echo y)" "y"
-  chk "rotate: the old key is kept for the window" "$(pairing_get oldkey)" "kold1234567890123"
+  chk "rotate: the new key differs" "$( [ "$(pairing_get key)" != "$PKEY" ] && echo y)" "y"
+  chk "rotate: the old key is kept for the window" "$(pairing_get oldkey)" "$PKEY"
   _exp=$(pairing_get oldkey_expires); _now=$(date +%s)
   chk "rotate: expiry is the window away" "$(awk -v e="$_exp" -v n="$_now" 'BEGIN{d=e-n; print (d>3500 && d<=3600) ? "y" : "n"}')" "y"
   case "$_rot" in *watp1:*) echo "ok   rotate: prints a fresh watp1: line" ;; *) echo "FAIL rotate: prints a watp1: line, got: $_rot"; fail=1 ;; esac
-  read_pairing "$(grep -o 'watp1:[A-Za-z0-9+/=|-]*' <<<"$_rot" | head -1)"
+  _rotline=$(grep -o 'watp1:[A-Za-z0-9+/=|-]*' <<<"$_rot" | head -n 1)
+  read_pairing "$_rotline" || { echo "FAIL rotate: the printed line fails read_pairing"; fail=1; }
   chk "rotate: the printed line keeps uuid and caps" "$P_UUID/$P_CAPS" "$PUUID/manage"
   chk "rotate: the printed key is the new store key" "$P_KEY" "$(pairing_get key)"
+  chk "rotate: the store's first line is the printed credential" "$(head -n 1 "$PAIR_STORE")" "$_rotline"
   chk "rotate: logs the rotation" "$(grep -c 'pair_rotated' "$PAIR_AUDIT" 2>/dev/null || echo 0)" "1"
   expect_fail scepter_rotate notanumber
+  # F5: the ENGINE appends audit records with open-append-close per entry; a manager write must keep them
+  printf '%s %s %s\n' '2030-01-01T00:00:00Z' 'engine_event' 'appended between manager writes' >>"$PAIR_AUDIT"
+  pairing_audit manager_event 'after-the-engine-line'
+  chk "audit: an engine-style appended line survives a manager write" "$(grep -c engine_event "$PAIR_AUDIT")" "1"
+  chk "audit: the manager line lands after it" "$(tail -n 1 "$PAIR_AUDIT" | grep -c manager_event)" "1"
+  # a store this manager cannot parse (a newer engine's format?) must never be overwritten (F1-B)
+  printf 'watp9:1|not-a-credential\n' >"$PAIR_STORE"
+  _rr=$(scepter_rotate 3600 2>&1)
+  chk "refuse: rotate explains the unreadable store" "$(grep -c 'cannot read it' <<<"$_rr")" "1"
+  chk "refuse: the store is untouched" "$(cat "$PAIR_STORE")" "watp9:1|not-a-credential"
+  _rp=$(scepter_pair 2>&1)
+  chk "refuse: pair explains the unreadable store" "$(grep -c 'cannot read it' <<<"$_rp")" "1"
+  _rv=$(NI_YES=1 scepter_revoke 2>&1)
+  chk "refuse: revoke explains the unreadable store" "$(grep -c 'cannot read it' <<<"$_rv")" "1"
+  chk "refuse: the store is still not deleted" "$(pairing_active && echo y || echo n)" "y"
+  # an ENGINE-written store (wattun -pair keeps the bare watp1: line): the manager reads it as-is (F1-B)
+  printf '%s\n' "$(make_pairing 1 "$PUUID" "$PKEY" full)" >"$PAIR_STORE"
+  chk "engine store: fields read back" "$(pairing_get uuid)/$(pairing_get caps)/$(pairing_get key)" "$PUUID/full/$PKEY"
+  chk "engine store: no metadata is invented" "$(pairing_get created)/$(pairing_get oldkey)" "/"
+  _est=$(pairing_status 2>&1)
+  chk "engine store: status shows uuid and caps" "$(grep -c "$PUUID" <<<"$_est")/$(grep -c full <<<"$_est")" "1/1"
+  # the pre-2026112211 manager's key=value store: still readable (backward compat), never written again
+  printf 'version=1\nuuid=%s\nkey=%s\ncaps=manage\ncreated=1700000000\noldkey=kold1234567890123\noldkey_expires=1700003600\n' \
+    "$PUUID" "$PKEY" >"$PAIR_STORE"
+  chk "legacy store: fields read back" \
+    "$(pairing_get uuid)/$(pairing_get caps)/$(pairing_get created)/$(pairing_get oldkey_expires)" "$PUUID/manage/1700000000/1700003600"
   expect_fail scepter_revoke # NONINTERACTIVE without --yes refuses
   NI_YES=1 scepter_revoke >/dev/null 2>&1
   chk "revoke: the store is gone" "$(pairing_active && echo y || echo n)" "n"
   chk "revoke: the audit log survives" "$(grep -c 'pair_revoked' "$PAIR_AUDIT" 2>/dev/null || echo 0)" "1"
   chk "audit: entries are tailed newest-last" "$(pairing_audit_tail 2 | wc -l | tr -d ' ')" "2"
-  rm -f "$PAIR_AUDIT"
+  rm -f "$PAIR_STORE" "$PAIR_AUDIT"
 
   # the pair screen (unattended: generates a fresh credential with the default tier)
   _pairout=$(NI_YES=0 scepter_pair 2>&1)
@@ -2310,6 +2353,17 @@ EOF
   _pst=$(pairing_status 2>&1)
   chk "status: shows the uuid" "$(grep -c "$P_UUID" <<<"$_pst")" "1"
   chk "status: shows the capability tier" "$(grep -c 'full' <<<"$_pst")" "1"
+
+  # F1-C: on Iran the same path holds the CLIENT credential (wattun -pair-to); the manager refuses to write there
+  conf_set side iran
+  _ip=$(scepter_pair 2>&1)
+  chk "iran: pair refuses" "$(grep -c 'Go cockpit' <<<"$_ip")" "1"
+  _ir=$(scepter_rotate 3600 2>&1)
+  chk "iran: rotate refuses" "$(grep -c 'Go cockpit' <<<"$_ir")" "1"
+  _ix=$(NI_YES=1 scepter_revoke 2>&1)
+  chk "iran: revoke refuses" "$(grep -c 'Go cockpit' <<<"$_ix")" "1"
+  chk "iran: the store survives untouched" "$(pairing_get uuid)" "$P_UUID"
+  conf_set side kharej
 
   # hidden infrastructure: the store/audit dotfiles never appear in a tunnel listing
   eval "$(sed -n '/^tunnels()/,/^}/p' wattun-manager)"
@@ -2336,7 +2390,7 @@ EOF
   printf '# %s x\nmode: server\ncarrier: tcp\n' 'probe tunnel created by scepter test.open' >"$WAT_CONF/hidden2.yml"
   chk "probe: the provenance line alone does not hide a normal name" "$(tunnels | grep -c '^hidden2$')" "1"
   rm -f "$WAT_CONF/hidden2.yml" "$WAT_CONF/probe-$_ts.yml" "$WAT_CONF/probe-$_ts-2.yml" "$WAT_CONF/probe-12345.yml"
-  chk "mgr: MGR_VERSION bumped with the probe filter" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112210"
+  chk "mgr: MGR_VERSION bumped with the store format and side gates" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112211"
 
   # refresh_token keeps field 10 when the allowed ports change
   role() { echo Kharej; }
