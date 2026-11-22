@@ -1215,3 +1215,12 @@ test); the web panel consumes the RPC later; watp1: QR code, fleet dashboard, cr
 are the plan's Later list; mgr ScepterClient is single-threaded by documented contract; the mgr
 accepts unpadded base64 keys on read (all writers emit padded; the engine fails loudly otherwise).
 Commit: 8348219 (fixes); this entry = READY FOR REVIEW
+
+## 2026-11-22 · supervisor · Debug round 2 dispatched — 12 parallel reviewers
+Owner requested a larger concurrent swarm. 12 read-only reviewers with disjoint scopes dispatched in
+one batch: D1 codec/Handle+journal, D2 events/state/watcher, D3 latch/session/disarm, D4 pairing
+wiring, D5 tunnel ops, D6 probe/auto, D7 update/backup/audit, D8 main wiring, D9 mgr transport,
+D10 mgr screens, D11 bash console, D12 docs-vs-code. Focus: the wave-2 fix code (never yet
+adversarially reviewed) + wave-1 SUSPECTED items. Reports will be verified by the supervisor before
+any fix cluster dispatches.
+Commit: none (dispatch record)
