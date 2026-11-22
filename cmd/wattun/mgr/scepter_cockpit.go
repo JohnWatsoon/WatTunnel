@@ -367,8 +367,8 @@ func scepterPairScreen(n string) {
 	for {
 		items, rows := scepterPairItems(doc, docErr, caps)
 		head := func(w io.Writer) { scepterPairHead(w, n, doc, docErr, caps, helloErr) }
-		i, k := Choose(head, items, &sel, []string{"⏎", "open", "n", "create", "s", "state",
-			"e", "events", "h", "hello", "r", "refresh", "esc", "back"}, time.Second)
+		i, k := Choose(head, items, &sel, []string{"⏎", "open", "n", "create", "t", "test",
+			"a", "auto", "s", "state", "e", "events", "h", "hello", "r", "refresh", "esc", "back"}, time.Second)
 		switch {
 		case i >= 0 && i < len(rows): // a remote tunnel row
 			scepterTunnelPage(n, cl, caps, rows[i].Name)
@@ -389,6 +389,12 @@ func scepterPairScreen(n string) {
 				continue
 			}
 			scepterWizardCreate(n, cl, doc)
+			doc, docErr = refetch()
+		case "t": // plan C.1: the remote carrier test is a pair-level action (it dials Kharej)
+			scepterProbeTest(n, cl, caps)
+			doc, docErr = refetch()
+		case "a": // plan C.2: the fleet auto-test, ranked table, apply a row
+			scepterFleetAuto(n, cl, caps, doc)
 			doc, docErr = refetch()
 		case "s":
 			scepterStateView(cl)
@@ -422,6 +428,12 @@ func scepterPairItems(doc scepterDoc, docErr string, caps ScepterCaps) ([]Item, 
 	}
 	if caps.Has(CapCreate) {
 		items = append(items, Item{Key: "n", Label: "Create a tunnel on Kharej", Desc: "the wizard drives tunnel.create"})
+	}
+	if caps.Has(CapManage) {
+		items = append(items,
+			Item{Key: "t", Label: "Probe carrier test", Desc: "open a probe on Kharej, measure it from here, close it"},
+			Item{Key: "a", Label: "Fleet auto-test", Desc: "rank what Kharej can serve (auto.test), apply a row"},
+		)
 	}
 	items = append(items,
 		Item{Key: "s", Label: "State document", Desc: "seq, uptime, tunnels — the pair's whole state"},
@@ -600,7 +612,7 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	}
 	params := map[string]string{}
 	if carrierWriteListen(cr) {
-		if !AskOK("Listen port on Kharej (empty = carrier default)", "", vPort) {
+		if !AskOK("Listen port on Kharej (empty = carrier default)", "", vPortOpt) {
 			return
 		}
 		if ReplyV != "" {
@@ -729,6 +741,7 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 	sel := 0
 	var row scepterTunRow
 	var cursor uint64
+	var stateSeq uint64
 	gone := func() bool {
 		Page("Scepter", pair)
 		Warn("Tunnel '" + name + "' is no longer in the state document (deleted on Kharej?).")
@@ -744,6 +757,7 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 			return false
 		}
 		cursor = doc.Cursor
+		stateSeq = doc.StateSeq
 		for _, r := range doc.Tunnels {
 			if r.Name == name {
 				row = r
@@ -759,7 +773,7 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 		items := scepterTunnelItems(row, caps)
 		head := func(w io.Writer) { scepterTunnelHead(w, pair, row, cursor) }
 		i, k := Choose(head, items, &sel, []string{"⏎", "run", "s", "stats", "l", "logs",
-			"u", "up/down", "esc", "back"}, time.Second)
+			"c", "carrier", "u", "up/down", "esc", "back"}, time.Second)
 		switch {
 		case i >= 0:
 			k = items[i].Key
@@ -775,6 +789,9 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 			Pause()
 		case "l":
 			scepterTunnelLogs(cl, name)
+			Pause()
+		case "c": // plan C.1: carrier.change on Kharej, then the local follow
+			ran = scepterRemoteCarrierChange(pair, cl, caps, name, stateSeq)
 			Pause()
 		case "p":
 			ran = scepterRemotePorts(cl, name, row.Ports, cursor)
@@ -822,6 +839,7 @@ func scepterTunnelItems(row scepterTunRow, caps ScepterCaps) []Item {
 	return []Item{
 		{Key: "s", Label: "Stats", Desc: "live /stats numbers of the remote unit"},
 		{Key: "l", Label: "Logs", Desc: "remote journal tail (chunked)"},
+		{Key: "c", Label: "Carrier", Desc: "switch it (carrier.change rolls back; this side follows)"},
 		{Key: "p", Label: "Ports", Desc: "edit the forwarded ports (restarts the unit)"},
 		{Key: "k", Label: "Config key", Desc: "set or drop one config key (restarts the unit)"},
 		{Key: "z", Label: "Preset", Desc: "stealth / plain, via preset.apply (rolls back on failure)"},

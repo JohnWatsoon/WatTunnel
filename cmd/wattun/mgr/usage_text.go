@@ -21,7 +21,11 @@ Usage: $SELF [command]
                         servers with their live remote state; with a name, that pair's
                         cockpit — create tunnels on Kharej (wizard over the encrypted
                         channel), open its remote tunnels (state, stats, logs, events,
-                        ports, limits, presets), start/stop/restart, edit and delete
+                        ports, limits, presets), start/stop/restart, edit and delete;
+                        test carrier shapes remotely (a probe listener on Kharej,
+                        measured from this server), switch a remote tunnel's carrier
+                        with automatic rollback (this tunnel follows, reverted if its
+                        link dies), run/apply the fleet carrier ranking
                         (needs wattun 3.5.0 on both ends; a write needs the pairing's
                         create/manage capability)
   preset NAME [PRESET]  apply built-in anti-censorship preset (rst-fast, mci, irancell, blackout, conservative)
