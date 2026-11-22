@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
@@ -17,9 +18,17 @@ import (
 // `wattun` and behaves like the engine's standalone -pair-to action (b24af32,
 // 2026-11-22) — validate the watp1: line, write `pairing: true` into the tunnel
 // yml, exit 0; a refused attach exits 1 with its reason on stderr. No hang: the
-// parent's shell-out always gets an exit code.
+// parent's shell-out always gets an exit code. WAT_MGR_FAKE_ENGINE=hang is the
+// wedged pre-b24af32 child for the deadline test: it sleeps past any sane
+// deadline, and the parent's exec context must kill it first.
 func TestMain(m *testing.M) {
-	if os.Getenv("WAT_MGR_FAKE_ENGINE") != "" {
+	switch os.Getenv("WAT_MGR_FAKE_ENGINE") {
+	case "hang":
+		time.Sleep(30 * time.Second) // the wedged child; the parent's deadline must kill it first
+		os.Exit(0)
+	case "":
+		// the test binary proper
+	default:
 		os.Exit(fakePairToEngine())
 	}
 	os.Exit(m.Run())
@@ -28,7 +37,10 @@ func TestMain(m *testing.M) {
 // fakePairToEngine validates with the ENGINE's own parser (wat.ParsePairingLine
 // — test-only import; production mgr does not import wat), so a line the mgr
 // accepts and the engine would reject fails here instead of shipping: exactly
-// the drift class the F10-parser bug was.
+// the drift class the F10-parser bug was. The re-attach rule mirrors the
+// engine's attachPairing (round-2 finding, 2026-11-22): a re-attach overwrites
+// the credential and is NOT a refusal; the yml's pairing key, already present,
+// is left alone (setPairingKey's rule).
 func fakePairToEngine() int {
 	fail := func(msg string) int {
 		fmt.Fprintln(os.Stderr, msg)
@@ -48,7 +60,7 @@ func fakePairToEngine() int {
 		return fail(err.Error())
 	}
 	if strings.Contains(string(body), "pairing:") {
-		return fail("pairing already attached to this tunnel")
+		return 0 // already marked: setPairingKey leaves the owner's key alone
 	}
 	f, err := os.OpenFile(*cfg, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -105,11 +117,14 @@ func TestPairingLineRoundTrip(t *testing.T) {
 			if p.Caps != c.caps {
 				t.Errorf("caps = %d, want %d", p.Caps, c.caps)
 			}
-			// an unpadded key field (hand-trimmed '=' like an unpadded wat1:) reads too
+			// an unpadded key field (hand-trimmed '=' like an unpadded wat1:) is
+			// refused: the engine's ParsePairingLine (StdEncoding only) refuses
+			// it too, and the pasted line travels to -pair-to verbatim — the
+			// manager must never accept more than the engine (round-2 finding)
 			fs := strings.Split(strings.TrimPrefix(line, "watp1:"), "|")
 			unpadded := strings.TrimSuffix(fs[2], "=")
-			if _, err := ReadPairingLine("watp1:" + strings.Join([]string{fs[0], fs[1], unpadded, fs[3]}, "|")); err != nil {
-				t.Errorf("unpadded key: %v", err)
+			if _, err := ReadPairingLine("watp1:" + strings.Join([]string{fs[0], fs[1], unpadded, fs[3]}, "|")); err == nil {
+				t.Error("an unpadded key must be refused (the engine refuses it)")
 			}
 		})
 	}
@@ -137,6 +152,14 @@ func TestReadPairingLineRejects(t *testing.T) {
 		{"uuid hex", fields("\x00", "1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9gg", "\x00"), "not a pairing UUID"},
 		{"key base64", fields("\x00", "\x00", "!!!"), "not valid base64"},
 		{"key short", fields("\x00", "\x00", "QUJD", "\x00"), "want exactly 32"},
+		// round-2 finding: an unpadded key the engine refuses must be refused HERE
+		// (the pasted line travels to -pair-to verbatim; the old RawStdEncoding
+		// fallback accepted more than the engine)
+		{"unpadded key", func() string {
+			fs := strings.Split(strings.TrimPrefix(good, "watp1:"), "|")
+			fs[2] = strings.TrimSuffix(fs[2], "=")
+			return "watp1:" + strings.Join(fs, "|")
+		}(), "not valid base64"},
 		// F10-parser: the engine takes exactly one tier word (CapFromName), so a
 		// comma list must be refused HERE — the pasted line reaches -pair-to
 		// verbatim and the engine would refuse it only at attach
@@ -732,11 +755,39 @@ func TestScepterPairToEngineContract(t *testing.T) {
 	if !IsPaired("ir") {
 		t.Error("the attached tunnel is not IsPaired")
 	}
-	// a second attach is refused by the fake engine (exit 1 + stderr): the
-	// refusal text reaches the caller untouched, so the screen can print it
-	err := scepterPairTo("ir", line)
-	if err == nil || !strings.Contains(err.Error(), "already attached") {
-		t.Errorf("engine refusal not surfaced: %v", err)
+	// a re-attach is allowed by the engine (attachPairing overwrites the store;
+	// setPairingKey leaves the yml key alone) — the fake mirrors that, and the
+	// manager must not turn an engine-allowed re-attach into a failure
+	// (round-2 finding: the fake was once stricter than the engine)
+	if err := scepterPairTo("ir", line); err != nil {
+		t.Errorf("a re-attach must succeed: %v", err)
+	}
+	body, _ = os.ReadFile(filepath.Join(dir, "ir.yml"))
+	if n := strings.Count(string(body), "pairing: true"); n != 1 {
+		t.Errorf("the yml marker must not duplicate on a re-attach: %d in:\n%s", n, body)
+	}
+}
+
+// TestScepterPairToDeadline pins the round-2 finding: the bare exec.Command in
+// scepterPairTo hung forever against a pre-b24af32 engine (the old -pair-to
+// ran the tunnel forever after storing the credential). The shell-out now
+// rides the 65 s context like scepterExec; a wedged child dies on it — proven
+// with a hanging fake and the shortened deadline var.
+func TestScepterPairToDeadline(t *testing.T) {
+	dir := t.TempDir()
+	oldConf, oldBin := P.Conf, P.Bin
+	defer func() { P.Conf, P.Bin = oldConf, oldBin }()
+	P.Conf = dir
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	os.Setenv("WAT_MGR_FAKE_ENGINE", "hang")
+	defer os.Unsetenv("WAT_MGR_FAKE_ENGINE")
+	P.Bin = os.Args[0] // the test binary, hanging as the fake engine (TestMain)
+	old := scepterPairToTimeout
+	scepterPairToTimeout = 250 * time.Millisecond
+	defer func() { scepterPairToTimeout = old }()
+	err := scepterPairTo("ir", MakePairingLine(ScepterVersion, "1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9e4", testKey(), CapManage))
+	if err == nil || !strings.Contains(err.Error(), "no answer within") {
+		t.Fatalf("a wedged -pair-to must die on the deadline: %v", err)
 	}
 }
 
@@ -768,11 +819,157 @@ func TestScepterAttachScreenFlow(t *testing.T) {
 	if !IsPaired("ir") {
 		t.Error("the attached tunnel is not IsPaired")
 	}
-	// the engine's refusal (second attach, exit 1 + stderr) is printed verbatim
+	// a re-attach is allowed by the engine (attachPairing overwrites; the fake
+	// mirrors it — round-2 finding): the screen reports success, the yml keeps
+	// exactly one marker
 	restore = feed(line + "\ny")
 	out = capture(t, func() { scepterAttach("ir") })
 	restore()
-	if !strings.Contains(out, "already attached") {
-		t.Errorf("engine refusal not on the screen:\n%s", out)
+	if !strings.Contains(out, "Pairing attached") {
+		t.Errorf("a re-attach must succeed on the screen:\n%s", out)
+	}
+	body, _ = os.ReadFile(filepath.Join(dir, "ir.yml"))
+	if n := strings.Count(string(body), "pairing: true"); n != 1 {
+		t.Errorf("the yml marker must not duplicate on a re-attach: %d in:\n%s", n, body)
+	}
+}
+
+// TestScepterWizardPortBusyReasksListen pins the round-2 finding: port_busy is
+// always a BIND port (the intent's listen or the carrier default), so the
+// wizard re-asks the LISTEN prompt once and resends with the new listen; the
+// forwarded ports stay. The old re-ask of the ports string resent the same
+// listen and looped forever.
+func TestScepterWizardPortBusyReasksListen(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	busy := ScepterResult{Code: scepterCodePortBusy, Params: map[string]any{"port": float64(4444), "user": "web"}}
+	done := ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "tunnel", "carrier": "udp"}}
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.create": {{r: busy}, {r: done}},
+	}}
+	// name default, udp (quick pick 2), listen default (empty), ports 443, send,
+	// then the re-asked listen 18443
+	defer feed("\n2\n443\ny18443\n")()
+	out := capture(t, func() { scepterWizardCreate("ir", cl, scepterDoc{StateSeq: 7}) })
+	sent := cl.cmds["tunnel.create"]
+	if len(sent) != 2 {
+		t.Fatalf("sends = %d, want 2:\n%s", len(sent), out)
+	}
+	if n := strings.Count(out, "Listen port on Kharej"); n != 2 {
+		t.Errorf("listen prompts = %d, want 2 (initial + exactly one re-ask):\n%s", n, out)
+	}
+	if n := strings.Count(out, "Forwarded ports"); n != 1 {
+		t.Errorf("ports prompts = %d, want 1 (the forwarded ports stay):\n%s", n, out)
+	}
+	if p, ok := sent[1]["params"].(map[string]string); !ok || p["listen"] != ":18443" || len(p) != 1 {
+		t.Errorf("the rebuilt intent must carry the new listen: %v", sent[1]["params"])
+	}
+	if sent[1]["ports"] != "443" {
+		t.Errorf("the forwarded ports changed: %v", sent[1]["ports"])
+	}
+}
+
+// TestScepterWizardCarrierNeedsRebuilds pins the round-2 finding: a re-pick
+// after carrier_needs rebuilds the params for the NEW carrier — the old
+// shape's sni must not ride into a carrier that reads none, and the listen
+// bind stays only because the pre-filled prompt is confirmed with Enter.
+func TestScepterWizardCarrierNeedsRebuilds(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	needs := ScepterResult{Code: scepterCodeCarrierNeeds, Params: map[string]any{
+		"carrier": "tls", "need": "a cert store on Kharej"}}
+	done := ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "tunnel", "carrier": "tcp"}}
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.create": {{r: needs}, {r: done}},
+	}}
+	// name default, tls (quick pick 4), listen 8443, sni old-sni.ir, ports 443,
+	// send, then re-pick tcp (quick pick 3) and Enter keeps the pre-filled 8443
+	defer feed("\n48443\nold-sni.ir\n443\ny3\n")()
+	out := capture(t, func() { scepterWizardCreate("ir", cl, scepterDoc{StateSeq: 7}) })
+	sent := cl.cmds["tunnel.create"]
+	if len(sent) != 2 {
+		t.Fatalf("sends = %d, want 2:\n%s", len(sent), out)
+	}
+	if p, _ := sent[0]["params"].(map[string]string); p["sni"] != "old-sni.ir" || p["listen"] != ":8443" {
+		t.Errorf("the first intent should carry the old shape's params: %v", sent[0]["params"])
+	}
+	if sent[1]["carrier"] != "tcp" {
+		t.Errorf("the re-picked carrier = %v", sent[1]["carrier"])
+	}
+	p, present := sent[1]["params"].(map[string]string)
+	if !present || len(p) != 1 || p["listen"] != ":8443" {
+		t.Errorf("the rebuilt params must keep only the confirmed listen: %v (present %v)", sent[1]["params"], present)
+	}
+	if n := strings.Count(out, "Listen port on Kharej"); n != 2 {
+		t.Errorf("listen prompts = %d, want 2 (the new carrier's bind is re-confirmed):\n%s", n, out)
+	}
+}
+
+// TestScepterFleetSelectionAndDials pins the fleet loop's two round-2 fixes:
+// the selection survives a move (F4: sel was re-declared inside the redraw
+// loop and the highlight snapped back to row 0), and a move does not re-dial
+// every pair (F5: one state.get shell-out per pair per second while idle —
+// rows are fetched on entry and on r only).
+func TestScepterFleetSelectionAndDials(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "a.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "b.yml"), []byte("mode: client\ncarrier: tcp\npairing: true\n"), 0o600)
+	doc := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"ver": "3.5.0", "state_seq": float64(4), "uptime_s": float64(90),
+		"tunnels": []any{map[string]any{"name": "web", "carrier": "udp", "state": "active", "health": "ok"}},
+	}}
+	calls := 0
+	oldDial := scepterDial
+	scepterDial = func(string) (ScepterClient, error) { calls++; return stubClient{doc}, nil }
+	defer func() { scepterDial = oldDial }()
+	defer feed("j0")() // one down-move, then leave: the move must not re-dial
+	out := capture(t, scepterFleet)
+	if calls != 2 {
+		t.Errorf("state.get dials = %d, want 2 (one per pair, fetched once on entry):\n%s", calls, out)
+	}
+	// the redraw after the move highlights row b — the selection survived the loop
+	if n := strings.Count(out, "❯ 2  b"); n != 1 {
+		t.Errorf("the moved-to row must stay highlighted (%d hits):\n%s", n, out)
+	}
+}
+
+// TestScepterTunnelPageBaseSeq pins the round-2 finding: tunnel.edit and
+// preset.apply are built on the state's state_seq, never the event cursor
+// (the cursor moves on every event, so a cursor-built intent answered stale).
+func TestScepterTunnelPageBaseSeq(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	doc := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"ver": "3.5.0", "state_seq": float64(6), "event_cursor": float64(3),
+		"tunnels": []any{map[string]any{"name": "web", "carrier": "udp", "state": "active", "health": "ok", "ports": "443"}},
+	}}
+	okRes := ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "web"}}
+	for _, c := range []struct {
+		name, keys, cmd string
+	}{
+		{"ports", "p443\nx0", "tunnel.edit"},
+		{"config key", "ksmax-mbps\n5\nx0", "tunnel.edit"},
+		{"preset", "zsx0", "preset.apply"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cl := &scriptClient{byCmd: map[string][]scriptAns{
+				"state.get": {{r: doc}, {r: doc}}, // page entry + the post-action refresh
+				c.cmd:       {{r: okRes}},
+			}}
+			defer feed(c.keys)() // page key, the action's prompts, a pause key, then leave
+			out := capture(t, func() { scepterTunnelPage("ir", cl, CapTunnel|CapCreate|CapManage, "web") })
+			sent := cl.cmds[c.cmd]
+			if len(sent) != 1 {
+				t.Fatalf("%s sends = %d, want 1:\n%s", c.cmd, len(sent), out)
+			}
+			if sent[0]["base_seq"] != uint64(6) {
+				t.Errorf("base_seq = %v, want the state seq 6 (not the event cursor 3)", sent[0]["base_seq"])
+			}
+		})
 	}
 }

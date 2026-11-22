@@ -85,12 +85,13 @@ func ReadPairingLine(line string) (PairingLine, error) {
 	if !uuidRe.MatchString(u) {
 		return p, fmt.Errorf("field 2 is not a pairing UUID (expected 8-4-4-4-12 hex, like 1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9e4)")
 	}
-	// padding-tolerant like ReadToken: install.sh may emit either form
+	// Padded StdEncoding only, exactly the engine's ParsePairingLine rule: the
+	// manager once accepted unpadded keys the engine refuses, and the pasted
+	// line travels to -pair-to verbatim — a drift here surfaces only at attach
+	// (round-2 finding, 2026-11-22). install.sh emits padded.
 	k, err := base64.StdEncoding.DecodeString(fs[2])
 	if err != nil {
-		if k, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(fs[2], "=")); err != nil {
-			return p, fmt.Errorf("field 3 (key) is not valid base64")
-		}
+		return p, fmt.Errorf("field 3 (key) is not valid base64 (padded, 32 bytes)")
 	}
 	if len(k) != 32 {
 		return p, fmt.Errorf("field 3 (key) is %d bytes, want exactly 32", len(k))
@@ -418,15 +419,28 @@ func scepterCodeHint(code int, p map[string]any) string {
 	return ""
 }
 
+// scepterPairToTimeout bounds one -pair-to shell-out, like scepterCallTimeout
+// does for -scepter-call: the standalone action answers in milliseconds, so
+// this only kills a wedged child — a pre-b24af32 binary ran the tunnel forever
+// after storing the credential, hanging the attach flow (attachPairing's fix
+// comment). Var so the tests can shorten it.
+var scepterPairToTimeout = scepterCallTimeout
+
 // scepterPairTo attaches a pairing line to a tunnel — the -pair-to equivalent.
 // The engine owns where the credential is stored (Kharej: /etc/wattun/.pairing,
 // 0600), so the manager shells out to the binary instead of writing files
 // itself; the binary's own error reaches the user untouched.
 var scepterPairTo = func(tunnel, line string) error {
-	out, err := exec.Command(P.Bin, "-config", filepath.Join(P.Conf, tunnel+".yml"), "-pair-to", line).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), scepterPairToTimeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, P.Bin, "-config", filepath.Join(P.Conf, tunnel+".yml"), "-pair-to", line)
+	out, err := c.CombinedOutput()
 	if err != nil {
 		if len(out) > 0 {
 			return fmt.Errorf("%s", strings.TrimSpace(string(out)))
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("no answer within %s", scepterPairToTimeout)
 		}
 		return err
 	}

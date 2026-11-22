@@ -270,6 +270,7 @@ func pairedTunnels() []string {
 }
 
 func scepterFleet() {
+	sel := 0 // outside the redraw loop: the highlight must survive ticks and moves (round-2 finding, 2026-11-22)
 	for {
 		names := pairedTunnels()
 		if len(names) == 0 {
@@ -285,48 +286,60 @@ func scepterFleet() {
 			err string
 		}
 		rows := make([]pairRow, len(names))
-		for i, n := range names { // one state.get per pair; a pair that cannot answer says so
-			cl, err := scepterDial(n)
-			if err != nil {
-				rows[i].err = err.Error()
-				continue
+		fetchAll := func() { // one state.get per pair; a pair that cannot answer says so
+			for i, n := range names {
+				rows[i] = pairRow{}
+				cl, err := scepterDial(n)
+				if err != nil {
+					rows[i].err = err.Error()
+					continue
+				}
+				doc, err := scepterFetchDoc(cl)
+				if err != nil {
+					rows[i].err = err.Error()
+					continue
+				}
+				rows[i].doc = doc
 			}
-			doc, err := scepterFetchDoc(cl)
-			if err != nil {
-				rows[i].err = err.Error()
-				continue
-			}
-			rows[i].doc = doc
 		}
 		items := make([]Item, len(names))
-		for i, r := range rows {
-			desc := ""
-			if r.err != "" {
-				desc = YEL + "unreachable: " + r.err + RST
-			} else {
-				desc = fmt.Sprintf("%s · seq %d · %d tunnel(s) · up %s", r.doc.Ver, r.doc.StateSeq,
-					len(r.doc.Tunnels), scepterUp(r.doc.UptimeS))
+		build := func() {
+			for i, r := range rows {
+				desc := ""
+				if r.err != "" {
+					desc = YEL + "unreachable: " + r.err + RST
+				} else {
+					desc = fmt.Sprintf("%s · seq %d · %d tunnel(s) · up %s", r.doc.Ver, r.doc.StateSeq,
+						len(r.doc.Tunnels), scepterUp(r.doc.UptimeS))
+				}
+				items[i] = Item{Label: names[i], Desc: desc}
 			}
-			items[i] = Item{Label: names[i], Desc: desc}
 		}
-		sel := 0
+		fetchAll() // fetched on entry and on r — never per tick (the loop used to
+		build()    // re-dial every pair every second while idle; round-2 finding)
 		head := func(w io.Writer) {
 			Title(w, "Scepter fleet", fmt.Sprintf("%d pair(s) · Iran cockpit", len(names)))
 			hintLine(w, "One row per paired tunnel; the state is live from its Kharej.")
 			fmt.Fprintln(w)
 		}
-		i, k := Choose(head, items, &sel, []string{"⏎", "open", "r", "refresh", "esc", "back"}, time.Second)
-		switch {
-		case i >= 0:
-			scepterScreen(names[i])
-		case k == "tick" || k == "move":
-			continue
-		case k == "r":
-			continue
-		case k == "eof":
-			return
-		default:
-			return
+		for {
+			i, k := Choose(head, items, &sel, []string{"⏎", "open", "r", "refresh", "esc", "back"}, time.Second)
+			switch {
+			case i >= 0:
+				scepterScreen(names[i])
+			case k == "r":
+				fetchAll()
+				build()
+			case k == "eof":
+				return
+			case k == "tick" || k == "move":
+				// idle: redraw the cached rows only — no RPC on a tick
+			default:
+				return
+			}
+			if i >= 0 {
+				break // the open may have attached, unpaired or moved state: rebuild the fleet
+			}
 		}
 	}
 }
@@ -596,6 +609,39 @@ func scepterRemoteNameSuggest(rows []scepterTunRow) string {
 	return "tunnel"
 }
 
+// scepterAskParams prompts for one carrier's params: the listen bind (when the
+// carrier binds one), the URL path (http shapes) and the SNI (TLS shapes).
+// The wizard uses it for the initial build and after a carrier_needs re-pick —
+// a re-pick must rebuild the params for the NEW carrier (a stale path/sni from
+// the old shape would land on Kharej verbatim; round-2 finding, 2026-11-22).
+// The defaults keep a re-pick continuous: the old listen stays pre-filled, the
+// path gets a fresh random and the SNI starts empty. False = the user backed out.
+func scepterAskParams(cr, listenDef, pathDef, sniDef string) (map[string]string, bool) {
+	params := map[string]string{}
+	if carrierWriteListen(cr) {
+		if !AskOK("Listen port on Kharej (empty = carrier default)", listenDef, vPortOpt) {
+			return nil, false
+		}
+		if ReplyV != "" {
+			params["listen"] = ":" + ReplyV // all-interfaces bind, the yml's ":PORT" form
+		}
+	}
+	switch cr {
+	case "ws", "wss", "h2", "h2c", "grpc":
+		if !AskOK("URL path", pathDef, vPath) {
+			return nil, false
+		}
+		params["path"] = ReplyV
+	}
+	switch cr {
+	case "tls", "wss", "h2", "grpc":
+		if v := Ask("SNI (empty = none)", sniDef); v != "" {
+			params["sni"] = v
+		}
+	}
+	return params, true
+}
+
 func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	baseSeq := base.StateSeq
 	Page("Create tunnel on Kharej", n+" · built on seq "+strconv.FormatUint(baseSeq, 10))
@@ -614,27 +660,9 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	if cr == "" {
 		return
 	}
-	params := map[string]string{}
-	if carrierWriteListen(cr) {
-		if !AskOK("Listen port on Kharej (empty = carrier default)", "", vPortOpt) {
-			return
-		}
-		if ReplyV != "" {
-			params["listen"] = ":" + ReplyV // all-interfaces bind, the yml's ":PORT" form
-		}
-	}
-	switch cr {
-	case "ws", "wss", "h2", "h2c", "grpc":
-		if !AskOK("URL path", p2RandPath(), vPath) {
-			return
-		}
-		params["path"] = ReplyV
-	}
-	switch cr {
-	case "tls", "wss", "h2", "grpc":
-		if v := Ask("SNI (empty = none)", ""); v != "" {
-			params["sni"] = v
-		}
+	params, pok := scepterAskParams(cr, "", p2RandPath(), "")
+	if !pok {
+		return
 	}
 	// Deliberately not asked here: reverse direction, FEC, bonding and the F19
 	// shaped knobs — edit them on the tunnel page (tunnel.edit) once the tunnel
@@ -678,16 +706,36 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 			name = ReplyV
 			continue
 		case scepterCodePortBusy:
-			if !AskOK("Ports (the remote listen port collides — forwarded ports)", pstr, vScepterPorts) {
+			// port_busy is always a BIND port (the intent's params["listen"] or
+			// the carrier default — round-2 finding, 2026-11-22): re-ask the
+			// LISTEN prompt and rebuild params with the new bind; the forwarded
+			// ports (and any shape params) stay. The old re-ask of the ports
+			// string resent the same listen and looped forever.
+			if !carrierWriteListen(cr) {
+				Warn("Kharej's own port for " + cr + " is busy — pick a different carrier or free the port there.")
 				return
 			}
-			pstr = ReplyV
+			if !AskOK("Listen port on Kharej (that one is busy; empty = carrier default)", "", vPortOpt) {
+				return
+			}
+			delete(params, "listen")
+			if ReplyV != "" {
+				params["listen"] = ":" + ReplyV // all-interfaces bind, the yml's ":PORT" form
+			}
 			continue
 		case scepterCodeCarrierNeeds:
-			cr = pickCarrier(false, head)
-			if cr == "" {
+			// rebuild the params for the NEW carrier, keeping only the listen
+			// bind if the user re-confirms it — the old shape's path/sni must
+			// not ride into a carrier that reads none (round-2 finding)
+			ncr := pickCarrier(false, head)
+			if ncr == "" {
 				return
 			}
+			np, pok := scepterAskParams(ncr, strings.TrimPrefix(params["listen"], ":"), p2RandPath(), "")
+			if !pok {
+				return
+			}
+			cr, params = ncr, np
 			continue
 		case scepterCodeBad:
 			// a rejected name or ports string: re-ask whichever it was
@@ -798,11 +846,14 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 			ran = scepterRemoteCarrierChange(pair, cl, caps, name, stateSeq)
 			Pause()
 		case "p":
-			ran = scepterRemotePorts(cl, name, row.Ports, cursor)
+			// base_seq is the STATE version the intent is built on, never the
+			// event cursor (round-2 finding, 2026-11-22: the cursor moves on
+			// every event, so a cursor-built intent answered stale each time)
+			ran = scepterRemotePorts(cl, name, row.Ports, stateSeq)
 		case "k":
-			ran = scepterRemoteKey(cl, name, cursor)
+			ran = scepterRemoteKey(cl, name, stateSeq)
 		case "z":
-			ran = scepterRemotePreset(cl, name, cursor)
+			ran = scepterRemotePreset(cl, name, stateSeq)
 		case "q":
 			ran = scepterRemoteLimits(cl, name)
 		case "r":

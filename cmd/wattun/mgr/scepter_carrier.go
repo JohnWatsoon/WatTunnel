@@ -280,14 +280,23 @@ func scepterRestartAndCheck(name string) bool {
 // (undoing Kharej's side means running carrier.change back, per the doc).
 // True when the local side ended up serving, or when there was no local side
 // to change (nothing was touched, nothing to revert).
-func scepterFollowLocal(remote, carrier string, params map[string]string, listenPort int) bool {
+//
+// The follower is identified by its PEER, not by name: a same-named local
+// tunnel proves nothing — two paired Kharej can both have a remote "web", and
+// rewriting the wrong one redirects it to the wrong host (round-2 finding,
+// 2026-11-22). The auto same-name path only fires when the local yml dials the
+// pair's own host; anything else goes through the pick screen, which lists
+// only tunnels dialing that host and states it.
+func scepterFollowLocal(pair, remote, carrier string, params map[string]string, listenPort int) bool {
+	host := scepterPeerHost(pair)
 	local := remote
-	if !fileExists(filepath.Join(P.Conf, local+".yml")) || Role(local) != "Iran" {
+	if !fileExists(filepath.Join(P.Conf, local+".yml")) || Role(local) != "Iran" ||
+		(host != "" && scepterPeerHost(local) != host) {
 		// The cockpit may serve remote tunnels whose Iran side lives on another
 		// server or under another name: ask which local tunnel follows, esc = none.
 		local = pickTunnel("Follow the change locally",
-			"the local tunnel that dials '"+remote+"' (now "+carrier+")",
-			func(n string) bool { return Role(n) == "Iran" })
+			"the local tunnel that dials "+orStr(host, "this pair's Kharej")+" (now "+carrier+")",
+			func(n string) bool { return Role(n) == "Iran" && (host == "" || scepterPeerHost(n) == host) })
 		if local == "" {
 			Warn("No local tunnel changed — Kharej's '" + remote + "' is on " + carrier + ".")
 			Hint("Its Iran side lives elsewhere or under another name; point it at the new shape there.")
@@ -593,7 +602,7 @@ func scepterRemoteCarrierChange(pair string, cl ScepterClient, caps ScepterCaps,
 	}
 	lp := int(scepterU64(res.Params["listen"]))
 	Ok("Kharej switched '" + name + "' to " + newCar + " (its link check passed).")
-	return scepterFollowLocal(name, newCar, params, lp)
+	return scepterFollowLocal(pair, name, newCar, params, lp)
 }
 
 // ======================================================================================
@@ -781,5 +790,5 @@ func scepterAutoApplyRow(pair string, cl ScepterClient, doc scepterDoc, r scepte
 	}
 	lp := int(scepterU64(res.Params["listen"]))
 	Ok(fmt.Sprintf("Row %d applied on Kharej: '%s' is on %s (its link check passed).", r.Rank, name, carrier))
-	scepterFollowLocal(name, carrier, nil, lp)
+	scepterFollowLocal(pair, name, carrier, nil, lp)
 }

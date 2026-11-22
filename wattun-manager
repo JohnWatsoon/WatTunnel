@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112211   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112212   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -1138,6 +1138,7 @@ pairing_load() { # $PAIR_STORE -> P_VERSION P_UUID P_KEY P_CAPS P_CREATED P_OLDK
     case "$line" in
       watp1:*) # the engine's credential line (line 1; a stray further one is ignored)
         [ -n "$P_UUID" ] && continue
+        line=${line%$'\r'} # a CRLF-edited store must not bake \r into the caps field (round-2)
         IFS='|' read -r P_VERSION P_UUID P_KEY P_CAPS <<<"${line#watp1:}" ;;
       \#*) # bookkeeping comments written by pairing_store_write: created=, oldkey=, oldkey_expires=
         k=${line#'#'}; k=${k# }; k=${k%%=*}; v=${line#*=}
@@ -1203,11 +1204,16 @@ pairing_audit() { # event detail : append one line, never rewrite the file
   # Append-only for real (F5, 2026-11-22): the ENGINE appends audit records with open-append-close per
   # entry, so the old cat->tmp->mv rewrite dropped anything appended in the read->rename window (the
   # engine kept writing the renamed-away inode). One small O_APPEND write is atomic enough on a regular
-  # file; a missing file is created 0600 via umask (>> never truncates an existing one).
+  # file; a missing file is created 0600 via umask (>> never truncates an existing one). A failed append
+  # returns 1 with its own error — an unaudited pairing change must not look like success (round-2).
   local f="$PAIR_AUDIT" old
   mkdir -p "$CONF"
   old=$(umask); umask 077
-  printf '%s %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$2" >>"$f"
+  if ! printf '%s %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$2" >>"$f"; then
+    umask "$old"
+    err "Could not append to $PAIR_AUDIT — the audit line was NOT recorded."
+    return 1
+  fi
   umask "$old"
   return 0
 }
@@ -1234,7 +1240,9 @@ pairing_status() {
   exp=$P_OLDKEY_EXP
   if [ -n "$P_OLDKEY" ] && [ -n "$exp" ]; then
     left=$(( exp - $(date +%s) ))
-    if [ "$left" -gt 0 ]; then say "  $(kv rotation "${YEL}old key accepted ${left}s more${RST}")"
+    # "the old key is accepted" was a lie: the engine takes only the current credential — the old
+    # line sits in the store as reference for the rotation window (round-2, 2026-11-22).
+    if [ "$left" -gt 0 ]; then say "  $(kv rotation "${YEL}the old line is kept for reference; attach the new line on Iran now — window ${left}s${RST}")"
     else say "  $(kv rotation "${GRY}old key expired${RST}")"; fi
   fi
   return 0
@@ -1387,14 +1395,22 @@ listen_blocked() { # proto port
   port_busy "$2" "$1" bind || tunnel_using_listen "$2" >/dev/null || tunnel_using_public "$2" "$1" >/dev/null || tunnel_using_misc "$2" >/dev/null
 }
 listen_conflict_desc() { # proto port -> explanation string
+  # A probe unit is hidden machinery (its name is throw-away), so the message
+  # names the machine, never the tunnel (round-2, 2026-11-22).
   local proto=${1:-tcp} port=$2
   local tun u
   tun=$(tunnel_using_listen "$port")
-  if [ -n "$tun" ]; then echo "tunnel '$tun'"; return; fi
+  if [ -n "$tun" ]; then
+    if is_probe_unit "$tun"; then echo "a scepter probe test unit"; else echo "tunnel '$tun'"; fi
+    return
+  fi
   tun=$(tunnel_using_public "$port" "$proto")
   if [ -n "$tun" ]; then echo "tunnel '$tun' (public port)"; return; fi
   tun=$(tunnel_using_misc "$port")
-  if [ -n "$tun" ]; then echo "tunnel '$tun' (local service)"; return; fi
+  if [ -n "$tun" ]; then
+    if is_probe_unit "$tun"; then echo "a scepter probe test unit"; else echo "tunnel '$tun' (local service)"; fi
+    return
+  fi
   u=$(port_user "$port" "$proto")
   if [ -n "$u" ]; then echo "$u"; return; fi
   echo "another process or tunnel"
@@ -10301,7 +10317,9 @@ settings_menu() {
     printf '  %s %-15s %sBBR, fq, 64 MiB buffers%s\n' "$(key_label b)" 'Kernel boost' "$GRY" "$RST"
     printf '  %s %-15s %s%s%s\n' "$(key_label p)" 'Update proxy' "${up_px:+$BOLD}" "${up_px:-${GRY}direct${RST}}" "${up_px:+$RST}"
     printf '  %s %-15s %s%s%s\n' "$(key_label w)" 'Server role' "$BOLD" "${sd:-not set}" "$RST"
-    if [ "$sd" = kharej ] || pairing_active; then # Scepter console: Kharej's local pairing panel (3.5.0)
+    if [ "$sd" = kharej ] || [ -z "$sd" ] || pairing_active; then # Scepter console: Kharej's local pairing panel
+      # (3.5.0). An unsaved side must still reach the first-pair path — the CLI gate (scepter_kharej_only)
+      # refuses an explicit Iran only, so hiding the entry on '' locked the first pairing out (round-2).
       if pairing_active; then psc="${GRN}paired${RST} ${GRY}($(pairing_get caps))${RST}"; else psc="${GRY}off${RST}"; fi
       printf '  %s %-15s %s\n' "$(key_label c)" 'Scepter' "$psc"
     fi
@@ -10319,7 +10337,7 @@ settings_menu() {
       r|R) echo; if confirm "Restart all tunnels? Open connections drop." n; then restart_all; sleep 1; fi ;;
       a|A) if [ "$(conf_get anim 1)" = 1 ]; then conf_set anim 0; ANIM=0; else conf_set anim 1; [ "$IS_TTY" = 1 ] && [ "${WAT_NO_ANIM:-0}" != 1 ] && ANIM=1; fi ;;
       b|B) boost_menu ;;
-      c|C) { [ "$sd" = kharej ] || pairing_active; } || { warn "Scepter pairing is the Kharej-side console."; sleep 1; continue; }
+      c|C) { [ "$sd" = kharej ] || [ -z "$sd" ] || pairing_active; } || { warn "Scepter pairing is the Kharej-side console."; sleep 1; continue; }
            echo; scepter_menu ;;
       p|P)
         echo

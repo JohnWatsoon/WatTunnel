@@ -216,7 +216,7 @@ func TestScepterFollowLocalOK(t *testing.T) {
 	writeTestYml(t, dir, "ir", "mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n")
 	calls := scepterStubLocalMachine(t, true)
 	out := capture(t, func() {
-		if !scepterFollowLocal("ir", "tcp", map[string]string{"path": "/p"}, 8443) {
+		if !scepterFollowLocal("ir", "ir", "tcp", map[string]string{"path": "/p"}, 8443) {
 			t.Error("follow-local reported failure")
 		}
 	})
@@ -243,7 +243,7 @@ func TestScepterFollowLocalRevert(t *testing.T) {
 	NonInteractive = false
 	defer feed("y")() // the revert question: yes
 	out := capture(t, func() {
-		if scepterFollowLocal("ir", "tcp", map[string]string{"path": "/p"}, 8443) {
+		if scepterFollowLocal("ir", "ir", "tcp", map[string]string{"path": "/p"}, 8443) {
 			t.Error("follow-local must report the dead link")
 		}
 	})
@@ -274,12 +274,47 @@ func TestScepterFollowLocalNoLocal(t *testing.T) {
 	NonInteractive = true
 	defer func() { NonInteractive = old }()
 	out := capture(t, func() {
-		if !scepterFollowLocal("web", "tcp", nil, 8443) {
+		if !scepterFollowLocal("ir", "web", "tcp", nil, 8443) {
 			t.Error("a skipped local follow is not a failure")
 		}
 	})
 	if !strings.Contains(out, "No local tunnel changed") || !strings.Contains(out, "is on tcp") {
 		t.Errorf("the skip must say what happened and what Kharej holds:\n%s", out)
+	}
+}
+
+// TestScepterFollowLocalPeerMatch pins the round-2 finding: a same-named local
+// tunnel that dials a DIFFERENT Kharej must not be rewritten by the follow —
+// two paired Kharej can both have a remote "web", and rewriting the wrong one
+// redirects it to the wrong host. The follow must fall to the pick screen with
+// the pair's host stated, exclude the wrong-peer tunnel from the candidates,
+// and rewrite only the tunnel that actually dials the pair's host.
+func TestScepterFollowLocalPeerMatch(t *testing.T) {
+	dir := scepterCarrierTestConf(t)
+	writeTestYml(t, dir, "pair", "mode: client\ncarrier: udp\npeer: 198.51.100.9:4443\npairing: true\n")
+	writeTestYml(t, dir, "web", "mode: client\ncarrier: udp\npeer: 198.51.100.7:4000\n")
+	writeTestYml(t, dir, "good", "mode: client\ncarrier: udp\npeer: 198.51.100.9:4443\n")
+	calls := scepterStubLocalMachine(t, true)
+	NonInteractive = false
+	defer feed("1")() // the pick screen lists good+pair only (web dials another host): 1 picks good
+	out := capture(t, func() {
+		if !scepterFollowLocal("pair", "web", "tcp", map[string]string{"path": "/p"}, 8443) {
+			t.Error("follow-local reported failure")
+		}
+	})
+	good := mustRead(filepath.Join(dir, "good.yml"))
+	if !strings.Contains(good, "carrier: tcp") || !strings.Contains(good, "peer: 198.51.100.9:8443") {
+		t.Errorf("the tunnel that dials the pair's host did not follow:\n%s", good)
+	}
+	web := mustRead(filepath.Join(dir, "web.yml"))
+	if !strings.Contains(web, "carrier: udp") || !strings.Contains(web, "peer: 198.51.100.7:4000") {
+		t.Errorf("the wrong-peer same-name tunnel was rewritten:\n%s", web)
+	}
+	if !strings.Contains(out, "198.51.100.9") {
+		t.Errorf("the pick screen must state the pair's host:\n%s", out)
+	}
+	if *calls != 1 {
+		t.Errorf("restarts = %d, want 1", *calls)
 	}
 }
 

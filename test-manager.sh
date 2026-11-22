@@ -2308,12 +2308,22 @@ EOF
   chk "rotate: the printed key is the new store key" "$P_KEY" "$(pairing_get key)"
   chk "rotate: the store's first line is the printed credential" "$(head -n 1 "$PAIR_STORE")" "$_rotline"
   chk "rotate: logs the rotation" "$(grep -c 'pair_rotated' "$PAIR_AUDIT" 2>/dev/null || echo 0)" "1"
+  # round-2: "old key accepted Ns more" was a lie — the engine takes only the current credential;
+  # the old line sits in the store as reference, so the status says to attach the new line on Iran
+  _rst=$(pairing_status 2>&1)
+  case "$_rst" in *"attach the new line on Iran now"*) echo "ok   status: rotation names the real action" ;; *) echo "FAIL status: rotation reminder missing, got: $_rst"; fail=1 ;; esac
+  case "$_rst" in *"accepted"*) echo "FAIL status: the 'old key accepted' lie is back"; fail=1 ;; *) echo "ok   status: no 'old key accepted' claim" ;; esac
   expect_fail scepter_rotate notanumber
   # F5: the ENGINE appends audit records with open-append-close per entry; a manager write must keep them
   printf '%s %s %s\n' '2030-01-01T00:00:00Z' 'engine_event' 'appended between manager writes' >>"$PAIR_AUDIT"
   pairing_audit manager_event 'after-the-engine-line'
   chk "audit: an engine-style appended line survives a manager write" "$(grep -c engine_event "$PAIR_AUDIT")" "1"
   chk "audit: the manager line lands after it" "$(tail -n 1 "$PAIR_AUDIT" | grep -c manager_event)" "1"
+  # round-2: a failed append is reported (rc 1 + its own error), never a silent success
+  _pao=$PAIR_AUDIT
+  PAIR_AUDIT="$SMOKE/no-such-dir/audit.log" # $CONF exists, the audit's dir does not: the append must fail
+  if pairing_audit test_event detail 2>/dev/null; then echo "FAIL audit: a failed append must return 1"; fail=1; else echo "ok   audit: a failed append returns 1"; fi
+  PAIR_AUDIT=$_pao
   # a store this manager cannot parse (a newer engine's format?) must never be overwritten (F1-B)
   printf 'watp9:1|not-a-credential\n' >"$PAIR_STORE"
   _rr=$(scepter_rotate 3600 2>&1)
@@ -2328,6 +2338,11 @@ EOF
   printf '%s\n' "$(make_pairing 1 "$PUUID" "$PKEY" full)" >"$PAIR_STORE"
   chk "engine store: fields read back" "$(pairing_get uuid)/$(pairing_get caps)/$(pairing_get key)" "$PUUID/full/$PKEY"
   chk "engine store: no metadata is invented" "$(pairing_get created)/$(pairing_get oldkey)" "/"
+  # round-2: a CRLF-edited store must not bake \r into the caps (and other) fields
+  printf 'watp1:1|%s|%s|full\r\n' "$PUUID" "$PKEY" >"$PAIR_STORE"
+  pairing_load
+  chk "store: a CRLF store does not bake \r into caps" "$P_CAPS" "full"
+  chk "store: a CRLF store reads uuid and key clean" "$P_UUID/${#P_KEY}" "$PUUID/44"
   _est=$(pairing_status 2>&1)
   chk "engine store: status shows uuid and caps" "$(grep -c "$PUUID" <<<"$_est")/$(grep -c full <<<"$_est")" "1/1"
   # the pre-2026112211 manager's key=value store: still readable (backward compat), never written again
@@ -2363,15 +2378,34 @@ EOF
   _ix=$(NI_YES=1 scepter_revoke 2>&1)
   chk "iran: revoke refuses" "$(grep -c 'Go cockpit' <<<"$_ix")" "1"
   chk "iran: the store survives untouched" "$(pairing_get uuid)" "$P_UUID"
+  # round-2: an unsaved side must not lock Kharej's first pairing out — the CLI gate
+  # (scepter_kharej_only) refuses an explicit Iran only, so a fresh server (no tunnels, no
+  # saved side) still reaches the pair console. tunnels() is stubbed empty for the
+  # fresh-server shape; the real listing returns with the eval in the hidden check below.
+  conf_set side ''
+  tunnels() { :; }
+  chk "gate: an unsaved side reads as no side" "$(server_side)" ""
+  chk "gate: an unsaved side reaches the Kharej pairing console" \
+    "$(scepter_kharej_only >/dev/null 2>&1 && echo y || echo n)" "y"
   conf_set side kharej
+  _smg=$(sed -n '/^settings_menu() {/,/^}/p' wattun-manager)
+  chk "settings: the Scepter entry renders on an unsaved side (tripwire)" \
+    "$([ "$(grep -c '\[ -z "\$sd" \]' <<<"$_smg")" -ge 2 ] && echo y)" "y"
 
-  # hidden infrastructure: the store/audit dotfiles never appear in a tunnel listing
+  # hidden infrastructure: the store/audit dotfiles never appear in a tunnel listing.
+  # The greps below are tripwires (nothing named pairing/audit existed when they first ran);
+  # the REAL check is the last one: a .pairing file actually present in the conf dir stays
+  # invisible to tunnels() — MSYS note: the "$CONF"/*.yml glob can never match a dotfile, and
+  # the 0600 dotfile mode cannot be proven on a noacl mount here (Linux CI exercises the rest).
   eval "$(sed -n '/^tunnels()/,/^}/p' wattun-manager)"
   printf 'mode: server\ncarrier: tcp\n' >"$WAT_CONF/hidden.yml"
+  printf 'watp1:1|%s|%s|full\n' "$PUUID" "$PKEY" >"$WAT_CONF/.pairing"
+  printf '2030-01-01T00:00:00Z engine_event x\n' >"$WAT_CONF/.pairing.audit"
   chk "hidden: a real tunnel is listed (control)" "$(tunnels | grep -c '^hidden$')" "1"
+  chk "hidden: a .pairing file in the conf dir never appears as a tunnel" "$(tunnels | grep -cF .pairing)" "0"
   chk "hidden: the pairing store never appears as a tunnel" "$(tunnels | grep -c pairing)" "0"
   chk "hidden: the audit log never appears as a tunnel" "$(tunnels | grep -c audit)" "0"
-  rm -f "$WAT_CONF/hidden.yml"
+  rm -f "$WAT_CONF/hidden.yml" "$WAT_CONF/.pairing" "$WAT_CONF/.pairing.audit"
 
   # the test.open probe units (phase E4): the engine leaves transient probe-<unix-ts>.yml files (its
   # provenance line, mode: server, bare ports:) in Kharej's conf dir for the ttl, and they must be hidden
@@ -2389,8 +2423,15 @@ EOF
   chk "probe: the discriminator needs the provenance line" "$(is_probe_unit probe-12345 && echo y || echo n)" "n"
   printf '# %s x\nmode: server\ncarrier: tcp\n' 'probe tunnel created by scepter test.open' >"$WAT_CONF/hidden2.yml"
   chk "probe: the provenance line alone does not hide a normal name" "$(tunnels | grep -c '^hidden2$')" "1"
+  # round-2: a port-conflict message names the machinery, never the throw-away probe unit
+  # (the section-6 stub at the top shadows tunnel_using_listen; re-eval the real one,
+  # the same trick the port check uses)
+  chk "conflict: a probe listener is described without its name" \
+    "$(eval "$_tul"; listen_conflict_desc udp 20500)" "a scepter probe test unit"
+  chk "conflict: a normal tunnel keeps its name" \
+    "$(eval "$_tul"; listen_conflict_desc tcp 26443)" "tunnel 'probe-12345'"
   rm -f "$WAT_CONF/hidden2.yml" "$WAT_CONF/probe-$_ts.yml" "$WAT_CONF/probe-$_ts-2.yml" "$WAT_CONF/probe-12345.yml"
-  chk "mgr: MGR_VERSION bumped with the store format and side gates" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112211"
+  chk "mgr: MGR_VERSION bumped with the round-2 pairing fixes" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112212"
 
   # refresh_token keeps field 10 when the allowed ports change
   role() { echo Kharej; }
