@@ -1264,3 +1264,19 @@ config edge (dev-only); probe PSK on argv (throwaway, D3 model); CloseScepter ha
 (the poller's lives-Reset routes through killStream); base_seq TOCTOU vs watcher (non-fatal per plan).
 READY FOR REVIEW stands (48b4445), now including round 2.
 Commit: ff9d43c, 4419d59, db27ada, 6f68a77, (this entry)
+
+## 2026-11-22 · supervisor · Automation pass dispatched — owner directive: zero manual setup steps
+Owner directive (explicit, 2026-11-22): the setup must be fully automated — NO extra manual pairing
+steps anywhere; the credential the user already pastes bootstraps everything. Design (supervisor,
+implementing D5's classic-token bootstrap which was left unwired): the tunnel TOKEN carries field 10
+`pair=<tier>` and the engine DERIVES the pairing at config load on both sides (stored .pairing file
+overrides = rotate/revoke store; pairing: false disables); the wizard mints the first token with
+pair=full automatically and adds latch-port to BOTH configs (no ask); the client AUTO-CONTACTS the
+latch for revival when its tunnel is down (no manual -latch-dial); install.sh's pending/print pairing
+block is deleted; the cockpit auto-runs the fast-preset verdict after a carrier change. Revocation
+stays Kharej-local (trust boundary, not an automation gap). Note: this owner directive overrides the
+opt-in guardrail for the bootstrap shape (latch-port default-on, no-pairing-ask) — recorded as an
+owner decision.
+Lanes: G1 (engine derivation + auto-revival, commits own), G2 (wizard/cockpit automation,
+uncommitted), G3 (installer + docs rewrite) after G1/G2.
+Commit: none yet (dispatch record)
