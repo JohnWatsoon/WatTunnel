@@ -1385,6 +1385,9 @@ func p2TunnelHeader(n, r string) {
 func tunnelHead(w io.Writer, n, r, car string, ti *tunnelInfo) {
 	col, dot, txt := stateCell(r, ti.State)
 	Title(w, n, r+" · "+car+PairedBadge(n)+"  "+col+dot+" "+txt+RST)
+	if ps := ScepterPairStatus(n); ps != "" { // paired Iran tunnels: the Kharej side at a glance
+		hintLine(w, ps)
+	}
 	if ti.State == "stopped" {
 		hintLine(w, "Not running. Start it below, or read its logs.")
 		fmt.Fprintln(w)
@@ -1461,6 +1464,9 @@ func tunnelPage(n string) {
 		car := Cfg(n, "carrier")
 		d := buildDeck(n, r, run, car)
 		items := deckItems(d)
+		if r == "Iran" && (IsPaired(n) || tokenPairCaps(n) != 0) { // the paired Kharej side, one key away
+			items = append(items, Item{Key: "K", Label: "Kharej view", Desc: "the remote side of this tunnel (Scepter)"})
+		}
 		ti := tinfo(n)
 		if first { // land on what this state most likely needs
 			first = false
@@ -1519,6 +1525,8 @@ func tunnelPage(n string) {
 			} else {
 				dispatch("anticensor_menu", n)
 			}
+		case "K":
+			ScepterKharejView(n) // the paired Kharej side of this tunnel (U3, Iran-main pass)
 		case "r":
 			fmt.Fprintln(Stdout)
 			if Confirm("Restart '"+n+"'? Open connections drop.", false) {
