@@ -17,21 +17,25 @@ Usage: $SELF [command]
   unmute NAME PATH      unmute it again; both talk to the running tunnel's metrics server (no root)
   logs NAME             follow the log
   token NAME            print the Kharej token again
-  scepter [NAME]        pairing cockpit (Iran): without a name, the fleet of paired Kharej
+  scepter [NAME]        pairing cockpit (Iran; also on the main menu). Setup: paste the
+                        Kharej token once — the token carries the pairing credential, so
+                        the pair and the cockpit open together (attach with a watp1: line
+                        stays for older pairs). Without a name, the fleet of paired Kharej
                         servers with their live remote state; with a name, that pair's
-                        cockpit — create tunnels on Kharej (wizard over the encrypted
+                        cockpit — create tunnels on Kharej (the wizard over the encrypted
                         channel), open its remote tunnels (state, stats, logs, events,
-                        ports, limits, presets), start/stop/restart, edit and delete;
-                        test carrier shapes remotely (a probe listener on Kharej,
-                        measured from this server), switch a remote tunnel's carrier
-                        with automatic rollback (this tunnel follows, reverted if its
-                        link dies), run/apply the fleet carrier ranking; Operations:
-                        update.status/run (Kharej updates its own binary over the
-                        channel — the cockpit drops mid-update, the scepter latch
-                        revives it, a watchdog rolls back to wattun.prev; full
-                        capability), doctor.fetch, backup.export (the config dir as
-                        a verified tarball), audit.tail (needs wattun 3.5.0 on both
-                        ends; a write needs the pairing's create/manage capability)
+                        ports, limits reset, presets from preset.list, mute, keyrotate),
+                        start/stop/restart, edit and delete (per-key prompts walk every
+                        change); test carrier shapes remotely (a probe listener on Kharej,
+                        measured from this server), switch a remote tunnel's carrier with
+                        automatic rollback (this tunnel follows, reverted if its link
+                        dies), run/apply the fleet carrier ranking; Operations:
+                        update.status/run (Kharej updates its own binary over the channel
+                        — the cockpit drops mid-update, the scepter latch revives it on
+                        its own, a watchdog rolls back to wattun.prev; full capability),
+                        doctor.fetch, backup.export (the config dir as a verified
+                        tarball), audit.tail (needs wattun 3.5.0 on both ends; a write
+                        needs the pairing's create/manage capability)
   preset NAME [PRESET]  apply built-in anti-censorship preset (rst-fast, mci, irancell, blackout, conservative)
   test-bypass NAME      automated connectivity & filter bypass test for anti-censorship profile
   profile save|list|show|del|apply   resilience profiles: save one tunnel's fake-sni/pool-rotate combination

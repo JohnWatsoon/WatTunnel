@@ -573,6 +573,7 @@ func scepterProbeTest(pair string, cl ScepterClient, caps ScepterCaps) {
 		return
 	}
 	Page("Probe carrier test", pair)
+	GradBand(Stdout, uiW()) // the screen's one bright moment
 	Hint("Opens a probe listener on Kharej for one shape, measures it from here with")
 	Hint("a throw-away client, closes it. Probes are rate-limited per pair (3 at once,")
 	Hint("then 1 per 30 s) and expire on their own at the ttl.")
@@ -599,7 +600,7 @@ func scepterProbeTest(pair string, cl ScepterClient, caps ScepterCaps) {
 	}
 	fmt.Fprintln(Stdout)
 	Hint("test.open " + cr + " — Kharej writes a throw-away server unit and reports what to dial.")
-	res, ok := scepterAct(cl, "test.open", scepterTestOpenArgs(cr, ttl, scepterNewID()))
+	res, ok := scepterActSpin(cl, "test.open", scepterTestOpenArgs(cr, ttl, scepterNewID()))
 	if !ok {
 		return
 	}
@@ -608,14 +609,27 @@ func scepterProbeTest(pair string, cl ScepterClient, caps ScepterCaps) {
 		Warn(err.Error())
 		return
 	}
-	Say("  " + kv("Probe", pr.ID+" · "+pr.Carrier+" :"+strconv.Itoa(pr.Port)+" on Kharej · ttl "+strconv.Itoa(pr.TTL)+"s"))
-	if pr.Path != "" {
-		Say("  " + kv("Path", pr.Path))
+	probeRows := []string{
+		KV(9, "id", pr.ID),
+		KV(9, "shape", pr.Carrier+" :"+strconv.Itoa(pr.Port)),
+		KV(9, "ttl", strconv.Itoa(pr.TTL)+"s"),
 	}
+	if pr.Path != "" {
+		probeRows = append(probeRows, KV(9, "path", pr.Path))
+	}
+	Panel(Stdout, "Probe on Kharej", probeRows...)
 	fmt.Fprintln(Stdout)
-	down, okM, why := scepterProbeMeasure(pair, pr)
+	Hint("Measuring from here with the throw-away client — waiting for the link, then 4 MB down.")
+	var down float64
+	var okM bool
+	var why string
+	scepterSpin("measuring "+cr, func() { down, okM, why = scepterProbeMeasure(pair, pr) })
 	if okM {
-		Ok(fmt.Sprintf("Link up · down %.1f MB/s (%.0f Mbps, 4 MB, 4 streams)", down, down*8))
+		// the engine's mb_per_s is decimal-MB (bytes/1e6/s), so bytes/s = down*1e6
+		// exactly; Rate renders it in the manager's one unit system (Human/Rate,
+		// 1024-based) — the digits move (12.5 → 11.9 MB/s) but the measurement
+		// does not, and every other rate on the manager reads from the same system
+		Ok(fmt.Sprintf("Link up · down %s (%.0f Mbps, 4 MB, 4 streams)", Rate(down*1e6), down*8))
 	} else {
 		Err("Probe test failed: " + why)
 	}
@@ -643,6 +657,7 @@ func scepterRemoteCarrierChange(pair string, cl ScepterClient, caps ScepterCaps,
 	}
 	head := func(w io.Writer) { Title(w, "Carrier of "+name, "on Kharej "+pair+" · carrier.change") }
 	Page("Carrier change", name+" · on Kharej "+pair)
+	GradBand(Stdout, uiW()) // the screen's one bright moment
 	Hint("Kharej patches its yml, restarts the unit and link-checks the new shape;")
 	Hint("a failure rolls Kharej back before the answer. After an OK this tunnel")
 	Hint("follows: rewrite, restart, link check — reverted if the link stays dead.")
@@ -721,6 +736,7 @@ func scepterFleetAuto(pair string, cl ScepterClient, caps ScepterCaps, doc scept
 		return
 	}
 	Page("Fleet auto-test", pair+" · what Kharej can serve")
+	GradBand(Stdout, uiW()) // the screen's one bright moment
 	Hint("Kharej opens one probe per shape, measures what it can SERVE and ranks the")
 	Hint("table (plain: udp tcp ws h2c · tls adds tls wss h2 grpc). The DPI verdict")
 	Hint("stays here: probe-test the winner from Iran. A run takes about a minute;")
@@ -743,7 +759,7 @@ func scepterFleetAuto(pair string, cl ScepterClient, caps ScepterCaps, doc scept
 		return
 	}
 	fmt.Fprintln(Stdout)
-	res, ok := scepterAct(cl, "auto.test", scepterAutoTestArgs(mode, scepterNewID()))
+	res, ok := scepterActSpin(cl, "auto.test", scepterAutoTestArgs(mode, scepterNewID()))
 	if !ok {
 		return
 	}
@@ -759,10 +775,13 @@ func scepterFleetAuto(pair string, cl ScepterClient, caps ScepterCaps, doc scept
 }
 
 // scepterAutoWait polls auto.rows until the run reports done; esc or q skips
-// the wait (the table view shows the partial state anyway).
+// the wait (the table view shows the partial state anyway). Each poll prints
+// one spinner frame ahead of the status line — a frame per 2 s poll, motion
+// that follows the data (anim off: frame 0 every poll, byte-stable).
 func scepterAutoWait(cl ScepterClient) {
 	fmt.Fprintln(Stdout)
 	Hint("Polling auto.rows — esc to skip the wait.")
+	var sp Spinner
 	for i := 0; i < 150; i++ { // 150 x 2 s: a run takes ~1 min; the ceiling bounds a wedged channel
 		res, err := cl.Call("auto.rows", nil)
 		if err != nil {
@@ -781,7 +800,7 @@ func scepterAutoWait(cl ScepterClient) {
 		if t.Done {
 			return
 		}
-		Say("  " + GRY + fmt.Sprintf("run %s in progress (%s shapes)…", orStr(t.Run, "?"), orStr(t.Mode, "?")) + RST)
+		Say("  " + GRY + sp.Frame() + " run " + orStr(t.Run, "?") + " in progress (" + orStr(t.Mode, "?") + " shapes)…" + RST)
 		k, _, ok := KeyRead(2 * time.Second)
 		if !ok || k == "esc" || k == "q" {
 			return
@@ -816,12 +835,33 @@ func scepterAutoRowsView(pair string, cl ScepterClient, caps ScepterCaps, doc sc
 		Pause()
 		return
 	}
+	fills := map[int]*Fill{} // per-row eased meters, alive across the redraws
 	for {
 		items := make([]Item, len(t.Rows))
+		// the fleet's own fastest row is the bar scale — an honest relative
+		// meter (nothing invented: every fill is that row's share of the best
+		// measured rate), eased across redraws by a Fill (anim off: snap)
+		best := 0.0
+		for _, r := range t.Rows {
+			if r.OK && r.DownMbps > best {
+				best = r.DownMbps
+			}
+		}
 		for i, r := range t.Rows {
-			desc := fmt.Sprintf("port %d · %.1f MB/s down", r.Port, r.DownMbps)
-			if !r.OK {
-				desc = "failed: " + orStr(r.Why, "no reason")
+			desc := "port " + strconv.Itoa(r.Port) + " · "
+			if r.OK {
+				rel := 0.0
+				if best > 0 {
+					rel = r.DownMbps / best
+				}
+				f, seen := fills[i]
+				if !seen {
+					f = NewFill(0)
+					fills[i] = f
+				}
+				desc += GradBar(f.Step(rel), 1, 10) + " " + Rate(r.DownMbps*1e6/8) + " down"
+			} else {
+				desc += "failed: " + orStr(r.Why, "no reason")
 			}
 			items[i] = Item{Label: fmt.Sprintf("%d · %s", r.Rank, r.Carrier), Desc: desc}
 		}
@@ -846,14 +886,16 @@ func scepterAutoRowsView(pair string, cl ScepterClient, caps ScepterCaps, doc sc
 }
 
 // scepterAutoHead draws the table header: the run, its progress and the honest
-// "no rows yet" when the run has not filled the table.
+// "no rows yet" when the run has not filled the table. The band is the view's
+// one bright moment; the table state sits in a KV row (quiet chrome).
 func scepterAutoHead(w io.Writer, pair string, t scepterAutoTable, tunnels int) {
 	Title(w, "Fleet auto-test", pair+" · run "+orStr(t.Run, "?")+" · "+orStr(t.Mode, "plain"))
+	GradBand(w, uiW())
 	status := "done"
 	if !t.Done {
 		status = "in progress"
 	}
-	fmt.Fprintln(w, "  "+kv("Table", fmt.Sprintf("%s · %d/%d shape(s) served", status, t.OK, len(t.Rows))))
+	fmt.Fprintln(w, "  "+KV(11, "Table", fmt.Sprintf("%s · %d/%d shape(s) served", status, t.OK, len(t.Rows))))
 	if len(t.Rows) == 0 {
 		hintLine(w, "No rows yet — the run fills the table as shapes are measured.")
 	}

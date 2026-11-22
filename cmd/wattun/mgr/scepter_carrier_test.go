@@ -340,7 +340,10 @@ func TestScepterProbeScreenSmoke(t *testing.T) {
 	NonInteractive = false
 	defer feed("1\n")() // pick udp (quick pick 1), ttl default (empty line)
 	out := capture(t, func() { scepterProbeTest("ir", cl, CapTunnel|CapCreate|CapManage) })
-	for _, want := range []string{"probe-77", "20501", "ttl 300s", "12.5", "Link up", "Probe closed"} {
+	// restyle pins (lane U4): the probe details moved into the Probe panel (ttl
+	// its own KV row), and the rate renders through Rate() — the manager's one
+	// unit system (1024-based): 12.5 decimal MB/s = 11.9 MB/s there
+	for _, want := range []string{"probe-77", "20501", "300s", "11.9 MB/s", "Link up", "Probe closed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("probe screen missing %q:\n%s", want, out)
 		}
@@ -491,7 +494,9 @@ func TestScepterFleetAutoSmoke(t *testing.T) {
 	out := capture(t, func() {
 		scepterFleetAuto("ir", cl, CapTunnel|CapCreate|CapManage, scepterDoc{StateSeq: 4})
 	})
-	for _, want := range []string{"Run at-9 started", "1 · udp", "8.4 MB/s", "3 · ws", "failed: no link in 15 s"} {
+	// restyle pins (lane U4): the ranked rows carry a relative GradBar and the
+	// rate in the manager's unit system — 8.4 Mbps = 1.0 MB/s (bytes = Mbps*1e6/8)
+	for _, want := range []string{"Run at-9 started", "1 · udp", "1.0 MB/s", "3 · ws", "failed: no link in 15 s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("auto-test screen missing %q:\n%s", want, out)
 		}

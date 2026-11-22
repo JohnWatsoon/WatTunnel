@@ -305,6 +305,65 @@ func vScepterBackupPath(s string) bool {
 }
 
 // ======================================================================================
+// Screen chrome: the U1 primitives on the scepter surfaces. The gradient band
+// under each title is the screen's one bright moment; a spinner covers the
+// seconds a channel call blocks; every number renders through the unit
+// formatters. Colour off keeps every screen's plain look byte-for-byte (the
+// band falls back to the grey ─ rule, the spinner never runs).
+// ======================================================================================
+
+// scepterSpin runs fn with a spinner line while it blocks (design-motion: a
+// spinner while something works, nothing looping for no reason). fn must not
+// print — the spinner owns the line and is stopped and erased before the
+// outcome prints. Anim off (NONINTERACTIVE, WAT_NO_ANIM, tests): fn runs bare,
+// so anim-off output stays byte-stable.
+func scepterSpin(what string, fn func()) {
+	if !UseAnim || !IsTTY {
+		fn()
+		return
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	var sp Spinner
+	go func() {
+		defer close(stopped) // runs after CurShow: no frame can follow the erase
+		CurHide()
+		defer CurShow()
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(120 * time.Millisecond):
+				fmt.Fprintf(Stdout, "\r\x1b[K  %s%s%s %s…", CYN, sp.Frame(), RST, what)
+			}
+		}
+	}()
+	fn()
+	close(done)
+	<-stopped // the spinner line is quiescent before the outcome prints over it
+	fmt.Fprint(Stdout, "\r\x1b[K")
+}
+
+// scepterActSpin is scepterAct with the channel call itself covered by the
+// spinner; the honest outcome printing stays outside the spinner's line.
+// (scepterAct lives in scepter_cockpit.go — this lane's screens spin without
+// touching that file.)
+func scepterActSpin(cl ScepterClient, cmd string, args map[string]any) (ScepterResult, bool) {
+	var res ScepterResult
+	var err error
+	scepterSpin(cmd, func() { res, err = cl.Call(cmd, args) })
+	if err != nil {
+		Warn("channel: " + err.Error())
+		return ScepterResult{}, false
+	}
+	if res.Code != scepterCodeOK {
+		scepterCodeErr(cmd, res)
+		return res, false
+	}
+	return res, true
+}
+
+// ======================================================================================
 // The ops screen: the pair screen's "o". The menu hides what the pairing's
 // capability does not cover (update.run without full), and each action repeats
 // its own gate — a direct call must refuse, not fall through.
@@ -332,6 +391,7 @@ func scepterOpsItems(caps ScepterCaps) []Item {
 
 func scepterOpsHead(w io.Writer, pair string, caps ScepterCaps) {
 	Title(w, "Operations", pair+" · caps "+orStr(caps.Labels(), "none"))
+	GradBand(w, uiW()) // the screen's one bright moment
 	hintLine(w, "The pair's ops console; every row below is Kharej's own answer.")
 	fmt.Fprintln(w)
 }
@@ -376,7 +436,8 @@ func scepterOpsScreen(pair string, cl ScepterClient, caps ScepterCaps) {
 func scepterUpdateStatusView(cl ScepterClient) {
 	fmt.Fprintln(Stdout)
 	Hint("update.status — the remote engine's update evidence (local reads only)")
-	res, ok := scepterAct(cl, "update.status", nil)
+	GradBand(Stdout, uiW())
+	res, ok := scepterActSpin(cl, "update.status", nil)
 	if !ok {
 		return
 	}
@@ -393,35 +454,35 @@ func scepterPrintUpdStatus(st scepterUpdStatus) {
 	if st.Systemd {
 		sysd = "yes"
 	}
-	Say("  " + kv("Engine", st.Ver+" · "+st.Goos+"/"+st.Arch+" · systemd "+sysd))
+	Say("  " + KV(11, "Engine", st.Ver+" · "+st.Goos+"/"+st.Arch+" · systemd "+sysd))
 	if st.Bin != "" {
-		Say("  " + kv("Binary", st.Bin))
+		Say("  " + KV(11, "Binary", st.Bin))
 	}
 	if st.Conf != "" {
-		Say("  " + kv("Conf", st.Conf))
+		Say("  " + KV(11, "Conf", st.Conf))
 	}
 	// The prev evidence is the watchdog's hard gate: without a backup path the
 	// job aborts untouched, so say so instead of a silent empty row.
 	if !st.PrevPresent || st.PrevPath == "" {
 		Warn("No wattun.prev evidence — the update watchdog refuses to swap without a backup path.")
 	} else {
-		prev := fmt.Sprintf("%s · %s · %s", st.PrevPath, Human(float64(st.PrevBytes)), scepterTs(st.PrevMtime))
+		prev := fmt.Sprintf("%s · %s · %s", st.PrevPath, UnitBytes(float64(st.PrevBytes), 0), scepterTs(st.PrevMtime))
 		if st.PrevVer != "" {
 			prev += " · " + st.PrevVer
 		}
-		Say("  " + kv("wattun.prev", prev))
+		Say("  " + KV(11, "wattun.prev", prev))
 	}
 	for _, u := range st.Units {
 		col, mark, txt := GRY, "◌", "stopped"
 		if u.Active {
 			col, mark, txt = GRN, "●", "up"
 		}
-		Say("  " + kv("Unit", u.Name+"  "+col+mark+" "+txt+RST))
+		Say("  " + KV(11, "Unit", u.Name+"  "+col+mark+" "+txt+RST))
 	}
 	if st.Mail == nil {
 		Hint("No update has run on this Kharej yet (no mailbox record).")
 	} else {
-		Say("  " + kv("Update", scepterMailStr(*st.Mail)))
+		Say("  " + KV(11, "Update", scepterMailStr(*st.Mail)))
 		if st.Mail.Phase == "started" {
 			Hint("A started record means an update was accepted; if the channel died before")
 			Hint("the answer, the journal replays it for the same command id — and a record")
@@ -429,7 +490,7 @@ func scepterPrintUpdStatus(st scepterUpdStatus) {
 		}
 	}
 	if st.StagedBytes > 0 {
-		Say("  " + kv("Staged", Human(float64(st.StagedBytes))+" under .update (staging in progress or left over)"))
+		Say("  " + KV(11, "Staged", UnitBytes(float64(st.StagedBytes), 0)+" under .update (staging in progress or left over)"))
 	}
 }
 
@@ -473,6 +534,7 @@ func scepterUpdateRun(pair string, cl ScepterClient, caps ScepterCaps) {
 		return
 	}
 	Page("Run update on Kharej", pair+" · update.run")
+	GradBand(Stdout, uiW())
 	Hint("Kharej downloads the release, verifies the signature, installs the binary")
 	Hint("and restarts every unit that was up — the unit carrying this channel too.")
 	Hint("A watchdog watches 40 s; a new engine that does not stay up rolls back to")
@@ -517,7 +579,8 @@ func scepterUpdateRun(pair string, cl ScepterClient, caps ScepterCaps) {
 func scepterDoctorView(pair string, cl ScepterClient) {
 	fmt.Fprintln(Stdout)
 	Hint("doctor.fetch — the pair's structured self-report (state, recent commands, ops fragments)")
-	res, ok := scepterAct(cl, "doctor.fetch", nil)
+	GradBand(Stdout, uiW())
+	res, ok := scepterActSpin(cl, "doctor.fetch", nil)
 	if !ok {
 		return
 	}
@@ -567,12 +630,14 @@ func scepterLearnLatchPort(pair string, params map[string]any) {
 
 func scepterBackupExport(pair string, cl ScepterClient) {
 	Page("Export backup", pair+" · backup.export")
+	GradBand(Stdout, uiW())
 	Hint("A tarball of Kharej's config dir: ymls, keys, tokens, .bak states, the")
 	Hint("pairing store and its audit — what a host rebuild restores from. Keys are")
 	Hint("in it on purpose; the command journal is not (machine replay state).")
 	Hint("Caps: 4 MB per file, 5 MB total — more is refused with too_large.")
 	fmt.Fprintln(Stdout)
-	res, ok := scepterAct(cl, "backup.export", nil)
+	Hint("Kharej is packaging and sending the config dir in chunks — a moment.")
+	res, ok := scepterActSpin(cl, "backup.export", nil)
 	if !ok {
 		return
 	}
@@ -603,6 +668,7 @@ func scepterBackupExport(pair string, cl ScepterClient) {
 
 func scepterAuditView(cl ScepterClient) {
 	Page("Audit trail", "Kharej · audit.tail")
+	GradBand(Stdout, uiW())
 	Hint("The last lines of Kharej's two append-only scepter records, raw:")
 	Hint("  .pairing.audit   — the local console's credential audit (pair/rotate/revoke)")
 	Hint("  .pairing.journal — every cockpit command with its recorded outcome")
@@ -634,7 +700,7 @@ func scepterAuditFetch(cl ScepterClient, nStr string) {
 	if nStr != "" {
 		n = atoi(nStr)
 	}
-	res, ok := scepterAct(cl, "audit.tail", scepterAuditTailArgs(n))
+	res, ok := scepterActSpin(cl, "audit.tail", scepterAuditTailArgs(n))
 	if !ok {
 		return
 	}
