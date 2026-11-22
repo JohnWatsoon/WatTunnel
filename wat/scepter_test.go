@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -507,28 +508,29 @@ func TestScepterJSONRobustness(t *testing.T) {
 			t.Fatalf("line %d (%q…): code %d, want %d", i, lines[i][:min(24, len(lines[i]))], r.resp.Code, wantCode)
 		}
 	}
-	// the audit saw the flood: four decode-level rows with cmd "?" (lines 1/2/4/5 — line 3 decoded fine and
-	// was audited by Handle as the empty command it was), one with the parsed id, plus the good ping
+	// the audit saw the flood: three decode-level rows with cmd "?" (lines 1/4/5 — wholly unparseable or
+	// oversized), the wrong-v line audited with its PARSED cmd and id (round-2 fix 6, 2026-11-22: it used to
+	// be a fourth "?"), line 3 (a v=1 line with no command) audited by Handle as the empty command, plus the
+	// good ping
 	ab, err := os.ReadFile(filepath.Join(dir, ScepterAuditFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var pluses, aID, ping int
+	var pluses, wrongV, ping int
 	for _, l := range strings.Split(strings.TrimRight(string(ab), "\n"), "\n") {
 		switch {
 		case strings.Contains(l, " cmd=? code=1"):
 			pluses++
-			if strings.HasSuffix(l, "id=a") {
-				aID++
-			}
 		case strings.Contains(l, " cmd=? code=8"):
 			pluses++
+		case strings.HasSuffix(l, "cmd=scepter.ping code=1 id=a"):
+			wrongV++
 		case strings.HasSuffix(l, "cmd=scepter.ping code=0 id=ok1"):
 			ping++
 		}
 	}
-	if pluses != 4 || aID != 1 || ping != 1 {
-		t.Fatalf("audit rows for garbage: ?=%d (id=a %d), ping=%d, file %q", pluses, aID, ping, ab)
+	if pluses != 3 || wrongV != 1 || ping != 1 {
+		t.Fatalf("audit rows for garbage: ?=%d (wrong-v %d), ping=%d, file %q", pluses, wrongV, ping, ab)
 	}
 }
 
@@ -1326,14 +1328,16 @@ func TestScepterCreateRollback(t *testing.T) {
 	if state.StateSeq() != seqBefore {
 		t.Fatal("a rolled-back intent must not bump state_seq (no change, no event)")
 	}
-	// the failure is journaled: the same id replays the recorded outcome without re-running the op
+	// a failed outcome is NOT journaled (round-2 fix 2, 2026-11-22): the same-id retry re-runs the op and
+	// rolls back again — re-executable rejections, and a re-run is the recovery when a panic skipped the
+	// rollback. The replay-from-journal contract covers APPLIED outcomes only (TestScepterWriteJournalReplay).
 	before := ops.creates
 	p2, code2 := c.call("tunnel.create", args, "rb-retry", time.Now().Unix(), 30*time.Second)
 	if code2 != CodeInternal || p2["rolled_back"] != true {
-		t.Fatalf("replayed failure: %v %v", code2, p2)
+		t.Fatalf("re-executed failure: %v %v", code2, p2)
 	}
-	if ops.creates != before {
-		t.Fatal("a journaled failure re-ran the op")
+	if ops.creates != before+1 {
+		t.Fatal("the failed create was journaled: the retry replayed instead of re-running the op")
 	}
 	// edit rollback: the unit refuses the new config, the .bak content is restored
 	ops.writeDirect("rb2", t)
@@ -1614,9 +1618,10 @@ func TestScepterCarrierChangeRPC(t *testing.T) {
 	}
 }
 
-// The carrier-change rollback drill with journal replay: the link check fails → rolled_back, the pre-change
-// config is restored and up again, and a retry with the SAME id replays the recorded outcome (at-most-once).
-func TestScepterCarrierChangeRollbackReplay(t *testing.T) {
+// The carrier-change rollback drill: the link check fails → rolled_back, the pre-change config is restored
+// and up again, and a retry re-runs the op and fails the same way — failed outcomes are not journaled
+// (round-2 fix 2, 2026-11-22), so the observable result is identical while the rollback keeps guarding.
+func TestScepterCarrierChangeRollback(t *testing.T) {
 	ops := newFakeOps(t)
 	ops.failLink["w2"] = true
 	ops.writeDirect("w2", t)
@@ -1630,10 +1635,11 @@ func TestScepterCarrierChangeRollbackReplay(t *testing.T) {
 	if !strings.Contains(string(b), "carrier: udp") {
 		t.Fatalf("rollback did not restore the pre-change carrier: %q", b)
 	}
-	// the same id replays the recorded failure instead of re-running the op
+	// the retry re-executes (a failed outcome is not journaled): the link check fails again, the rollback
+	// restores the same pre-change config
 	p, code = c.Call("carrier.change", map[string]any{"name": "w2", "carrier": "ws", "id": "cc-7"})
 	if code != CodeInternal || p["rolled_back"] != true {
-		t.Fatalf("replay: %v %v", code, p)
+		t.Fatalf("retry: %v %v", code, p)
 	}
 	if b2, _ := os.ReadFile(filepath.Join(ops.dir, "w2.yml")); string(b2) != string(b) {
 		t.Fatal("the replay mutated the tunnel")
@@ -2125,8 +2131,13 @@ func TestScepterUpdateChannelSurvival(t *testing.T) {
 }
 
 // The watcher unit drill: applied and rolled_back records fire while fresh, a started record silent past the
-// job's watch window fires interrupted, and stale history never re-fires on a later poll.
+// stale threshold fires interrupted, and stale history never re-fires on a later poll. The threshold pins
+// ABOVE the job's 15 min download cap (round-2 fix 10, 2026-11-22): a healthy slow update still in flight
+// must not be declared interrupted.
 func TestScepterUpdateWatcher(t *testing.T) {
+	if scepterUpdateStale <= 15*time.Minute {
+		t.Fatalf("scepterUpdateStale = %v, want above the job's 15 min download cap", scepterUpdateStale)
+	}
 	dir := t.TempDir()
 	jp := filepath.Join(dir, ".pairing.journal")
 	ss, err := NewScepterState(testPairing(CapManage), nil, jp)
@@ -2143,7 +2154,7 @@ func TestScepterUpdateWatcher(t *testing.T) {
 	writeAtomicTest(mail, `{"phase":"rolled_back","run":"w2","ts":`+strconv.FormatInt(now+3, 10)+`}`)
 	waitScepterEvent(t, ss, EvUpdateFailed, UpdatePhaseRolledBack)
 	writeAtomicTest(mail, `{"phase":"started","run":"w3","ts":`+
-		strconv.FormatInt(now-2*int64((10*time.Minute)/time.Second), 10)+`}`) // silent past the job window
+		strconv.FormatInt(now-2*int64(scepterUpdateStale/time.Second), 10)+`}`) // silent past the threshold
 	waitScepterEvent(t, ss, EvUpdateFailed, "interrupted")
 	seq := ss.StateSeq()
 	writeAtomicTest(mail, `{"phase":"failed","run":"w4","ts":`+
@@ -2299,29 +2310,50 @@ func TestScepterPrunedIDReexecutes(t *testing.T) {
 	}
 }
 
-// A reused id with a DIFFERENT command must not replay the old outcome (F4/M2): the second command
-// re-executes and its own outcome is recorded.
+// A reused id with a DIFFERENT command is refused (F4/M2 + round-2 fix 1, 2026-11-22): answering it would
+// re-record over the id and erase the FIRST command's outcome — its legit retry would then miss and
+// re-execute a mutation (double-apply). The reuse answers bad_request without recording; the original
+// command's retry still replays from the intact record.
 func TestScepterJournalCmdMismatch(t *testing.T) {
 	ops := newFakeOps(t)
 	ops.writeDirect("t1", t)
-	c, _ := newScepterPair(t, CapManage, "", dirSource{ops.dir}, ops)
-	p, code := c.call("tunnel.edit", map[string]any{"name": "t1", "set": map[string]any{"ping-every": "3"}},
-		"dup-id", time.Now().Unix(), 10*time.Second)
+	jp := filepath.Join(t.TempDir(), ".pairing.journal")
+	c, _ := newScepterPair(t, CapManage, jp, dirSource{ops.dir}, ops)
+	now := time.Now().Unix()
+	editArgs := map[string]any{"name": "t1", "set": map[string]any{"ping-every": "3"}}
+	p, code := c.call("tunnel.edit", editArgs, "dup-id", now, 10*time.Second)
 	if code != CodeOK {
 		t.Fatalf("edit: %d %v", code, p)
 	}
-	p2, code := c.call("tunnel.stop", map[string]any{"name": "t1"}, "dup-id", time.Now().Unix(), 10*time.Second)
-	if code != CodeOK || p2["state"] != "inactive" {
-		t.Fatalf("same id, different cmd: %v %v (want the stop's own outcome, not the edit replay)", code, p2)
+	// the reuse: bad_request with the why, and the stop NEVER ran
+	p2, code := c.call("tunnel.stop", map[string]any{"name": "t1"}, "dup-id", now, 10*time.Second)
+	if code != CodeBadRequest || p2["why"] != "command id reused with a different command" {
+		t.Fatalf("same id, different cmd: %v %v (want bad_request with the why)", code, p2)
 	}
-	stopped := false
 	for _, a := range ops.actions {
 		if a == "t1:stop" {
-			stopped = true
+			t.Fatal("the mismatched command executed instead of being refused")
 		}
 	}
-	if !stopped {
-		t.Fatal("the mismatched command never executed (the old outcome was replayed)")
+	// the original command's retry with the same id still replays the recorded outcome (no re-run)
+	restarts := 0
+	for _, a := range ops.actions {
+		if a == "t1:restart" {
+			restarts++
+		}
+	}
+	p3, code := c.call("tunnel.edit", editArgs, "dup-id", now, 10*time.Second)
+	if code != CodeOK {
+		t.Fatalf("the original command's retry: %d %v (want the recorded replay)", code, p3)
+	}
+	n := 0
+	for _, a := range ops.actions {
+		if a == "t1:restart" {
+			n++
+		}
+	}
+	if n != restarts {
+		t.Fatalf("the retry re-ran the op (restarts %d -> %d) instead of replaying", restarts, n)
 	}
 }
 
@@ -2388,12 +2420,35 @@ func TestScepterPanicRecovered(t *testing.T) {
 	if !strings.Contains(string(ab), "cmd=tunnel.edit code=7 id=p-1") {
 		t.Fatalf("the panic left no audit row: %q", ab)
 	}
+	// the panic outcome is NOT journaled (round-2 fix 2, 2026-11-22): the panic unwound past the ops'
+	// rollback, so a journaled failure would replay forever and pin the half-applied state — the fresh
+	// attempt (even the same id) re-executes instead.
+	if len(ss.journal.keep) != 0 {
+		t.Fatalf("the panic outcome was journaled (%d records), want an empty journal", len(ss.journal.keep))
+	}
+	if r := ss.Handle(ScepterRequest{ID: "p-1", V: scepterV, Cmd: "tunnel.edit",
+		Args: map[string]any{"name": "t1", "set": map[string]any{"ping-every": "1"}}, TS: now}, testPairing(CapFull).Caps); r.Code != CodeInternal {
+		t.Fatalf("same-id retry code %d, want internal (re-executed, never a replayed failure)", r.Code)
+	}
+	if ops.edits != 2 {
+		t.Fatalf("Edit ran %d times, want 2 (the retry replayed the failure instead of re-running)", ops.edits)
+	}
+	if len(ss.journal.keep) != 0 {
+		t.Fatal("the retried panic was journaled")
+	}
 }
 
-// panickyOps is a fakeOps whose Edit blows up mid-op: the L3 recovery must catch it like any op failure.
-type panickyOps struct{ *fakeOps }
+// panickyOps is a fakeOps whose Edit blows up mid-op: the L3 recovery must catch it like any op failure,
+// and the round-2 pin counts invocations to prove a not-journaled failure re-executes.
+type panickyOps struct {
+	*fakeOps
+	edits int // Handle holds the command queue, so a plain counter is race-free
+}
 
-func (p *panickyOps) Edit(string, ScepterPatch) (map[string]any, int) { panic("boom") }
+func (p *panickyOps) Edit(string, ScepterPatch) (map[string]any, int) {
+	p.edits++
+	panic("boom")
+}
 
 // The tunnel liveness watcher (F8-state): a tunnel dying OUTSIDE scepter (systemd stop, a crash) still
 // reaches seq-diffing clients — the watcher fires tunnel_down (and up again) with via:"watch" and the
@@ -2750,5 +2805,366 @@ func TestSessionCloseScepter(t *testing.T) {
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("user stream dead after CloseScepter")
+	}
+}
+
+// ---- round-2 debug pins (2026-11-22): capability before replay, id/cmd conflict, ttl_s typing, line-cap
+// content bytes, decode-reject audit, audit rotation, watcher double-fire, two-miss rule ----
+
+// The capability check precedes the journal replay (round-2 fix 3): a rotated lower-cap credential must not
+// replay an outcome recorded under higher caps — every command's capability is judged fresh, retries
+// included. A capable retry still replays the recorded outcome.
+func TestScepterCapCheckBeforeReplay(t *testing.T) {
+	dir := t.TempDir()
+	ss, err := NewScepterState(testPairing(CapFull), nil, filepath.Join(dir, ".pairing.journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
+	ops := newFakeOps(t)
+	ops.writeDirect("t1", t)
+	ss.SetOps(ops)
+	now := time.Now().Unix()
+	req := ScepterRequest{ID: "cap-1", V: scepterV, Cmd: "tunnel.edit",
+		Args: map[string]any{"name": "t1", "set": map[string]any{"ping-every": "1"}}, TS: now}
+	if r := ss.Handle(req, testPairing(CapFull).Caps); r.Code != CodeOK {
+		t.Fatalf("record under full caps: %d", r.Code)
+	}
+	tunnelOnly := testPairing(CapTunnel)
+	ss.ReloadPairing(tunnelOnly)
+	_, caps := ss.PairingInfo()
+	if caps != tunnelOnly.Caps {
+		t.Fatalf("reload caps %d, want %d", caps, tunnelOnly.Caps)
+	}
+	if r := ss.Handle(req, caps); r.Code != CodeDenied {
+		t.Fatalf("replay under lower caps: code %d, want denied (never the recorded OK)", r.Code)
+	}
+	ss.ReloadPairing(testPairing(CapFull))
+	_, caps = ss.PairingInfo()
+	if r := ss.Handle(req, caps); r.Code != CodeOK {
+		t.Fatalf("capable retry: code %d, want the recorded OK replay", r.Code)
+	}
+}
+
+// The ttl_s args alias is strictly typed on EVERY command carrying it, wire ttl set or not (round-2 fix 4):
+// {"ttl":600,"ttl_s":"x"} used to slip through because the type check only ran when the wire ttl was unset.
+func TestScepterTTLSAlwaysTypeChecked(t *testing.T) {
+	ss, err := NewScepterState(testPairing(CapFull), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Stop(); ss.journal.Close() })
+	now := time.Now().Unix()
+	caps := testPairing(CapFull).Caps
+	if r := ss.Handle(ScepterRequest{ID: "tts-bad", V: scepterV, Cmd: "scepter.ping", TS: now, TTL: 600,
+		Args: map[string]any{"ttl_s": "x"}}, caps); r.Code != CodeBadRequest {
+		t.Fatalf("wrong-typed ttl_s with the wire ttl set: code %d, want bad_request", r.Code)
+	}
+	if r := ss.Handle(ScepterRequest{ID: "tts-ok", V: scepterV, Cmd: "scepter.ping", TS: now,
+		Args: map[string]any{"ttl_s": float64(300)}}, caps); r.Code != CodeOK {
+		t.Fatalf("numeric ttl_s alias: code %d, want OK", r.Code)
+	}
+}
+
+// The 64 KiB command cap counts CONTENT bytes, the line terminator excluded (round-2 fix 5): exactly
+// scepterMaxLine content bytes + \n is a legal command (it used to be rejected, an off-by-one); one byte
+// more is too_large. Writes go out through a bufio.Writer in stream-sized pieces — the suite's proven
+// large-write path (a single 64 KiB Stream.Write stalls the sim link) — and the answers are read raw with a
+// select timeout: waitResp would block in Stream.Read past its own deadline on any transport stall.
+func TestScepterLineCapContentBytes(t *testing.T) {
+	c, _ := newScepterPair(t, CapFull, "", &fakeSource{})
+	build := func(id string, content int) []byte {
+		head := fmt.Sprintf(`{"id":%q,"v":1,"cmd":"scepter.ping","args":{"pad":"`, id)
+		tail := `"}}`
+		pad := content - len(head) - len(tail)
+		if pad < 0 {
+			t.Fatalf("content %d below the envelope size", content)
+		}
+		return []byte(head + strings.Repeat("p", pad) + tail)
+	}
+	type res struct {
+		resp ScepterResponse
+		err  error
+	}
+	out := make(chan res, 2)
+	go func() { // raw responses via the client's own decoder buffer, in order
+		for i := 0; i < 2; i++ {
+			var r res
+			line, err := c.d.br.ReadSlice('\n')
+			if err == bufio.ErrBufferFull {
+				for {
+					if _, e := c.d.br.ReadSlice('\n'); e != bufio.ErrBufferFull {
+						break
+					}
+				}
+				err = errors.New("oversized response line")
+			} else if err == nil {
+				err = json.Unmarshal(trimEOL(line), &r.resp)
+			}
+			out <- r
+		}
+	}()
+	send := func(line []byte) {
+		w := bufio.NewWriter(c.st)
+		w.Write(line)
+		w.WriteByte('\n')
+		w.Flush()
+	}
+	line := build("cap-ok", scepterMaxLine)
+	if len(line) != scepterMaxLine {
+		t.Fatalf("built line = %d bytes, want exactly %d content bytes", len(line), scepterMaxLine)
+	}
+	send(line)
+	select {
+	case r := <-out:
+		if r.err != nil {
+			t.Fatalf("cap-ok: %v", r.err)
+		}
+		if r.resp.Code != CodeOK {
+			t.Fatalf("exactly %d content bytes: code %d, want OK", scepterMaxLine, r.resp.Code)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for the max-content answer")
+	}
+	send(build("cap-big", scepterMaxLine+1))
+	select {
+	case r := <-out:
+		if r.err != nil {
+			t.Fatalf("cap-big: %v", r.err)
+		}
+		if r.resp.Code != CodeTooLarge {
+			t.Fatalf("%d content bytes: code %d, want too_large", scepterMaxLine+1, r.resp.Code)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for the over-cap answer")
+	}
+}
+
+// A decode-level rejection audits the PARTIAL request's cmd when the line parsed that far (round-2 fix 6):
+// a wrong-v line with a valid cmd used to audit cmd "?", blinding the trail to what was attempted. Wholly
+// unparseable lines still audit "?".
+func TestScepterDecodeRejectAuditCmd(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := newScepterPair(t, CapManage, filepath.Join(dir, ".pairing.journal"), &fakeSource{})
+	if _, err := c.st.Write([]byte(`{"id":"wv-9","v":99,"cmd":"tunnel.stats","args":{"name":"t1"}}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := c.waitResp("wv-9", 10*time.Second); code != CodeBadRequest {
+		t.Fatalf("wrong-v line: code %d, want bad_request", code)
+	}
+	ab, err := os.ReadFile(filepath.Join(dir, ScepterAuditFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ab), "cmd=tunnel.stats code=1 id=wv-9") {
+		t.Fatalf("the wrong-v attempt lost its parsed cmd in the audit: %q", ab)
+	}
+	if _, err := c.st.Write([]byte("not json\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ab, err := os.ReadFile(filepath.Join(dir, ScepterAuditFile))
+		if err == nil && strings.Contains(string(ab), "cmd=? code=1") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the unparseable line left no cmd=? audit row: %q", ab)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Audit rotation renames the full live file to ".1"; the SECOND rotation must REPLACE that generation — a
+// plain rename onto an existing file fails on Windows and the error was once ignored, so a dev checkout's
+// audit grew without bound (round-2 fix 7): on failure the stale generation is removed and the rename
+// retried once.
+func TestScepterAuditRotationReplacesGeneration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ScepterAuditFile)
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", scepterJournalRotate)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := OpenScepterAudit(path) // a.size = the filler: the next record crosses the threshold
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.record(time.Now(), "u", "scepter.ping", "r1", CodeOK)
+	if st, err := os.Stat(path + ".1"); err != nil || st.Size() < int64(scepterJournalRotate) {
+		t.Fatalf("first rotation: .1 = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the rotated live file is still there: %v", err)
+	}
+	// the second rotation must replace the .1 generation (the Windows rename-over case)
+	if err := os.WriteFile(path, []byte(strings.Repeat("y", scepterJournalRotate)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.record(time.Now(), "u", "scepter.ping", "r2", CodeOK)
+	st, err := os.Stat(path + ".1")
+	if err != nil || st.Size() < int64(scepterJournalRotate) {
+		t.Fatalf("second rotation did not replace .1: %v", err)
+	}
+	b, _ := os.ReadFile(path + ".1")
+	if !strings.Contains(string(b), "id=r2") {
+		t.Fatalf("the second generation kept the OLD audit (rename-over failed): tail %q", b[len(b)-100:])
+	}
+}
+
+// liveSrc is a one-tunnel ScepterSource driven by test callbacks: presence and liveness exactly as a listing
+// would report them (the watcher pins flip them mid-test).
+type liveSrc struct {
+	present func() bool
+	up      func() bool
+}
+
+func (l liveSrc) Tunnels() []ScepterTunnelInfo {
+	if l.present != nil && !l.present() {
+		return []ScepterTunnelInfo{}
+	}
+	st, h := "inactive", "down"
+	if l.up() {
+		st, h = "active", "ok"
+	}
+	return []ScepterTunnelInfo{{Name: "w1", Carrier: "udp", State: st, Health: h}}
+}
+
+func (liveSrc) TunnelStats(string) (map[string]any, bool) { return nil, false }
+func (liveSrc) TunnelLogs(string, int) ([]string, bool)   { return nil, false }
+func (liveSrc) History(string) ([]map[string]any, bool)   { return nil, false }
+
+// The scepter path's own start/stop fires tunnel_up/tunnel_down (via:"scepter"); the liveness watcher's next
+// poll used to fire the same flip again via:"watch" — one state change, two events (round-2 fix 8). The
+// watcher skips a flip the scepter path announced within the window; real flips still fire.
+func TestScepterWatcherNoDoubleFire(t *testing.T) {
+	old := scepterWatchPoll
+	scepterWatchPoll = 100 * time.Millisecond
+	t.Cleanup(func() { scepterWatchPoll = old }) // runs LAST: the watcher is stopped before the var is restored
+	ops := newFakeOps(t)
+	ops.writeDirect("w1", t)
+	ops.runUnit("w1", "start") // the tunnel is up before the watcher baselines
+	ws := liveSrc{present: func() bool { return true }, up: func() bool { return ops.active["w1"] }}
+	ss, err := NewScepterState(testPairing(CapManage), ws, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ss.Stop) // runs FIRST
+	ss.SetOps(ops)
+	ss.evWindow = 0 // coalescing must not mask a double fire
+	// the baseline: the first poll records the tunnel silently
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ss.mu.Lock()
+		e, ok := ss.watchSnap["w1"]
+		ss.mu.Unlock()
+		if ok && e.up {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the watcher never baselined the up tunnel")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	seq := ss.StateSeq()
+	if r := ss.Handle(ScepterRequest{ID: "df-1", V: scepterV, Cmd: "tunnel.stop",
+		Args: map[string]any{"name": "w1"}, TS: time.Now().Unix()}, testPairing(CapManage).Caps); r.Code != CodeOK {
+		t.Fatalf("tunnel.stop: %d", r.Code)
+	}
+	time.Sleep(4 * scepterWatchPoll) // several polls over the flip: no via:watch repeat may appear
+	ss.mu.Lock()
+	downs, viaScepter := 0, false
+	for _, ev := range ss.events {
+		if ev.Type != EvTunnelDown || ev.Detail["name"] != "w1" {
+			continue
+		}
+		downs++
+		if ev.Detail["via"] == "scepter" {
+			viaScepter = true
+		}
+	}
+	endSeq := ss.seq
+	ss.mu.Unlock()
+	if downs != 1 || !viaScepter {
+		t.Fatalf("tunnel_down fired %d times (want exactly 1, via scepter)", downs)
+	}
+	if endSeq != seq+1 {
+		t.Fatalf("state_seq moved %d -> %d: a via:watch event fired for the scepter flip", seq, endSeq)
+	}
+	// a real flip with no scepter involvement still fires
+	ops.active["w1"] = true
+	waitScepterEvent(t, ss, EvTunnelUp, "")
+}
+
+// A one-poll listing omission must not re-baseline a tunnel (round-2 fix 9): it is treated as gone only on
+// the SECOND consecutive miss — a reappearance after one miss keeps its history (a later flip still fires),
+// and two consecutive omissions of a last-known-up tunnel fire tunnel_down why:"gone" (a unit that vanished
+// outside scepter is news).
+func TestScepterWatcherTwoMissRule(t *testing.T) {
+	old := scepterWatchPoll
+	scepterWatchPoll = 100 * time.Millisecond
+	t.Cleanup(func() { scepterWatchPoll = old })
+	var present, up atomic.Bool
+	present.Store(true)
+	up.Store(true)
+	ws := liveSrc{present: func() bool { return present.Load() }, up: func() bool { return up.Load() }}
+	ss, err := NewScepterState(testPairing(CapManage), ws, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ss.Stop)
+	ss.evWindow = 0
+	waitEntry := func(want func(scepterWatchEnt) bool, what string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			ss.mu.Lock()
+			e, ok := ss.watchSnap["w1"]
+			ss.mu.Unlock()
+			if ok && want(e) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the watch entry never %s (last %+v)", what, e)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitEntry(func(e scepterWatchEnt) bool { return e.up && e.miss == 0 }, "baselined up")
+	seq := ss.StateSeq()
+	// one miss: the entry is kept, nothing fires
+	present.Store(false)
+	waitEntry(func(e scepterWatchEnt) bool { return e.miss == 1 }, "counted one miss")
+	if ss.StateSeq() != seq {
+		t.Fatal("a one-poll omission fired an event")
+	}
+	// reappearance: history kept — the miss resets and a later flip still fires
+	present.Store(true)
+	waitEntry(func(e scepterWatchEnt) bool { return e.up && e.miss == 0 }, "rebaselined after one miss")
+	if ss.StateSeq() != seq {
+		t.Fatal("a reappearance after one miss fired an event")
+	}
+	up.Store(false)
+	waitScepterEvent(t, ss, EvTunnelDown, "") // the flip across the hiccup is not swallowed
+	up.Store(true)
+	waitEntry(func(e scepterWatchEnt) bool { return e.up && e.miss == 0 }, "back up")
+	// two consecutive omissions: gone
+	present.Store(false)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ss.mu.Lock()
+		found := false
+		for _, ev := range ss.events {
+			if ev.Type == EvTunnelDown && ev.Detail["why"] == "gone" && ev.Detail["via"] == "watch" {
+				found = true
+			}
+		}
+		ss.mu.Unlock()
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no tunnel_down why:gone after two consecutive omissions")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

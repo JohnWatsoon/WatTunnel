@@ -263,8 +263,10 @@ type scepterDecoder struct {
 
 func newScepterDecoder(r io.Reader) *scepterDecoder {
 	// One line must fit the buffer whole (ReadSlice stops at the first '\n' only inside the buffer): commands
-	// are legal up to scepterMaxLine, and a chunked response line is ~scepterChunk + overhead, so both fit with
-	// room. A line that fills the buffer WITHOUT a newline is by construction over the cap: drained, rejected.
+	// are legal up to scepterMaxLine CONTENT bytes — the cap excludes the line terminator, round-2 fix 5,
+	// 2026-11-22, which also covers the \r\n shape — and a chunked response line is ~scepterChunk + overhead,
+	// so both fit with room. A line that fills the buffer WITHOUT a newline is by construction over the cap:
+	// drained, rejected.
 	return &scepterDecoder{br: bufio.NewReaderSize(r, scepterMaxLine+64)}
 }
 
@@ -291,7 +293,7 @@ func (d *scepterDecoder) next() (ScepterRequest, int) {
 		}
 		return ScepterRequest{}, CodeBadRequest
 	}
-	if len(line) > scepterMaxLine {
+	if len(trimEOL(line)) > scepterMaxLine { // the cap counts content bytes, terminator excluded (round-2 fix 5)
 		return ScepterRequest{}, CodeTooLarge
 	}
 	var req ScepterRequest
@@ -559,10 +561,11 @@ func (j *ScepterJournal) Close() {
 }
 
 // Lookup returns the recorded outcome for a command id, if any. The recorded COMMAND must match too
-// (F4/M2, 2026-11-22): a client reusing an id for a different command used to be answered with the old
-// outcome — a cmd mismatch misses and the command re-executes fresh. A record with an empty Cmd is a
-// rotation artifact of the pre-fix writer (rotateLocked once dropped the field); it matches any command,
-// which is the safe side: replaying a recorded mutating outcome beats re-running the op blind.
+// (F4/M2, 2026-11-22): a client reusing an id for a different command misses here — and Handle answers the
+// reuse bad_request via Conflict below WITHOUT re-recording (round-2 fix 1, 2026-11-22), so the stored
+// outcome stays for the original command's retry. A record with an empty Cmd is a rotation artifact of the
+// pre-fix writer (rotateLocked once dropped the field); it matches any command, which is the safe side:
+// replaying a recorded mutating outcome beats re-running the op blind.
 func (j *ScepterJournal) Lookup(id, cmd string) (ScepterResponse, bool) {
 	if j == nil || id == "" {
 		return ScepterResponse{}, false
@@ -574,6 +577,21 @@ func (j *ScepterJournal) Lookup(id, cmd string) (ScepterResponse, bool) {
 		return ScepterResponse{}, false
 	}
 	return r.Resp, true
+}
+
+// Conflict reports whether the id is already recorded for a DIFFERENT command (round-2 fix 1, 2026-11-22).
+// Handle answers such a reuse bad_request and stops: re-recording over the id would erase the original
+// command's outcome, and its legit retry would then miss here and re-execute a mutation (double-apply). A
+// record with an empty Cmd (the pre-fix writer's artifact, see Lookup) is not a conflict — it matches any
+// command.
+func (j *ScepterJournal) Conflict(id, cmd string) bool {
+	if j == nil || id == "" {
+		return false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	r, ok := j.keep[id]
+	return ok && r.Cmd != "" && r.Cmd != cmd
 }
 
 // ---- command audit (plan E.3): every command, every outcome, with the credential UUID ----
@@ -649,7 +667,14 @@ func (a *ScepterAudit) record(now time.Time, uuid, cmd, id string, code int) {
 		a.size += int64(len(line))
 	}
 	if a.size >= scepterJournalRotate {
-		os.Rename(a.path, a.path+".1") // one generation preserved (type comment); the next record starts fresh
+		if err := os.Rename(a.path, a.path+".1"); err != nil {
+			// one generation preserved (type comment); the next record starts fresh. A plain rename onto an
+			// existing file FAILS on Windows and the error was once ignored — the live audit then grew
+			// without bound on a dev checkout (round-2 fix 7, 2026-11-22): drop the stale generation and
+			// retry once; evidence rotates, it is not lost.
+			os.Remove(a.path + ".1")
+			os.Rename(a.path, a.path+".1")
+		}
 		a.size = 0
 	}
 }
@@ -719,12 +744,14 @@ type ScepterState struct {
 	// structural op the cockpit can ask for, and a retry loop must never machine-gun restarts of the host.
 	updateRate  scepterRate
 	updateWatch atomic.Bool // the status watcher is spawned once per state (SetOps)
-	// watchStop/watchDone shut the tunnel liveness watcher down (Stop); watchSnap is its last snapshot of
-	// which tunnels were up. lives holds the scepter streams this state is currently serving so a disarm
-	// (ReloadPairing(nil)) can kill them mid-line.
+	// watchStop/watchDone shut the tunnel liveness watcher down (Stop); watchSnap is its last per-tunnel
+	// snapshot: the last-observed direction, the direction the SCEPTER path last announced (watchAnnounced,
+	// the double-fire suppression) and the consecutive-miss count of an absent tunnel (the two-miss rule).
+	// lives holds the scepter streams this state is currently serving so a disarm (ReloadPairing(nil)) can
+	// kill them mid-line.
 	watchStop chan struct{}
 	watchDone chan struct{}
-	watchSnap map[string]bool
+	watchSnap map[string]scepterWatchEnt
 	lives     map[*Stream]struct{}
 	qmu       sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
 	recent    []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
@@ -797,10 +824,55 @@ func (ss *ScepterState) Stop() {
 // Tunnels() read per 5 s per paired process — the same read state.get makes.
 var scepterWatchPoll = 5 * time.Second
 
+// scepterWatchEnt is one tunnel's entry in the liveness watcher's snapshot (round-2 fixes 8/9, 2026-11-22):
+// up is the last-OBSERVED direction; fired/firedAt the direction and moment the SCEPTER path last announced
+// a tunnel_up/tunnel_down for the tunnel (zero time = none) — a flip matching that announcement within
+// 2×poll is the scepter op's own state change, not news; miss counts consecutive polls the tunnel was
+// absent from the listing.
+type scepterWatchEnt struct {
+	up      bool
+	fired   bool
+	firedAt time.Time
+	miss    int
+}
+
+// watchAnnounced records that the SCEPTER path just fired a liveness event for name in direction up
+// (tunnel.start/stop/restart's tunnel_up/tunnel_down, tunnel.create's tunnel_up). The watcher's next poll
+// would otherwise see the op's own state flip and announce it again via:"watch" — one state change, two
+// events (round-2 fix 8, 2026-11-22). Real flips keep firing.
+func (ss *ScepterState) watchAnnounced(name string, up bool) {
+	ss.mu.Lock()
+	if ss.watchSnap == nil {
+		ss.watchSnap = map[string]scepterWatchEnt{}
+	}
+	e := ss.watchSnap[name]
+	e.fired, e.firedAt = up, ss.nowf()
+	ss.watchSnap[name] = e
+	ss.mu.Unlock()
+}
+
+// watchGone records a tunnel the SCEPTER path removed (tunnel.delete): tunnel_deleted announced the end, so
+// the liveness watcher must not add a tunnel_down when the listing stops carrying the name — the last-known
+// state is preset to down and the two-miss rule then drops it silently.
+func (ss *ScepterState) watchGone(name string) {
+	ss.mu.Lock()
+	if ss.watchSnap == nil {
+		ss.watchSnap = map[string]scepterWatchEnt{}
+	}
+	e := ss.watchSnap[name]
+	e.up, e.fired, e.firedAt = false, false, ss.nowf()
+	ss.watchSnap[name] = e
+	ss.mu.Unlock()
+}
+
 // watchTunnels is the liveness watcher (F8-state): polls the source, diffs state/health per tunnel against
 // the last snapshot, fires the up/down events OUTSIDE the state lock (AddEvent locks it itself). A tunnel
-// seen for the first time records its baseline silently — the create path already fired its own event — and
-// a tunnel that vanishes from the listing is dropped silently too (deletion fires tunnel_deleted).
+// seen for the first time records its baseline silently — the create path already fired its own event. A
+// flip the scepter path announced itself within the window is skipped (round-2 fix 8). A tunnel missing
+// from the listing is treated as gone only on the SECOND consecutive miss (round-2 fix 9, 2026-11-22): a
+// one-poll listing hiccup must not re-baseline it — reappearing after one miss keeps its history and diffs
+// normally — and the second miss fires tunnel_down why:"gone" when it was last known up, unless the scepter
+// path announced the tunnel's end within the window (a stop or the delete's watchGone: already news).
 func (ss *ScepterState) watchTunnels() {
 	// both channels captured once: Stop nils the struct fields under the lock, and the goroutine must not
 	// read them back (a field read here would race the nil-out under -race)
@@ -827,13 +899,36 @@ func (ss *ScepterState) watchTunnels() {
 			up   bool
 		}
 		var fires []flip
+		var gone []string
 		ss.mu.Lock()
+		next := make(map[string]scepterWatchEnt, len(snap))
+		now := ss.nowf()
 		for name, up := range snap {
-			if prev, seen := ss.watchSnap[name]; seen && prev != up {
+			prev, seen := ss.watchSnap[name]
+			e := scepterWatchEnt{up: up, fired: prev.fired, firedAt: prev.firedAt}
+			if seen && prev.up != up &&
+				!(prev.fired == up && !prev.firedAt.IsZero() && now.Sub(prev.firedAt) < 2*scepterWatchPoll) {
 				fires = append(fires, flip{name, up})
 			}
+			next[name] = e
 		}
-		ss.watchSnap = snap
+		for name, prev := range ss.watchSnap {
+			if _, present := snap[name]; present {
+				continue
+			}
+			prev.miss++
+			if prev.miss < 2 {
+				next[name] = prev // one miss keeps lastSeen: a reappearance keeps its history (round-2 fix 9)
+				continue
+			}
+			// second miss: gone. Announced ends (the delete's watchGone, a stop within the window) already
+			// fired their event; a unit that vanished outside scepter while last known up is news.
+			recentlyEnded := !prev.firedAt.IsZero() && now.Sub(prev.firedAt) < 2*scepterWatchPoll && !prev.fired
+			if prev.up && !recentlyEnded {
+				gone = append(gone, name)
+			}
+		}
+		ss.watchSnap = next
 		ss.mu.Unlock()
 		for _, f := range fires {
 			if f.up {
@@ -841,6 +936,9 @@ func (ss *ScepterState) watchTunnels() {
 			} else {
 				ss.AddEvent(EvTunnelDown, map[string]any{"name": f.name, "via": "watch"})
 			}
+		}
+		for _, name := range gone {
+			ss.AddEvent(EvTunnelDown, map[string]any{"name": name, "via": "watch", "why": "gone"})
 		}
 	}
 }
@@ -1051,7 +1149,9 @@ var scepterCmds = map[string]scepterCmd{
 }
 
 // Handle validates and runs one request. Order (each step is a trust-boundary check, cheapest first):
-// registry → ops presence → rate → journal replay (idempotency) → TTL → capability → execute → journal.
+// registry → ops presence → rate → capability → journal replay (idempotency) → id-cmd conflict → TTL →
+// execute → journal. The capability check precedes the replay (round-2 fix 3, 2026-11-22): a rotated
+// lower-cap credential must not replay an outcome recorded under higher caps.
 // The caller stamps Seq. EVERY outcome is audited (plan E.3): the wrapper appends one ScepterAuditFile line
 // with the credential UUID for ok/denied/stale/rate_limited/bad_request/unknown alike — "who tried what" is
 // answerable from the audit alone — while the journal inside stays outcomes-only for replay. The audit write
@@ -1083,6 +1183,12 @@ func (ss *ScepterState) handle(req ScepterRequest, caps uint32) ScepterResponse 
 	if !rl {
 		return ScepterResponse{ID: req.ID, Code: CodeRateLimited}
 	}
+	if caps&c.minCap == 0 {
+		// BEFORE the journal replay (round-2 fix 3, 2026-11-22): a rotated lower-cap credential must not
+		// replay a recorded outcome granted under higher caps — capability is judged fresh on every command,
+		// retries included.
+		return ScepterResponse{ID: req.ID, Code: CodeDenied, Params: map[string]any{"need": CapName(c.minCap)}}
+	}
 	// ONE command queue per pairing (plan B.4/E.2, the bash manager's mgr_lock pattern): from the idempotency
 	// replay to the journal record the whole command holds one mutex, so two scepter streams never interleave
 	// write intents, a retry racing its original cannot double-apply, and Kharej's files are touched by one
@@ -1093,16 +1199,25 @@ func (ss *ScepterState) handle(req ScepterRequest, caps uint32) ScepterResponse 
 		resp.Seq = ss.StateSeq() // refresh the tail: the client may have been offline a while
 		return resp
 	}
+	if ss.journal.Conflict(req.ID, req.Cmd) {
+		// the id is already recorded for a DIFFERENT command (round-2 fix 1, 2026-11-22): re-recording over
+		// it would erase the original command's outcome and its legit retry would miss and re-execute a
+		// mutation (double-apply). Answer without recording — the stored outcome stays for the original
+		// command's retry.
+		return ScepterResponse{ID: req.ID, Code: CodeBadRequest,
+			Params: map[string]any{"why": "command id reused with a different command"}}
+	}
 	ttl := req.TTL
+	if n, ok := argInt(req.Args, "ttl_s"); !ok {
+		// ttl_s (plan's intent shape) is the args alias of the wire `ttl` field, reserved on every command;
+		// strictly-typed args rule: a wrong type is bad_request WHENEVER it is present, wire ttl set or not
+		// (round-2 fix 4, 2026-11-22 — the check used to be skipped when the wire ttl was set).
+		return ScepterResponse{ID: req.ID, Code: CodeBadRequest}
+	} else if ttl == 0 && n > 0 {
+		ttl = n // the args alias resolves only an unset wire ttl, as before
+	}
 	if ttl == 0 {
 		ttl = scepterTTL
-		if n, ok := argInt(req.Args, "ttl_s"); !ok {
-			// ttl_s (plan's intent shape) is the args alias of the wire `ttl` field, reserved on every
-			// command; strictly-typed args rule: a wrong type is bad_request.
-			return ScepterResponse{ID: req.ID, Code: CodeBadRequest}
-		} else if n > 0 {
-			ttl = n
-		}
 	}
 	ttl = intentTTLClamp(ttl) // the client does not set its own window (F6/L6, 2026-11-22)
 	ts := req.TS
@@ -1118,15 +1233,14 @@ func (ss *ScepterState) handle(req ScepterRequest, caps uint32) ScepterResponse 
 	if now.After(time.Unix(ts, 0).Add(time.Duration(ttl)*time.Second + scepterSkew)) {
 		return ScepterResponse{ID: req.ID, Code: CodeStale}
 	}
-	if caps&c.minCap == 0 {
-		return ScepterResponse{ID: req.ID, Code: CodeDenied, Params: map[string]any{"need": CapName(c.minCap)}}
-	}
 	params, code := func() (params map[string]any, code int) {
 		defer func() {
 			if r := recover(); r != nil {
 				// a panicking handler (an ops bug) must not take the engine down (L3, 2026-11-22): answer
-				// CodeInternal like any Kharej-side op failure — which means a mutating intent's replay
-				// below is the recorded failure, never a blind re-run of a half-applied op.
+				// CodeInternal like any Kharej-side op failure. It is NOT journaled (round-2 fix 2): the
+				// panic unwound PAST the ops' rollback, so the outcome describes half-applied state —
+				// journaling it would replay the failure forever. The fresh attempt is the recovery: it
+				// completes the config or meets the name_taken/rollback path like any first run.
 				params = map[string]any{"detail": fmt.Sprintf("panic: %v", r)}
 				code = CodeInternal
 			}
@@ -1137,12 +1251,13 @@ func (ss *ScepterState) handle(req ScepterRequest, caps uint32) ScepterResponse 
 	if params == nil {
 		resp.Params = nil
 	}
-	if scepterMutations[req.Cmd] && (code == CodeOK || code == CodeInternal) { // MUTATING intents only
+	if scepterMutations[req.Cmd] && code == CodeOK { // MUTATING intents, APPLIED outcomes only
 		// (H1/F4, 2026-11-22 — reads re-execute; journaling them once grew the replay set without bound and
-		// stale-replayed a hello across an engine update): applied intents AND Kharej-side op failures
-		// (rolled-back writes) are journaled, so a retry replays the recorded outcome instead of re-running
-		// the op. Pure rejections (denied/stale/rate/bad args/not found) are recomputed on a retry and would
-		// burn the 1 MB journal on noise.
+		// stale-replayed a hello across an engine update. Round-2 fix 2, 2026-11-22 — failures re-execute
+		// too: a journaled failure (the panic guard's CodeInternal, or a rolled-back op) replayed forever,
+		// and a replay cannot recover half-applied state. Every non-OK outcome is re-executable by design —
+		// the rollback makes a re-run safe, and a re-run is exactly the recovery when a panic skipped the
+		// rollback. Pure rejections (denied/stale/rate/bad args/not found) are recomputed on a retry anyway.)
 		ss.journal.Record(req.Cmd, req.ID, ts, resp)
 	}
 	ss.mu.Lock() // every handled request (success or code) is visible to the doctor's last-commands trace
@@ -1390,8 +1505,10 @@ func cmdHistory(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
 // Every write command is validate → backup → apply → verify → report, with the ops source owning Kharej's
 // reality (tunnel files, units, port bookkeeping). This engine layer stays deliberately thin: argument typing,
 // the per-pair create bucket, the event, and the base_seq tail. Rejections come back as machine codes from the
-// ops (validation is Kharej's, plan B.2); a rolled-back write is CodeInternal with {"rolled_back":true} and is
-// journaled (Handle), so a retry replays the outcome instead of re-running the op.
+// ops (validation is Kharej's, plan B.2); a rolled-back write is CodeInternal with {"rolled_back":true}.
+// Failed outcomes are NOT journaled (round-2 fix 2, 2026-11-22): a retry re-runs the op — the rollback makes
+// that safe, and a re-run is also how a panic-skipped rollback recovers — while APPLIED outcomes replay from
+// the journal (Handle).
 
 // ScepterTunnelSpec is one tunnel.create intent, typed. The name is optional (Kharej picks one), Key is
 // engine-generated (the created tunnel's new PSK, delivered to the cockpit inside the session AEAD), Params
@@ -1528,6 +1645,9 @@ func cmdTunnelCreate(ss *ScepterState, req ScepterRequest) (map[string]any, int)
 	p, code := ss.ops.Create(spec)
 	if code == CodeOK {
 		ss.AddEvent(EvTunnelUp, map[string]any{"name": p["name"], "via": "scepter"})
+		if n, is := p["name"].(string); is {
+			ss.watchAnnounced(n, true) // the liveness watcher must not re-fire the create's own tunnel_up
+		}
 		p = ss.writeTail(p, req, pre)
 	}
 	return p, code
@@ -1579,6 +1699,7 @@ func cmdTunnelDelete(ss *ScepterState, req ScepterRequest) (map[string]any, int)
 	p, code := ss.ops.Delete(name)
 	if code == CodeOK {
 		ss.AddEvent(EvTunnelDeleted, map[string]any{"name": name})
+		ss.watchGone(name) // tunnel_deleted announced the end: the two-miss rule drops the name silently
 	}
 	return p, code
 }
@@ -1595,8 +1716,10 @@ func cmdTunnelUnit(action string) scepterHandler {
 		if code == CodeOK {
 			if action == "stop" {
 				ss.AddEvent(EvTunnelDown, map[string]any{"name": name, "via": "scepter"})
+				ss.watchAnnounced(name, false) // the watcher must not re-fire this flip via:"watch" (fix 8)
 			} else {
 				ss.AddEvent(EvTunnelUp, map[string]any{"name": name, "via": "scepter"})
+				ss.watchAnnounced(name, true)
 			}
 		}
 		return p, code
@@ -1955,8 +2078,12 @@ func cmdAuditTail(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
 // deployment: one failed stat/read of a ~100-byte path every 2 s per paired process.
 const (
 	scepterUpdatePoll  = 2 * time.Second
-	scepterUpdateFresh = time.Hour        // a terminal record older than this is history, not news
-	scepterUpdateStale = 10 * time.Minute // a started record silent this long never finished (the job's whole watch is ~1 min)
+	scepterUpdateFresh = time.Hour // a terminal record older than this is history, not news
+	// a started record silent this long never finished. It must clear the job's 15 min download cap (the
+	// http.Client timeout in cmd/wattun/scepter_ops.go): at 10 min a healthy slow update still in flight
+	// fired update_failed {phase:"interrupted"} (round-2 fix 10, 2026-11-22). 20 min clears any download the
+	// cap allows and keeps the interrupted verdict prompt for a job that actually died (its watch is ~1 min).
+	scepterUpdateStale = 20 * time.Minute
 )
 
 func (ss *ScepterState) watchUpdateStatus() {
@@ -2031,10 +2158,16 @@ func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState) {
 		}
 		if code != CodeOK {
 			// decode-level garbage is audited too (L4, 2026-11-22): unparseable JSON, a wrong protocol
-			// version, an oversized line — a garbage flood leaves a trace in the shared audit file with
-			// cmd "?" and whatever of the id could be parsed (the audit line sanitizes it).
+			// version, an oversized line — a garbage flood leaves a trace in the shared audit file (the
+			// audit line sanitizes cmd/id). The PARTIAL request's cmd is used when the line parsed that far
+			// (round-2 fix 6, 2026-11-22: a wrong-v line with a valid cmd audited cmd "?"); only a wholly
+			// unparseable or oversized line audits the "?" placeholder.
+			acmd := req.Cmd
+			if acmd == "" {
+				acmd = "?"
+			}
 			uuid, _ := ss.cred()
-			ss.audit.record(ss.nowf(), uuid, "?", req.ID, code)
+			ss.audit.record(ss.nowf(), uuid, acmd, req.ID, code)
 			writeRespLine(st, &wmu, ScepterResponse{ID: req.ID, Code: code})
 			continue
 		}
