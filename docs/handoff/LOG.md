@@ -1138,3 +1138,34 @@ audit; full wat suite 712 s exit 0), f9429a0 (cluster Y, bash: store speaks the 
 read + line-1 rule, .pairing poller, -pair-to standalone + yml key, deny list, backup exclusion,
 probe cap, unit disable) and Z (mgr) queued.
 Commit: 2233fb0, f9429a0
+
+## 2026-11-22 · supervisor · Debug wave 2 closed — all fix clusters landed
+- 2233fb0 (W, wat/): mutation-only journal bounded at 4096 ids (reads no longer journaled — also kills
+  the stale-hello replay), cmd-aware Lookup, hello floor scepterMinScepterVer, ttl clamp [60,3600] +
+  future-ts clamp, panic recover → CodeInternal, liveness watcher (via:"watch" events + seq), latch
+  proof 10 s deadline, exact pair-field, ValidScepterName -r ban, ReloadPairing/CloseScepter disarm
+  APIs, decode-reject audit. Full wat suite 712 s exit 0.
+- f9429a0 (Y, bash): .pairing store speaks the engine format (line 1 = watp1: credential, # bookkeeping
+  comments), refuse-on-unparsable, Iran-side pair/rotate/revoke guard, audit O_APPEND append, F11
+  positional fix, MGR 2026112211. test-manager ALL OK 1079.
+- b24af32 (X, cmd/wattun): contactLatch latch PSK (H2 — the revival tool works now), readPairingFile
+  first-watp1-line + logged warnings, .pairing 5 s poller → ReloadPairing (instant revoke/rotate),
+  -pair-to standalone (stores + sets pairing: true + exits; client default re-attaches the stored file;
+  missing file warns and runs unpaired), update-job deny, backup.export excludes the pairing credential
+  (manage→full escalation closed), probe units count toward the 64 cap, .tmp-anywhere exclusion, unit
+  disable on failed create rollback. Full wat suite 716.4 s exit 0, twice.
+- 8192c2a (supervisor, X's leftover): the latch follows the credential — revoke stands the monitor down
+  permanently, rotation re-arms from the new key; pinned by TestPairingPollerLatchFollows.
+- 468d960 (supervisor): TECHNICAL.md accepted-limitations section (per-process caps/D3, real
+  mixed-version behavior, rotation window as manager bookkeeping, downgrade caveats, small warts) +
+  the live revocation contract.
+- a33aec9 (Z, mgr): single-tier pairing-line contract both directions (comma lists rejected; renderer
+  emits one tier word), token field 10 parsed/carried through refresh/changeKey/reverse (variadic
+  MakeToken), attach flow pinned against the real engine parser via a fake-engine test binary,
+  vScepterName -r mirror. cmd suite green.
+Wave 2 decisions recorded: backup.export excludes .pairing (owner-decision item resolved to the safe
+side); auto.test excluded from the mutation-journal set (idempotent by already_running); rotation
+overlap stays manager bookkeeping (engine accepts only the current credential — documented).
+Proceeding to wave 3: fresh read-only regression sweep (full battery, mixed-version retest,
+user-visible string review) → READY FOR REVIEW.
+Commit: 2233fb0, f9429a0, b24af32, 8192c2a, 468d960, a33aec9
