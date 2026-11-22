@@ -1101,3 +1101,40 @@ Commit: a86676a, e92fe35
 PHASE E READY FOR REVIEW. All five plan phases committed. Proceeding to debug wave 1 (four parallel
 adversarial reviewers: wire protocol, state, managers, compat).
 Commit: 78113db, 8b7fa8e
+
+## 2026-11-22 · supervisor · Debug wave 1 complete — 4 reviewers, findings verified; wave 2 in flight
+Four read-only adversarial reviewers (wire protocol / state model / managers / compat) delivered 30+
+findings. Supervisor verified the majors firsthand against the code before batching fixes:
+- HIGH, confirmed: unbounded journal keep map + every-read journaled (two reviewers; "bounded journal"
+  comment false, rotation O(n) rewrite); .pairing store format split (bash key=value vs engine watp1:
+  — manager-paired Kharej NEVER arms the channel; manager rotate on an engine store mints garbage;
+  live-reproduced); contactLatch builds the session without the latch PSK (shipped -latch-dial can
+  never connect; the wat drill hand-builds its config, masking it); -pair-to has no exit path (mgr
+  attach hangs) and the client never re-reads the stored pairing at start (pairing dies on restart);
+  update-job missing from scepterParamDeny (remote yml → unit-start crash loop via flag.Set order).
+- MEDIUM, confirmed: journal replay ignores cmd (reused id replays the old command's outcome — two
+  reviewers); hello gate refuses any server older than the client's EXACT version (first patch
+  release silently kills the cockpit; floor exists but unused); fixed hello id journaled across
+  updates (stale hello replay); revoke/rotate not engine-enforced (no watcher — plan's "instant
+  revocation" unimplemented); tunnel up/down outside scepter changes the state doc without a seq
+  bump; probes bypass the 64-unit cap; field 10 unwired (ParsePairingTokenField dead code) + Go mgr
+  ReadToken drops field 10 on refresh; forgeable probe provenance (params.path substring → destructive
+  orphan sweep); backup.export ships .pairing to manage-tier (manage→full escalation, pinned as
+  deliberate — resolved: exclude the credential from exports).
+- LOW/accepted: TTL unbounded + future ts; no recover on serve paths; no latch proof deadline; audit
+  misses decode-level garbage; audit two-writer window; .tmp prefix exclusion gap; enabled-fileless
+  unit after failed create; .bak one generation (accepted, wattun.prev precedent); probe port TOCTOU
+  (self-healing); L2 tombstone window, L7 client concurrency, L8 error-id loss (accepted, logged);
+  hello toward a 3.4 server = one local dial attempt of the JSON's first 2 bytes (0x7b22=31778) on the
+  old allowlist then reset — inherent to a stream channel over a port-header protocol, documented as
+  the real mixed-version behavior; M1 caps are per-PROCESS (stored pairing), no per-credential proof
+  in-band (consistent with D3 today, documented; D4 multi-credential needs the panel-era design).
+Wave 2 fixes landed so far: 2233fb0 (cluster W, wat/: mutation-only bounded journal, cmd-aware
+replay, hello floor, TTL clamp, panic guard, liveness watcher via:"watch", latch proof deadline,
+exact pair-field, ValidScepterName -r ban, ReloadPairing/CloseScepter disarm APIs, decode-reject
+audit; full wat suite 712 s exit 0), f9429a0 (cluster Y, bash: store speaks the engine format with
+# bookkeeping, Iran-side pair/rotate/revoke guard, audit O_APPEND append, F11 positional, MGR
+2026112211; test-manager ALL OK 1079). Clusters X (cmd/wattun wiring: latch PSK, dual-format store
+read + line-1 rule, .pairing poller, -pair-to standalone + yml key, deny list, backup exclusion,
+probe cap, unit disable) and Z (mgr) queued.
+Commit: 2233fb0, f9429a0
