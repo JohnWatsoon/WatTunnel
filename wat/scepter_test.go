@@ -553,12 +553,27 @@ type fakeOps struct {
 	active    map[string]bool
 	creates   int // Create calls that executed (journal idempotency counting)
 
+	// phase C: probe lifecycle bookkeeping and the auto-test rows the fake serves
+	probes      map[string]string // probe id -> carrier, while open
+	probeSeq    int
+	failLink    map[string]bool // carrier.change link check fails for these tunnels
+	autoMu      sync.Mutex      // the run flag rides a goroutine (async like the production run)
+	autoRunning bool
+	autoRunID   string
+	autoMode    string
+	rows        []map[string]any // the canned ranked table (carrier, port, ok)
+
 	inN, maxIn atomic.Int64 // concurrency probe: the queue test pins max concurrent edits to 1
 	delay      time.Duration
 }
 
 func newFakeOps(t *testing.T) *fakeOps {
-	return &fakeOps{dir: t.TempDir(), failStart: map[string]bool{}, binds: map[int]string{}, active: map[string]bool{}}
+	return &fakeOps{dir: t.TempDir(), failStart: map[string]bool{}, binds: map[int]string{}, active: map[string]bool{},
+		probes: map[string]string{}, failLink: map[string]bool{},
+		rows: []map[string]any{
+			{"rank": 1, "carrier": "tcp", "port": 20501, "ok": true, "down_mbps": 9.5},
+			{"rank": 2, "carrier": "udp", "port": 20502, "ok": false, "why": "no link"},
+		}}
 }
 
 func (f *fakeOps) runUnit(name, action string) {
@@ -742,6 +757,109 @@ func (f *fakeOps) SetLimits(name string, items []string) (map[string]any, int) {
 	}
 	writeAtomicTest(f.yml(name), setYMLKey(string(b), "limits", strings.Join(items, ", ")))
 	return map[string]any{"name": name, "limits": len(items)}, CodeOK
+}
+
+// ---- phase C fakes: probes, carrier change, the auto-test table ----
+
+func (f *fakeOps) TestOpen(carrier string, ttlS int) (map[string]any, int) {
+	f.begin()
+	defer f.end()
+	if carrier == "" || strings.Contains(carrier, "+") || carrier == "icmp" {
+		return map[string]any{"carrier": carrier}, CodeBadRequest
+	}
+	f.probeSeq++
+	id := fmt.Sprintf("probe-%d", f.probeSeq)
+	f.probes[id] = carrier
+	return map[string]any{"id": id, "carrier": carrier, "port": 20900 + f.probeSeq,
+		"key": "probekey123456789012345678901234", "path": "/wat", "ttl": ttlS}, CodeOK
+}
+
+func (f *fakeOps) TestClose(id string) (map[string]any, int) {
+	f.begin()
+	defer f.end()
+	if _, open := f.probes[id]; !open {
+		return map[string]any{"id": id}, CodeNotFound
+	}
+	delete(f.probes, id)
+	return map[string]any{"id": id, "closed": true}, CodeOK
+}
+
+// CarrierChange runs the fake's edit path; a failed link check restores the pre-change yml and reports
+// rolled_back — the same shape the production ops answers.
+func (f *fakeOps) CarrierChange(name, carrier string, params map[string]string) (map[string]any, int) {
+	f.begin()
+	defer f.end()
+	pre, err := os.ReadFile(f.yml(name))
+	if err != nil {
+		return map[string]any{"name": name}, CodeNotFound
+	}
+	set := map[string]string{"carrier": carrier}
+	for k, v := range params {
+		set[k] = v
+	}
+	p, code := f.Edit(name, ScepterPatch{Set: set})
+	if code != CodeOK {
+		return p, code
+	}
+	if f.failLink[name] {
+		writeAtomicTest(f.yml(name), string(pre))
+		f.runUnit(name, "restart")
+		return map[string]any{"detail": "link check failed", "rolled_back": true}, CodeInternal
+	}
+	p["listen"] = ":" + fmt.Sprint(4400+f.probeSeq)
+	return p, CodeOK
+}
+
+func (f *fakeOps) AutoTest(mode string, done func(ok, total int)) (map[string]any, int) {
+	if mode != "" && mode != "plain" && mode != "tls" {
+		return map[string]any{"modes": "plain,tls"}, CodeBadRequest
+	}
+	f.autoMu.Lock()
+	if f.autoRunning {
+		run := f.autoRunID
+		f.autoMu.Unlock()
+		return map[string]any{"run": run, "already_running": true}, CodeOK
+	}
+	f.autoRunning, f.autoRunID, f.autoMode = true, fmt.Sprintf("at-%d", time.Now().UnixNano()), mode
+	run := f.autoRunID
+	f.autoMu.Unlock()
+	go func() { // async like the production run; the engine learns the finish through done
+		time.Sleep(20 * time.Millisecond)
+		ok := 0
+		for _, r := range f.rows {
+			if r["ok"] == true {
+				ok++
+			}
+		}
+		f.autoMu.Lock()
+		f.autoRunning = false
+		f.autoMu.Unlock()
+		done(ok, len(f.rows))
+		_ = run
+	}()
+	return map[string]any{"run": run, "mode": mode, "shapes": len(f.rows)}, CodeOK
+}
+
+func (f *fakeOps) AutoRows() (map[string]any, int) {
+	f.autoMu.Lock()
+	defer f.autoMu.Unlock()
+	rows := make([]map[string]any, len(f.rows))
+	copy(rows, f.rows)
+	return map[string]any{"run": f.autoRunID, "mode": f.autoMode, "done": !f.autoRunning, "rows": rows}, CodeOK
+}
+
+func (f *fakeOps) ApplyRow(name string, row int) (map[string]any, int) {
+	if row < 1 || row > len(f.rows) {
+		return map[string]any{"row": row}, CodeNotFound
+	}
+	r := f.rows[row-1]
+	carrier, _ := r["carrier"].(string)
+	port, _ := r["port"].(int)
+	p, code := f.CarrierChange(name, carrier, map[string]string{"listen": fmt.Sprintf(":%d", port)})
+	if code == CodeOK {
+		p["row"] = row
+	}
+	return p, code
 }
 
 // dirSource is the ScepterSource reading the fake ops' CONF dir, so the state document reflects what the
@@ -1119,5 +1237,204 @@ func TestScepterCallRaw(t *testing.T) {
 	json.Unmarshal([]byte(last), &lr)
 	if fr.Chunk == nil || lr.Chunk == nil || lr.Chunk.I != lr.Chunk.N-1 {
 		t.Fatalf("chunk lines: first %v last %v", fr.Chunk, lr.Chunk)
+	}
+}
+
+// ---- phase C: remote carrier work ----
+
+// The probe lifecycle drill (plan C.3) over the RPC: open reports the dial parameters, the ttl is clamped and
+// echoed, the event ring logs open and close, and a second close of the same probe is not_found.
+func TestScepterTestOpenLifecycle(t *testing.T) {
+	ops := newFakeOps(t)
+	c, _ := newScepterPair(t, CapManage, "", dirSource{ops.dir}, ops)
+	// strictly-typed args first (they must not burn probe tokens)
+	if p, code := c.Call("test.open", map[string]any{}); code != CodeBadRequest {
+		t.Fatalf("open without carrier: %v %v", code, p)
+	}
+	if p, code := c.Call("test.open", map[string]any{"carrier": "udp", "ttl": "soon"}); code != CodeBadRequest {
+		t.Fatalf("open with a string ttl: %v %v", code, p)
+	}
+	p, code := c.Call("test.open", map[string]any{"carrier": "udp", "ttl": 5})
+	if code != CodeOK {
+		t.Fatalf("open: %v %v", code, p)
+	}
+	if p["ttl"] != float64(probeTTLMin) || p["carrier"] != "udp" || p["port"] == 0 || p["key"] == "" || p["id"] == "" {
+		t.Fatalf("open params: %v", p)
+	}
+	id1 := p["id"].(string)
+	if p, code = c.Call("test.open", map[string]any{"carrier": "tcp", "ttl": 99999}); code != CodeOK || p["ttl"] != float64(probeTTLMax) {
+		t.Fatalf("open clamped ttl: %v %v", code, p)
+	}
+	if p, code = c.Call("test.open", map[string]any{"carrier": "ws"}); code != CodeOK || p["path"] != "/wat" {
+		t.Fatalf("http-family probe must report the shared path: %v %v", code, p)
+	}
+	if p, code = c.Call("test.open", map[string]any{"carrier": "h2c"}); code != CodeRateLimited || p["resource"] != "probe" {
+		t.Fatalf("the fourth probe must hit the per-pair bucket: %v %v", code, p)
+	}
+	if _, code = c.Call("test.close", map[string]any{"id": id1}); code != CodeOK {
+		t.Fatal("close")
+	}
+	if p, code = c.Call("test.close", map[string]any{"id": id1}); code != CodeNotFound {
+		t.Fatalf("double close: %v %v", code, p)
+	}
+	if p, code = c.Call("test.close", map[string]any{}); code != CodeBadRequest {
+		t.Fatalf("close without id: %v %v", code, p)
+	}
+	// the event ring saw the lifecycle
+	p, code = c.Call("events.since", map[string]any{"seq": 0})
+	if code != CodeOK {
+		t.Fatal(code)
+	}
+	evs := p["events"].([]any)
+	var opened, closed int
+	for _, e := range evs {
+		switch m := e.(map[string]any); m["type"] {
+		case EvTestOpened:
+			opened++
+		case EvTestClosed:
+			closed++
+		}
+	}
+	if opened != 3 || closed != 1 {
+		t.Fatalf("events: opened %d closed %d (want 3/1)", opened, closed)
+	}
+}
+
+// carrier.change over the RPC: the happy switch reports carrier+listen and fires carrier_switched; a failed
+// link check rolls back, is journaled (a same-id retry replays it), and the base_seq tail carries fresh state.
+func TestScepterCarrierChangeRPC(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.writeDirect("w1", t)
+	c, _ := newScepterPair(t, CapManage, "", dirSource{ops.dir}, ops)
+	p, code := c.Call("carrier.change", map[string]any{"name": "w1", "carrier": "tcp", "base_seq": 999})
+	if code != CodeOK || p["carrier"] != "tcp" || p["listen"] == nil {
+		t.Fatalf("carrier.change: %v %v", code, p)
+	}
+	if _, moved := p["state"]; !moved { // built on a stale base_seq: the fresh document rides along
+		t.Fatalf("stale base_seq must carry the state tail: %v", p)
+	}
+	b, _ := os.ReadFile(filepath.Join(ops.dir, "w1.yml"))
+	if !strings.Contains(string(b), "carrier: tcp") {
+		t.Fatalf("change did not land: %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(ops.dir, "w1.yml.bak")); err != nil {
+		t.Fatal("no .bak after the change")
+	}
+	p, code = c.Call("carrier.change", map[string]any{"name": "w1", "carrier": "tcp", "params": map[string]any{"carrier": "udp"}})
+	if code != CodeBadRequest {
+		t.Fatalf("duplicate carrier in params: %v %v", code, p)
+	}
+	if _, code = c.Call("carrier.change", map[string]any{"name": "w1", "carrier": ""}); code != CodeBadRequest {
+		t.Fatal("empty carrier accepted")
+	}
+	// the structural bucket shared with tunnel.create: five ops pass, the sixth is rate_limited
+	for i := 0; i < 4; i++ {
+		car := "tcp"
+		if i%2 == 0 {
+			car = "udp"
+		}
+		if _, code = c.Call("carrier.change", map[string]any{"name": "w1", "carrier": car}); code != CodeOK {
+			t.Fatalf("structural op %d: %v", i, code)
+		}
+	}
+	if p, code = c.Call("carrier.change", map[string]any{"name": "w1", "carrier": "tcp"}); code != CodeRateLimited || p["resource"] != "carrier.change" {
+		t.Fatalf("sixth structural op must be rate limited: %v %v", code, p)
+	}
+}
+
+// The carrier-change rollback drill with journal replay: the link check fails → rolled_back, the pre-change
+// config is restored and up again, and a retry with the SAME id replays the recorded outcome (at-most-once).
+func TestScepterCarrierChangeRollbackReplay(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.failLink["w2"] = true
+	ops.writeDirect("w2", t)
+	jp := filepath.Join(t.TempDir(), "journal.jsonl")
+	c, _ := newScepterPair(t, CapManage, jp, dirSource{ops.dir}, ops)
+	p, code := c.Call("carrier.change", map[string]any{"name": "w2", "carrier": "ws", "id": "cc-7"})
+	if code != CodeInternal || p["rolled_back"] != true {
+		t.Fatalf("link-check failure: %v %v", code, p)
+	}
+	b, _ := os.ReadFile(filepath.Join(ops.dir, "w2.yml"))
+	if !strings.Contains(string(b), "carrier: udp") {
+		t.Fatalf("rollback did not restore the pre-change carrier: %q", b)
+	}
+	// the same id replays the recorded failure instead of re-running the op
+	p, code = c.Call("carrier.change", map[string]any{"name": "w2", "carrier": "ws", "id": "cc-7"})
+	if code != CodeInternal || p["rolled_back"] != true {
+		t.Fatalf("replay: %v %v", code, p)
+	}
+	if b2, _ := os.ReadFile(filepath.Join(ops.dir, "w2.yml")); string(b2) != string(b) {
+		t.Fatal("the replay mutated the tunnel")
+	}
+}
+
+// The fleet auto-test round-trip on a sim Kharej (plan C.3): trigger, wait for EvAutoTested, read the ranked
+// table, apply row 1 through the carrier.change path.
+func TestScepterAutoTestRPC(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.writeDirect("at1", t)
+	c, _ := newScepterPair(t, CapManage, "", dirSource{ops.dir}, ops)
+	if p, code := c.Call("auto.test", map[string]any{"mode": "nope"}); code != CodeBadRequest || p["modes"] != "plain,tls" {
+		t.Fatalf("unknown mode: %v %v", code, p)
+	}
+	p, code := c.Call("auto.test", nil)
+	if code != CodeOK || p["mode"] != "plain" || p["shapes"] != float64(2) || p["run"] == "" {
+		t.Fatalf("auto.test: %v %v", code, p)
+	}
+	// wait for the run to finish (the trigger answers before it does)
+	var rows []any
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		pr, pc := c.Call("auto.rows", nil)
+		if pc != CodeOK {
+			t.Fatalf("auto.rows: %v", pc)
+		}
+		if done, _ := pr["done"].(bool); done {
+			rows = pr["rows"].([]any)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("auto.test run never finished")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	r1 := rows[0].(map[string]any)
+	if r1["rank"] != float64(1) || r1["carrier"] != "tcp" || r1["ok"] != true {
+		t.Fatalf("rank 1 must be the servable shape: %v", r1)
+	}
+	r2 := rows[1].(map[string]any)
+	if r2["ok"] != false || r2["why"] == "" {
+		t.Fatalf("rank 2 is the failed shape: %v", r2)
+	}
+	// EvAutoTested announced the finish
+	p, _ = c.Call("events.since", map[string]any{"seq": 0})
+	var tested bool
+	for _, e := range p["events"].([]any) {
+		if m := e.(map[string]any); m["type"] == EvAutoTested {
+			if d := m["detail"].(map[string]any); d["ok"] == float64(1) && d["total"] == float64(2) {
+				tested = true
+			}
+		}
+	}
+	if !tested {
+		t.Fatalf("no auto_test event with (ok 1, total 2): %v", p["events"])
+	}
+	// apply row 1 through the carrier.change path
+	p, code = c.Call("auto.apply", map[string]any{"name": "at1", "row": 1})
+	if code != CodeOK || p["carrier"] != "tcp" || p["row"] != float64(1) {
+		t.Fatalf("auto.apply: %v %v", code, p)
+	}
+	b, _ := os.ReadFile(filepath.Join(ops.dir, "at1.yml"))
+	if !strings.Contains(string(b), "carrier: tcp") || !strings.Contains(string(b), "listen: :20501") {
+		t.Fatalf("auto.apply did not land: %q", b)
+	}
+	if _, code = c.Call("auto.apply", map[string]any{"name": "at1", "row": 0}); code != CodeBadRequest {
+		t.Fatal("row 0 accepted")
+	}
+	if p, code = c.Call("auto.apply", map[string]any{"name": "at1", "row": 9}); code != CodeNotFound {
+		t.Fatalf("out-of-range row: %v %v", code, p)
+	}
+	if _, code = c.Call("auto.apply", map[string]any{"name": "at1"}); code != CodeBadRequest {
+		t.Fatal("missing row accepted")
 	}
 }

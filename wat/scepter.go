@@ -312,6 +312,10 @@ const (
 	EvPairRevoked     = "pair_revoked"
 	EvScepterUp       = "scepter_up"
 	EvScepterDown     = "scepter_down"
+	// Phase C (remote carrier work), appended like EvTunnelEdited: data, not commands.
+	EvTestOpened = "test_opened" // a remote probe listener came up (test.open / the auto-test core)
+	EvTestClosed = "test_closed" // a probe listener closed (ttl expiry or test.close)
+	EvAutoTested = "auto_test"   // a fleet auto-test run finished (detail: mode, ok, total)
 )
 
 // ScepterEvent is one numbered event; Seq is its state_seq.
@@ -500,12 +504,18 @@ type ScepterState struct {
 	ops     ScepterOps // the write side (phase B); nil until SetOps — then write commands answer unknown_cmd
 	journal *ScepterJournal
 	rate    scepterRate
-	// createRate is the slower per-pair bucket on tunnel.create (plan B.2: "creation/test rate limits per
-	// pair"): five creates at once, then one per 10 s — a human cockpit never feels it, a runaway loop stops.
+	// createRate is the slower per-pair "structural" bucket on the unit-restarting ops — tunnel.create (plan
+	// B.2: "creation/test rate limits per pair"), carrier.change and auto.apply (phase C): five at once, then
+	// one per 10 s — a human cockpit never feels it, a runaway loop stops.
 	createRate scepterRate
-	qmu        sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
-	recent     []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
-	nowf       func() time.Time // tests shrink the clock
+	// probeRate bounds test.open (phase C: "rate-limited per pair like other write commands"): three probe
+	// listeners at once, then one per 30 s. The auto-test core's own probes bypass this bucket (the run is
+	// already gated by autoRate below); autoRate bounds auto.test itself.
+	probeRate scepterRate
+	autoRate  scepterRate
+	qmu       sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
+	recent    []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
+	nowf      func() time.Time // tests shrink the clock
 }
 
 // ScepterRec is one handled command for the doctor's "last commands" line (Recent).
@@ -528,6 +538,8 @@ func NewScepterState(pair *PairingConfig, src ScepterSource, journalPath string)
 		pair: pair, src: src, journal: j, started: time.Now(),
 		rate:       scepterRate{rate: 20, burst: 40},
 		createRate: scepterRate{rate: 0.1, burst: 5},
+		probeRate:  scepterRate{rate: 1.0 / 30, burst: 3},
+		autoRate:   scepterRate{rate: 1.0 / 60, burst: 2},
 		nowf:       time.Now,
 	}, nil
 }
@@ -617,6 +629,14 @@ var scepterCmds = map[string]scepterCmd{
 	"tunnel.restart": {minCap: CapManage, fn: cmdTunnelUnit("restart"), needsOps: true},
 	"limits.set":     {minCap: CapManage, fn: cmdLimitsSet, needsOps: true},
 	"preset.apply":   {minCap: CapManage, fn: cmdPresetApply, needsOps: true},
+
+	// Phase C (remote carrier work): probe listeners, the link-verified carrier change and the fleet auto-test.
+	"test.open":      {minCap: CapManage, fn: cmdTestOpen, needsOps: true},
+	"test.close":     {minCap: CapManage, fn: cmdTestClose, needsOps: true},
+	"carrier.change": {minCap: CapManage, fn: cmdCarrierChange, needsOps: true},
+	"auto.test":      {minCap: CapManage, fn: cmdAutoTest, needsOps: true},
+	"auto.rows":      {minCap: CapManage, fn: cmdAutoRows, needsOps: true},
+	"auto.apply":     {minCap: CapManage, fn: cmdAutoApply, needsOps: true},
 }
 
 // Handle validates and runs one request. Order (each step is a trust-boundary check, cheapest first):
@@ -947,6 +967,18 @@ type ScepterOps interface {
 	Delete(name string) (map[string]any, int)
 	Unit(name, action string) (map[string]any, int) // action: "start" | "stop" | "restart"
 	SetLimits(name string, items []string) (map[string]any, int)
+
+	// Phase C (remote carrier work). TestOpen serves a probe listener of one carrier shape for ttlS seconds and
+	// reports what the cockpit should dial (id, port, key, path); TestClose closes it early. CarrierChange is
+	// the edit path plus a link check of the new shape with automatic rollback. AutoTest triggers the ranking
+	// run and returns BEFORE it finishes — done is called with (rows ok, rows total) when the run completes;
+	// AutoRows reads the stored table; ApplyRow pushes row N (1-based, ranked) through CarrierChange.
+	TestOpen(carrier string, ttlS int) (map[string]any, int)
+	TestClose(id string) (map[string]any, int)
+	CarrierChange(name, carrier string, params map[string]string) (map[string]any, int)
+	AutoTest(mode string, done func(ok, total int)) (map[string]any, int)
+	AutoRows() (map[string]any, int)
+	ApplyRow(name string, row int) (map[string]any, int)
 }
 
 // ValidScepterName is the tunnel-name rule: a name becomes the systemd instance (wattun@NAME) and the config
@@ -966,9 +998,10 @@ func ValidScepterName(name string) bool {
 	return true
 }
 
-// scepterNewKey generates the PSK of a remotely created tunnel: 40 alphanumerics, the manager's new_key shape
-// (32 urandom bytes stripped of base64 punctuation). It travels to the cockpit inside the session AEAD only.
-func scepterNewKey() string {
+// ScepterNewKey generates a tunnel PSK: 40 alphanumerics, the manager's new_key shape (32 urandom bytes
+// stripped of base64 punctuation). It travels to the cockpit inside the session AEAD only — tunnel.create
+// uses it for the created tunnel, the phase C ops for probe listeners.
+func ScepterNewKey() string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 40)
 	if _, err := crand.Read(b); err != nil {
@@ -1013,7 +1046,7 @@ func cmdTunnelCreate(ss *ScepterState, req ScepterRequest) (map[string]any, int)
 	if !ss.createRate.allow(ss.nowf()) {
 		return map[string]any{"resource": "create"}, CodeRateLimited
 	}
-	spec := ScepterTunnelSpec{Name: name, Carrier: carrier, Ports: ports, Params: params, Key: scepterNewKey()}
+	spec := ScepterTunnelSpec{Name: name, Carrier: carrier, Ports: ports, Params: params, Key: ScepterNewKey()}
 	pre := ss.StateSeq() // the state_seq the intent met on arrival: base_seq is compared against THIS, not
 	// the post-apply seq (which the event bump advanced by one — a matching base_seq must not carry the state)
 	p, code := ss.ops.Create(spec)
@@ -1139,6 +1172,156 @@ func cmdPresetApply(ss *ScepterState, req ScepterRequest) (map[string]any, int) 
 	p, code := ss.ops.Edit(name, patch)
 	if code == CodeOK {
 		ss.AddEvent(EvTunnelEdited, map[string]any{"name": name, "preset": preset})
+		p = ss.writeTail(p, req, pre)
+	}
+	return p, code
+}
+
+// ---- remote carrier work (phase C) ----
+//
+// test.open / test.close / carrier.change / auto.test / auto.rows / auto.apply. The engine layer stays thin
+// (arg typing, buckets, events, tails); the shapes, the link check and the measurement live in the ops —
+// docs/TECHNICAL.md "Remote testing and carrier change" holds the version matrix (both ends 3.5.0) and the
+// Iran-side restart contract.
+
+// probeTTLBounds is the probe listener lifetime the handler clamps args ttl into: 10 s floor (a shorter one
+// races its own client), 1 h ceiling (a forgotten probe must not own a port forever), 300 s default.
+const (
+	probeTTLDefault = 300
+	probeTTLMin     = 10
+	probeTTLMax     = 3600
+)
+
+func probeTTLClamp(ttl int) int {
+	switch {
+	case ttl <= 0:
+		return probeTTLDefault
+	case ttl < probeTTLMin:
+		return probeTTLMin
+	case ttl > probeTTLMax:
+		return probeTTLMax
+	}
+	return ttl
+}
+
+// cmdTestOpen: test.open {carrier, ttl} — Kharej opens a probe listener of the requested shape (one carrier,
+// no bonds, no raw sockets: a probe must be a thing a throw-away client can dial from Iran) and reports what
+// to dial. The args ttl is the PROBE lifetime; the envelope's ttl/ttl_s field stays the intent TTL (Handle).
+func cmdTestOpen(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	carrier, ok := argString(req.Args, "carrier")
+	if !ok || carrier == "" {
+		return nil, CodeBadRequest
+	}
+	ttl, ok := argInt(req.Args, "ttl")
+	if !ok {
+		return nil, CodeBadRequest
+	}
+	if !ss.probeRate.allow(ss.nowf()) {
+		return map[string]any{"resource": "probe"}, CodeRateLimited
+	}
+	secs := probeTTLClamp(ttl)
+	p, code := ss.ops.TestOpen(carrier, secs)
+	if code == CodeOK {
+		p["ttl"] = secs // echo the effective lifetime (the request's was clamped)
+		ss.AddEvent(EvTestOpened, map[string]any{"carrier": carrier, "ttl": secs,
+			"id": p["id"], "port": p["port"]})
+	}
+	return p, code
+}
+
+// cmdTestClose: test.close {id} — close a probe listener before its ttl.
+func cmdTestClose(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	id, ok := argString(req.Args, "id")
+	if !ok || id == "" {
+		return nil, CodeBadRequest
+	}
+	p, code := ss.ops.TestClose(id)
+	if code == CodeOK {
+		ss.AddEvent(EvTestClosed, map[string]any{"id": id, "why": "closed"})
+	}
+	return p, code
+}
+
+// cmdCarrierChange: carrier.change {name, carrier, params?, base_seq?, ttl_s?} — the auto_apply discipline
+// remotely (plan C.1): apply the new carrier config, restart the unit, verify with a link check, and on any
+// failure restore the .bak config and restart again, reporting rolled_back with the failure. The IRAN side of
+// the restart is the cockpit's job (TECHNICAL.md contract): it rewrites its own tunnel and re-checks the link.
+func cmdCarrierChange(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok || name == "" {
+		return nil, CodeBadRequest
+	}
+	carrier, ok := argString(req.Args, "carrier")
+	if !ok || carrier == "" {
+		return nil, CodeBadRequest
+	}
+	params, ok := argStringMap(req.Args, "params")
+	if !ok {
+		return nil, CodeBadRequest
+	}
+	if _, dup := params["carrier"]; dup { // the args carrier is authoritative; a duplicate is a client bug
+		return map[string]any{"key": "carrier", "why": "pass the carrier as its own argument"}, CodeBadRequest
+	}
+	if !ss.createRate.allow(ss.nowf()) { // the structural bucket shared with tunnel.create
+		return map[string]any{"resource": "carrier.change"}, CodeRateLimited
+	}
+	pre := ss.StateSeq() // see cmdTunnelCreate: base_seq is judged against the pre-apply seq
+	p, code := ss.ops.CarrierChange(name, carrier, params)
+	if code == CodeOK {
+		ss.AddEvent(EvCarrierSwitched, map[string]any{"name": name, "carrier": carrier, "via": "carrier.change"})
+		p = ss.writeTail(p, req, pre)
+	}
+	return p, code
+}
+
+// cmdAutoTest: auto.test {mode?} — trigger the ranking run (mode "" or "plain": the plain shapes; "tls" adds
+// the TLS family). Returns BEFORE the run finishes: read auto.rows for the table, EvAutoTested fires when it
+// is done. A second trigger while one runs answers already_running, not an error.
+func cmdAutoTest(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	var mode string
+	if req.Args != nil { // argString(nil) is false by the strictly-typed convention; mode is OPTIONAL here
+		var ok bool
+		if mode, ok = argString(req.Args, "mode"); !ok {
+			return nil, CodeBadRequest
+		}
+	}
+	if !ss.autoRate.allow(ss.nowf()) {
+		return map[string]any{"resource": "auto.test"}, CodeRateLimited
+	}
+	if mode == "" {
+		mode = "plain" // the default catalog; the response and the event echo the resolved mode
+	}
+	p, code := ss.ops.AutoTest(mode, func(okRows, total int) {
+		ss.AddEvent(EvAutoTested, map[string]any{"mode": mode, "ok": okRows, "total": total})
+	})
+	return p, code
+}
+
+// cmdAutoRows: auto.rows — the stored table of the last run (ranked: servable shapes first, by measured rate).
+func cmdAutoRows(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	return ss.ops.AutoRows()
+}
+
+// cmdAutoApply: auto.apply {name, row} — apply ranked row N (1-based, the auto.rows order) to tunnel name
+// through the carrier.change path, so the same link check and rollback guard a ranked switch.
+func cmdAutoApply(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	name, ok := argString(req.Args, "name")
+	if !ok || name == "" {
+		return nil, CodeBadRequest
+	}
+	row, ok := argInt(req.Args, "row")
+	if !ok || row < 1 {
+		return nil, CodeBadRequest
+	}
+	if !ss.createRate.allow(ss.nowf()) { // the structural bucket: auto.apply restarts a unit
+		return map[string]any{"resource": "auto.apply"}, CodeRateLimited
+	}
+	pre := ss.StateSeq()
+	p, code := ss.ops.ApplyRow(name, row)
+	if code == CodeOK {
+		if c, is := p["carrier"]; is {
+			ss.AddEvent(EvCarrierSwitched, map[string]any{"name": name, "carrier": c, "via": "auto.apply", "row": row})
+		}
 		p = ss.writeTail(p, req, pre)
 	}
 	return p, code

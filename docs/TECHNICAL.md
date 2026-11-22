@@ -2414,8 +2414,10 @@ Kharej owns state. `state.get` returns one versioned document: engine version, p
 `tunnels` (`{name, carrier, state, health, metrics}`), `event_cursor`, `uptime_s`, `state_seq`. The `state_seq`
 counter increments on every change; clients diff by seq, never by wall clock. Events are numbered with the same
 seq and replayable (`events.since {seq}`, last 512): `tunnel_up`, `tunnel_down`, `tunnel_deleted`,
-`carrier_switched`, `tunnel_edited` (phase B: edit/limits/preset applied), `heal_action`, `sla_breach`,
-`update_available`, `pair_rotated`, `pair_revoked`, `scepter_up`, `scepter_down`. Every intent is journaled
+`carrier_switched`, `tunnel_edited` (phase B: edit/limits/preset applied), `test_opened` / `test_closed`
+(phase C: a remote probe listener came up / closed), `auto_test` (phase C: a ranking run finished, with
+`ok`/`total`), `heal_action`, `sla_breach`, `update_available`, `pair_rotated`, `pair_revoked`,
+`scepter_up`, `scepter_down`. Every intent is journaled
 (append-only, atomic writes, rotated at 1 MB) with its outcome; a retry of the same command id returns the
 recorded outcome (at-most-once application). Applied intents and rolled-back Kharej-side failures
 (`code=internal`) are journaled; pure rejections (`denied`/`stale`/`rate_limited`/`bad_request`) are
@@ -2474,6 +2476,74 @@ keys this binary parses; the keys the ops write themselves (`mode`, `key`, `carr
 `latch-dial`, `scepter-call`, `scepter-args`, `state-dir`) are refused. A pairing may never edit, delete or
 restart its OWN unit (`code=1` with `{"self":…}`) — the cockpit channel rides that very unit; the local
 console handles it.
+
+### Phase C commands: remote testing and carrier change (both ends 3.5.0)
+
+Phase C lets the cockpit drive carrier work remotely: open a probe listener on Kharej, switch a tunnel's
+carrier with an automatic rollback, and run/read/apply a carrier ranking. **Version matrix: both ends need
+3.5.0** (the client-side hello already refuses older peers). Nothing here rides the session pump: probe
+listeners are separate units and the link check dials loopback sockets, so tunnel throughput is untouched.
+
+| Command | Args | Capability | Notes |
+|---|---|---|---|
+| `test.open` | `{carrier, ttl?}` | manage | opens a probe listener of the requested shape for `ttl` seconds (default 300, clamped to 10..3600, the effective value is echoed); answers `{id, carrier, port, key, path?, metrics?, ttl}` |
+| `test.close` | `{id}` | manage | closes a probe before its ttl |
+| `carrier.change` | `{name, carrier, params?, base_seq?, ttl_s?}` | manage | the edit path plus a link check with automatic rollback; answers `{name, carrier, listen?, link:"ok"}` |
+| `auto.test` | `{mode?}` | manage | triggers the ranking run and answers `{run, mode, shapes}` BEFORE it finishes; `EvAutoTested` fires when done; a second trigger answers `{run, already_running:true}` |
+| `auto.rows` | — | manage | the stored ranked table `{run, mode, done, ok, rows:[{rank, carrier, port, ok, down_mbps?, why?}]}` |
+| `auto.apply` | `{name, row, base_seq?, ttl_s?}` | manage | applies ranked row N (1-based) through `carrier.change`; answers like it plus `row` |
+
+**The probe listener** (`test.open`) is a short-lived server unit named `probe-<unix>…` created through the
+same file/unit machinery as `tunnel.create`, with three hard properties: it carries a bare `ports:` line (an
+explicit EMPTY allowlist — only target port 0, the built-in speed test, is ever answered, so the probe can
+never reach a Kharej local service), it uses its own generated key (delivered in the response, inside the
+session AEAD), and it binds a free port in 20500..20999 (the manager's test-port range, checked against every
+other tunnel's binds and metrics). Supported shapes: one carrier, no bonds — `udp`, `tcp`, `tls`, `ws`,
+`wss`, `h2`, `h2c`, `grpc` (the raw-IP carriers have no probe listener; off Linux they answer
+`carrier_needs` before anything is written). The probe is removed — unit stopped, files deleted, nothing kept
+as `.bak` (it is engine machinery, not owner data) — at ttl expiry or `test.close`; events `test_opened` /
+`test_closed` land in the event ring, and `test.open` is additionally rate-limited per pair (3 at once, then
+1 per 30 s). An engine restart forgets its timers, so startup sweeps away any provenance-marked `probe-*.yml`
+left by a previous life (ymls without the `# probe tunnel created by scepter test.open` line are never
+touched, however they are named). Probes count toward the per-host tunnel cap like any unit.
+
+**carrier.change** is the auto-apply discipline executed remotely (plan C.1): validate the target shape
+(`carrier_needs` before any file moves) → patch the yml (the carrier key plus `params`, re-parsed, bind
+collisions checked against the NEW shape) → backup `.bak` → restart the unit → verify → and on any failure
+restore the `.bak`, restart again, and answer `code=7` with `{"rolled_back":true, "detail":…}`. The verify is
+a **link check**: after systemd reports the unit active, every port the new carrier binds is probed on
+loopback — TCP carriers by connect (the pool listener accepts, so a successful connect is exactly "the new
+carrier is serving"), UDP carriers by a bind-conflict test (binding the same loopback address must fail while
+the unit holds the port; Windows does not reliably surface ICMP port-unreachable on a connected UDP socket,
+the bind test is exact on every OS), retried for up to 4 s. Raw carriers bind no port — for them the unit
+liveness verify is the whole server-side check.
+
+**The Iran-side restart contract:** `carrier.change` changes and verifies only the KHAREJ side. After a
+successful change the cockpit rewrites its own tunnel (new carrier, `listen` from the response as its peer
+port) and restarts its own tunnel, then runs its own link check — the pass-traffic verdict. Until that
+restart completes, the old carrier config on Iran simply fails to connect to the new shape; nothing on
+Kharej rolls back because of it (a failed cockpit restart is reverted by running `carrier.change` back to
+the old row/carrier).
+
+**auto.test / auto.rows / auto.apply** make the fleet auto-test cockpit-managed. The pre-existing auto tester
+is wattun-manager bash logic on IRAN (`at_probe`/`at_curl`: throw-away clients, a `/stats` alive wait, a
+`/speedtest` measurement); the triggerable core lives in the engine ops on Kharej and measures rows the same
+way the fast preset does — for each shape in the mode's catalog (`plain`: `udp, tcp, ws, h2c`; `tls`: adds
+`tls, wss, h2, grpc`; no external material — self-signed TLS in memory, the shared `/wat` default path) it
+opens a probe, drives a throw-away client process of its own binary against it over loopback (the same
+command line the fast preset's `at_start` builds), waits for `/stats alive`, runs one down-direction
+`/speedtest?mb=4&streams=4`, records `{carrier, port, ok, down_mbps}` and closes the probe. The table is
+ranked (servable shapes first by measured rate, failures last), stored on Kharej, and served by `auto.rows`;
+`auto.apply` pushes a ranked row through `carrier.change`, so the link check and rollback guard the switch.
+The run is ASYNC (a full run takes roughly a minute) and rate-limited per pair (2 at once, then 1 per 60 s);
+each shape's measurement is honest about failure (`why: "no link in 15 s"` and friends). What it ranks is
+which shapes Kharej can SERVE and how fast — the DPI verdict stays Iran's: the cockpit runs its own fast
+preset locally (`wattun-manager auto-test`) and applies a row via `auto.apply`/`carrier.change`.
+
+Rate buckets for the phase C commands (per pair, on top of the general 20/s bucket): `probeRate` for
+`test.open` (3 at once, 1 per 30 s), `autoRate` for `auto.test` (2 at once, 1 per 60 s), and the structural
+bucket shared with `tunnel.create` (5 at once, 1 per 10 s) for `carrier.change` and `auto.apply` — both
+restart units, so both are structural.
 
 ### The one-shot client action: `wattun -scepter-call`
 

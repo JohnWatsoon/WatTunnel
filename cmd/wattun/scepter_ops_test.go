@@ -8,13 +8,16 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
@@ -458,4 +461,375 @@ func mustGlobExisting(t *testing.T, dir string) []string {
 		t.Fatal(err)
 	}
 	return m
+}
+
+// ---- phase C: probe listeners, carrier change, the auto-test core ----
+
+// linkStub is the link-check seam every probe/change test needs: the fake units bind no real sockets, so the
+// production dialer would (correctly) report nothing listening. The stub records what it was asked to check.
+func linkStub() (func(carrier string, binds map[int]string) error, *[]string) {
+	var calls []string
+	return func(carrier string, binds map[int]string) error {
+		ps := make([]int, 0, len(binds))
+		for p := range binds {
+			ps = append(ps, p)
+		}
+		sort.Ints(ps)
+		calls = append(calls, fmt.Sprintf("%s:%v", carrier, ps))
+		return nil
+	}, &calls
+}
+
+func TestFileScepterOpsTestOpenLifecycle(t *testing.T) {
+	o, fu, _ := testOps2(t)
+	o.probeMinS = 1 // the ttl-expiry drill must not wait the documented 10 s floor
+	link, calls := linkStub()
+	o.linkCheck = link
+	// rejections before anything is written or started
+	if p, code := o.TestOpen("tcp+udp", 0); code != wat.CodeBadRequest {
+		t.Fatalf("bond probe: %v %v", code, p)
+	}
+	if p, code := o.TestOpen("icmp", 0); runtime.GOOS != "linux" && code != wat.CodeCarrierNeeds {
+		t.Fatalf("raw-carrier probe on %s: %v %v", runtime.GOOS, code, p)
+	} else if runtime.GOOS == "linux" && (code != wat.CodeBadRequest || p["why"] == "") {
+		t.Fatalf("raw-carrier probe on linux: %v %v", code, p)
+	}
+	if p, code := o.TestOpen("nope-carrier", 0); code != wat.CodeBadRequest {
+		t.Fatalf("unknown carrier: %v %v", code, p)
+	}
+	if len(*calls) != 0 || fu.count("start") != 0 {
+		t.Fatal("a rejected probe must not touch units or the link check")
+	}
+	// open: the dial parameters come back, the speed-test-only yml is on disk, the unit is up
+	p, code := o.TestOpen("udp", 0)
+	if code != wat.CodeOK {
+		t.Fatalf("open: %v %v", code, p)
+	}
+	id := p["id"].(string)
+	port := p["port"].(int)
+	if port < 20500 || port >= 21000 || p["key"] == "" || p["ttl"] != 300 {
+		t.Fatalf("open params: %v", p)
+	}
+	if !fu.did(id + ":start") {
+		t.Fatal("probe unit was not started")
+	}
+	y := mustReadExisting(t, filepath.Join(o.conf, id+".yml"))
+	cfg, err := parseConfig(y, nil)
+	if err != nil || !cfg.PortsSet || len(cfg.Ports) != 0 {
+		t.Fatalf("probe yml must be a speed-test-only unit (empty ports list): %v\n%s", err, y)
+	}
+	if !strings.Contains(y, "carrier: udp") || !strings.Contains(y, fmt.Sprintf("listen: :%d", port)) || !strings.Contains(y, probeProvenance) {
+		t.Fatalf("probe yml shape:\n%s", y)
+	}
+	// a second open lands on another name and port
+	p2, code := o.TestOpen("tcp", 0)
+	if code != wat.CodeOK || p2["port"] == port || p2["id"] == id {
+		t.Fatalf("second open: %v %v", code, p2)
+	}
+	// explicit close: files gone, unit stopped, the id is no longer known
+	if _, code = o.TestClose(id); code != wat.CodeOK {
+		t.Fatal("close")
+	}
+	if _, err := os.Stat(filepath.Join(o.conf, id+".yml")); !os.IsNotExist(err) {
+		t.Fatal("closed probe left its yml")
+	}
+	if !fu.did(id + ":stop") {
+		t.Fatal("closed probe did not stop its unit")
+	}
+	if _, code = o.TestClose(id); code != wat.CodeNotFound {
+		t.Fatalf("double close: %v", code)
+	}
+	// ttl expiry: the shortest ttl the ops accept, then the timer must have done the same thing
+	p3, code := o.TestOpen("udp", 1)
+	if code != wat.CodeOK || p3["ttl"] != 1 {
+		t.Fatalf("short-ttl open: %v %v", code, p3)
+	}
+	id3 := p3["id"].(string)
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(o.conf, id3+".yml")); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the probe was not removed at ttl expiry")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !fu.did(id3 + ":stop") {
+		t.Fatal("expired probe did not stop its unit")
+	}
+	o.TestClose(p2["id"].(string))
+	// the restart-orphan sweep (what newFileScepterOps runs at startup) takes exactly the ymls carrying the
+	// probe provenance line: an engine restart forgets its timers, so the previous life's probes must not
+	// linger, while a user tunnel merely named probe-something stays.
+	p4, code := o.TestOpen("ws", 300)
+	if code != wat.CodeOK {
+		t.Fatalf("ws open: %v %v", code, p4)
+	}
+	time.Sleep(1100 * time.Millisecond) // probe names are second-granular: let the next open get its own name
+	p5, _ := o.TestOpen("h2c", 300)
+	o.TestClose(p5["id"].(string))
+	userYML := filepath.Join(o.conf, "probe-user.yml")
+	if err := os.WriteFile(userYML, []byte("mode: server\ncarrier: udp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// simulate the previous life: p4's files exist on disk but the live map forgot it
+	orphan := p4["id"].(string)
+	o.TestClose(orphan)
+	os.WriteFile(o.path(orphan, "yml"), []byte("# "+probeProvenance+"\nmode: server\n"), 0o600)
+	o.orphanSweep = false
+	o.sweepOrphanProbes()
+	if _, err := os.Stat(o.path(orphan, "yml")); !os.IsNotExist(err) {
+		t.Fatal("orphan sweep left a provenance-marked probe yml")
+	}
+	if !fu.did(orphan + ":stop") {
+		t.Fatal("orphan sweep did not stop the orphaned probe unit")
+	}
+	if _, err := os.Stat(userYML); err != nil {
+		t.Fatal("sweep removed a user tunnel named probe-*")
+	}
+	os.Remove(userYML)
+}
+
+func TestFileScepterOpsCarrierChangeRollback(t *testing.T) {
+	o, fu, _ := testOps2(t)
+	link, calls := linkStub()
+	o.linkCheck = link
+	o.Create(wat.ScepterTunnelSpec{Name: "c1", Carrier: "udp", Ports: "20030", Key: "kk",
+		Params: map[string]string{"listen": ":20100"}})
+	// happy change: carrier key swapped, unit restarted, the link check saw the new bind, listen reported
+	p, code := o.CarrierChange("c1", "tcp", nil)
+	if code != wat.CodeOK || p["carrier"] != "tcp" || p["listen"] != 20100 {
+		t.Fatalf("carrier change: %v %v", code, p)
+	}
+	y := mustReadExisting(t, filepath.Join(o.conf, "c1.yml"))
+	if !strings.Contains(y, "carrier: tcp") || !strings.Contains(y, "listen: :20100") {
+		t.Fatalf("change did not land:\n%s", y)
+	}
+	if fu.count("c1:restart") != 1 {
+		t.Fatalf("change restarted the unit %d time(s)", fu.count("c1:restart"))
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("link check ran %d time(s)", len(*calls))
+	}
+	// params ride along (the cockpit moves the listen port with the shape)
+	if p, code = o.CarrierChange("c1", "udp", map[string]string{"listen": ":20101"}); code != wat.CodeOK || p["listen"] != 20101 {
+		t.Fatalf("change with params: %v %v", code, p)
+	}
+	// rejections: unknown shape, missing tunnel, self
+	if _, code = o.CarrierChange("c1", "nope-carrier", nil); code != wat.CodeBadRequest {
+		t.Fatal("unknown carrier accepted")
+	}
+	if _, code = o.CarrierChange("missing", "tcp", nil); code != wat.CodeNotFound {
+		t.Fatal("missing tunnel accepted")
+	}
+	if _, code = o.CarrierChange("self", "tcp", nil); code != wat.CodeBadRequest {
+		t.Fatal("self change accepted")
+	}
+	before := mustReadExisting(t, filepath.Join(o.conf, "c1.yml"))
+	// rollback drill A: the unit refuses the new config — .bak restored, restarted again, rolled_back
+	fu.dead["c1"] = true
+	restarts := fu.count("c1:restart")
+	if p, code = o.CarrierChange("c1", "tcp", nil); code != wat.CodeInternal || p["rolled_back"] != true {
+		t.Fatalf("dead-unit change: %v %v", code, p)
+	}
+	if now := mustReadExisting(t, filepath.Join(o.conf, "c1.yml")); now != before {
+		t.Fatalf("rollback did not restore:\n%s", now)
+	}
+	if fu.count("c1:restart") <= restarts {
+		t.Fatal("rollback did not restart with the restored config")
+	}
+	// rollback drill B: the unit comes up but the link check fails — same contract
+	fu.dead["c1"] = false
+	o.linkCheck = func(string, map[int]string) error { return fmt.Errorf("link check: nothing accepting") }
+	before = mustReadExisting(t, filepath.Join(o.conf, "c1.yml"))
+	if p, code = o.CarrierChange("c1", "tcp", nil); code != wat.CodeInternal || p["rolled_back"] != true ||
+		!strings.Contains(p["detail"].(string), "link check") {
+		t.Fatalf("link-failure change: %v %v", code, p)
+	}
+	if now := mustReadExisting(t, filepath.Join(o.conf, "c1.yml")); now != before {
+		t.Fatal("link-failure rollback did not restore the config")
+	}
+	if fu.count("c1:restart") <= restarts {
+		t.Fatal("link-failure rollback did not restart the restored unit")
+	}
+}
+
+// Multi-tunnel port bookkeeping (plan C.3): two remote creates take distinct metrics ports and listens, a
+// live probe blocks its own port against a third create, and probes count toward the tunnel cap.
+func TestFileScepterOpsMultiTunnelPorts(t *testing.T) {
+	o, _, _ := testOps2(t)
+	o.maxTunnels = 3 // small cap: two tunnels + one probe fill it
+	link, _ := linkStub()
+	o.linkCheck = link
+	p1, code := o.Create(wat.ScepterTunnelSpec{Name: "m1", Carrier: "udp", Ports: "20030", Key: "kk",
+		Params: map[string]string{"listen": ":20110"}})
+	if code != wat.CodeOK {
+		t.Fatalf("m1: %v %v", code, p1)
+	}
+	p2, code := o.Create(wat.ScepterTunnelSpec{Name: "m2", Carrier: "tcp", Ports: "20031", Key: "kk",
+		Params: map[string]string{"listen": ":20111"}})
+	if code != wat.CodeOK {
+		t.Fatalf("m2: %v %v", code, p2)
+	}
+	m1, m2 := p1["metrics"].(string), p2["metrics"].(string)
+	if m1 == "" || m2 == "" || m1 == m2 {
+		t.Fatalf("metrics ports collided or missing: %q %q", m1, m2)
+	}
+	// a live probe is bookkept like any unit: its port is busy, and it fills the cap
+	pr, code := o.TestOpen("udp", 300)
+	if code != wat.CodeOK {
+		t.Fatalf("probe open: %v %v", code, pr)
+	}
+	pp := pr["port"].(int)
+	p3, code := o.Create(wat.ScepterTunnelSpec{Name: "m3", Carrier: "udp", Ports: "20032", Key: "kk",
+		Params: map[string]string{"listen": fmt.Sprintf(":%d", pp)}})
+	if code != wat.CodePortBusy || p3["user"] != pr["id"] || p3["port"] != pp {
+		t.Fatalf("create on the probe's port: %v %v (probe id %v)", code, p3, pr["id"])
+	}
+	if p, code := o.Create(wat.ScepterTunnelSpec{Name: "m4", Carrier: "udp", Ports: "20033", Key: "kk",
+		Params: map[string]string{"listen": ":20112"}}); code != wat.CodeRateLimited || p["cap"] != 3 {
+		t.Fatalf("cap with a live probe: %v %v", code, p)
+	}
+	o.TestClose(pr["id"].(string))
+	// the probe's port is free again; the cap slot is free again
+	if _, code = o.Create(wat.ScepterTunnelSpec{Name: "m5", Carrier: "udp", Ports: "20034", Key: "kk",
+		Params: map[string]string{"listen": fmt.Sprintf(":%d", pp)}}); code != wat.CodeOK {
+		t.Fatalf("create on the closed probe's port: %v", code)
+	}
+}
+
+// The auto-test core: the trigger answers before the run, a second trigger sees already_running, the table
+// ranks servable shapes by rate, and row 1 applies through the carrier-change path.
+func TestFileScepterOpsAutoTest(t *testing.T) {
+	o, _, _ := testOps2(t)
+	link, _ := linkStub()
+	o.linkCheck = link
+	o.Create(wat.ScepterTunnelSpec{Name: "t1", Carrier: "udp", Ports: "20030", Key: "kk",
+		Params: map[string]string{"listen": ":20120"}})
+	hold := make(chan struct{})
+	o.runProbe = func(pr *scepterProbe) (float64, bool, string) {
+		<-hold
+		switch pr.carrier {
+		case "udp":
+			return 0, false, "no link"
+		case "ws":
+			return 7.0, true, ""
+		case "h2c":
+			return 3.0, true, ""
+		default:
+			return 9.5, true, ""
+		}
+	}
+	if p, code := o.AutoTest("nope", nil); code != wat.CodeBadRequest || p["modes"] != "plain,tls" {
+		t.Fatalf("unknown mode: %v %v", code, p)
+	}
+	p, code := o.AutoTest("", nil)
+	if code != wat.CodeOK || p["mode"] != "plain" || p["shapes"] != 4 || p["run"] == "" {
+		t.Fatalf("auto.test: %v %v", code, p)
+	}
+	run := p["run"].(string)
+	// while the run holds on shape 1, a second trigger reports already_running and a row apply refuses
+	p2, code := o.AutoTest("plain", nil)
+	if code != wat.CodeOK || p2["already_running"] != true || p2["run"] != run {
+		t.Fatalf("second trigger: %v %v", code, p2)
+	}
+	if p, code = o.ApplyRow("t1", 1); code != wat.CodeNotFound || !strings.Contains(p["why"].(string), "still going") {
+		t.Fatalf("apply while running: %v %v", code, p)
+	}
+	close(hold)
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		p, _ = o.AutoRows()
+		if done, _ := p["done"].(bool); done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("auto-test run never finished")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if p["run"] != run || p["ok"] != 3 {
+		t.Fatalf("rows head: %v", p)
+	}
+	rows := p["rows"].([]autoRow)
+	if len(rows) != 4 || rows[0].Carrier != "tcp" || rows[0].DownMbps != 9.5 || rows[0].Rank != 1 ||
+		rows[1].Carrier != "ws" || rows[2].Carrier != "h2c" || rows[3].Carrier != "udp" || rows[3].OK {
+		t.Fatalf("ranking: %+v", rows)
+	}
+	// row 1 applies via the carrier-change path; out-of-range rows are not_found
+	if p, code = o.ApplyRow("t1", 1); code != wat.CodeOK || p["carrier"] != "tcp" || p["row"] != 1 {
+		t.Fatalf("apply row 1: %v %v", code, p)
+	}
+	if y := mustReadExisting(t, filepath.Join(o.conf, "t1.yml")); !strings.Contains(y, "carrier: tcp") {
+		t.Fatalf("apply did not land:\n%s", y)
+	}
+	if p, code = o.ApplyRow("t1", 9); code != wat.CodeNotFound || p["why"] == nil {
+		t.Fatalf("out-of-range row: %v %v", code, p)
+	}
+	// the run's probes are closed: nothing lingers
+	if m, _ := filepath.Glob(filepath.Join(o.conf, "probe-*.yml")); len(m) != 0 {
+		t.Fatalf("auto-test left probe units: %v", m)
+	}
+}
+
+// The link check against REAL loopback sockets: TCP must connect, UDP must accept-and-drop the junk byte, and
+// both must fail against a closed port.
+func TestDialBindPort(t *testing.T) {
+	tl, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tl.Close()
+	go func() {
+		for {
+			c, err := tl.Accept()
+			if err != nil {
+				return
+			}
+			c.Close() // a probe listener accepts and waits; the check only needs the accept
+		}
+	}()
+	tcpPort := tl.Addr().(*net.TCPAddr).Port
+	if err := dialBindPort(tcpPort, false, time.Second); err != nil {
+		t.Fatalf("tcp bind check: %v", err)
+	}
+	ul, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ul.Close()
+	udpPort := ul.LocalAddr().(*net.UDPAddr).Port
+	if err := dialBindPort(udpPort, true, time.Second); err != nil {
+		t.Fatalf("udp bind check: %v", err)
+	}
+	// closed ports: grab one, release it, then check
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadPort := dead.Addr().(*net.TCPAddr).Port
+	dead.Close()
+	if err := dialBindPort(deadPort, false, 300*time.Millisecond); err == nil {
+		t.Fatal("tcp check accepted a closed port")
+	}
+	if err := dialBindPort(deadPort, true, 300*time.Millisecond); err == nil {
+		t.Fatal("udp check accepted a closed port")
+	}
+}
+
+// The throw-away client command line the auto-test core spawns (pure; the production spawn uses it verbatim).
+func TestProbeClientArgs(t *testing.T) {
+	pr := &scepterProbe{id: "probe-1", carrier: "wss", port: 20505, key: "kk"}
+	args := probeClientArgs(pr, "127.0.0.1:19750", 20506)
+	want := []string{"-mode", "client", "-carrier", "wss", "-key", "kk", "-peer", "127.0.0.1:20505",
+		"-metrics", "127.0.0.1:19750", "-map", "20506:1@127.0.0.1"}
+	if len(args) != len(want) {
+		t.Fatalf("args: %v", args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q (full: %v)", i, args[i], want[i], args)
+		}
+	}
 }

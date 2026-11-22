@@ -20,10 +20,13 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +34,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JohnWatsoon/WatTunnel/wat"
@@ -50,6 +54,9 @@ const scepterVerify = 6 * time.Second
 // actions and can fail starts at will. known is the config-key checker (main passes its flag.Lookup closure,
 // the same `known` the cfgWatcher uses; a test passes its own set — flag.Lookup is only populated once main
 // has registered the flags).
+//
+// The phase C seams (runProbe, linkCheck, nowf and the probe ttl bounds) fall back to their production
+// implementations when nil, so a struct-literal test can stub one seam without rebuilding the rest.
 type fileScepterOps struct {
 	conf       string // the tunnel dir: /etc/wattun in production, the -config dir in dev
 	self       string // this unit's own config name; write ops refuse it — the cockpit channel rides this unit
@@ -58,13 +65,68 @@ type fileScepterOps struct {
 	active     func(name string) bool          // unit liveness (systemctl is-active equivalent)
 	known      func(key string) bool           // is key a config key this binary accepts (nil = accept all)
 	logf       func(string, ...any)
+
+	probeMu     sync.Mutex               // guards probes and autoRun: timers and the auto-test goroutine run outside the command queue
+	probes      map[string]*scepterProbe // live probe listeners (test.open); closed at ttl expiry or test.close
+	autoRun     autoRunState             // the last (or running) fleet auto-test run
+	runProbe    func(pr *scepterProbe) (down float64, ok bool, why string)
+	linkCheck   func(carrier string, binds map[int]string) error
+	nowf        func() time.Time
+	probeMinS   int // probe ttl clamps; 0 = the documented defaults (10 / 3600 / 300)
+	probeMaxS   int
+	probeDefS   int
+	orphanSweep bool // true once the constructor swept restart-orphaned probes (once per process)
 }
+
+// scepterProbe is one live probe listener: a short-lived server unit (NAME = the probe id) that exists only so
+// a throw-away client can measure a carrier shape. It forwards nothing: the yml carries a bare `ports:` (an
+// explicit empty allowlist) and target port 0 — the built-in speed test — is answered before the allowlist
+// check (main.go serve()), so the probe can never reach a local service.
+type scepterProbe struct {
+	id      string // the probe tunnel name; doubles as the test.close id
+	carrier string
+	port    int    // the listen port on Kharej (all interfaces), from the 20500-20999 test range
+	key     string // the probe's own PSK, delivered to the cockpit inside the session AEAD
+	metrics string // the probe unit's private /stats ("" when no port was free)
+	timer   *time.Timer
+}
+
+// autoRow is one ranked row of a fleet auto-test run (auto.rows). Rank is the 1-based position in the ranked
+// order — exactly what auto.apply's row argument names.
+type autoRow struct {
+	Rank     int     `json:"rank"`
+	Carrier  string  `json:"carrier"`
+	Port     int     `json:"port,omitempty"`
+	OK       bool    `json:"ok"`
+	DownMbps float64 `json:"down_mbps,omitempty"`
+	Why      string  `json:"why,omitempty"`
+}
+
+// autoRunState is the stored result of the last auto.test (and the in-flight run's progress).
+type autoRunState struct {
+	id      string
+	mode    string
+	running bool
+	rows    []autoRow
+}
+
+// autoTestShapes is the auto-test catalog: shapes a Kharej can serve with no external material (self-signed
+// TLS in memory, the shared /wat default path). Raw-IP carriers (icmp, gre, ipip, raw shaped) have no probe
+// listener and are excluded; mode "" means plain.
+var autoTestShapes = map[string][]string{
+	"plain": {"udp", "tcp", "ws", "h2c"},
+	"tls":   {"udp", "tcp", "ws", "h2c", "tls", "wss", "h2", "grpc"},
+}
+
+// scepterLinkWait is how long the link check retries a bind dial after the unit reported active: the fresh
+// process binds within a moment of systemd's verdict.
+const scepterLinkWait = 4 * time.Second
 
 // newFileScepterOps wires the production ops: the systemd template wattun@NAME, exactly the unit install.sh
 // and the manager create. self is this process's own unit ("" when run without -config, e.g. a flag-run dev
 // server, which owns no yml the cockpit could collide with by name).
 func newFileScepterOps(conf, self string, known func(string) bool, logf func(string, ...any)) *fileScepterOps {
-	return &fileScepterOps{
+	o := &fileScepterOps{
 		conf: conf, self: self, maxTunnels: scepterMaxTunnels, known: known, logf: logf,
 		unit: func(name, action string) error {
 			u := "wattun@" + name
@@ -82,6 +144,8 @@ func newFileScepterOps(conf, self string, known func(string) bool, logf func(str
 			return exec.Command("systemctl", "is-active", "--quiet", "wattun@"+name).Run() == nil
 		},
 	}
+	o.sweepOrphanProbes() // an engine restart forgets its timers: probes from the previous life must not linger
+	return o
 }
 
 func runSystemctl(args ...string) error {
@@ -530,6 +594,13 @@ func (o *fileScepterOps) waitActive(name string, want bool) bool {
 // ---- tunnel.edit / preset.apply ----
 
 func (o *fileScepterOps) Edit(name string, patch wat.ScepterPatch) (map[string]any, int) {
+	return o.applyEdit(name, patch, false)
+}
+
+// applyEdit is the edit flow (validate → backup → apply → restart → verify → rollback). linkVerify upgrades
+// the liveness verify into a link check: every port the patched config would bind is dialed (phase C — a
+// carrier.switch that binds nothing serves nobody), and a failure restores the .bak.
+func (o *fileScepterOps) applyEdit(name string, patch wat.ScepterPatch, linkVerify bool) (map[string]any, int) {
 	if p, code := o.refuseSelf(name); code != wat.CodeOK {
 		return p, code
 	}
@@ -556,8 +627,8 @@ func (o *fileScepterOps) Edit(name string, patch wat.ScepterPatch) (map[string]a
 	rev, _ := cfg.get("reverse")
 	metrics, _ := cfg.get("metrics")
 	listen := func(k string) string { v, _ := cfg.get(k); return v }
-	if code, p := o.checkBindCollisions(name, scepterBinds(carrier, rev == "true" || rev == "1",
-		listen, metrics)); code != wat.CodeOK {
+	binds := scepterBinds(carrier, rev == "true" || rev == "1", listen, metrics)
+	if code, p := o.checkBindCollisions(name, binds); code != wat.CodeOK {
 		return p, code
 	}
 	// backup → apply → verify → rollback: the .bak is what the auto-apply flow leaves on Iran, so an owner
@@ -576,12 +647,119 @@ func (o *fileScepterOps) Edit(name string, patch wat.ScepterPatch) (map[string]a
 		o.rollback(f, string(old))
 		return map[string]any{"detail": "unit did not come up with the new config", "rolled_back": true}, wat.CodeInternal
 	}
+	if linkVerify {
+		if err := o.checkLink(carrier, binds); err != nil {
+			o.rollback(f, string(old))
+			return map[string]any{"detail": err.Error(), "rolled_back": true}, wat.CodeInternal
+		}
+	}
 	p := map[string]any{"name": name}
 	if _, is := patch.Set["carrier"]; is { // the handler turns this into the carrier_switched event
 		p["carrier"] = carrier
+		if port := listenPort(binds); port > 0 {
+			p["listen"] = port // what the Iran side must dial after its own restart (TECHNICAL.md contract)
+		}
 	}
 	o.logf("scepter ops: edited tunnel %s (%d key(s), ports %q)", name, len(patch.Set), patch.Ports)
 	return p, wat.CodeOK
+}
+
+// listenPort picks the carrier's own bind port out of a scepterBinds map (the metrics entry is not it).
+func listenPort(binds map[int]string) int {
+	ps := make([]int, 0, len(binds))
+	for p, what := range binds {
+		if what == "metrics" {
+			continue
+		}
+		ps = append(ps, p)
+	}
+	sort.Ints(ps)
+	if len(ps) == 0 {
+		return 0
+	}
+	return ps[0]
+}
+
+// CarrierChange: carrier.change {name, carrier, params} (plan C.1) — the auto_apply discipline remotely:
+// validate the target shape, apply the patch through the edit path with a LINK check, and let applyEdit roll
+// everything back (config restored, unit restarted) when the new carrier does not come up.
+func (o *fileScepterOps) CarrierChange(name, carrier string, params map[string]string) (map[string]any, int) {
+	if code, p := o.checkCarrier(carrier); code != wat.CodeOK { // a shape the host cannot serve fails before any file moves
+		return p, code
+	}
+	set := make(map[string]string, len(params)+1)
+	for k, v := range params {
+		set[k] = v
+	}
+	set["carrier"] = carrier
+	p, code := o.applyEdit(name, wat.ScepterPatch{Set: set}, true)
+	if code == wat.CodeOK {
+		o.logf("scepter ops: carrier change on %s -> %s (link check ok)", name, carrier)
+	}
+	return p, code
+}
+
+// checkLink verifies the new carrier's listeners actually accept: every non-metrics bind is probed on
+// loopback (TCP: connect; UDP: a bind conflict test, see dialBindPort). Retried until scepterLinkWait because
+// the fresh process binds within a moment of systemd's verdict. Raw carriers bind no port — the unit liveness
+// verify is all Kharej can see of them. This is the SERVER-side half of the link check: the pass-traffic
+// verdict comes from the cockpit restarting its own tunnel and re-checking (docs/TECHNICAL.md, the Iran-side
+// restart contract).
+func (o *fileScepterOps) checkLink(carrier string, binds map[int]string) error {
+	if o.linkCheck != nil { // test seam
+		return o.linkCheck(carrier, binds)
+	}
+	deadline := o.now().Add(scepterLinkWait)
+	for {
+		var err error
+		for p, what := range binds {
+			if what == "metrics" {
+				continue
+			}
+			if e := dialBindPort(p, isUDPBindName(what), 2*time.Second); e != nil {
+				err = e
+				break
+			}
+		}
+		if err == nil {
+			return nil
+		}
+		if o.now().After(deadline) {
+			return fmt.Errorf("link check: %v", err)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// isUDPBindName: scepterBinds labels each port with the carrier leg that binds it; a udp-tier leg gets a UDP
+// probe, everything else TCP.
+func isUDPBindName(what string) bool {
+	return what == "udp" || shapedUDPCarrier[what]
+}
+
+// dialBindPort checks one bound port on loopback. TCP: a connect — the pool listener accepts and waits, so a
+// successful connect is exactly "the new carrier is serving". UDP: a socket bind on the same loopback address
+// — a live listener makes the bind fail (the port is held, healthy), an unbound port binds (and the probe
+// socket is closed immediately). The bind probe replaces the classic junk-datagram probe: Windows does not
+// reliably surface ICMP port-unreachable on a connected UDP socket (measured 2026-11-22, TestDialBindPort),
+// while the bind conflict is exact on every OS. Assumes the tunnel binds a wildcard or loopback-reachable
+// address — the shape these ops and the manager write.
+func dialBindPort(port int, udp bool, d time.Duration) error {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	if !udp {
+		c, err := net.DialTimeout("tcp", addr, d)
+		if err != nil {
+			return err
+		}
+		c.Close()
+		return nil
+	}
+	c, err := net.ListenPacket("udp", addr)
+	if err == nil {
+		c.Close()
+		return fmt.Errorf("udp :%d is not bound", port)
+	}
+	return nil // bind conflict: the port is held
 }
 
 // rollback restores the pre-edit yml and restarts the unit; both best-effort — the response already says
@@ -589,6 +767,411 @@ func (o *fileScepterOps) Edit(name string, patch wat.ScepterPatch) (map[string]a
 func (o *fileScepterOps) rollback(f, old string) {
 	o.writeAtomic(f, old)
 	o.unit(filepath.Base(strings.TrimSuffix(f, ".yml")), "restart")
+}
+
+// now is the clock seam (tests shrink the probe ttl and the link wait).
+func (o *fileScepterOps) now() time.Time {
+	if o.nowf != nil {
+		return o.nowf()
+	}
+	return time.Now()
+}
+
+func (o *fileScepterOps) probeTTLBounds() (minS, maxS, defS int) {
+	minS, maxS, defS = o.probeMinS, o.probeMaxS, o.probeDefS
+	if minS <= 0 {
+		minS = 10
+	}
+	if maxS <= 0 {
+		maxS = 3600
+	}
+	if defS <= 0 {
+		defS = 300
+	}
+	return minS, maxS, defS
+}
+
+// ---- test.open / test.close: probe listeners (phase C) ----
+
+// sweepOrphanProbes removes probes left by a previous engine life: the process that created them is gone, so
+// their timers are gone, and a leaked listener would sit on its port forever. Only ymls carrying the probe
+// provenance line are swept — a user tunnel merely named probe-something is left alone. Best effort: a sweep
+// that cannot stop a unit leaves the files (the next boot tries again).
+func (o *fileScepterOps) sweepOrphanProbes() {
+	if o.orphanSweep {
+		return
+	}
+	o.orphanSweep = true
+	files, _ := filepath.Glob(filepath.Join(o.conf, "probe-*.yml"))
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil || !strings.Contains(string(b), probeProvenance) {
+			continue
+		}
+		name := strings.TrimSuffix(filepath.Base(f), ".yml")
+		o.unit(name, "stop")
+		o.removeFiles(name)
+		o.logf("scepter ops: swept orphaned probe %s (left by a previous engine run)", name)
+	}
+}
+
+// probeProvenance marks a yml as this machinery's product (the sweep reads it; the count is what keeps a
+// hand-made tunnel named probe-x safe).
+const probeProvenance = "probe tunnel created by scepter test.open"
+
+func (o *fileScepterOps) TestOpen(carrier string, ttlS int) (map[string]any, int) {
+	if strings.Contains(carrier, "+") {
+		return map[string]any{"carrier": carrier, "why": "a probe takes one carrier, not a bond"}, wat.CodeBadRequest
+	}
+	if code, p := o.checkCarrier(carrier); code != wat.CodeOK {
+		return p, code
+	}
+	if carrierNoListen[carrier] { // icmp/gre/ipip/raw shaped bind no port: nothing for a throw-away client to dial
+		return map[string]any{"carrier": carrier, "why": "raw carriers have no probe listener"}, wat.CodeBadRequest
+	}
+	minS, maxS, defS := o.probeTTLBounds()
+	switch {
+	case ttlS <= 0:
+		ttlS = defS
+	case ttlS < minS:
+		ttlS = minS
+	case ttlS > maxS:
+		ttlS = maxS
+	}
+	pr, code, detail := o.openProbe(carrier, ttlS)
+	if code != wat.CodeOK {
+		return map[string]any{"detail": detail, "rolled_back": code == wat.CodeInternal}, code
+	}
+	p := map[string]any{"id": pr.id, "carrier": carrier, "port": pr.port, "key": pr.key, "ttl": ttlS}
+	if pr.metrics != "" {
+		p["metrics"] = pr.metrics
+	}
+	if httpCarrier[carrier] {
+		p["path"] = "/wat" // the shared default path (normPath), so the cockpit has every dial parameter in one answer
+	}
+	o.logf("scepter ops: probe %s up (%s :%d, ttl %ds)", pr.id, carrier, pr.port, ttlS)
+	return p, wat.CodeOK
+}
+
+// openProbe is the probe machinery both test.open and the auto-test core use: validate nothing (callers
+// did), pick a port, write the speed-test-only yml, start the unit, verify liveness AND that the listener
+// accepts, then arm the ttl timer. Failures remove everything they wrote.
+func (o *fileScepterOps) openProbe(carrier string, ttlS int) (*scepterProbe, int, string) {
+	name := fmt.Sprintf("probe-%d", o.now().Unix())
+	for i := 0; o.exists(name); i++ { // same-second collision: suffix up
+		name = fmt.Sprintf("probe-%d-%d", o.now().Unix(), i+2)
+		if i > 100 {
+			return nil, wat.CodeInternal, "no free probe name"
+		}
+	}
+	key := wat.ScepterNewKey()
+	if key == "" {
+		return nil, wat.CodeInternal, "key generation failed"
+	}
+	port, err := o.freeProbePort(isUDPBindName(carrier))
+	if err != nil {
+		return nil, wat.CodeInternal, err.Error()
+	}
+	metrics := o.pickMetricsPort(name) // best effort: a probe without /stats still serves speed tests
+	yml := fmt.Sprintf("# %s %s (wat %s); removed at ttl expiry or test.close\n"+
+		"mode: server\nkey: %s\ncarrier: %s\nlisten: :%d\n", probeProvenance, o.now().UTC().Format(time.RFC3339), wat.Version,
+		key, carrier, port)
+	if metrics != "" {
+		yml += "metrics: " + metrics + "\n"
+	}
+	yml += "ports:\n" // bare ports: = an explicit EMPTY allowlist; only target 0 (the speed test) is ever answered
+	if err := o.writeAtomic(o.path(name, "yml"), yml); err != nil {
+		return nil, wat.CodeInternal, err.Error()
+	}
+	if err := o.writeAtomic(o.path(name, "key"), key+"\n"); err != nil {
+		o.removeFiles(name)
+		return nil, wat.CodeInternal, err.Error()
+	}
+	if err := o.unit(name, "start"); err != nil {
+		o.unit(name, "stop")
+		o.removeFiles(name)
+		return nil, wat.CodeInternal, err.Error()
+	}
+	if !o.waitActive(name, true) {
+		o.unit(name, "stop")
+		o.removeFiles(name)
+		return nil, wat.CodeInternal, "probe unit did not come up"
+	}
+	if err := o.checkLink(carrier, map[int]string{port: carrier}); err != nil {
+		o.unit(name, "stop")
+		o.removeFiles(name)
+		return nil, wat.CodeInternal, err.Error()
+	}
+	pr := &scepterProbe{id: name, carrier: carrier, port: port, key: key, metrics: metrics}
+	o.probeMu.Lock()
+	if o.probes == nil {
+		o.probes = map[string]*scepterProbe{}
+	}
+	o.probes[name] = pr
+	o.probeMu.Unlock()
+	pr.timer = time.AfterFunc(time.Duration(ttlS)*time.Second, func() { o.expireProbe(name, "ttl") })
+	return pr, wat.CodeOK, ""
+}
+
+// freeProbePort finds a free port in 20500-20999 (the manager's at_free_port range) for the given protocol,
+// avoiding every port another tunnel or listener claims. Probes count toward the tunnel cap like any unit,
+// and their listen ports are visible to portUsers, so a live probe also blocks its own port.
+func (o *fileScepterOps) freeProbePort(udp bool) (int, error) {
+	taken := o.portUsers("")
+	for p := 20500; p < 21000; p++ {
+		if _, busy := taken[p]; busy {
+			continue
+		}
+		var c io.Closer
+		var err error
+		if udp {
+			c, err = net.ListenPacket("udp", fmt.Sprintf(":%d", p))
+		} else {
+			c, err = net.Listen("tcp", fmt.Sprintf(":%d", p))
+		}
+		if err != nil {
+			continue
+		}
+		c.Close()
+		return p, nil
+	}
+	return 0, fmt.Errorf("no free probe port in 20500-20999")
+}
+
+func (o *fileScepterOps) TestClose(id string) (map[string]any, int) {
+	o.probeMu.Lock()
+	pr, ok := o.probes[id]
+	if ok {
+		delete(o.probes, id)
+	}
+	o.probeMu.Unlock()
+	if !ok {
+		return map[string]any{"id": id, "why": "no such probe listener"}, wat.CodeNotFound
+	}
+	o.closeProbe(pr)
+	o.logf("scepter ops: probe %s closed by test.close", id)
+	return map[string]any{"id": id, "closed": true}, wat.CodeOK
+}
+
+// expireProbe fires from the ttl timer: the probe is gone either way, files included (a probe is engine
+// machinery, not owner data — nothing to keep as .bak).
+func (o *fileScepterOps) expireProbe(id, why string) {
+	o.probeMu.Lock()
+	pr, ok := o.probes[id]
+	if ok {
+		delete(o.probes, id)
+	}
+	o.probeMu.Unlock()
+	if !ok {
+		return // already closed by test.close
+	}
+	o.closeProbe(pr)
+	o.logf("scepter ops: probe %s expired (%s)", id, why)
+}
+
+func (o *fileScepterOps) closeProbe(pr *scepterProbe) {
+	if pr.timer != nil {
+		pr.timer.Stop()
+	}
+	o.unit(pr.id, "stop")
+	o.removeFiles(pr.id)
+}
+
+// ---- auto.test / auto.rows / auto.apply: the fleet auto-test core (phase C) ----
+//
+// The pre-existing auto tester is wattun-manager bash logic on IRAN (at_probe/at_curl in wattun-manager):
+// throw-away clients, /stats alive wait, /speedtest measurement. This core is the triggerable engine-side
+// twin, per the plan's "implement the triggerable core in the engine ops": Kharej measures which shapes it
+// can SERVE and how fast (a throw-away client of itself against the probe listener — the same measurement
+// method the fast preset uses). The DPI verdict stays Iran's: the cockpit runs its own fast preset locally
+// and applies a row via auto.apply or carrier.change (docs/TECHNICAL.md).
+
+func (o *fileScepterOps) AutoTest(mode string, done func(ok, total int)) (map[string]any, int) {
+	if mode == "" {
+		mode = "plain"
+	}
+	shapes, known := autoTestShapes[mode]
+	if !known {
+		return map[string]any{"modes": "plain,tls"}, wat.CodeBadRequest
+	}
+	o.probeMu.Lock()
+	if o.autoRun.running {
+		run := o.autoRun.id
+		o.probeMu.Unlock()
+		return map[string]any{"run": run, "already_running": true}, wat.CodeOK
+	}
+	run := fmt.Sprintf("at-%d", o.now().Unix())
+	o.autoRun = autoRunState{id: run, mode: mode, running: true}
+	o.probeMu.Unlock()
+	go func() { // async: a run takes ~1 min (one probe + one throw-away client per shape); the command
+		// queue must not be held that long, and the answer is read via auto.rows / EvAutoTested.
+		_, _, defS := o.probeTTLBounds()
+		rows := make([]autoRow, 0, len(shapes))
+		ok := 0
+		for _, carrier := range shapes {
+			row := o.measureShape(carrier, defS) // the default ttl, not the floor: the measurement (alive
+			// wait up to 15 s + one speedtest) must never be cut short by its own probe's timer; the
+			// explicit close below does the cleanup, the ttl is only the abandoned-run safety net
+			if row.OK {
+				ok++
+			}
+			rows = append(rows, row)
+		}
+		rankRows(rows)
+		o.probeMu.Lock()
+		o.autoRun.rows = rows
+		o.autoRun.running = false
+		o.probeMu.Unlock()
+		if done != nil {
+			done(ok, len(shapes))
+		}
+	}()
+	return map[string]any{"run": run, "mode": mode, "shapes": len(shapes)}, wat.CodeOK
+}
+
+// measureShape opens one probe, runs the measurement seam against it, closes the probe. The ttl floor (not
+// the default) bounds an abandoned probe when the run dies mid-way.
+func (o *fileScepterOps) measureShape(carrier string, ttlS int) autoRow {
+	pr, code, detail := o.openProbe(carrier, ttlS)
+	if code != wat.CodeOK {
+		return autoRow{Carrier: carrier, Why: "probe open failed: " + detail}
+	}
+	down, ok, why := o.runProbeFn()(pr)
+	o.expireProbe(pr.id, "auto-test done")
+	return autoRow{Carrier: carrier, Port: pr.port, OK: ok, DownMbps: down, Why: why}
+}
+
+func (o *fileScepterOps) runProbeFn() func(pr *scepterProbe) (float64, bool, string) {
+	if o.runProbe != nil {
+		return o.runProbe
+	}
+	return o.spawnProbeClient
+}
+
+// rankRows orders the table for auto.rows/auto.apply: servable shapes first by measured rate, failures last
+// in catalog order (stable: two runs of the same host rank deterministically).
+func rankRows(rows []autoRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].OK != rows[j].OK {
+			return rows[i].OK
+		}
+		if rows[i].OK && rows[i].DownMbps != rows[j].DownMbps {
+			return rows[i].DownMbps > rows[j].DownMbps
+		}
+		return false
+	})
+	for i := range rows {
+		rows[i].Rank = i + 1
+	}
+}
+
+func (o *fileScepterOps) AutoRows() (map[string]any, int) {
+	o.probeMu.Lock()
+	defer o.probeMu.Unlock()
+	r := o.autoRun
+	rows := make([]autoRow, len(r.rows))
+	copy(rows, r.rows)
+	ok := 0
+	for _, row := range rows {
+		if row.OK {
+			ok++
+		}
+	}
+	return map[string]any{"run": r.id, "mode": r.mode, "done": !r.running, "ok": ok, "rows": rows}, wat.CodeOK
+}
+
+func (o *fileScepterOps) ApplyRow(name string, row int) (map[string]any, int) {
+	o.probeMu.Lock()
+	rs, running := o.autoRun.rows, o.autoRun.running
+	o.probeMu.Unlock()
+	if running || row < 1 || row > len(rs) {
+		p := map[string]any{"row": row, "why": "no such row (auto.rows is the table; rows rank from 1)"}
+		if running {
+			p["why"] = "the run is still going"
+		}
+		return p, wat.CodeNotFound
+	}
+	pick := rs[row-1]
+	p, code := o.CarrierChange(name, pick.Carrier, map[string]string{"listen": fmt.Sprintf(":%d", pick.Port)})
+	if code == wat.CodeOK {
+		p["row"] = row
+	}
+	return p, code
+}
+
+// spawnProbeClient is the production measurement: a throw-away client process of THIS binary (the fast
+// preset's at_start shape) dialing the probe listener over loopback, driven through its private metrics
+// address — wait for /stats alive, then one down-direction /speedtest. Loopback only, killed after.
+func (o *fileScepterOps) spawnProbeClient(pr *scepterProbe) (float64, bool, string) {
+	bin, err := os.Executable()
+	if err != nil {
+		return 0, false, "no binary: " + err.Error()
+	}
+	mp := o.pickMetricsPort(pr.id)
+	if mp == "" {
+		return 0, false, "no free metrics port"
+	}
+	dmapPort, err := o.freeProbePort(false) // the dummy -map is a TCP listener; portUsers already holds pr.port
+	if err != nil {
+		return 0, false, err.Error()
+	}
+	args := probeClientArgs(pr, mp, dmapPort)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if err := cmd.Start(); err != nil {
+		return 0, false, "client start: " + err.Error()
+	}
+	defer func() { cancel(); cmd.Wait() }() // the kill is the timeout's job (a passing measure finishes first)
+
+	statsURL := fmt.Sprintf("http://%s/stats", mp)
+	deadline := o.now().Add(15 * time.Second)
+	for {
+		if m, err := probeGetJSON(statsURL, 2*time.Second); err == nil && m["alive"] == true {
+			break
+		}
+		if o.now().After(deadline) {
+			return 0, false, "no link in 15 s"
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	res, err := probeGetJSON(fmt.Sprintf("http://%s/speedtest?dir=down&mb=4&streams=4", mp), 70*time.Second)
+	if err != nil {
+		return 0, false, "speedtest: " + err.Error()
+	}
+	if res["ok"] != true {
+		why, _ := res["error"].(string)
+		return 0, false, "speedtest failed: " + why
+	}
+	down, _ := res["mb_per_s"].(float64)
+	return down, true, ""
+}
+
+// probeClientArgs is the throw-away client command line (pure; the test asserts the shape). The dummy map
+// keeps the engine's "client without -map" refusal quiet while publishing nothing on a real interface.
+func probeClientArgs(pr *scepterProbe, metrics string, dmapPort int) []string {
+	return []string{
+		"-mode", "client", "-carrier", pr.carrier,
+		"-key", pr.key,
+		"-peer", net.JoinHostPort("127.0.0.1", strconv.Itoa(pr.port)),
+		"-metrics", metrics,
+		"-map", fmt.Sprintf("%d:1@127.0.0.1", dmapPort),
+	}
+}
+
+// probeGetJSON fetches one small JSON document from a loopback metrics address.
+func probeGetJSON(url string, timeout time.Duration) (map[string]any, error) {
+	c := &http.Client{Timeout: timeout}
+	resp, err := c.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var m map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // scepterPatchYML applies a patch with the manager's line-surgery semantics (set_value/unset_value/write_ports):
