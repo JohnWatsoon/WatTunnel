@@ -191,6 +191,7 @@ func main() {
 	latchDial := flag.String("latch-dial", "", "client, standalone: contact the scepter latch on Kharej at host:port with the pairing from -pair-to (or the stored pairing file), prove the key, run the pairing hello and one ping, then exit — the cockpit revival primitive and the drill tool (3.5.0)")
 	scepterCall := flag.String("scepter-call", "", "client, standalone one-shot (3.5.0 phase B): run ONE Scepter command on the paired Kharej through this tunnel's reserved stream (same -config/-pair-to context as the run itself), print every response line as JSONL on stdout (chunk pieces included) and exit; exit 0 once answered — the machine code rides the JSON — exit 1 on a transport failure. This is what the Go manager shells out to (its scepterDial seam)")
 	scepterArgs := flag.String("scepter-args", "", "with -scepter-call: the command's args as a JSON object (e.g. '{\"name\":\"t1\",\"carrier\":\"udp\",\"ports\":\"20030\"}'); a top-level \"id\" is lifted as the command id, so a retried call reuses it and the server journal answers at-most-once (3.5.0)")
+	updateJob := flag.String("update-job", "", "internal, standalone (3.5.0 phase D): run one Scepter update job from a staged dir (job.json) — backup the running binary to wattun.prev, install the staged one, restart the recorded units, watch them stay up and roll back to wattun.prev when the new engine does not; the scepter update.run launches this through systemd-run so the watchdog outlives the engine restart it performs. Not a human entry point")
 	var hdrs []string
 	flag.Func("header", "client, ws|wss|h2|h2c|grpc carrier: extra request header 'Name: value' (repeatable)", func(v string) error {
 		if !strings.Contains(v, ":") {
@@ -308,6 +309,9 @@ func main() {
 		return
 	}
 	// -latch-dial (3.5.0): standalone cockpit contact, like -pair a setup/drill action, not a run mode.
+	if *updateJob != "" { // the systemd-run update job body (3.5.0 phase D): runs unsandboxed by design —
+		os.Exit(runUpdateJobMain(*updateJob)) // it must swap /usr/local/bin/wattun, which the engine unit cannot
+	}
 	if *latchDial != "" {
 		var pairing *wat.PairingConfig
 		var perr error

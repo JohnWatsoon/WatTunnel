@@ -6,8 +6,13 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -844,5 +849,397 @@ func TestProbeClientArgs(t *testing.T) {
 		if args[i] != want[i] {
 			t.Fatalf("args[%d] = %q, want %q (full: %v)", i, args[i], want[i], args)
 		}
+	}
+}
+
+// ---- phase D: update orchestration, doctor, backup.export, audit.tail ----
+
+// update.status: local evidence only — version, wattun.prev (with its -version), unit states, the mailbox
+// and the staging state. Never a network fetch.
+func TestFileScepterOpsUpdateStatus(t *testing.T) {
+	o, fu, conf := testOps2(t)
+	if err := os.WriteFile(filepath.Join(conf, "t1.yml"), []byte("mode: server\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fu.active["t1"] = true
+	binDir := t.TempDir()
+	bin := filepath.Join(binDir, "wattun")
+	if err := os.WriteFile(bin, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin+".prev", []byte("PREV"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o.updPrevVer = func(string) string { return "3.4.9" }
+	o.exePath = func() (string, error) { return bin, nil } // the test binary is not a wattun; point at the sandbox
+	writeUpdateStatus(conf, wat.ScepterUpdateStatus{Phase: wat.UpdatePhaseApplied, Run: "u1",
+		From: "3.4.9", To: wat.Version, Ts: time.Now().Unix()})
+	p, code := o.UpdateStatus()
+	if code != wat.CodeOK || p["ver"] != wat.Version {
+		t.Fatalf("update.status: %v %v", code, p)
+	}
+	if p["systemd"] != false { // Windows checkout: no systemd, and that is exactly what the field reports
+		t.Fatalf("systemd on %s: %v", runtime.GOOS, p["systemd"])
+	}
+	prev := p["prev"].(map[string]any)
+	if prev["present"] != true || prev["ver"] != "3.4.9" {
+		t.Fatalf("prev evidence: %v", prev)
+	}
+	units := p["units"].([]map[string]any)
+	if len(units) != 1 || units[0]["name"] != "t1" || units[0]["active"] != true {
+		t.Fatalf("units: %v", units)
+	}
+	up := p["update"].(*wat.ScepterUpdateStatus)
+	if up.Phase != wat.UpdatePhaseApplied || up.Run != "u1" {
+		t.Fatalf("mailbox: %+v", up)
+	}
+	if _, ok := p["staged"]; ok {
+		t.Fatal("no staging expected yet")
+	}
+	if err := os.MkdirAll(filepath.Join(conf, scepterUpdateDirF), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(conf, scepterUpdateDirF, "wattun.new"), []byte("NEW"), 0o700)
+	p, _ = o.UpdateStatus()
+	if st, ok := p["staged"].(map[string]any); !ok || st["bytes"] != int64(3) {
+		t.Fatalf("staged evidence: %v", p["staged"])
+	}
+}
+
+// The response-flush ordering, pinned structurally at the ops level: UpdateRun returns phase=started BEFORE
+// the worker's first action (the grace sleep precedes everything), so the journaled response is long gone
+// from the process by the time the job restarts the session's own unit. The gates are portable: on this
+// checkout (Windows / no systemd) UpdateRun refuses before anything else.
+func TestFileScepterOpsUpdateRunGates(t *testing.T) {
+	o, _, _ := testOps2(t)
+	if runtime.GOOS != "linux" || !systemdAvailable() {
+		p, code := o.UpdateRun("")
+		if code != wat.CodeBadRequest || p["why"] == nil {
+			t.Fatalf("update.run on a host without systemd: %v %v", code, p)
+		}
+	} else {
+		t.Skip("host runs systemd: the refusal gate cannot be tested here")
+	}
+	// the tag normalization the ops apply (the handler already validated the shape; the ops re-validate)
+	for s, want := range map[string]struct {
+		tag string
+		ok  bool
+	}{"3.6.0": {"v3.6.0", true}, "v3.6.0": {"v3.6.0", true}, "3.6": {"", false},
+		"3.6.0.1": {"", false}, "": {"", false}, "three.six": {"", false}} {
+		tag, ok := scepterNormTag(s)
+		if ok != want.ok || tag != want.tag {
+			t.Fatalf("scepterNormTag(%q) = %q,%v want %q,%v", s, tag, ok, want.tag, want.ok)
+		}
+	}
+	// the mailbox-fresh in-flight guard: a started record inside the job window blocks a second job,
+	// a stale started record (dead job) and terminal phases do not
+	conf := o.conf
+	writeUpdateStatus(conf, wat.ScepterUpdateStatus{Phase: wat.UpdatePhaseStarted, Run: "live", Ts: time.Now().Unix()})
+	if run, busy := updateJobInFlight(conf); !busy || run != "live" {
+		t.Fatalf("fresh started record not in flight: %q %v", run, busy)
+	}
+	writeUpdateStatus(conf, wat.ScepterUpdateStatus{Phase: wat.UpdatePhaseStarted, Run: "dead",
+		Ts: time.Now().Unix() - int64((scepterUpdateWatch+2*scepterUpdateStable)/time.Second) - 10})
+	if _, busy := updateJobInFlight(conf); busy {
+		t.Fatal("a stale started record still counts as in flight")
+	}
+	writeUpdateStatus(conf, wat.ScepterUpdateStatus{Phase: wat.UpdatePhaseApplied, Ts: time.Now().Unix()})
+	if _, busy := updateJobInFlight(conf); busy {
+		t.Fatal("a terminal record counts as in flight")
+	}
+}
+
+// The update drill in a sandbox (plan D.3, the manager tests' pattern): the REAL worker and the REAL job
+// logic run over fake units and fake binary files — applied when the new engine stays up, rolled_back (with
+// wattun.prev restored byte-for-byte) when it refuses to run, failed-untouched when the backup path is gone
+// or the staged binary will not execute.
+func TestFileScepterOpsUpdateDrill(t *testing.T) {
+	newDrill := func(t *testing.T) (*fileScepterOps, *fakeUnits, string, string, string) {
+		t.Helper()
+		o, fu, conf := testOps2(t)
+		if err := os.WriteFile(filepath.Join(conf, "t1.yml"), []byte("mode: server\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fu.active["t1"] = true // the one pre-active unit (self is inactive in the fake)
+		binDir := t.TempDir()
+		bin := filepath.Join(binDir, "wattun")
+		if err := os.WriteFile(bin, []byte("OLDBIN-3.5.0"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		o.updGrace = time.Millisecond
+		o.updProbe = func(string) (string, error) { return "3.6.0", nil }
+		o.updFetch = func(dir, to string) error {
+			if to != "latest" {
+				t.Errorf("fetch got to %q, want latest", to)
+			}
+			return os.WriteFile(filepath.Join(dir, "wattun.new"), []byte("NEWBIN-3.6.0"), 0o700)
+		}
+		return o, fu, conf, bin, filepath.Join(binDir, "wattun.prev")
+	}
+	// launchViaJob is the sandbox's systemd-run: read the staged job.json, shrink the watch windows, run the
+	// REAL job logic over the fake units. deadOnRestart makes the "new engine" refuse to run.
+	launchViaJob := func(t *testing.T, fu *fakeUnits, prev string, deadOnRestart bool) func(stage, bin string) error {
+		return func(stage, bin string) error {
+			jb, err := os.ReadFile(filepath.Join(stage, scepterJobFile))
+			if err != nil {
+				return err
+			}
+			var job scepterUpdateJob
+			if err := json.Unmarshal(jb, &job); err != nil {
+				return err
+			}
+			job.WatchS, job.StableS = 1, 0 // the sandbox shrinks the windows (40 s / 10 s in production)
+			first := true
+			runUpdateJob(scepterUpdateEnv{Job: job, Prev: prev,
+				restart: func(u string) error {
+					if deadOnRestart && first {
+						first = false
+						fu.mu.Lock()
+						fu.dead[u] = true // the new binary refuses: liveness never comes back
+						fu.mu.Unlock()
+					}
+					return fu.unit(u, "restart")
+				},
+				isActive: fu.isActive, logf: func(_ string, _ ...any) {}, nowf: time.Now})
+			return nil // the launch succeeded; the job's outcome lives in the mailbox (what the drills assert)
+		}
+	}
+
+	t.Run("applied", func(t *testing.T) {
+		o, fu, conf, bin, prev := newDrill(t)
+		o.updLaunch = launchViaJob(t, fu, prev, false)
+		o.updateWorker("upd-1", bin, "latest")
+		st, err := readUpdateStatus(conf)
+		if err != nil || st.Phase != wat.UpdatePhaseApplied {
+			t.Fatalf("phase: %v %v", err, st)
+		}
+		if got := mustReadExisting(t, bin); got != "NEWBIN-3.6.0" {
+			t.Fatalf("bin after install: %q", got)
+		}
+		if got := mustReadExisting(t, prev); got != "OLDBIN-3.5.0" {
+			t.Fatalf("wattun.prev backup: %q", got)
+		}
+		if !fu.did("t1:restart") || fu.count("t1:restart") != 1 {
+			t.Fatalf("unit restarts: %v", fu.actions)
+		}
+	})
+	t.Run("rolled_back", func(t *testing.T) {
+		o, fu, conf, bin, prev := newDrill(t)
+		o.updLaunch = launchViaJob(t, fu, prev, true) // the new engine refuses to run
+		o.updateWorker("upd-2", bin, "latest")
+		st, err := readUpdateStatus(conf)
+		if err != nil || st.Phase != wat.UpdatePhaseRolledBack || st.Detail == "" {
+			t.Fatalf("phase: %v %v", err, st)
+		}
+		if got := mustReadExisting(t, bin); got != "OLDBIN-3.5.0" {
+			t.Fatalf("rollback did not restore wattun.prev: %q", got)
+		}
+		if got := mustReadExisting(t, prev); got != "OLDBIN-3.5.0" {
+			t.Fatalf("wattun.prev changed: %q", got)
+		}
+		if fu.count("t1:restart") != 2 { // install restart + rollback restart
+			t.Fatalf("unit restarts: %v", fu.actions)
+		}
+	})
+	t.Run("no_backup_path", func(t *testing.T) {
+		o, fu, conf, bin, prev := newDrill(t)
+		o.updLaunch = func(stage, bin string) error { // the sandbox: backup cannot even read the source
+			os.Remove(bin)
+			return launchViaJob(t, fu, prev, false)(stage, bin)
+		}
+		o.updateWorker("upd-3", bin, "latest")
+		st, err := readUpdateStatus(conf)
+		if err != nil || st.Phase != wat.UpdatePhaseFailed || !strings.Contains(st.Detail, "backup") {
+			t.Fatalf("phase: %v %v", err, st)
+		}
+		if _, err := os.Stat(bin); !os.IsNotExist(err) {
+			t.Fatal("the running binary was touched despite the failed backup gate")
+		}
+	})
+	t.Run("staged_binary_refuses", func(t *testing.T) {
+		o, _, conf, bin, _ := newDrill(t)
+		o.updProbe = func(string) (string, error) { return "", fmt.Errorf("exec format error") }
+		o.updateWorker("upd-4", bin, "latest")
+		st, err := readUpdateStatus(conf)
+		if err != nil || st.Phase != wat.UpdatePhaseFailed || !strings.Contains(st.Detail, "does not run") {
+			t.Fatalf("phase: %v %v", err, st)
+		}
+		if _, err := os.Stat(filepath.Join(conf, scepterUpdateDirF)); !os.IsNotExist(err) {
+			t.Fatal("a failed staging left the .update dir behind")
+		}
+	})
+}
+
+// backup.export: the tarball holds the restore set (ymls, keys, tokens, .bak edits, the pairing store, the
+// audit) and holds back the machine state (the journal, the staging dir, tmp files); b64/sha256/files are
+// consistent, and an oversized member is refused rather than silently skipped.
+func TestFileScepterOpsBackupExport(t *testing.T) {
+	o, _, conf := testOps2(t)
+	files := map[string]string{
+		"t1.yml": "mode: server\ncarrier: udp\n", "t1.key": "kk\n", "t1.token": "wat1:abc\n",
+		"t1.yml.bak": "mode: server\n", ".pairing": "version=1\nuuid=u\n", ".pairing.audit": "2026-11-22T10:00:00Z pair_created u\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(conf, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(conf, ".pairing.journal"), []byte(`{"id":"x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(conf, "junk.tmp"), []byte("tmp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(conf, scepterUpdateDirF), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(conf, scepterUpdateDirF, "wattun.new"), []byte("NEW"), 0o700)
+	p, code := o.BackupExport()
+	if code != wat.CodeOK {
+		t.Fatalf("backup.export: %v %v", code, p)
+	}
+	var doc struct {
+		B64    string `json:"b64"`
+		Sha256 string `json:"sha256"`
+		Size   int    `json:"size"`
+		Files  int    `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(p["logs"].([]string)[0]), &doc); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(doc.B64)
+	if err != nil || len(raw) != doc.Size || fmt.Sprintf("%x", sha256.Sum256(raw)) != doc.Sha256 {
+		t.Fatalf("doc integrity: %v size %d/%d", err, len(raw), doc.Size)
+	}
+	got := map[string]string{}
+	tr := tar.NewReader(bytes.NewReader(raw))
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(tr)
+		got[hdr.Name] = string(b)
+	}
+	for name, content := range files {
+		if got[name] != content {
+			t.Fatalf("tar %q = %q, want %q", name, got[name], content)
+		}
+	}
+	for _, absent := range []string{".pairing.journal", "junk.tmp", "wattun.new"} {
+		if _, ok := got[absent]; ok {
+			t.Fatalf("machine state %q must not be in the backup", absent)
+		}
+	}
+	if doc.Files != len(files) {
+		t.Fatalf("files count %d, want %d", doc.Files, len(files))
+	}
+	// an oversized member is refused (code=too_large), not silently skipped
+	big := filepath.Join(conf, "big.yml")
+	os.WriteFile(big, make([]byte, 5<<20), 0o600)
+	if p, code = o.BackupExport(); code != wat.CodeTooLarge || p["file"] != "big.yml" {
+		t.Fatalf("oversized member: %v %v", code, p)
+	}
+	os.Remove(big)
+}
+
+// audit.tail: the last n lines of each source, raw and parse-free; missing files are empty entries, not errors.
+func TestFileScepterOpsAuditTail(t *testing.T) {
+	o, _, conf := testOps2(t)
+	audit := ""
+	for i := 1; i <= 5; i++ {
+		audit += fmt.Sprintf("2026-11-22T10:0%d:00Z pair_event u (%d)\n", i, i)
+	}
+	os.WriteFile(filepath.Join(conf, ".pairing.audit"), []byte(audit), 0o600)
+	// journalRec lines as the journal writes them ({"id","cmd","ts","resp"}); built inline because the type
+	// lives unexported in wat and the reader is deliberately parse-free
+	journal := ""
+	for i := 1; i <= 3; i++ {
+		journal += fmt.Sprintf(`{"id":"id%d","cmd":"tunnel.edit","ts":%d,"resp":{"id":"id%d","code":0}}`+"\n", i, 100+i, i)
+	}
+	os.WriteFile(filepath.Join(conf, ".pairing.journal"), []byte(journal), 0o600)
+	p, code := o.AuditTail(2)
+	if code != wat.CodeOK {
+		t.Fatalf("audit.tail: %v", code)
+	}
+	logs := p["logs"].([]string)
+	var a, j struct {
+		Src     string   `json:"src"`
+		Entries []string `json:"entries"`
+	}
+	if json.Unmarshal([]byte(logs[0]), &a) != nil || a.Src != "audit" || len(a.Entries) != 2 ||
+		a.Entries[0] != "2026-11-22T10:04:00Z pair_event u (4)" {
+		t.Fatalf("audit tail: %+v", a)
+	}
+	if json.Unmarshal([]byte(logs[1]), &j) != nil || j.Src != "journal" || len(j.Entries) != 2 ||
+		!strings.Contains(j.Entries[1], `"id3"`) {
+		t.Fatalf("journal tail: %+v", j)
+	}
+	// missing files: empty entries, code ok
+	o2, _, _ := testOps2(t)
+	if p, code = o2.AuditTail(5); code != wat.CodeOK {
+		t.Fatalf("audit.tail on an empty dir: %v", code)
+	}
+	logs = p["logs"].([]string)
+	json.Unmarshal([]byte(logs[0]), &a)
+	if len(a.Entries) != 0 {
+		t.Fatalf("entries from a missing audit: %v", a.Entries)
+	}
+}
+
+// doctor.fetch's ops fragment: the latch status (the same data the loopback /scepter endpoint serves), this
+// unit's state, the update mailbox and the journal size — merged into the state document by the handler.
+func TestFileScepterOpsDoctor(t *testing.T) {
+	o, fu, conf := testOps2(t)
+	fu.active["self"] = true
+	oldLatch := latchNow.Load()
+	t.Cleanup(func() { latchNow.Store(oldLatch) })
+	latchNow.Store(&latchMonitor{port: 8443})
+	writeUpdateStatus(conf, wat.ScepterUpdateStatus{Phase: wat.UpdatePhaseApplied, Run: "u1", Ts: time.Now().Unix()})
+	p, code := o.Doctor()
+	if code != wat.CodeOK {
+		t.Fatalf("doctor: %v", code)
+	}
+	latch := p["latch"].(map[string]any)
+	if latch["enabled"] != true || latch["port"] != 8443 || latch["armed"] != false {
+		t.Fatalf("latch fragment: %v", latch)
+	}
+	unit := p["unit"].(map[string]any)
+	if unit["name"] != "self" || unit["active"] != true {
+		t.Fatalf("unit fragment: %v", unit)
+	}
+	if up := p["update"].(*wat.ScepterUpdateStatus); up.Run != "u1" {
+		t.Fatalf("update fragment: %+v", up)
+	}
+	if _, ok := p["journal"]; ok {
+		t.Fatal("no journal expected in a bare test dir")
+	}
+}
+
+// The engine's pinned release-signing key must stay byte-identical to the installer's SIG_PUB (three copies
+// exist: install.sh, wattun-manager, this engine; the test pins the engine copy to install.sh so they cannot
+// drift). Skipped in checkouts without install.sh next to the module root.
+func TestScepterUpdateSigPubMatchesInstallSh(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "install.sh"))
+	if err != nil {
+		t.Skipf("no install.sh at the module root: %v", err)
+	}
+	s := string(b)
+	start := strings.Index(s, "SIG_PUB=$(cat <<'PEM'")
+	if start < 0 {
+		t.Fatal("install.sh has no SIG_PUB heredoc")
+	}
+	s = s[start:]
+	end := strings.Index(s, "\nPEM\n")
+	if end < 0 {
+		t.Fatal("install.sh SIG_PUB heredoc unterminated")
+	}
+	body := s[strings.Index(s, "\n")+1 : end+1] // the PEM block incl. the trailing newline
+	if body != scepterSigPub {
+		t.Fatalf("scepterSigPub drifted from install.sh SIG_PUB:\n--- engine ---\n%s\n--- install.sh ---\n%s",
+			scepterSigPub, body)
 	}
 }

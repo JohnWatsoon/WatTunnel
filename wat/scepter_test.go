@@ -4,7 +4,11 @@
 package wat
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -565,11 +570,21 @@ type fakeOps struct {
 
 	inN, maxIn atomic.Int64 // concurrency probe: the queue test pins max concurrent edits to 1
 	delay      time.Duration
+
+	// phase D: canned update/doctor answers and backup-export parameters
+	updMu       sync.Mutex
+	updTo       string
+	updRuns     int
+	updStatus   map[string]any
+	doctorExtra map[string]any
+	backupPad   int // pad the tarball past scepterChunk so the chunked transfer is exercised
+	backupCode  int
+	auditN      []string
 }
 
 func newFakeOps(t *testing.T) *fakeOps {
 	return &fakeOps{dir: t.TempDir(), failStart: map[string]bool{}, binds: map[int]string{}, active: map[string]bool{},
-		probes: map[string]string{}, failLink: map[string]bool{},
+		probes: map[string]string{}, failLink: map[string]bool{}, backupCode: CodeOK,
 		rows: []map[string]any{
 			{"rank": 1, "carrier": "tcp", "port": 20501, "ok": true, "down_mbps": 9.5},
 			{"rank": 2, "carrier": "udp", "port": 20502, "ok": false, "why": "no link"},
@@ -860,6 +875,63 @@ func (f *fakeOps) ApplyRow(name string, row int) (map[string]any, int) {
 		p["row"] = row
 	}
 	return p, code
+}
+
+// ---- phase D: update / doctor / backup / audit ----
+
+func (f *fakeOps) UpdateStatus() (map[string]any, int) {
+	if f.updStatus == nil {
+		return map[string]any{"ver": Version, "prev": map[string]any{"present": false}}, CodeOK
+	}
+	return f.updStatus, CodeOK
+}
+
+func (f *fakeOps) UpdateRun(to string) (map[string]any, int) {
+	f.updMu.Lock()
+	defer f.updMu.Unlock()
+	f.updTo = to
+	f.updRuns++ // the channel-survival drill counts this: a journal replay must NOT re-run the op
+	if to == "" {
+		to = "latest" // the production ops echo the resolved target, not the empty argument
+	}
+	return map[string]any{"run": fmt.Sprintf("upd-%d", f.updRuns), "to": to, "phase": UpdatePhaseStarted}, CodeOK
+}
+
+func (f *fakeOps) Doctor() (map[string]any, int) {
+	if f.doctorExtra == nil {
+		return map[string]any{"latch": map[string]any{"enabled": false}}, CodeOK
+	}
+	return f.doctorExtra, CodeOK
+}
+
+// BackupExport builds a REAL tar in memory (one t1.yml entry, padded past the chunk size when pad is set)
+// and returns it in the chunked-logs convention — the same shape the production ops answer with.
+func (f *fakeOps) BackupExport() (map[string]any, int) {
+	if f.backupCode != CodeOK {
+		return map[string]any{"why": "too big"}, f.backupCode
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	content := "mode: server\n"
+	if f.backupPad > 0 {
+		content += strings.Repeat("x", f.backupPad)
+	}
+	tw.WriteHeader(&tar.Header{Name: "t1.yml", Mode: 0o600, Size: int64(len(content))})
+	tw.Write([]byte(content))
+	tw.Close()
+	doc, _ := json.Marshal(map[string]any{"b64": base64.StdEncoding.EncodeToString(buf.Bytes()),
+		"sha256": fmt.Sprintf("%x", sha256.Sum256(buf.Bytes())), "size": buf.Len(), "files": 1})
+	return map[string]any{"logs": []string{string(doc)}}, CodeOK
+}
+
+func (f *fakeOps) AuditTail(n int) (map[string]any, int) {
+	entries := f.auditN
+	if n < len(entries) {
+		entries = entries[len(entries)-n:] // the ops answer the TAIL, like the manager's pairing_audit_tail
+	}
+	da, _ := json.Marshal(map[string]any{"src": "audit", "entries": entries})
+	dj, _ := json.Marshal(map[string]any{"src": "journal", "entries": []string{}})
+	return map[string]any{"logs": []string{string(da), string(dj)}}, CodeOK
 }
 
 // dirSource is the ScepterSource reading the fake ops' CONF dir, so the state document reflects what the
@@ -1436,5 +1508,322 @@ func TestScepterAutoTestRPC(t *testing.T) {
 	}
 	if _, code = c.Call("auto.apply", map[string]any{"name": "at1"}); code != CodeBadRequest {
 		t.Fatal("missing row accepted")
+	}
+}
+
+// ---- phase D: operations ----
+
+// update.status passes through, update.run is the one CapFull command: denied at manage (recomputed on a
+// retry — pure rejections are not journaled), accepted at full, and the version argument is validated before
+// the ops ever see it (below the first Scepter release the cockpit's own channel would not come back; the
+// running version is a nothing-to-do).
+func TestScepterUpdateRPC(t *testing.T) {
+	ops := newFakeOps(t)
+	c, _ := newScepterPair(t, CapManage, "", &fakeSource{}, ops)
+	p, code := c.Call("update.status", nil)
+	if code != CodeOK || p["ver"] != Version {
+		t.Fatalf("update.status: %v %v", code, p)
+	}
+	if _, code = c.Call("update.run", nil); code != CodeDenied {
+		t.Fatalf("update.run at manage: code %d, want %d (denied)", code, CodeDenied)
+	}
+	// a full-capability credential gets through; the version gates are checked before the bucket, so every
+	// rejection shape is visible without waiting out the 5 min refill
+	ops2 := newFakeOps(t)
+	c2, _ := newScepterPair(t, CapFull, "", &fakeSource{}, ops2)
+	for _, bad := range []any{"three.six", "v3.6", "3.6.0.1", Version, "3.4.9", 6} {
+		if _, code = c2.Call("update.run", map[string]any{"to": bad}); code != CodeBadRequest {
+			t.Fatalf("to %v accepted (code %d)", bad, code)
+		}
+	}
+	if _, code = c2.Call("update.run", map[string]any{"ttl_s": "soon"}); code != CodeBadRequest {
+		t.Fatal("bad ttl_s type accepted")
+	}
+	p, code = c2.Call("update.run", map[string]any{"to": "v3.6.0"})
+	if code != CodeOK || p["phase"] != UpdatePhaseStarted || p["to"] != "v3.6.0" || p["run"] == nil {
+		t.Fatalf("update.run at full: %v %v", code, p)
+	}
+	if ops2.updRuns != 1 || ops2.updTo != "v3.6.0" {
+		t.Fatalf("ops saw %d run(s), to %q", ops2.updRuns, ops2.updTo)
+	}
+	// the started event fired in-life (the watcher owns the terminal events, this handler owns started)
+	p, _ = c2.Call("events.since", map[string]any{"seq": 0})
+	fired := false
+	for _, e := range p["events"].([]any) {
+		if m := e.(map[string]any); m["type"] == EvUpdateStarted {
+			fired = true
+		}
+	}
+	if !fired {
+		t.Fatal("no update_started event in-life")
+	}
+	// the per-pair update bucket: one at once, one per 5 min — a retry loop can never machine-gun restarts
+	if p, code = c2.Call("update.run", nil); code != CodeRateLimited || p["resource"] != "update" {
+		t.Fatalf("second update.run in the same window: %v %v", code, p)
+	}
+	// no args = the latest release (a fresh state: its own bucket)
+	ops3 := newFakeOps(t)
+	c3, _ := newScepterPair(t, CapFull, "", &fakeSource{}, ops3)
+	if p, code = c3.Call("update.run", nil); code != CodeOK || p["to"] != "latest" || ops3.updTo != "" {
+		t.Fatalf("update.run latest: %v %v (ops to %q)", code, p, ops3.updTo)
+	}
+	if _, code = c2.Call("update.run", map[string]any{"ttl_s": "soon"}); code != CodeBadRequest {
+		t.Fatal("bad ttl_s type accepted")
+	}
+}
+
+// doctor.fetch: the state document plus the doctor's last-commands trace, enriched by the ops fragment
+// (latch status et al) — the same data the loopback /scepter endpoint serves, packaged for the cockpit.
+func TestScepterDoctorFetchRPC(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.doctorExtra = map[string]any{"latch": map[string]any{"enabled": true, "port": 8443},
+		"unit": map[string]any{"name": "server", "active": true}}
+	c, _ := newScepterPair(t, CapManage, "", &fakeSource{}, ops)
+	if _, code := c.Call("scepter.ping", nil); code != CodeOK {
+		t.Fatal("ping")
+	}
+	p, code := c.Call("doctor.fetch", nil)
+	if code != CodeOK {
+		t.Fatalf("doctor.fetch code %d", code)
+	}
+	if p["ver"] != Version {
+		t.Fatalf("doctor core ver: %v", p["ver"])
+	}
+	if _, ok := p["tunnels"]; !ok {
+		t.Fatal("doctor has no tunnels")
+	}
+	latch, _ := p["latch"].(map[string]any)
+	if latch == nil || latch["enabled"] != true || latch["port"] != float64(8443) {
+		t.Fatalf("doctor latch fragment: %v", p["latch"])
+	}
+	recent, _ := p["recent"].([]any)
+	if len(recent) != 2 { // ping + this doctor.fetch
+		t.Fatalf("recent trace: %v", p["recent"])
+	}
+}
+
+// backup.export rides the chunked-logs convention: a tarball over scepterChunk arrives as chunk pieces, the
+// client reassembles them into the one newline-free doc, and the doc decodes back to the exact tar (b64 and
+// sha256 pinned). A monster export is refused, not exploded.
+func TestScepterBackupExportChunked(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.backupPad = scepterChunk * 2 // forces 3+ chunks through the real writeResp
+	c, _ := newScepterPair(t, CapManage, "", &fakeSource{}, ops)
+	p, code := c.Call("backup.export", nil)
+	if code != CodeOK {
+		t.Fatalf("backup.export code %d", code)
+	}
+	logs, ok := p["logs"].([]string) // waitResp reassembles chunks into a []string logs list
+	if !ok || len(logs) != 1 {
+		t.Fatalf("reassembled logs: %#v", p["logs"])
+	}
+	var doc struct {
+		B64    string `json:"b64"`
+		Sha256 string `json:"sha256"`
+		Size   int    `json:"size"`
+		Files  int    `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(logs[0]), &doc); err != nil {
+		t.Fatalf("backup doc: %v", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(doc.B64)
+	if err != nil {
+		t.Fatalf("b64: %v", err)
+	}
+	if len(raw) != doc.Size || fmt.Sprintf("%x", sha256.Sum256(raw)) != doc.Sha256 || doc.Files != 1 {
+		t.Fatalf("backup doc integrity: size %d/%d sha %q files %d", len(raw), doc.Size, doc.Sha256, doc.Files)
+	}
+	tr := tar.NewReader(bytes.NewReader(raw))
+	hdr, err := tr.Next()
+	if err != nil || hdr.Name != "t1.yml" {
+		t.Fatalf("tar entry: %v %v", hdr, err)
+	}
+	b, _ := io.ReadAll(tr)
+	if !strings.HasPrefix(string(b), "mode: server\n") {
+		t.Fatalf("tar content: %q", b)
+	}
+	if _, err := tr.Next(); err != io.EOF {
+		t.Fatal("tar has extra entries")
+	}
+	ops.backupCode = CodeTooLarge
+	if _, code = c.Call("backup.export", nil); code != CodeTooLarge {
+		t.Fatalf("too-large export: code %d", code)
+	}
+}
+
+// audit.tail: the last n entries of each source come back as two newline-free JSON docs in the logs list
+// (audit first, journal second), parse-free raw lines, with the count/type gates holding. The response is
+// small enough to pass unchunked, so the params are the wire-roundtripped []any — the logsAs helper reads
+// both that and the chunked-reassembly []string shape.
+func TestScepterAuditTailRPC(t *testing.T) {
+	ops := newFakeOps(t)
+	ops.auditN = []string{"2026-11-22T10:00:00Z pair_created u1", "2026-11-22T11:00:00Z pair_rotated u1",
+		"2026-11-22T12:00:00Z pair_revoked u1"}
+	c, _ := newScepterPair(t, CapManage, "", &fakeSource{}, ops)
+	p, code := c.Call("audit.tail", nil)
+	if code != CodeOK {
+		t.Fatalf("audit.tail code %d", code)
+	}
+	logs := logsAs(p)
+	if len(logs) != 2 {
+		t.Fatalf("audit.tail logs: %#v", p["logs"])
+	}
+	var a struct {
+		Src     string   `json:"src"`
+		Entries []string `json:"entries"`
+	}
+	if json.Unmarshal([]byte(logs[0]), &a) != nil || a.Src != "audit" || len(a.Entries) != 3 {
+		t.Fatalf("audit doc: %s", logs[0])
+	}
+	var j struct {
+		Src string `json:"src"`
+	}
+	if json.Unmarshal([]byte(logs[1]), &j) != nil || j.Src != "journal" {
+		t.Fatalf("journal doc: %s", logs[1])
+	}
+	if p, code = c.Call("audit.tail", map[string]any{"n": 2}); code != CodeOK {
+		t.Fatal("audit.tail n=2")
+	}
+	logs = logsAs(p)
+	json.Unmarshal([]byte(logs[0]), &a)
+	if len(a.Entries) != 2 || a.Entries[1] != ops.auditN[2] {
+		t.Fatalf("n=2 tail: %v", a.Entries)
+	}
+	if _, code = c.Call("audit.tail", map[string]any{"n": "many"}); code != CodeBadRequest {
+		t.Fatal("bad n type accepted")
+	}
+	if _, code = c.Call("audit.tail", map[string]any{"n": -1}); code != CodeBadRequest {
+		t.Fatal("negative n accepted")
+	}
+}
+
+// The channel-survival semantics (plan D.1/D.3), end to end over real sessions and a real journal file:
+// the update.run response is flushed BEFORE the "restart" (the client received it), the intent lives in the
+// journal across the engine's death, the revived engine answers a retry of the SAME id from the journal
+// (at-most-once: the ops never re-run), and the revived state's watcher turns the update mailbox into the
+// update_applied event — in production the latch's job is exactly this re-dial during the dead window.
+func TestScepterUpdateChannelSurvival(t *testing.T) {
+	dir := t.TempDir()
+	jp := filepath.Join(dir, ".pairing.journal")
+	ops1 := newFakeOps(t)
+	c1, _ := newScepterPair(t, CapFull, jp, &fakeSource{}, ops1)
+	id := "survive-1"
+	p, code := c1.call("update.run", map[string]any{"to": "v3.6.0"}, id, time.Now().Unix(), 30*time.Second)
+	if code != CodeOK || p["phase"] != UpdatePhaseStarted {
+		t.Fatalf("update.run: %v %v", code, p)
+	}
+	if ops1.updRuns != 1 {
+		t.Fatalf("ops ran %d time(s)", ops1.updRuns)
+	}
+	startedPhase := fmt.Sprint(p["phase"])
+	c1.Close() // the engine "restarts": the in-band channel dies right after the flushed response
+
+	// the update job finished while the engine was down: the mailbox records the outcome
+	writeAtomicTest(filepath.Join(dir, ScepterUpdateStatusFile),
+		`{"phase":"applied","run":"survive-1","from":"`+Version+`","to":"v3.6.0","ts":`+
+			strconv.FormatInt(time.Now().Unix(), 10)+`}`)
+
+	ops2 := newFakeOps(t)
+	c2, _ := newScepterPair(t, CapFull, jp, &fakeSource{}, ops2) // revival: in-band again, or via the latch
+	p, code = c2.call("update.run", map[string]any{"to": "v3.6.0"}, id, time.Now().Unix(), 30*time.Second)
+	if code != CodeOK {
+		t.Fatalf("retry code %d", code)
+	}
+	if fmt.Sprint(p["phase"]) != startedPhase {
+		t.Fatalf("replayed response changed: %v (started phase %q)", p, startedPhase)
+	}
+	if ops2.updRuns != 0 {
+		t.Fatal("the journal replay re-ran the update op (at-most-once broken)")
+	}
+	deadline := time.Now().Add(8 * time.Second) // the revived watcher polls the mailbox every 2 s
+	for {
+		p, _ = c2.Call("events.since", map[string]any{"seq": 0})
+		found := false
+		for _, e := range p["events"].([]any) {
+			if m := e.(map[string]any); m["type"] == EvUpdateApplied {
+				if d := m["detail"].(map[string]any); d["run"] == "survive-1" && d["to"] == "v3.6.0" {
+					found = true
+				}
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no update_applied event after revival: %v", p["events"])
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// The watcher unit drill: applied and rolled_back records fire while fresh, a started record silent past the
+// job's watch window fires interrupted, and stale history never re-fires on a later poll.
+func TestScepterUpdateWatcher(t *testing.T) {
+	dir := t.TempDir()
+	jp := filepath.Join(dir, ".pairing.journal")
+	ss, err := NewScepterState(testPairing(CapManage), nil, jp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.journal.Close() })
+	ss.SetOps(newFakeOps(t)) // arms the watcher (the status path exists next to the journal)
+	mail := filepath.Join(dir, ScepterUpdateStatusFile)
+	now := time.Now().Unix()
+	writeAtomicTest(mail, `{"phase":"applied","run":"w1","from":"`+Version+`","to":"v3.6.0","ts":`+
+		strconv.FormatInt(now, 10)+`}`)
+	waitScepterEvent(t, ss, EvUpdateApplied, "")
+	writeAtomicTest(mail, `{"phase":"rolled_back","run":"w2","ts":`+strconv.FormatInt(now+3, 10)+`}`)
+	waitScepterEvent(t, ss, EvUpdateFailed, UpdatePhaseRolledBack)
+	writeAtomicTest(mail, `{"phase":"started","run":"w3","ts":`+
+		strconv.FormatInt(now-2*int64((10*time.Minute)/time.Second), 10)+`}`) // silent past the job window
+	waitScepterEvent(t, ss, EvUpdateFailed, "interrupted")
+	seq := ss.StateSeq()
+	writeAtomicTest(mail, `{"phase":"failed","run":"w4","ts":`+
+		strconv.FormatInt(now-2*int64(time.Hour/time.Second), 10)+`}`) // stale history: not news
+	time.Sleep(3 * scepterUpdatePoll)
+	if ss.StateSeq() != seq {
+		t.Fatal("a stale status record fired an event")
+	}
+}
+
+// logsAs reads the logs list in either wire shape: a small (unchunked) response roundtrips as []any, a
+// chunked response is reassembled by waitResp into []string.
+func logsAs(p map[string]any) []string {
+	switch v := p["logs"].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, len(v))
+		for i, e := range v {
+			out[i], _ = e.(string)
+		}
+		return out
+	}
+	return nil
+}
+
+// waitScepterEvent polls the state's event ring for kind (and detail.phase when want is non-empty).
+func waitScepterEvent(t *testing.T, ss *ScepterState, kind, want string) {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		ss.mu.Lock()
+		found := false
+		for _, ev := range ss.events {
+			if ev.Type != kind {
+				continue
+			}
+			if want == "" || ev.Detail["phase"] == want {
+				found = true
+			}
+		}
+		ss.mu.Unlock()
+		if found {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %s event (phase %q) within the deadline", kind, want)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }

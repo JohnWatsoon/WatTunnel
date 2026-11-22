@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -316,7 +317,41 @@ const (
 	EvTestOpened = "test_opened" // a remote probe listener came up (test.open / the auto-test core)
 	EvTestClosed = "test_closed" // a probe listener closed (ttl expiry or test.close)
 	EvAutoTested = "auto_test"   // a fleet auto-test run finished (detail: mode, ok, total)
+	// Phase D (operations). update_started is fired by the update.run handler itself; applied/failed are
+	// fired by the status watcher (watchUpdateStatus) — the update job restarts the very engine that would
+	// have to fire them, so the events travel across the restart in the .update.status file (the journal
+	// replay of the original update.run intent covers the channel side; see docs/TECHNICAL.md).
+	EvUpdateStarted = "update_started"
+	EvUpdateApplied = "update_applied"
+	EvUpdateFailed  = "update_failed"
 )
+
+// Phases of ScepterUpdateStatus, the cross-restart update mailbox ($CONF/.update.status). The engine writes
+// started when update.run accepts an intent and stages a release; the update job (the binary re-exec'd as
+// `wattun -update-job`, a transient systemd unit that outlives the engine restart) writes the terminal phase.
+// The watcher turns each phase the engine observes into an event; update.status serves the raw record.
+const (
+	UpdatePhaseStarted    = "started"     // intent accepted, staging/launch in progress (the engine writes it)
+	UpdatePhaseApplied    = "applied"     // new binary installed and every recorded unit stayed up
+	UpdatePhaseFailed     = "failed"      // download/verify/install failed, or the rollback itself failed
+	UpdatePhaseRolledBack = "rolled_back" // new engine did not stay up; wattun.prev restored and restarted
+)
+
+// ScepterUpdateStatus is one record of the update mailbox. Written by the engine (UpdatePhaseStarted) and
+// the update job (terminal phases), read by the watcher and by update.status. Atomic tmp+rename every write.
+type ScepterUpdateStatus struct {
+	Phase  string `json:"phase"`
+	Run    string `json:"run,omitempty"` // the update.run command id that started it
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"` // the resolved target version ("" while still latest-resolving)
+	Detail string `json:"detail,omitempty"`
+	Ts     int64  `json:"ts"`
+}
+
+// ScepterUpdateStatusFile is the mailbox file name, relative to the config dir (next to .pairing and the
+// journal). The engine writes and reads it; defined here because the watcher (this package) and the ops
+// (cmd/wattun) must never drift apart on the path.
+const ScepterUpdateStatusFile = ".update.status"
 
 // ScepterEvent is one numbered event; Seq is its state_seq.
 type ScepterEvent struct {
@@ -513,9 +548,13 @@ type ScepterState struct {
 	// already gated by autoRate below); autoRate bounds auto.test itself.
 	probeRate scepterRate
 	autoRate  scepterRate
-	qmu       sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
-	recent    []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
-	nowf      func() time.Time // tests shrink the clock
+	// updateRate bounds update.run (phase D): one at once, then one per 5 min — an update is the most
+	// structural op the cockpit can ask for, and a retry loop must never machine-gun restarts of the host.
+	updateRate  scepterRate
+	updateWatch atomic.Bool      // the status watcher is spawned once per state (SetOps)
+	qmu         sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
+	recent      []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
+	nowf        func() time.Time // tests shrink the clock
 }
 
 // ScepterRec is one handled command for the doctor's "last commands" line (Recent).
@@ -540,17 +579,32 @@ func NewScepterState(pair *PairingConfig, src ScepterSource, journalPath string)
 		createRate: scepterRate{rate: 0.1, burst: 5},
 		probeRate:  scepterRate{rate: 1.0 / 30, burst: 3},
 		autoRate:   scepterRate{rate: 1.0 / 60, burst: 2},
+		updateRate: scepterRate{rate: 1.0 / 300, burst: 1},
 		nowf:       time.Now,
 	}, nil
 }
 
 // SetOps arms the write side (phase B). Without it every write command answers unknown_cmd — a phase-A binary,
 // or a deployment that wants the read-only cockpit only. Call once at startup, before any scepter stream is
-// served; the binary wires the real ops in main, tests inject a fake.
+// served; the binary wires the real ops in main, tests inject a fake. With armed ops and a persistent journal
+// dir it also starts the update-status watcher (phase D): the update job's outcome travels across the engine
+// restart in the .update.status mailbox file, and this watcher is what turns it into events after revival.
 func (ss *ScepterState) SetOps(ops ScepterOps) {
 	ss.mu.Lock()
 	ss.ops = ops
 	ss.mu.Unlock()
+	if ops != nil && ss.statusPath() != "" && ss.updateWatch.CompareAndSwap(false, true) {
+		go ss.watchUpdateStatus()
+	}
+}
+
+// statusPath is the update mailbox next to the journal (same config dir). Empty when there is no persistent
+// journal (tests, ephemeral pairing): no file, no watcher.
+func (ss *ScepterState) statusPath() string {
+	if ss.journal == nil || ss.journal.path == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(ss.journal.path), ScepterUpdateStatusFile)
 }
 
 // AddEvent records a state change and returns its seq (the state_seq counter increments on EVERY change).
@@ -637,6 +691,14 @@ var scepterCmds = map[string]scepterCmd{
 	"auto.test":      {minCap: CapManage, fn: cmdAutoTest, needsOps: true},
 	"auto.rows":      {minCap: CapManage, fn: cmdAutoRows, needsOps: true},
 	"auto.apply":     {minCap: CapManage, fn: cmdAutoApply, needsOps: true},
+
+	// Phase D (operations). doctor.fetch answers from the state itself (basic doc) and is enriched by the
+	// ops when armed — deliberately NOT needsOps. The update pair and the config-dir reads are ops-only.
+	"update.status": {minCap: CapManage, fn: cmdUpdateStatus, needsOps: true},
+	"update.run":    {minCap: CapFull, fn: cmdUpdateRun, needsOps: true}, // the one CapFull command (plan D4)
+	"doctor.fetch":  {minCap: CapManage, fn: cmdDoctorFetch},
+	"backup.export": {minCap: CapManage, fn: cmdBackupExport, needsOps: true},
+	"audit.tail":    {minCap: CapManage, fn: cmdAuditTail, needsOps: true},
 }
 
 // Handle validates and runs one request. Order (each step is a trust-boundary check, cheapest first):
@@ -979,6 +1041,19 @@ type ScepterOps interface {
 	AutoTest(mode string, done func(ok, total int)) (map[string]any, int)
 	AutoRows() (map[string]any, int)
 	ApplyRow(name string, row int) (map[string]any, int)
+
+	// Phase D (operations). UpdateStatus reports engine version, wattun.prev presence, unit states and the
+	// update mailbox — local reads only, never a network fetch. UpdateRun starts Kharej's own update
+	// (CapFull ONLY; the ops stage a verified release and hand the swap to a job that outlives the engine
+	// restart) and returns before anything moves. Doctor returns the ops-side doctor fragments (latch, unit,
+	// update mailbox, journal) merged into doctor.fetch. BackupExport returns a tarball of the config dir
+	// as params {"logs":[doc]} (doc: b64/sha256/size/files) so the serve loop chunks it like tunnel.logs.
+	// AuditTail returns the last n lines of the pairing audit and the scepter journal, same logs convention.
+	UpdateStatus() (map[string]any, int)
+	UpdateRun(to string) (map[string]any, int)
+	Doctor() (map[string]any, int)
+	BackupExport() (map[string]any, int)
+	AuditTail(n int) (map[string]any, int)
 }
 
 // ValidScepterName is the tunnel-name rule: a name becomes the systemd instance (wattun@NAME) and the config
@@ -1341,6 +1416,184 @@ func (ss *ScepterState) writeTail(p map[string]any, req ScepterRequest, pre uint
 	return p
 }
 
+// ---- operations (phase D) ----
+//
+// update.status / update.run / doctor.fetch / backup.export / audit.tail. The engine layer stays thin
+// (arg typing, the update bucket, the started event, the base_seq tail); the machinery lives in the ops —
+// docs/TECHNICAL.md "Phase D commands: operations" holds the update orchestration contract, the survival
+// mechanism and the payload conventions.
+
+// scepterMinScepterVer is the oldest target version update.run may install: below 3.5.0 the peer does not
+// serve the scepter stream, so the update would cut the cockpit's only channel to Kharej (re-entry would
+// need the local console). Deliberately a constant, not Version: from 3.6.0 on, a 3.5.x recovery downgrade
+// must stay possible.
+const scepterMinScepterVer = "3.5.0"
+
+// ValidScepterTag validates the update.run `to` argument: a dotted semver with an optional v prefix
+// ("3.6.0", "v3.6.0"). The ops re-validate (the ops never trust their caller) and normalize to the tag.
+func ValidScepterTag(s string) bool {
+	s = strings.TrimPrefix(strings.TrimSpace(s), "v")
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" || len(p) > 3 {
+			return false
+		}
+		for i := 0; i < len(p); i++ {
+			if p[i] < '0' || p[i] > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// cmdUpdateStatus: update.status — engine version, wattun.prev evidence, unit states and the update mailbox.
+// Local reads only: no network fetch from the engine (the cockpit decides what to install, it does not ask
+// the engine to go looking).
+func cmdUpdateStatus(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	return ss.ops.UpdateStatus()
+}
+
+// cmdUpdateRun: update.run {to?} — Kharej runs its own update (plan D.1), the one CapFull-only command.
+// The ops stage a verified release and hand the swap to a job that OUTLIVES the engine restart; this handler
+// returns a started answer that is journaled (a retried id replays at-most-once, never a second update) and
+// flushed long before the job's restart touches the session (the ops' first move after acceptance is a
+// several-second grace, and the restart itself waits for the whole download).
+func cmdUpdateRun(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	var to string
+	if req.Args != nil { // `to` is optional (empty = the latest release); a wrong type is still bad_request
+		var ok bool
+		if to, ok = argString(req.Args, "to"); !ok {
+			return map[string]any{"to": to, "why": "want a dotted version, optionally v-prefixed (v3.6.0)"}, CodeBadRequest
+		}
+	}
+	if to != "" {
+		if !ValidScepterTag(to) {
+			return map[string]any{"to": to, "why": "want a dotted version, optionally v-prefixed (v3.6.0)"}, CodeBadRequest
+		}
+		if to == Version || to == strings.TrimPrefix(Version, "v") {
+			return map[string]any{"ver": Version, "why": "already running this version"}, CodeBadRequest
+		}
+		if OlderVersion(strings.TrimPrefix(to, "v"), scepterMinScepterVer) {
+			// a pre-Scepter target would come back without the management channel; recovery to a 3.5.x
+			// version stays possible on purpose (the cockpit's own rollback tool), 3.4.x does not.
+			return map[string]any{"to": to, "why": "below " + scepterMinScepterVer + " the cockpit channel would not come back"}, CodeBadRequest
+		}
+	}
+	if !ss.updateRate.allow(ss.nowf()) {
+		return map[string]any{"resource": "update"}, CodeRateLimited
+	}
+	pre := ss.StateSeq() // see cmdTunnelCreate: base_seq is judged against the pre-apply seq
+	p, code := ss.ops.UpdateRun(to)
+	if code == CodeOK {
+		if run, is := p["run"]; is && p["already_running"] == nil {
+			// the watcher owns applied/failed (they can only be known after the revival it reports); the
+			// started event is this handler's, so the cockpit sees the intent accepted in-life.
+			ss.AddEvent(EvUpdateStarted, map[string]any{"run": run, "to": p["to"]})
+		}
+		p = ss.writeTail(p, req, pre)
+	}
+	return p, code
+}
+
+// cmdDoctorFetch: doctor.fetch — the structured doctor output. Base document = the state doc (ver, pair,
+// tunnels, uptime, event cursor) plus the doctor's last-commands trace (the ONLY user-visible scepter trace,
+// plan A.3); the ops merge their fragments (latch status, unit state, update mailbox, journal size) when armed.
+func cmdDoctorFetch(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	doc := ss.document()
+	doc["recent"] = ss.Recent()
+	ss.mu.Lock()
+	ops := ss.ops
+	ss.mu.Unlock()
+	if ops != nil {
+		if extra, code := ops.Doctor(); code == CodeOK && extra != nil {
+			for k, v := range extra { // the ops fragment adds keys (latch/unit/update/journal); it never clobbers the core doc
+				if _, exists := doc[k]; !exists {
+					doc[k] = v
+				}
+			}
+		}
+	}
+	return doc, CodeOK
+}
+
+// cmdBackupExport: backup.export — a tarball of the config dir (contents and exclusions documented in the
+// ops), delivered through the chunked-logs convention: params {"logs":[doc]} with doc = {b64, sha256, size,
+// files}; the serve loop chunks it exactly like tunnel.logs (a tarball has no newlines, so reassembly is the
+// identity on the single-element list).
+func cmdBackupExport(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	return ss.ops.BackupExport()
+}
+
+// cmdAuditTail: audit.tail {n?} — the last n entries of each audit source (the pairing audit written by the
+// Kharej console and the scepter command journal), raw lines parse-free (the audit's schema is the manager's;
+// re-encoding it here would couple this engine to it). Same chunked-logs convention as backup.export: two
+// newline-free JSON docs, one per source.
+func cmdAuditTail(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
+	n, ok := argInt(req.Args, "n")
+	if !ok || n < 0 {
+		return nil, CodeBadRequest
+	}
+	if n == 0 {
+		n = 100
+	}
+	n = min(n, 1000)
+	return ss.ops.AuditTail(n)
+}
+
+// Update-status watcher (phase D). The update job restarts the very engine that ran update.run, so its
+// outcome cannot be fired as an event by the process that started it: the job writes every phase transition
+// to the .update.status mailbox (atomic tmp+rename) and the REVIVED engine's watcher turns what it observes
+// into events — applied/failed/rolled_back for fresh records (1 h window), update_failed {phase:interrupted}
+// for a started record that went silent (job died mid-flight: host reboot, systemd-run failure), and nothing
+// for older records (history; update.status still serves them). In-life failures (download refused, no
+// systemd) never restart anything, so the same watcher catches them too. Cadence cost on the default
+// deployment: one failed stat/read of a ~100-byte path every 2 s per paired process.
+const (
+	scepterUpdatePoll  = 2 * time.Second
+	scepterUpdateFresh = time.Hour        // a terminal record older than this is history, not news
+	scepterUpdateStale = 10 * time.Minute // a started record silent this long never finished (the job's whole watch is ~1 min)
+)
+
+func (ss *ScepterState) watchUpdateStatus() {
+	path := ss.statusPath()
+	if path == "" {
+		return
+	}
+	last := ""
+	for {
+		time.Sleep(scepterUpdatePoll)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue // no update ever run, or the file was cleaned up
+		}
+		var st ScepterUpdateStatus
+		if json.Unmarshal(b, &st) != nil || st.Phase == "" || st.Phase == last {
+			continue
+		}
+		age := ss.nowf().Unix() - st.Ts
+		detail := map[string]any{"run": st.Run, "from": st.From, "to": st.To, "phase": st.Phase}
+		if st.Detail != "" {
+			detail["detail"] = st.Detail
+		}
+		switch {
+		case st.Phase == UpdatePhaseStarted && age > int64(scepterUpdateStale/time.Second):
+			detail["phase"] = "interrupted" // the record says started; the event's phase says WHY it is a failure
+			ss.AddEvent(EvUpdateFailed, detail)
+		case age >= 0 && age < int64(scepterUpdateFresh/time.Second) && st.Phase != UpdatePhaseStarted:
+			if st.Phase == UpdatePhaseApplied {
+				ss.AddEvent(EvUpdateApplied, detail)
+			} else { // failed or rolled_back: both are "the update did not stick"
+				ss.AddEvent(EvUpdateFailed, detail)
+			}
+		}
+		last = st.Phase // stale history and fired phases never re-fire; a NEWER record (next update.run) does
+	}
+}
+
 // ServeScepter runs the server side of one scepter stream: read a line, answer (possibly chunked), repeat until
 // the stream ends. The events scepter_up/scepter_down bracket the stream's lifetime for the event log.
 func ServeScepter(st *Stream, ss *ScepterState) {
@@ -1444,7 +1697,7 @@ func (c *ScepterClient) helloExchange(sess *Session) error {
 		return fmt.Errorf("scepter: hello rejected (code %d)", code)
 	}
 	ver, _ := hello["ver"].(string)
-	if ver == "" || olderVersion(ver, Version) {
+	if ver == "" || OlderVersion(ver, Version) {
 		c.st.Reset()
 		return fmt.Errorf("scepter: pairing needs %s on the server, peer reported %q", Version, ver)
 	}
@@ -1580,9 +1833,10 @@ func (c *ScepterClient) waitResp(id string, timeout time.Duration) (map[string]a
 	}
 }
 
-// olderVersion reports whether a is a dotted version older than b ("3.4.3" < "3.5.0"). Non-parsing a is old
-// (fail closed toward "pairing needs an upgrade").
-func olderVersion(a, b string) bool {
+// OlderVersion reports whether a is a dotted version older than b ("3.4.3" < "3.5.0"). Non-parsing a is old
+// (fail closed toward "pairing needs an upgrade"). Exported for the phase D update gates: both the engine
+// handler (downgrade refusal) and the ops (staged-version sanity) compare dotted versions.
+func OlderVersion(a, b string) bool {
 	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
 	for i := 0; i < len(pa) || i < len(pb); i++ {
 		var x, y int

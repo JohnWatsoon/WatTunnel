@@ -20,11 +20,20 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -35,6 +44,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JohnWatsoon/WatTunnel/wat"
@@ -76,6 +86,17 @@ type fileScepterOps struct {
 	probeMaxS   int
 	probeDefS   int
 	orphanSweep bool // true once the constructor swept restart-orphaned probes (once per process)
+
+	// Phase D (update orchestration) seams — nil falls back to the production implementation, so a
+	// struct-literal test can stub one seam without rebuilding the rest (the phase C convention).
+	updRunning atomic.Bool // one update at a time per process (the journal replay of a retried id never reaches here)
+	updRun     string      // the running (or last accepted) update.run command id
+	updGrace   time.Duration
+	exePath    func() (string, error)              // the swap target; nil = os.Executable + EvalSymlinks
+	updFetch   func(dir, to string) error          // stage a verified release into dir (wattun.new)
+	updProbe   func(newBin string) (string, error) // sanity-run the staged binary; returns its -version
+	updLaunch  func(stage, bin string) error       // hand the job to systemd (production: systemd-run)
+	updPrevVer func(prev string) string            // -version of the wattun.prev binary ("" when it will not run)
 }
 
 // scepterProbe is one live probe listener: a short-lived server unit (NAME = the probe id) that exists only so
@@ -1447,4 +1468,807 @@ func runScepterCall(tun *tunnel, cmd, argsJSON string) int {
 		return 1
 	}
 	return 0
+}
+
+// ---- phase D: update orchestration ----
+//
+// update.status / update.run: the scariest remote op (plan D.1), so the design is conservative at every step.
+//
+// Mechanism (the choice the plan left open, evidence for it in docs/TECHNICAL.md): the ENGINE does the
+// network part — download the release binary + SHA256SUMS + SHA256SUMS.sig from GitHub, verify the RSA
+// signature natively (crypto/rsa against scepterSigPub, the byte-identical third copy of the installer's
+// pinned key; a test pins it against install.sh) and the binary's sha256 line, sanity-run the staged binary —
+// and then hands the SWAP to a transient systemd unit: `systemd-run` re-executes this binary as
+// `wattun -update-job <stagedir>`. That job is the rollback watchdog: parented by PID 1 (it survives the
+// engine restart that it itself performs), NOT sandboxed like the engine unit (ProtectSystem=strict keeps the
+// engine from writing /usr/local/bin — a child of the engine could not do the swap either), and it follows
+// backup wattun.prev → install → restart the previously-active units → watch them stay up → restore
+// wattun.prev and restart again when the new engine dies. An in-engine watchdog cannot work (the engine is
+// the thing being replaced) and neither can a watchdog child (it dies with the engine's cgroup).
+//
+// The channel survives by construction: the update.run response is journaled and flushed BEFORE anything
+// moves (the worker's first action is a grace sleep, and the restart waits for the whole download), the
+// latch covers the dead window if the new engine never comes back (arm delay 30 s < the job's watch window),
+// and the job's phase transitions travel to the revived engine in the .update.status mailbox, whose watcher
+// (wat.ScepterState) fires the update_applied/update_failed events.
+
+const (
+	scepterUpdateDirF    = ".update"        // staging dir under the config dir
+	scepterJobFile       = "job.json"       // the staged job's parameters, read by -update-job
+	scepterUpdateGrace   = 3 * time.Second  // response-flush grace before the worker touches anything
+	scepterUpdateWatch   = 40 * time.Second // job liveness watch window (latch arm delay is 30 s — must exceed it)
+	scepterUpdateStable  = 10 * time.Second // the units must stay active this long before "applied"
+	scepterUpdateMax     = 64 << 20         // staged binary download cap (release binaries are ~10-15 MB)
+	scepterRepo          = "JohnWatsoon/WatTunnel"
+	scepterUpdateUnitPfx = "wattun-update-" // transient unit name prefix
+)
+
+// scepterSigPub is the release-signing public key, byte-identical to the SIG_PUB copies in install.sh and
+// wattun-manager (TestScepterUpdateSigPubMatchesInstallSh pins it against install.sh so the three cannot
+// drift). A third copy is the price of native RSA verification in the engine — no openssl dependency.
+const scepterSigPub = `-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA0j+yK26CzKRD+am5rQZJ
+v8zChkZ5HuwQ4uBtj2mKfFRG8mrj7XN3iW60QEj7Le/fAYtk4hHvqsxb6Xhxw303
++rFCBxKr+mwc3GOB/zVh/fzNqN2pXzKCT+mSKiaDfwUmCizKFNUUCCnhNVpEx9hl
+A4B4n5iBgxW0G/ks4hOujx6teaKUN44+cZNgPshPSQ5KdiqQBi0rFCiSAKBCh1vL
+j07u5S/mvU8L8u9M6sUzST0mXcGw9WKQmAiIOCqAwLiyV1RtDodgaCIxLPJ93Qo/
+uK4DzYX3Ker8lW6MRKXgX3fAVXoyj/ZaE3oh1ZibVefAy6w7qB74JvQPv4nFvS/Y
+VJXpxiHiqE/YMdHbS9eCQnqjHVKmGWvBVPo/IlUiJFbl8nIEFZVij32Cp8A4awO2
+IORyD7iC8bA7AZHruzVfiUtrYA5XhBTRJplqws8kM0Ig4sLrws0HPOY4xOBRtSVh
+vgY6Qw/EWglth/K24PEC8AiuJYIRRkn/Kq+SBIRu8qVrAgMBAAE=
+-----END PUBLIC KEY-----
+`
+
+// scepterUpdateJob is the staged job's parameter file (conf/.update/job.json): everything -update-job needs
+// to run without asking the (possibly dying) engine anything. Paths are absolute; watch/stable are seconds.
+type scepterUpdateJob struct {
+	Bin     string   `json:"bin"`      // the running binary (the swap target; wattun.prev sits next to it)
+	New     string   `json:"new"`      // the staged, verified release binary
+	Status  string   `json:"status"`   // the .update.status mailbox path
+	From    string   `json:"from"`     // engine version at accept time
+	To      string   `json:"to"`       // the staged binary's reported version
+	Run     string   `json:"run"`      // the update.run command id (evidence in the status file)
+	Units   []string `json:"units"`    // the units that were active pre-update (all restarted, self included)
+	WatchS  int      `json:"watch_s"`  // liveness watch window
+	StableS int      `json:"stable_s"` // stable-active requirement inside the window
+}
+
+// writeUpdateStatus records one mailbox transition (atomic tmp+rename, 0600 — the manager-file discipline).
+func writeUpdateStatus(conf string, st wat.ScepterUpdateStatus) {
+	if st.Ts == 0 {
+		st.Ts = time.Now().Unix()
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	p := filepath.Join(conf, wat.ScepterUpdateStatusFile)
+	tmp := p + ".tmp"
+	if os.WriteFile(tmp, append(b, '\n'), 0o600) == nil {
+		os.Rename(tmp, p)
+	}
+}
+
+// readUpdateStatus loads the mailbox record, if any.
+func readUpdateStatus(conf string) (*wat.ScepterUpdateStatus, error) {
+	b, err := os.ReadFile(filepath.Join(conf, wat.ScepterUpdateStatusFile))
+	if err != nil {
+		return nil, err
+	}
+	var st wat.ScepterUpdateStatus
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+// UpdateStatus (update.status, CapManage): engine version, wattun.prev evidence, unit states, the update
+// mailbox and the staging state. Deliberately NO network fetch — the engine never goes looking for releases;
+// deciding to update is the cockpit's (a release check would also make a read command slow and flaky).
+func (o *fileScepterOps) UpdateStatus() (map[string]any, int) {
+	p := map[string]any{
+		"ver": wat.Version, "goos": runtime.GOOS, "arch": runtime.GOARCH,
+		"systemd": systemdAvailable(), "conf": o.conf,
+	}
+	if bin, err := o.selfBinPath(); err == nil {
+		p["bin"] = bin
+		prev := bin + ".prev"
+		if fi, err := os.Stat(prev); err == nil {
+			ver := ""
+			if o.updPrevVer != nil {
+				ver = o.updPrevVer(prev)
+			} else {
+				ver = execPrevVersion(prev)
+			}
+			p["prev"] = map[string]any{"present": true, "path": prev,
+				"bytes": fi.Size(), "mtime": fi.ModTime().Unix(), "ver": ver}
+		} else {
+			p["prev"] = map[string]any{"present": false}
+		}
+	}
+	units := []map[string]any{}
+	for _, f := range mustGlobYMLs(o.conf) {
+		name := strings.TrimSuffix(filepath.Base(f), ".yml")
+		units = append(units, map[string]any{"name": name, "active": o.active(name)})
+	}
+	p["units"] = units
+	if st, err := readUpdateStatus(o.conf); err == nil {
+		p["update"] = st
+	}
+	if fi, err := os.Stat(filepath.Join(o.conf, scepterUpdateDirF, "wattun.new")); err == nil {
+		p["staged"] = map[string]any{"bytes": fi.Size()}
+	}
+	return p, wat.CodeOK
+}
+
+// execPrevVersion runs the wattun.prev binary's -version (3 s cap) for update.status evidence. Memoized per
+// path+size+mtime: the prev binary never changes within one engine life (the JOB replaces it, which ends
+// this life), and an exec per update.status call would be waste.
+var prevVerMemo struct {
+	mu         sync.Mutex
+	path, iden string
+	ver        string
+}
+
+func execPrevVersion(prev string) string {
+	var iden string
+	if fi, err := os.Stat(prev); err == nil {
+		iden = fmt.Sprintf("%d:%d", fi.Size(), fi.ModTime().UnixNano())
+	}
+	prevVerMemo.mu.Lock()
+	defer prevVerMemo.mu.Unlock()
+	if prevVerMemo.path == prev && prevVerMemo.iden == iden {
+		return prevVerMemo.ver
+	}
+	ver := ""
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, prev, "-version").CombinedOutput(); err == nil {
+		f := strings.Fields(string(out))
+		if len(f) >= 2 {
+			ver = f[len(f)-1]
+		}
+	}
+	prevVerMemo.path, prevVerMemo.iden, prevVerMemo.ver = prev, iden, ver
+	return ver
+}
+
+// systemdAvailable reports whether this host can run the update job (a systemd-run-able systemd). Cheap
+// probes, called from update.status and update.run only.
+func systemdAvailable() bool {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false
+	}
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		return false
+	}
+	if _, err := os.Stat("/run/systemd/system"); err != nil {
+		return false
+	}
+	return true
+}
+
+func mustGlobYMLs(conf string) []string {
+	m, _ := filepath.Glob(filepath.Join(conf, "*.yml"))
+	return m
+}
+
+// scepterNormTag normalizes a validated version argument to the release tag form ("3.6.0" -> "v3.6.0").
+// Callers validated the shape first (wat.ValidScepterTag; the ops never trust their caller).
+func scepterNormTag(s string) (string, bool) {
+	s = strings.TrimPrefix(strings.TrimSpace(s), "v")
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return "", false
+	}
+	for _, p := range parts {
+		if p == "" || len(p) > 3 {
+			return "", false
+		}
+		for i := 0; i < len(p); i++ {
+			if p[i] < '0' || p[i] > '9' {
+				return "", false
+			}
+		}
+	}
+	return "v" + s, true
+}
+
+// UpdateRun (update.run {to}, CapFull ONLY): accept the intent, record it in the mailbox BEFORE anything
+// moves, and start the worker. Returns phase=started immediately — the response is journaled and flushed
+// while the worker is still inside its grace sleep; the restart itself waits for the whole download. The
+// unit carrying the cockpit channel IS restarted (that is the point); the latch covers the gap if the new
+// engine never returns.
+func (o *fileScepterOps) UpdateRun(to string) (map[string]any, int) {
+	if runtime.GOOS != "linux" {
+		// the gate is a capability of the host, not a build tag: the same binary runs dev servers on Windows
+		// (the ops' own checkCarrier precedent), and only a linux+systemd host can run the update job.
+		return map[string]any{"why": "update.run needs a linux host with systemd"}, wat.CodeBadRequest
+	}
+	if !systemdAvailable() {
+		return map[string]any{"why": "systemd (systemd-run) not available; update the binary over SSH"}, wat.CodeBadRequest
+	}
+	if o.updRunning.Load() {
+		return map[string]any{"run": o.updRun, "already_running": true}, wat.CodeOK
+	}
+	if run, busy := updateJobInFlight(o.conf); busy {
+		// a previous life's job may still be mid-flight (the engine restarted around it): a fresh started
+		// record inside the job's watch window means a job owns the swap — never a second one.
+		return map[string]any{"run": run, "already_running": true}, wat.CodeOK
+	}
+	bin, err := o.selfBinPath()
+	if err != nil {
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	toN := "latest"
+	if to != "" {
+		t, ok := scepterNormTag(to) // the handler validated the shape; the ops re-validate (never trust the caller)
+		if !ok {
+			return map[string]any{"to": to, "why": "want a dotted version, optionally v-prefixed (v3.6.0)"}, wat.CodeBadRequest
+		}
+		toN = t
+	}
+	run := fmt.Sprintf("upd-%d", o.now().Unix())
+	o.updRun = run
+	o.updRunning.Store(true)
+	// the intent hits the mailbox FIRST (atomic): whatever happens now — the engine dying, the host
+	// rebooting — the revived engine and the cockpit see that an update was accepted and by whom.
+	writeUpdateStatus(o.conf, wat.ScepterUpdateStatus{Phase: wat.UpdatePhaseStarted, Run: run,
+		From: wat.Version, To: toN, Ts: o.now().Unix()})
+	go o.updateWorker(run, bin, toN)
+	return map[string]any{"run": run, "to": toN, "phase": wat.UpdatePhaseStarted,
+		"grace_s": int(scepterUpdateGrace / time.Second)}, wat.CodeOK
+}
+
+// selfBinPath resolves the running binary (the swap target and the .prev anchor). The seam exists for the
+// update drills: the test binary's path is not a wattun, so the sandbox points the ops at fake files.
+func (o *fileScepterOps) selfBinPath() (string, error) {
+	if o.exePath != nil {
+		return o.exePath()
+	}
+	bin, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(bin)
+}
+
+// updateJobInFlight reports whether a mailbox record says an update job is (or may be) mid-flight: a started
+// record is trusted for the job's whole watch window (watch + two rollback passes) and never longer — a
+// started record that old belongs to a job that died, and the next update.run must be able to proceed.
+func updateJobInFlight(conf string) (string, bool) {
+	st, err := readUpdateStatus(conf)
+	if err != nil || st.Phase != wat.UpdatePhaseStarted {
+		return "", false
+	}
+	if time.Now().Unix()-st.Ts >= int64((scepterUpdateWatch+2*scepterUpdateStable)/time.Second) {
+		return "", false
+	}
+	return st.Run, true
+}
+
+// updateWorker is the engine half: grace (the response flush), stage a verified release, sanity-run it,
+// record the job parameters and launch the job. Every failure lands in the mailbox as failed — the engine
+// stays up (nothing was swapped), the watcher fires update_failed, and the cockpit can retry.
+func (o *fileScepterOps) updateWorker(run, bin, toN string) {
+	defer o.updRunning.Store(false)
+	time.Sleep(o.updGraceOr(scepterUpdateGrace)) // the update.run response is flushed (and journaled) inside this window
+	stage := filepath.Join(o.conf, scepterUpdateDirF)
+	fail := func(why string) {
+		writeUpdateStatus(o.conf, wat.ScepterUpdateStatus{Phase: wat.UpdatePhaseFailed, Run: run,
+			From: wat.Version, To: toN, Detail: why, Ts: o.now().Unix()})
+		os.RemoveAll(stage) // nothing was swapped: a failed staging leaves no half-state behind
+		o.logf("scepter ops: update %s failed before the swap: %s", run, why)
+	}
+	os.RemoveAll(stage)
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		fail("staging dir: " + err.Error())
+		return
+	}
+	if err := o.fetchFn()(stage, toN); err != nil {
+		fail("download/verify: " + err.Error())
+		return
+	}
+	newBin := filepath.Join(stage, "wattun.new")
+	got, err := o.probeFn()(newBin)
+	if err != nil {
+		fail("staged binary does not run on this host: " + err.Error())
+		return
+	}
+	if got == wat.Version {
+		fail("release " + got + " is the running version (nothing to do)")
+		return
+	}
+	if toN != "latest" && got != toN && got != strings.TrimPrefix(toN, "v") {
+		// the staged binary's own -version is the honest evidence: a mis-tagged release asset must not
+		// install something the cockpit did not ask for
+		fail("release tag " + toN + " contains binary " + got)
+		return
+	}
+	// the units to restart are the ones that were ACTIVE pre-update (self included — that is the point);
+	// inactive units are simply started by their owner when needed, on whatever binary is then installed.
+	var units []string
+	for _, f := range mustGlobYMLs(o.conf) {
+		name := strings.TrimSuffix(filepath.Base(f), ".yml")
+		if o.active(name) {
+			units = append(units, name)
+		}
+	}
+	job := scepterUpdateJob{Bin: bin, New: newBin, Status: filepath.Join(o.conf, wat.ScepterUpdateStatusFile),
+		From: wat.Version, To: got, Run: run, Units: units,
+		WatchS: int(scepterUpdateWatch / time.Second), StableS: int(scepterUpdateStable / time.Second)}
+	jb, err := json.Marshal(job)
+	if err == nil {
+		err = atomicWriteFile(filepath.Join(stage, scepterJobFile), jb, 0o600)
+	}
+	if err != nil {
+		fail("job file: " + err.Error())
+		return
+	}
+	if err := o.launchFn()(stage, bin); err != nil {
+		fail("launch: " + err.Error())
+		return
+	}
+	o.logf("scepter ops: update %s launched (to %s, units %v); the job owns the swap, watch and rollback now",
+		run, got, units)
+}
+
+func (o *fileScepterOps) updGraceOr(d time.Duration) time.Duration {
+	if o.updGrace > 0 {
+		return o.updGrace
+	}
+	return d
+}
+
+func (o *fileScepterOps) fetchFn() func(dir, to string) error {
+	if o.updFetch != nil {
+		return o.updFetch
+	}
+	return o.fetchRelease
+}
+
+func (o *fileScepterOps) probeFn() func(newBin string) (string, error) {
+	if o.updProbe != nil {
+		return o.updProbe
+	}
+	return probeStagedBinary
+}
+
+func (o *fileScepterOps) launchFn() func(stage, bin string) error {
+	if o.updLaunch != nil {
+		return o.updLaunch
+	}
+	return o.launchUpdateJob
+}
+
+// fetchRelease downloads and verifies one release binary into dir/wattun.new. base is
+// releases/latest/download or releases/download/<tag>; the RSA-verified SHA256SUMS is the trust anchor (the
+// .sha256 sidecar alone would only prove transport integrity, not release authenticity). The version comes
+// from the caller's sanity probe of the staged binary — one exec, not two.
+func (o *fileScepterOps) fetchRelease(dir, to string) error {
+	asset := "wattun-linux-" + runtime.GOARCH
+	base := "https://github.com/" + scepterRepo + "/releases/latest/download"
+	if to != "" && to != "latest" {
+		base = "https://github.com/" + scepterRepo + "/releases/download/" + to
+	}
+	newBin := filepath.Join(dir, "wattun.new")
+	if err := httpToFile(base+"/"+asset, newBin, scepterUpdateMax); err != nil {
+		return err
+	}
+	sums, err := httpToBytes(base+"/SHA256SUMS", 1<<20)
+	if err != nil {
+		return fmt.Errorf("SHA256SUMS: %w", err)
+	}
+	sig, err := httpToBytes(base+"/SHA256SUMS.sig", 64<<10)
+	if err != nil {
+		return fmt.Errorf("SHA256SUMS.sig: %w", err)
+	}
+	return verifyReleaseSignature(sums, sig, asset, newBin)
+}
+
+// verifyReleaseSignature checks the RSA-SHA256 signature over SHA256SUMS (against scepterSigPub, or the
+// WAT_SIG_PUB override the installer also honors for forks), then the asset's hash line against the staged
+// file. Both checks fail closed.
+func verifyReleaseSignature(sums, sig []byte, asset, newBin string) error {
+	pubPEM := scepterSigPub
+	if p := os.Getenv("WAT_SIG_PUB"); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			pubPEM = string(b)
+		}
+	}
+	blk, _ := pem.Decode([]byte(pubPEM))
+	if blk == nil {
+		return fmt.Errorf("signature public key: no PEM block")
+	}
+	k, err := x509.ParsePKIXPublicKey(blk.Bytes)
+	if err != nil {
+		return fmt.Errorf("signature public key: %v", err)
+	}
+	rsaKey, ok := k.(*rsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("signature public key: not RSA")
+	}
+	h := sha256.Sum256(sums)
+	if err := rsa.VerifyPKCS1v15(rsaKey, crypto.SHA256, h[:], sig); err != nil {
+		return fmt.Errorf("release RSA signature failed verification (download tampered with?)")
+	}
+	got, err := fileSHA256(newBin)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(sums), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[1] == asset {
+			if f[0] != got {
+				return fmt.Errorf("checksum mismatch for %s (want %s, got %s)", asset, f[0], got)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("binary hash missing from signed SHA256SUMS")
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// httpToFile streams one URL to a local file under a hard size cap (a release mirror serving garbage must
+// fill a disk only up to scepterUpdateMax). HTTPS via the default transport (WAT_PROXY-style proxies come
+// through the standard environment variables).
+func httpToFile(url, dst string, capBytes int64) error {
+	c := &http.Client{Timeout: 15 * time.Minute}
+	resp, err := c.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
+	}
+	tmp := dst + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o700)
+	if err != nil {
+		return err
+	}
+	n, err := io.Copy(f, io.LimitReader(resp.Body, capBytes+1))
+	f.Close()
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if n > capBytes {
+		os.Remove(tmp)
+		return fmt.Errorf("%s: larger than the %d MB cap", url, capBytes>>20)
+	}
+	return os.Rename(tmp, dst)
+}
+
+func httpToBytes(url string, capBytes int64) ([]byte, error) {
+	c := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := c.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, capBytes))
+}
+
+// probeStagedBinary sanity-runs the staged binary (-version), exactly install.sh's "retrieved binary failed
+// execution on this host" check. It also yields the resolved version: a latest-run that resolves to the
+// running version is a nothing-to-do, not an update.
+func probeStagedBinary(newBin string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, newBin, "-version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	// the -version output is "wattun <ver>"; take the last field so a prefixed banner cannot fool it
+	f := strings.Fields(string(out))
+	if len(f) < 2 {
+		return "", fmt.Errorf("-version printed %q", strings.TrimSpace(string(out)))
+	}
+	return f[len(f)-1], nil
+}
+
+// launchUpdateJob hands the staged job to systemd: a transient one-shot unit, parented by PID 1 (it
+// outlives the engine restart it performs), with NO unit sandbox of its own (the engine's
+// ProtectSystem=strict is why the swap cannot happen inside the engine). Fire-and-forget: the job's outcome
+// travels in the .update.status mailbox, not in this call's exit code.
+func (o *fileScepterOps) launchUpdateJob(stage, bin string) error {
+	unit := fmt.Sprintf("%s%d", scepterUpdateUnitPfx, o.now().Unix())
+	out, err := exec.Command("systemd-run", "--collect", "--unit="+unit,
+		"--description=wattun scepter update job", bin, "-update-job", stage).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemd-run %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// runUpdateJobMain is the -update-job standalone mode (wired in main): read the staged job.json and run the
+// job with the real systemctl. Exit 0 once the job reached ANY recorded terminal phase (the outcome lives in
+// the mailbox), 1 when the job could not even start (no/broken job file).
+func runUpdateJobMain(stage string) int {
+	jb, err := os.ReadFile(filepath.Join(stage, scepterJobFile))
+	if err != nil {
+		log.Printf("update job: %v", err)
+		return 1
+	}
+	var job scepterUpdateJob
+	if err := json.Unmarshal(jb, &job); err != nil || job.Bin == "" || job.New == "" || job.Status == "" {
+		log.Printf("update job: bad job file: %v", err)
+		return 1
+	}
+	e := scepterUpdateEnv{
+		Job:     job,
+		Prev:    job.Bin + ".prev",
+		restart: func(u string) error { return runSystemctl("restart", "wattun@"+u) },
+		isActive: func(u string) bool {
+			return exec.Command("systemctl", "is-active", "--quiet", "wattun@"+u).Run() == nil
+		},
+		logf: log.Printf,
+		nowf: time.Now,
+	}
+	phase := runUpdateJob(e)
+	log.Printf("update job %s: %s", job.Run, phase)
+	return 0
+}
+
+// scepterUpdateEnv abstracts what the job touches, so the drill tests run the REAL job logic over fake
+// units and fake binary paths (the manager tests' sandbox pattern).
+type scepterUpdateEnv struct {
+	Job      scepterUpdateJob
+	Prev     string // the backup path (Job.Bin + ".prev" in production)
+	restart  func(unit string) error
+	isActive func(unit string) bool
+	logf     func(string, ...any)
+	nowf     func() time.Time
+}
+
+// runUpdateJob is the rollback watchdog itself: backup → install → restart the pre-active units → watch
+// them stay up → restore wattuv.prev and restart again when the new engine does not. The backup is FIRST
+// and its failure aborts untouched: refusing without a wattun.prev-compatible backup path is the hard gate
+// (plan D.1). Every transition lands in the mailbox; the last write wins and the revived engine reports it.
+func runUpdateJob(e scepterUpdateEnv) string {
+	now := func() time.Time {
+		if e.nowf != nil {
+			return e.nowf()
+		}
+		return time.Now()
+	}
+	say := func(phase, detail string) {
+		writeUpdateStatus(filepath.Dir(e.Job.Status), wat.ScepterUpdateStatus{Phase: phase, Run: e.Job.Run,
+			From: e.Job.From, To: e.Job.To, Detail: detail, Ts: now().Unix()})
+	}
+	record := func(phase, detail string) string {
+		if detail != "" {
+			e.logf("update job %s: %s (%s)", e.Job.Run, phase, detail)
+		} else {
+			e.logf("update job %s: %s", e.Job.Run, phase)
+		}
+		say(phase, detail)
+		return phase
+	}
+	// 1. the backup gate: no wattun.prev-compatible path → abort with the running binary untouched.
+	if err := copyBinary(e.Job.Bin, e.Prev); err != nil {
+		return record(wat.UpdatePhaseFailed, "no backup path for wattun.prev, aborting untouched: "+err.Error())
+	}
+	// 2. install the staged binary (tmp + rename next to the target, 0755).
+	if err := copyBinary(e.Job.New, e.Job.Bin); err != nil {
+		return record(wat.UpdatePhaseFailed, "install failed, wattun.prev is in place: "+err.Error())
+	}
+	// 3. restart every unit that was active pre-update (the channel unit included — the response is long
+	// since flushed; the latch covers the window if this goes wrong).
+	for _, u := range e.Job.Units {
+		if err := e.restart(u); err != nil {
+			e.logf("update job %s: restart wattun@%s: %v", e.Job.Run, u, err)
+		}
+	}
+	// 4. watch: every recorded unit must be active and STAY active for the stable window. Type=simple makes
+	// one is-active verdict worthless (a crash-looping unit flickers), so stability is the verdict.
+	deadline := now().Add(time.Duration(e.Job.WatchS) * time.Second)
+	stable := time.Duration(e.Job.StableS) * time.Second
+	var upSince time.Time
+	for {
+		allUp := true
+		for _, u := range e.Job.Units {
+			if !e.isActive(u) {
+				allUp = false
+				break
+			}
+		}
+		if allUp {
+			if upSince.IsZero() {
+				upSince = now()
+			}
+			if now().Sub(upSince) >= stable {
+				return record(wat.UpdatePhaseApplied, "")
+			}
+		} else {
+			upSince = time.Time{}
+		}
+		if now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// 5. rollback: the new engine did not stay up — restore wattun.prev (already verified writable in step 1)
+	// and restart the units on it. Best effort: if even this fails, the mailbox says so and the latch plus
+	// the local console are the way back in.
+	if err := copyBinary(e.Prev, e.Job.Bin); err != nil {
+		return record(wat.UpdatePhaseFailed, "rollback FAILED (wattun.prev restore: "+err.Error()+"); the latch and the local console are the way back")
+	}
+	for _, u := range e.Job.Units {
+		if err := e.restart(u); err != nil {
+			e.logf("update job %s: rollback restart wattun@%s: %v", e.Job.Run, u, err)
+		}
+	}
+	return record(wat.UpdatePhaseRolledBack, "the new engine did not stay up; wattun.prev restored and restarted")
+}
+
+// copyBinary copies src to dst atomically (tmp + rename in the target dir), mode 0755 — the installer's
+// install -m 755 + mv discipline.
+func copyBinary(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	tmp := dst + ".new"
+	if err := os.WriteFile(tmp, b, 0o755); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil { // umask may have stripped bits from WriteFile's mode
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+// atomicWriteFile: tmp + rename in the target directory (the manager-file discipline; used for the job file).
+func atomicWriteFile(path string, b []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// ---- phase D: ops reads (doctor.fetch / backup.export / audit.tail) ----
+
+// Doctor is the ops-side doctor.fetch fragment, merged into the state document (the state owns the core:
+// ver, pair, tunnels, recent). latchNow is the live monitor (nil = pairing without -latch-port), exactly
+// what the loopback /scepter endpoint serves — this is the same data, packaged for the cockpit.
+func (o *fileScepterOps) Doctor() (map[string]any, int) {
+	p := map[string]any{"latch": latchNow.Load().status()}
+	if o.self != "" {
+		p["unit"] = map[string]any{"name": o.self, "active": o.active(o.self)}
+	}
+	if st, err := readUpdateStatus(o.conf); err == nil {
+		p["update"] = st
+	}
+	if fi, err := os.Stat(filepath.Join(o.conf, ".pairing.journal")); err == nil {
+		p["journal"] = map[string]any{"bytes": fi.Size()}
+	}
+	return p, wat.CodeOK
+}
+
+// backupExclude names the one state file backup.export deliberately leaves out: the command journal is
+// machine replay state (id -> recorded response), not restore data — a rebuilt Kharej does not need it and
+// it is the one file that grows with command traffic. The audit (.pairing.audit) IS included: it is the
+// who-did-what record the plan keeps append-only.
+const backupExclude = ".pairing.journal"
+
+// BackupExport builds a tarball of the config dir: every regular file except the journal (above), the
+// staging dir (engine machinery) and tmp files. Keys and the pairing store are INCLUDED on purpose: the
+// tarball exists to restore a Kharej after a host rebuild, a config dir without keys restores nothing, and
+// keys already travel this channel (tunnel.create returns them inside the session AEAD). Caps: one file
+// > 4 MB and a total > 5 MB are refused (code=too_large) — the chunked transfer tops out at 512 x 16 KiB.
+func (o *fileScepterOps) BackupExport() (map[string]any, int) {
+	const perFileCap, totalCap = 4 << 20, 5 << 20
+	entries, err := os.ReadDir(o.conf)
+	if err != nil {
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	files, total := 0, int64(0)
+	for _, e := range entries {
+		if e.IsDir() { // dirs are skipped wholesale: the only dir here is .update (engine staging)
+			continue
+		}
+		name := e.Name()
+		if name == backupExclude || name == scepterUpdateDirF || strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if fi.Size() > perFileCap {
+			return map[string]any{"file": name, "why": fmt.Sprintf("larger than the %d MB per-file cap", perFileCap>>20)}, wat.CodeTooLarge
+		}
+		total += fi.Size()
+		if total > totalCap {
+			return map[string]any{"why": fmt.Sprintf("config dir larger than the %d MB export cap", totalCap>>20)}, wat.CodeTooLarge
+		}
+		b, err := os.ReadFile(filepath.Join(o.conf, name))
+		if err != nil {
+			continue // raced with a delete: the file is gone, the tarball is a moment-in-time snapshot
+		}
+		hdr := &tar.Header{Name: name, Mode: int64(fi.Mode().Perm()), Size: int64(len(b)), ModTime: fi.ModTime()}
+		if tw.WriteHeader(hdr) == nil {
+			if _, werr := tw.Write(b); werr == nil {
+				files++
+			}
+		}
+	}
+	tw.Close()
+	sum := sha256.Sum256(buf.Bytes())
+	doc, err := json.Marshal(map[string]any{"b64": base64.StdEncoding.EncodeToString(buf.Bytes()),
+		"sha256": hex.EncodeToString(sum[:]), "size": buf.Len(), "files": files})
+	if err != nil {
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	return map[string]any{"logs": []string{string(doc)}}, wat.CodeOK
+}
+
+// AuditTail (audit.tail {n}) reads the two audit sources — .pairing.audit (the Kharej console's credential
+// audit, "<RFC3339> <event> <detail>" lines) and .pairing.journal (the scepter command journal, journalRec
+// JSON lines) — and returns the last n of each as raw lines. Parse-free on purpose: the audit's schema is
+// the manager's, and re-encoding it here would couple the engine to it. Two newline-free JSON docs, one per
+// source, in the chunked-logs convention (the cockpit parses logs[0]/logs[1]).
+func (o *fileScepterOps) AuditTail(n int) (map[string]any, int) {
+	a := tailFile(filepath.Join(o.conf, ".pairing.audit"), n, 2<<20)
+	j := tailFile(filepath.Join(o.conf, ".pairing.journal"), n, 2<<20)
+	da, _ := json.Marshal(map[string]any{"src": "audit", "entries": a})
+	dj, _ := json.Marshal(map[string]any{"src": "journal", "entries": j})
+	return map[string]any{"logs": []string{string(da), string(dj)}}, wat.CodeOK
+}
+
+// tailFile returns the last n lines of a file, reading at most capBytes from the end (the journal rotates
+// at 1 MB; the audit is bounded by its console's rewrite). A truncated read aligns to the next full line.
+func tailFile(path string, n int, capBytes int64) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return []string{}
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return []string{}
+	}
+	off := fi.Size()
+	if off > capBytes {
+		off = capBytes
+	}
+	buf := make([]byte, off)
+	if _, err := f.ReadAt(buf, fi.Size()-off); err != nil {
+		return []string{}
+	}
+	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
+	if off < fi.Size() && len(lines) > 0 {
+		lines = lines[1:] // the first line of a truncated read may be partial: drop it
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }

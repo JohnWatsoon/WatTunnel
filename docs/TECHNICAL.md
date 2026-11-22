@@ -2364,8 +2364,9 @@ and RTT were unchanged.
 
 Scepter turns a tunnel token into a live pairing: Kharej and Iran **pair once**, and from then on Iran is the
 cockpit — reading state, stats, logs and events of its tunnels on Kharej over an encrypted management channel,
-with no SSH to Kharej. Phase A (3.5.0) is the read-only channel; write intents, remote carrier tests and update
-orchestration come in later phases. Everything is API-first: a future web panel is just another client.
+with no SSH to Kharej. It landed in phases inside 3.5.0: the read-only channel (A), write intents (B), remote
+carrier work (C) and operations (D: update orchestration, doctor, backup, audit). Everything is API-first: a
+future web panel is just another client.
 
 **Version matrix: both ends need 3.5.0** for any Scepter feature. A 3.4.x Kharej paired by a 3.5 Iran degrades
 to today's behavior: no scepter traffic beyond at most one rejected hello, the tunnel itself is untouched.
@@ -2416,8 +2417,9 @@ counter increments on every change; clients diff by seq, never by wall clock. Ev
 seq and replayable (`events.since {seq}`, last 512): `tunnel_up`, `tunnel_down`, `tunnel_deleted`,
 `carrier_switched`, `tunnel_edited` (phase B: edit/limits/preset applied), `test_opened` / `test_closed`
 (phase C: a remote probe listener came up / closed), `auto_test` (phase C: a ranking run finished, with
-`ok`/`total`), `heal_action`, `sla_breach`, `update_available`, `pair_rotated`, `pair_revoked`,
-`scepter_up`, `scepter_down`. Every intent is journaled
+`ok`/`total`), `update_started` / `update_applied` / `update_failed` (phase D: an update intent was
+accepted / the new engine verified up / the update failed or rolled back), `heal_action`, `sla_breach`,
+`update_available`, `pair_rotated`, `pair_revoked`, `scepter_up`, `scepter_down`. Every intent is journaled
 (append-only, atomic writes, rotated at 1 MB) with its outcome; a retry of the same command id returns the
 recorded outcome (at-most-once application). Applied intents and rolled-back Kharej-side failures
 (`code=internal`) are journaled; pure rejections (`denied`/`stale`/`rate_limited`/`bad_request`) are
@@ -2544,6 +2546,94 @@ Rate buckets for the phase C commands (per pair, on top of the general 20/s buck
 `test.open` (3 at once, 1 per 30 s), `autoRate` for `auto.test` (2 at once, 1 per 60 s), and the structural
 bucket shared with `tunnel.create` (5 at once, 1 per 10 s) for `carrier.change` and `auto.apply` — both
 restart units, so both are structural.
+
+### Phase D commands: operations (both ends 3.5.0)
+
+Phase D makes the cockpit an operations console: remote updates, structured doctor output, a disaster-recovery
+backup and the audit trail. **Version matrix: both ends need 3.5.0** (the client-side hello already refuses
+older peers). No new rejection codes: `denied`, `bad_request`, `rate_limited`, `internal` and `too_large`
+mean what they mean everywhere else.
+
+| Command | Args | Capability | Notes |
+|---|---|---|---|
+| `update.status` | — | manage | `{ver, goos, arch, systemd, bin, conf, prev:{present, path, bytes, mtime, ver?}, units:[{name, active}], update:<mailbox record or absent>, staged?}` — local evidence only, the engine never fetches anything |
+| `update.run` | `{to?}` | **full** | Kharej updates its own binary; answers `{run, to, phase:"started", grace_s}` immediately, `{run, already_running:true}` while a job owns the swap |
+| `doctor.fetch` | — | manage | the state document plus `recent` (the doctor's last-commands trace) and the ops fragments `latch` / `unit` / `update` / `journal` — the same data the loopback `/scepter` endpoint serves, packaged for the cockpit |
+| `backup.export` | — | manage | a tarball of the config dir as one chunked JSON doc `{b64, sha256, size, files}` |
+| `audit.tail` | `{n?}` | manage | the last n entries (default 100, cap 1000) of each audit source, as two chunked JSON docs `{src:"audit"\|"journal", entries:[raw lines]}` |
+
+**The large-payload convention** (backup.export, audit.tail): big answers ride the tunnel.logs chunking —
+params `{"logs":[...]}` whose elements are newline-free JSON documents; the serve loop splits anything over
+16 KiB into chunk pieces and the client reassembles unchanged. A small answer is the same shape, just one
+line. A cockpit therefore parses `logs` uniformly (a chunked reassembly arrives as a string list, a small
+answer as the JSON-roundtripped value — both are lists of strings after joining).
+
+**update.run is the one CapFull command, and the scariest remote op in the plane — it may restart the very
+unit that carries the cockpit channel.** The contract, in order:
+
+1. **Gates.** Full capability (server-side check like every command); a linux host with systemd; the per-pair
+   update bucket (one at once, then one per 5 min); `to` (optional) must be a dotted version, optionally
+   v-prefixed. `to` equal to the running version is refused (nothing to do), and targets below **3.5.0** are
+   refused outright: a pre-Scepter peer would come back without the management channel, stranding the
+   cockpit. Recovery downgrades within 3.5.x+ stay possible on purpose — that is the cockpit's own rollback
+   tool. A retry of the same command id replays the recorded `started` answer from the journal (at-most-once,
+   never a second update); a different id while a job owns the swap answers `already_running` — including
+   across an engine restart (a fresh `started` record inside the job's window blocks a second job).
+2. **Record first, move later.** The intent lands in the update mailbox (`$CONF/.update.status`, atomic
+   tmp+rename) as `phase:"started"` BEFORE anything else, then the response is journaled and flushed. The
+   engine-side worker's first action is a 3 s grace sleep, and the restart itself waits for the whole
+   download — the answer is off the process long before the session dies.
+3. **Stage.** The ENGINE does the network part (root behind the full-capability gate is the accepted model,
+   plan D3): it downloads `wattun-linux-<arch>`, `SHA256SUMS` and `SHA256SUMS.sig` from the GitHub release
+   (`releases/latest/download`, or `releases/download/<tag>` for an explicit `to`; standard proxy
+   environment variables honored; 64 MB download cap), verifies the RSA-SHA256 signature of SHA256SUMS
+   against the pinned release key (native `crypto/rsa` — the key is a third byte-identical copy of the
+   `SIG_PUB` in install.sh and wattun-manager, pinned by a test against install.sh), verifies the binary's
+   hash line, sanity-runs the staged binary's `-version` (a binary that will not run on this host is a
+   failure, not an update) and refuses a "latest" that resolves to the running version. Any failure here
+   writes `phase:"failed"` and removes the staging dir — nothing was swapped, the engine stays up, the
+   watcher fires `update_failed`.
+4. **Swap via a job that outlives the engine.** The staged swap runs as `wattun -update-job <stagedir>` —
+   this binary re-exec'd in a transient `systemd-run` unit (`wattun-update-<ts>`): parented by PID 1, so it
+   survives the engine restart it performs, and NOT sandboxed like the engine unit (the engine's
+   `ProtectSystem=strict` sandbox is exactly why the engine cannot write `/usr/local/bin` itself; a watchdog
+   child of the engine would die with its cgroup, and an in-engine watcher dies with the engine — the
+   transient unit is the only supervised context that outlives the restart). Why not install.sh: it is
+   interactive shell machinery (prompts, manager payload, kernel boost, unit rewrite) and has no automatic
+   rollback; the job is ~100 lines of Go, the same code the drill tests run.
+5. **The rollback watchdog is the job.** Its sequence: back up `BIN` → `BIN.prev` (atomic copy+rename) —
+   **this is the hard "refuses without a wattun.prev-compatible backup path" gate: a failed backup aborts
+   with the running binary untouched**; install the staged binary; restart every unit that was ACTIVE
+   pre-update (the channel unit included); watch them for 40 s and require all of them active for the last
+   10 s continuously (a `Type=simple` unit is "active" the moment the process starts — a crash-looping new
+   engine flickers, and stability is the verdict); on a dead engine restore `BIN.prev` and restart the units
+   again (`phase:"rolled_back"`). If even the rollback fails the mailbox says so verbatim and the latch (plus
+   the local console) is the way back in. Every transition is written to the mailbox atomically.
+6. **The channel survives, and the news arrives after revival.** While the units are down the scepter latch
+   (if armed with `-latch-port`) arms after 30 s of quiet — inside the job's 40 s watch window — so the
+   cockpit can always re-dial: in-band when the new engine lives, through the latch when it does not. The
+   mailbox is the cross-restart news channel: the REVIVED engine's watcher polls it (every 2 s) and fires
+   `update_applied` / `update_failed` for fresh records (1 h window), `update_failed {phase:"interrupted"}`
+   for a `started` record silent past the job's window (host rebooted mid-job), and nothing for older
+   records (history; `update.status` still serves them). `update_started` is the one in-life event, fired by
+   the command handler at accept time. The cockpit's own view after a revival: retry the command id (the
+   journal replays the `started` answer) and call `update.status` for the outcome.
+
+**backup.export** tarballs the config dir for a host rebuild: every regular file in `$CONF` — `NAME.yml`,
+`NAME.key`, `NAME.token`, `NAME.yml.bak` (pre-edit states), `.pairing` (the pairing store), `.pairing.audit`
+(the credential audit) and anything else an operator or the manager left there. Deliberately excluded: the
+command journal `.pairing.journal` (machine replay state, not restore data — the one file that grows with
+command traffic), the `.update/` staging dir and tmp files. Keys and the pairing store are INCLUDED on
+purpose: a config dir without keys restores nothing, and keys already travel this channel (`tunnel.create`
+returns them inside the session AEAD). Caps: one member > 4 MB or a total > 5 MB is refused (`too_large`)
+— the chunked transfer tops out at 512 x 16 KiB. The doc carries the tar's sha256 and size so the cockpit
+can verify the decode.
+
+**audit.tail** reads the two append-only sources on Kharej: `.pairing.audit` (the Kharej console's
+credential audit — pair/rotate/revoke events, written by wattun-manager as `<RFC3339> <event> <detail>`
+lines) and `.pairing.journal` (the scepter command journal). Lines are returned RAW, parse-free on purpose:
+the audit's schema is the manager's, and re-encoding it in the engine would couple the two. Files are read
+from the end (2 MB window); a missing file is an empty entries list, not an error.
 
 ### The one-shot client action: `wattun -scepter-call`
 
