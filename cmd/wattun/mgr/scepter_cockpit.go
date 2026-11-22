@@ -368,7 +368,7 @@ func scepterPairScreen(n string) {
 		items, rows := scepterPairItems(doc, docErr, caps)
 		head := func(w io.Writer) { scepterPairHead(w, n, doc, docErr, caps, helloErr) }
 		i, k := Choose(head, items, &sel, []string{"⏎", "open", "n", "create", "t", "test",
-			"a", "auto", "s", "state", "e", "events", "h", "hello", "r", "refresh", "esc", "back"}, time.Second)
+			"a", "auto", "o", "ops", "s", "state", "e", "events", "h", "hello", "r", "refresh", "esc", "back"}, time.Second)
 		switch {
 		case i >= 0 && i < len(rows): // a remote tunnel row
 			scepterTunnelPage(n, cl, caps, rows[i].Name)
@@ -407,6 +407,9 @@ func scepterPairScreen(n string) {
 		case "h":
 			scepterHelloView(cl)
 			Pause()
+		case "o": // plan D: the ops console (update, doctor, backup, audit)
+			scepterOpsScreen(n, cl, caps)
+			doc, docErr = refetch()
 		case "r":
 			doc, docErr = refetch()
 		case "0", "esc", "q":
@@ -433,6 +436,7 @@ func scepterPairItems(doc scepterDoc, docErr string, caps ScepterCaps) ([]Item, 
 		items = append(items,
 			Item{Key: "t", Label: "Probe carrier test", Desc: "open a probe on Kharej, measure it from here, close it"},
 			Item{Key: "a", Label: "Fleet auto-test", Desc: "rank what Kharej can serve (auto.test), apply a row"},
+			Item{Key: "o", Label: "Operations", Desc: "update, doctor, backup, audit — the pair's ops console"},
 		)
 	}
 	items = append(items,
@@ -771,7 +775,7 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 	}
 	for {
 		items := scepterTunnelItems(row, caps)
-		head := func(w io.Writer) { scepterTunnelHead(w, pair, row, cursor) }
+		head := func(w io.Writer) { scepterTunnelHead(w, pair, row, cursor, caps) }
 		i, k := Choose(head, items, &sel, []string{"⏎", "run", "s", "stats", "l", "logs",
 			"c", "carrier", "u", "up/down", "esc", "back"}, time.Second)
 		switch {
@@ -850,7 +854,7 @@ func scepterTunnelItems(row scepterTunRow, caps ScepterCaps) []Item {
 	}
 }
 
-func scepterTunnelHead(w io.Writer, pair string, row scepterTunRow, cursor uint64) {
+func scepterTunnelHead(w io.Writer, pair string, row scepterTunRow, cursor uint64, caps ScepterCaps) {
 	col, dot, txt := scepterStateCell(row)
 	Title(w, row.Name, "on Kharej "+pair+"  "+col+dot+" "+txt+RST)
 	fmt.Fprintln(w, "  "+kv("Carrier", orStr(row.Carrier, "?")))
@@ -863,6 +867,11 @@ func scepterTunnelHead(w io.Writer, pair string, row scepterTunRow, cursor uint6
 	fmt.Fprintln(w, "  "+kv("Event cursor", strconv.FormatUint(cursor, 10)))
 	if cursor == 0 {
 		hintLine(w, "The events cursor rides the state document; press e on the pair screen to read events.")
+	}
+	if !caps.Has(CapManage) {
+		// scepterTunnelItems returned an empty action list for this tier; say why
+		// instead of stranding the reader on a headless page.
+		hintLine(w, "Stats, logs and edits need the 'manage' capability on the pairing line.")
 	}
 	fmt.Fprintln(w)
 }

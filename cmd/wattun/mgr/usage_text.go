@@ -25,9 +25,13 @@ Usage: $SELF [command]
                         test carrier shapes remotely (a probe listener on Kharej,
                         measured from this server), switch a remote tunnel's carrier
                         with automatic rollback (this tunnel follows, reverted if its
-                        link dies), run/apply the fleet carrier ranking
-                        (needs wattun 3.5.0 on both ends; a write needs the pairing's
-                        create/manage capability)
+                        link dies), run/apply the fleet carrier ranking; Operations:
+                        update.status/run (Kharej updates its own binary over the
+                        channel — the cockpit drops mid-update, the scepter latch
+                        revives it, a watchdog rolls back to wattun.prev; full
+                        capability), doctor.fetch, backup.export (the config dir as
+                        a verified tarball), audit.tail (needs wattun 3.5.0 on both
+                        ends; a write needs the pairing's create/manage capability)
   preset NAME [PRESET]  apply built-in anti-censorship preset (rst-fast, mci, irancell, blackout, conservative)
   test-bypass NAME      automated connectivity & filter bypass test for anti-censorship profile
   profile save|list|show|del|apply   resilience profiles: save one tunnel's fake-sni/pool-rotate combination

@@ -415,6 +415,11 @@ func scepterCodeHint(code int, p map[string]any) string {
 		return "port " + orStr(port, "?") + " is already bound by " + orStr(str("user"), "another listener")
 	case scepterCodeCarrierNeeds:
 		return "carrier '" + orStr(str("carrier"), "?") + "' needs " + orStr(str("need"), "a different platform") + " on Kharej"
+	case scepterCodeTooLarge:
+		if s := str("why"); s != "" {
+			return "too large for the channel: " + s
+		}
+		return "the answer is too large for the channel (the payload caps)"
 	}
 	return ""
 }

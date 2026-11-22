@@ -1,0 +1,638 @@
+// Scepter operations from the cockpit (3.5.0, plan D; the pair screen's "o").
+// Five flows, every answer straight from the RPC (docs/TECHNICAL.md, "Phase D
+// commands: operations"; both ends need 3.5.0):
+//
+//   - update.status (manage): the remote engine's version, wattun.prev
+//     evidence, unit states, the update mailbox and the staging state — local
+//     reads on Kharej, the engine fetches nothing;
+//   - update.run {to?} (full — the one CapFull command): Kharej updates its
+//     own binary. Hard confirm (default no), the drop warning up front: the
+//     channel dies mid-update by design and comes back through the latch; the
+//     outcome survives in the journal and the update mailbox — after the
+//     revival, update.status reveals applied/failed/rolled_back, and a retried
+//     command id replays from the journal at-most-once;
+//   - doctor.fetch (manage): the state document plus the doctor fragments,
+//     flattened into structured rows;
+//   - backup.export (manage): Kharej's config dir as a sha256-verified
+//     tarball, reassembled with the transport's chunk parser and saved here;
+//   - audit.tail {n} (manage): the last n raw lines of each audit source.
+//
+// Client-side capability gating is UX only — Kharej re-checks every command
+// (D3; the full gate on update.run is UX too, the engine's is the real one).
+
+package mgr
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ======================================================================================
+// Arg shapes and answer parsers (pure; the tests pin them against the engine's
+// strictly-typed readers in wat/scepter.go and cmd/wattun/scepter_ops.go).
+// ======================================================================================
+
+// scepterUpdateRunArgs builds update.run {id, to?}. `to` stays absent when
+// empty (the engine's latest release); the id is lifted by -scepter-call into
+// the command id — a resend after an unclear outcome replays the journal's
+// recorded started answer instead of starting a second update.
+func scepterUpdateRunArgs(to, id string) map[string]any {
+	args := map[string]any{"id": id}
+	if to != "" {
+		args["to"] = to
+	}
+	return args
+}
+
+// scepterAuditTailArgs builds audit.tail {n}: empty means the engine's default
+// (100), and the 1000 cap is mirrored client-side so the validator's promise
+// ("the engine caps it") matches what is sent.
+func scepterAuditTailArgs(n int) map[string]any {
+	if n <= 0 {
+		n = 100
+	}
+	if n > 1000 {
+		n = 1000
+	}
+	return map[string]any{"n": n}
+}
+
+// scepterLogsOf reads the chunked-logs convention's params (backup.export,
+// audit.tail): a chunked reassembly arrives as []string (the transport parser's
+// own shape), a small answer as the JSON-roundtripped []any — both are the same
+// list of newline-free documents after flattening.
+func scepterLogsOf(p map[string]any) []string {
+	if p == nil {
+		return nil
+	}
+	switch l := p["logs"].(type) {
+	case []string:
+		return l
+	case []any:
+		out := make([]string, 0, len(l))
+		for _, e := range l {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// scepterBackupDoc is the backup.export payload document {b64, sha256, size,
+// files}; raw is the decoded tarball.
+type scepterBackupDoc struct {
+	B64, SHA256 string
+	Size, Files int
+}
+
+// scepterParseBackupDoc decodes and verifies the payload: the document carries
+// the tar's size and sha256 so a truncated or corrupted reassembly is caught
+// here, honestly, before anything is written to disk.
+func scepterParseBackupDoc(doc string) (scepterBackupDoc, []byte, error) {
+	var d scepterBackupDoc
+	if err := json.Unmarshal([]byte(doc), &d); err != nil {
+		return d, nil, fmt.Errorf("backup document does not parse: %v", err)
+	}
+	if d.B64 == "" || d.SHA256 == "" || d.Size <= 0 {
+		return d, nil, fmt.Errorf("backup document lacks b64, sha256 or size")
+	}
+	raw, err := base64.StdEncoding.DecodeString(d.B64)
+	if err != nil {
+		return d, nil, fmt.Errorf("backup tarball: %v", err)
+	}
+	if len(raw) != d.Size {
+		return d, nil, fmt.Errorf("backup tarball is %d bytes, the document says %d (truncated transfer?)", len(raw), d.Size)
+	}
+	sum := sha256.Sum256(raw)
+	if got := hex.EncodeToString(sum[:]); got != d.SHA256 {
+		return d, nil, fmt.Errorf("backup tarball checksum mismatch (want %s, got %s)", d.SHA256, got)
+	}
+	return d, raw, nil
+}
+
+// scepterUpdUnit is one row of update.status's unit list.
+type scepterUpdUnit struct {
+	Name   string
+	Active bool
+}
+
+// scepterUpdMail is the update mailbox record (wat.ScepterUpdateStatus over
+// the wire): the cross-restart news channel of the update orchestration.
+type scepterUpdMail struct {
+	Phase, Run, From, To, Detail string
+	Ts                           int64
+}
+
+// scepterUpdStatus is the update.status answer's cockpit subset. Absent
+// evidence stays absent — nothing is defaulted into looking real.
+type scepterUpdStatus struct {
+	Ver, Goos, Arch string
+	Systemd         bool
+	Bin, Conf       string
+	PrevPresent     bool
+	PrevPath        string
+	PrevBytes       int64
+	PrevMtime       int64
+	PrevVer         string
+	Units           []scepterUpdUnit
+	Mail            *scepterUpdMail
+	StagedBytes     int64
+}
+
+// scepterParseUpdStatus parses the answer; an empty params map is an error,
+// never a blank screen that looks like a success.
+func scepterParseUpdStatus(p map[string]any) (scepterUpdStatus, error) {
+	var s scepterUpdStatus
+	if len(p) == 0 {
+		return s, fmt.Errorf("empty update.status answer")
+	}
+	s.Ver, _ = p["ver"].(string)
+	s.Goos, _ = p["goos"].(string)
+	s.Arch, _ = p["arch"].(string)
+	s.Systemd, _ = p["systemd"].(bool)
+	s.Bin, _ = p["bin"].(string)
+	s.Conf, _ = p["conf"].(string)
+	if prev, ok := p["prev"].(map[string]any); ok {
+		s.PrevPresent, _ = prev["present"].(bool)
+		s.PrevPath, _ = prev["path"].(string)
+		s.PrevVer, _ = prev["ver"].(string)
+		s.PrevBytes = int64(scepterU64(prev["bytes"]))
+		s.PrevMtime = int64(scepterU64(prev["mtime"]))
+	}
+	if list, ok := p["units"].([]any); ok {
+		for _, e := range list {
+			m, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			u := scepterUpdUnit{}
+			u.Name, _ = m["name"].(string)
+			u.Active, _ = m["active"].(bool)
+			s.Units = append(s.Units, u)
+		}
+	}
+	if m, ok := p["update"].(map[string]any); ok {
+		mail := &scepterUpdMail{}
+		mail.Phase, _ = m["phase"].(string)
+		mail.Run, _ = m["run"].(string)
+		mail.From, _ = m["from"].(string)
+		mail.To, _ = m["to"].(string)
+		mail.Detail, _ = m["detail"].(string)
+		mail.Ts = int64(scepterU64(m["ts"]))
+		s.Mail = mail
+	}
+	if staged, ok := p["staged"].(map[string]any); ok {
+		s.StagedBytes = int64(scepterU64(staged["bytes"]))
+	}
+	return s, nil
+}
+
+// scepterTs formats one unix timestamp for the ops rows; an absent one says ?.
+func scepterTs(ts int64) string {
+	if ts <= 0 {
+		return "?"
+	}
+	return time.Unix(ts, 0).Format("2006-01-02 15:04")
+}
+
+// scepterRenderRows flattens one params map into sorted dotted-path rows:
+// doctor.fetch's document nests maps (latch, unit, update, journal) and lists
+// (recent, tunnels), and %v of those is noise, not rows. Lists render one row
+// per element; an empty list renders nothing (no rows are invented).
+func scepterRenderRows(p map[string]any) []string {
+	var out []string
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			ks := make([]string, 0, len(t))
+			for k := range t {
+				ks = append(ks, k)
+			}
+			sort.Strings(ks) // a map's iteration order must not jitter the rows
+			for _, k := range ks {
+				p := k
+				if path != "" {
+					p = path + "." + k
+				}
+				walk(p, t[k])
+			}
+		case []any:
+			for i, e := range t {
+				walk(fmt.Sprintf("%s[%d]", path, i), e)
+			}
+		case []string:
+			for i, e := range t {
+				walk(fmt.Sprintf("%s[%d]", path, i), e)
+			}
+		default:
+			out = append(out, path+": "+fmt.Sprintf("%v", v))
+		}
+	}
+	walk("", p)
+	return out
+}
+
+// ======================================================================================
+// Validators (they print their own reason, like every AskOK validator here).
+// ======================================================================================
+
+// vScepterTag mirrors the engine's ValidScepterTag: a dotted version, optionally
+// v-prefixed; empty is the latest release (the engine's optional `to`). The
+// engine re-validates and refuses the running version and pre-3.5.0 targets
+// (those would come back without the cockpit channel).
+func vScepterTag(s string) bool {
+	if strings.TrimSpace(s) == "" {
+		return true
+	}
+	t := strings.TrimPrefix(strings.TrimSpace(s), "v")
+	fs := strings.Split(t, ".")
+	if len(fs) == 3 {
+		ok := true
+		for _, f := range fs {
+			if !isDigits(f) || len(f) > 3 {
+				ok = false
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	Err("Want a dotted version, optionally v-prefixed (v3.6.0).")
+	return false
+}
+
+// vScepterAuditN: the audit.tail line count; empty takes the engine's default.
+func vScepterAuditN(s string) bool {
+	if s == "" {
+		return true
+	}
+	if !isDigits(s) {
+		Err("Digits only (empty = the default 100).")
+		return false
+	}
+	if n := atoi(s); n > 1000 {
+		Err("The engine caps the tail at 1000 lines.")
+		return false
+	}
+	return true
+}
+
+// vScepterBackupPath: the local save path. The export is a plain (uncompressed)
+// tar, so the name should say .tar; a one-line path only — it is typed.
+func vScepterBackupPath(s string) bool {
+	if s == "" || strings.ContainsAny(s, "\n\r") {
+		Err("Give a file path ending in .tar.")
+		return false
+	}
+	if !strings.HasSuffix(strings.ToLower(s), ".tar") {
+		Err("The export is a plain tar — save it as *.tar.")
+		return false
+	}
+	return true
+}
+
+// ======================================================================================
+// The ops screen: the pair screen's "o". The menu hides what the pairing's
+// capability does not cover (update.run without full), and each action repeats
+// its own gate — a direct call must refuse, not fall through.
+// ======================================================================================
+
+// scepterOpsItems: one item per ops command. update.status first (the read the
+// others are judged against), update.run last and in red — the scariest remote
+// op in the plane.
+func scepterOpsItems(caps ScepterCaps) []Item {
+	if !caps.Has(CapManage) {
+		return nil // every ops command needs at least manage
+	}
+	items := []Item{
+		{Key: "s", Label: "Update status", Desc: "engine version, wattun.prev, unit states, the update mailbox"},
+		{Key: "d", Label: "Doctor", Desc: "doctor.fetch — the pair's structured self-report"},
+		{Key: "b", Label: "Export backup", Desc: "Kharej's config dir as a verified tarball, saved here"},
+		{Key: "a", Label: "Audit trail", Desc: "the last audit + journal lines, raw"},
+	}
+	if caps.Has(CapFull) {
+		items = append(items, Item{Key: "u", Label: RED + "Run update" + RST,
+			Desc: "Kharej updates its own binary (drops this channel; rolls back on a dead engine)"})
+	}
+	return items
+}
+
+func scepterOpsHead(w io.Writer, pair string, caps ScepterCaps) {
+	Title(w, "Operations", pair+" · caps "+orStr(caps.Labels(), "none"))
+	hintLine(w, "The pair's ops console; every row below is Kharej's own answer.")
+	fmt.Fprintln(w)
+}
+
+func scepterOpsScreen(pair string, cl ScepterClient, caps ScepterCaps) {
+	sel := 0
+	for {
+		items := scepterOpsItems(caps)
+		head := func(w io.Writer) { scepterOpsHead(w, pair, caps) }
+		i, k := Choose(head, items, &sel, []string{"⏎", "run", "esc", "back"}, time.Second)
+		switch {
+		case i >= 0:
+			k = items[i].Key
+		case k == "tick" || k == "move":
+			continue
+		case k == "eof":
+			return
+		}
+		switch k {
+		case "s":
+			scepterUpdateStatusView(cl)
+			Pause()
+		case "d":
+			scepterDoctorView(cl)
+			Pause()
+		case "b":
+			scepterBackupExport(pair, cl)
+			Pause()
+		case "a":
+			scepterAuditView(cl)
+		case "u":
+			scepterUpdateRun(pair, cl, caps)
+			Pause()
+		case "0", "esc", "q":
+			return
+		}
+	}
+}
+
+// ---- update.status ----
+
+func scepterUpdateStatusView(cl ScepterClient) {
+	fmt.Fprintln(Stdout)
+	Hint("update.status — the remote engine's update evidence (local reads only)")
+	res, ok := scepterAct(cl, "update.status", nil)
+	if !ok {
+		return
+	}
+	st, err := scepterParseUpdStatus(res.Params)
+	if err != nil {
+		Warn(err.Error())
+		return
+	}
+	scepterPrintUpdStatus(st)
+}
+
+func scepterPrintUpdStatus(st scepterUpdStatus) {
+	sysd := "no"
+	if st.Systemd {
+		sysd = "yes"
+	}
+	Say("  " + kv("Engine", st.Ver+" · "+st.Goos+"/"+st.Arch+" · systemd "+sysd))
+	if st.Bin != "" {
+		Say("  " + kv("Binary", st.Bin))
+	}
+	if st.Conf != "" {
+		Say("  " + kv("Conf", st.Conf))
+	}
+	// The prev evidence is the watchdog's hard gate: without a backup path the
+	// job aborts untouched, so say so instead of a silent empty row.
+	if !st.PrevPresent || st.PrevPath == "" {
+		Warn("No wattun.prev evidence — the update watchdog refuses to swap without a backup path.")
+	} else {
+		prev := fmt.Sprintf("%s · %s · %s", st.PrevPath, Human(float64(st.PrevBytes)), scepterTs(st.PrevMtime))
+		if st.PrevVer != "" {
+			prev += " · " + st.PrevVer
+		}
+		Say("  " + kv("wattun.prev", prev))
+	}
+	for _, u := range st.Units {
+		col, mark, txt := GRY, "◌", "stopped"
+		if u.Active {
+			col, mark, txt = GRN, "●", "up"
+		}
+		Say("  " + kv("Unit", u.Name+"  "+col+mark+" "+txt+RST))
+	}
+	if st.Mail == nil {
+		Hint("No update has run on this Kharej yet (no mailbox record).")
+	} else {
+		Say("  " + kv("Update", scepterMailStr(*st.Mail)))
+		if st.Mail.Phase == "started" {
+			Hint("A started record means an update was accepted; if the channel died before")
+			Hint("the answer, the journal replays it for the same command id — and a record")
+			Hint("silent past the job's watch window arrives as update_failed {interrupted}.")
+		}
+	}
+	if st.StagedBytes > 0 {
+		Say("  " + kv("Staged", Human(float64(st.StagedBytes))+" under .update (staging in progress or left over)"))
+	}
+}
+
+// scepterMailStr renders the mailbox record; the phase carries the colour
+// (applied green, started/rolled_back amber, failed red).
+func scepterMailStr(m scepterUpdMail) string {
+	col := YEL
+	switch m.Phase {
+	case "applied":
+		col = GRN
+	case "failed":
+		col = RED
+	}
+	s := col + orStr(m.Phase, "?") + RST
+	if m.Run != "" {
+		s += " · run " + m.Run
+	}
+	if m.From != "" || m.To != "" {
+		s += " · " + orStr(m.From, "?") + " → " + orStr(m.To, "?")
+	}
+	if m.Ts > 0 {
+		s += " · " + scepterTs(m.Ts)
+	}
+	if m.Detail != "" {
+		s += " · " + m.Detail
+	}
+	return s
+}
+
+// ---- update.run ----
+
+// scepterUpdateRun: the one CapFull command. The warnings are the contract
+// (docs/TECHNICAL.md step 6): the channel drops mid-update and comes back via
+// the latch; the outcome survives in the journal + mailbox, so update.status
+// after the revival is the way to know. The intent rides scepterRun so a
+// transport retry resends the SAME command id — the journal answers
+// at-most-once, never a second update.
+func scepterUpdateRun(pair string, cl ScepterClient, caps ScepterCaps) {
+	if !caps.Has(CapFull) {
+		Warn("Running an update needs the 'full' capability on the pairing line.")
+		return
+	}
+	Page("Run update on Kharej", pair+" · update.run")
+	Hint("Kharej downloads the release, verifies the signature, installs the binary")
+	Hint("and restarts every unit that was up — the unit carrying this channel too.")
+	Hint("A watchdog watches 40 s; a new engine that does not stay up rolls back to")
+	Hint("wattun.prev and the units restart on it.")
+	fmt.Fprintln(Stdout)
+	Warn("The channel WILL drop mid-update. It comes back on its own: the scepter")
+	Warn("latch arms while Kharej's units are down and revives the cockpit.")
+	Hint("The outcome survives the drop: the answer is journaled. After the revival,")
+	Hint("open Update status — the update mailbox carries applied/failed/rolled_back,")
+	Hint("and a retried command id replays from the journal (never a second update).")
+	fmt.Fprintln(Stdout)
+	if !AskOK("Target version (empty = latest release)", "", vScepterTag) {
+		return
+	}
+	to := ReplyV
+	fmt.Fprintln(Stdout)
+	if !Confirm("Send update.run to Kharej now?", false) { // hard confirm: default no
+		Warn("Cancelled.")
+		return
+	}
+	res, ok := scepterRun(cl, "update.run", func(_ uint64, id string) map[string]any {
+		return scepterUpdateRunArgs(to, id)
+	}, 0)
+	if !ok || res.Code != scepterCodeOK {
+		return // printed (a transport give-up or a rejection with its hint)
+	}
+	if b, _ := res.Params["already_running"].(bool); b {
+		run, _ := res.Params["run"].(string)
+		Warn("A job already owns the swap (run " + orStr(run, "?") + ") — Update status shows its progress.")
+		return
+	}
+	run, _ := res.Params["run"].(string)
+	toN, _ := res.Params["to"].(string)
+	grace := int(scepterU64(res.Params["grace_s"]))
+	Ok(fmt.Sprintf("Update accepted — run %s, target %s.", orStr(run, "?"), orStr(toN, "latest")))
+	Hint(fmt.Sprintf("Nothing moves for %d s; then the channel drops as Kharej's units restart.", grace))
+	Hint("Come back via Update status — the mailbox reveals the outcome.")
+}
+
+// ---- doctor.fetch ----
+
+func scepterDoctorView(cl ScepterClient) {
+	fmt.Fprintln(Stdout)
+	Hint("doctor.fetch — the pair's structured self-report (state, recent commands, ops fragments)")
+	res, ok := scepterAct(cl, "doctor.fetch", nil)
+	if !ok {
+		return
+	}
+	rows := scepterRenderRows(res.Params)
+	if len(rows) == 0 {
+		Warn("doctor.fetch answered nothing.")
+		return
+	}
+	for _, row := range rows {
+		if i := strings.Index(row, ": "); i > 0 {
+			Say("  " + GRY + row[:i+1] + RST + " " + row[i+2:])
+			continue
+		}
+		Say("  " + row)
+	}
+}
+
+// ---- backup.export ----
+
+func scepterBackupExport(pair string, cl ScepterClient) {
+	Page("Export backup", pair+" · backup.export")
+	Hint("A tarball of Kharej's config dir: ymls, keys, tokens, .bak states, the")
+	Hint("pairing store and its audit — what a host rebuild restores from. Keys are")
+	Hint("in it on purpose; the command journal is not (machine replay state).")
+	Hint("Caps: 4 MB per file, 5 MB total — more is refused with too_large.")
+	fmt.Fprintln(Stdout)
+	res, ok := scepterAct(cl, "backup.export", nil)
+	if !ok {
+		return
+	}
+	docs := scepterLogsOf(res.Params)
+	if len(docs) != 1 {
+		Warn(fmt.Sprintf("backup.export answered %d document(s), want exactly 1.", len(docs)))
+		return
+	}
+	d, raw, err := scepterParseBackupDoc(docs[0])
+	if err != nil {
+		Err(err.Error())
+		return
+	}
+	fmt.Fprintln(Stdout)
+	def := filepath.Join(P.Conf, fmt.Sprintf("%s-backup-%d.tar", pair, time.Now().Unix()))
+	if !AskOK("Save the backup as", def, vScepterBackupPath) {
+		return
+	}
+	path := ReplyV
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		Err("Writing the backup failed: " + err.Error())
+		return
+	}
+	Ok(fmt.Sprintf("Backup saved: %s (%s tar, %d file(s), sha256 verified).", path, Human(float64(len(raw))), d.Files))
+}
+
+// ---- audit.tail ----
+
+func scepterAuditView(cl ScepterClient) {
+	Page("Audit trail", "Kharej · audit.tail")
+	Hint("The last lines of Kharej's two append-only scepter records, raw:")
+	Hint("  .pairing.audit   — the local console's credential audit (pair/rotate/revoke)")
+	Hint("  .pairing.journal — every cockpit command with its recorded outcome")
+	fmt.Fprintln(Stdout)
+	if !AskOK("Lines per source (empty = 100, cap 1000)", "", vScepterAuditN) {
+		return
+	}
+	n := ReplyV
+	for {
+		scepterAuditFetch(cl, n)
+		fmt.Fprintln(Stdout)
+		MenuLine(Stdout, "r", "refresh", "0", "back")
+		fmt.Fprintf(Stdout, "  %s▸%s ", CYN, RST)
+		k, _, ok := KeyRead(0)
+		if !ok || k == "0" || k == "esc" || k == "q" {
+			return
+		}
+		if k != "r" {
+			Hint("Press r or 0.")
+		}
+	}
+}
+
+// scepterAuditFetch runs one audit.tail and prints both sources' raw lines.
+// The lines are shown verbatim: the audit's schema is the manager's own, and
+// re-encoding here could hide what it records.
+func scepterAuditFetch(cl ScepterClient, nStr string) {
+	n := 0
+	if nStr != "" {
+		n = atoi(nStr)
+	}
+	res, ok := scepterAct(cl, "audit.tail", scepterAuditTailArgs(n))
+	if !ok {
+		return
+	}
+	docs := scepterLogsOf(res.Params)
+	if len(docs) != 2 {
+		Warn(fmt.Sprintf("audit.tail answered %d source document(s), want 2 (audit + journal).", len(docs)))
+		return
+	}
+	labels := []string{".pairing.audit", ".pairing.journal"}
+	for i, doc := range docs {
+		var d struct {
+			Src     string   `json:"src"`
+			Entries []string `json:"entries"`
+		}
+		if err := json.Unmarshal([]byte(doc), &d); err != nil {
+			Warn(labels[i] + ": unparseable source document: " + err.Error())
+			continue
+		}
+		fmt.Fprintln(Stdout)
+		Say("  " + BOLD + orStr(d.Src, labels[i]) + RST + "  " + GRY +
+			"(" + strconv.Itoa(len(d.Entries)) + " line(s))" + RST)
+		if len(d.Entries) == 0 {
+			Say("  " + GRY + "empty (nothing recorded yet, or the file does not exist)" + RST)
+		}
+		for _, e := range d.Entries {
+			Say("  " + GRY + e + RST)
+		}
+	}
+}
