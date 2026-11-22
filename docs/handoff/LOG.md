@@ -916,3 +916,25 @@ Commit: d354660, 4ef462a
   stub transport becomes real in phase B; journalctl-backed tunnel.logs later.
 PHASE A READY FOR REVIEW. Proceeding to phase B (write intents).
 Commit: 9fbe625, eae9c41
+
+## 2026-11-22 · supervisor · Phase B engine lane committed (bc26b3a) — write intents live; mgr cockpit lane dispatched
+- Lane E (engine) reviewed and verified (gofmt empty, build+vet clean, Scepter tests ok) after
+  self-committing bc26b3a: 8 write commands (tunnel.create/edit/delete/start|stop/restart,
+  limits.set, preset.apply) over a typed ScepterOps seam (real fileScepterOps on Kharej: full
+  validate -> backup -> apply -> verify -> rollback, systemd unit ops, port-collision scan,
+  tunnel cap 64, self-unit refusals, limits hot-reload; fake ops on temp CONF in wat tests), one
+  command queue (mutex from journal replay through record; pins concurrent serialization),
+  base_seq freshness tail judged pre-apply, codes 10/11/12, -scepter-call/-scepter-args one-shot
+  CLI (the manager seam). TECHNICAL.md command table grew.
+- IMPORTANT phase-A bug found and fixed in passing (Lane E, with baseline proof):
+  serveScepterLoop spun hot forever after session close (Stream.Read's session-dead error
+  answered bad_request persistently) — one burned core per closed scepter pair; it made five
+  wall-clock suite tests fail reproducibly. Fix: a data-less read error ends the serve loop.
+  Full wat suite now FULLY GREEN (691.8 s, exit 0) including TestSlowReaderBuffersBounded — the
+  2026-11-22 environmental caveat above was in fact caused by this spin; that entry stands
+  corrected by this one.
+- Supervisor added scepter-call/scepter-args to the manager's CFG_FILE_ONLY (same cross-lane
+  coverage rule as before); test-manager.sh re-run in progress.
+- Lane F (Go mgr cockpit: real shell-out transport, fleet view, create wizard, tunnel pages)
+  dispatched against the committed -scepter-call contract; delivers uncommitted.
+Commit: bc26b3a
