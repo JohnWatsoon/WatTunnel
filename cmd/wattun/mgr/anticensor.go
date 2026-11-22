@@ -448,7 +448,8 @@ func setDirection(n string) bool {
 			if IsReverse(n) {
 				rev = "1"
 			}
-			_ = writeFile0600(filepath.Join(P.Conf, n+".token"), MakeToken(t.Carrier, t.Peer, t.Key, t.Path, t.SNI, t.Icmp, t.Ports, rev, t.Auto)+"\n")
+			// field 10 rides along (bash passes "$T_PAIR" here too), or the reverse toggle strips the pair capability
+			_ = writeFile0600(filepath.Join(P.Conf, n+".token"), MakeToken(t.Carrier, t.Peer, t.Key, t.Path, t.SNI, t.Icmp, t.Ports, rev, t.Auto, t.Pair)+"\n")
 		}
 	}
 	other := "Kharej"

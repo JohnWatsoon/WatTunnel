@@ -1172,10 +1172,12 @@ func scepterRemoteDelete(cl ScepterClient, name string) bool {
 // shape, the manager's v_name without the local file check (the name lands on
 // Kharej, not here).
 func vScepterName(s string) bool {
-	if regexp.MustCompile(`^[a-zA-Z0-9_-]{1,32}$`).MatchString(s) {
+	// the "-r" ban mirrors the engine's ValidScepterName (companion_of would hide a tunnel named
+	// <x>-r whenever x is an auto Kharej tunnel — wave-1 finding F12)
+	if regexp.MustCompile(`^[a-zA-Z0-9_-]{1,32}$`).MatchString(s) && !strings.HasSuffix(s, "-r") {
 		return true
 	}
-	Err("Use 1-32 letters, digits, - or _.")
+	Err("Use 1-32 letters, digits, - or _ (a name may not end in -r).")
 	return false
 }
 

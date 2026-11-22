@@ -95,39 +95,21 @@ func ReadPairingLine(line string) (PairingLine, error) {
 	if len(k) != 32 {
 		return p, fmt.Errorf("field 3 (key) is %d bytes, want exactly 32", len(k))
 	}
-	caps, err := CapsFromTokens(strings.Split(fs[3], ","))
-	if err != nil {
-		return p, err
+	// Exactly one tier word: the engine's ParsePairingLine reads field 4 with
+	// CapFromName, which accepts only tunnel|create|manage|full (F10-parser,
+	// 2026-11-22). A comma list validated here but the pasted line travels to
+	// -pair-to verbatim, so anything the engine will refuse must be refused in
+	// this validator — otherwise the owner hits the refusal only at attach.
+	bit, ok := capName[fs[3]]
+	if !ok {
+		return p, fmt.Errorf("field 4 (capabilities) must be one tier word: tunnel, create, manage or full (got %q)", fs[3])
 	}
-	return PairingLine{Version: fs[0], UUID: u, Key: k, Caps: caps}, nil
+	return PairingLine{Version: fs[0], UUID: u, Key: k, Caps: tierBits(bit)}, nil
 }
 
-// CapsFromTokens turns the line's comma list ("create" alone means the tier
-// create, which includes tunnel — D4's tiers are cumulative, so the tokens
-// name a tier and the mask carries every tier at or below it).
-func CapsFromTokens(tokens []string) (ScepterCaps, error) {
-	if len(tokens) == 0 || (len(tokens) == 1 && tokens[0] == "") {
-		return 0, fmt.Errorf("field 4 (capabilities) is empty; use tunnel, create, manage or full")
-	}
-	var m ScepterCaps
-	seen := map[string]bool{}
-	for _, t := range tokens {
-		t = strings.TrimSpace(strings.ToLower(t))
-		bit, ok := capName[t]
-		if !ok {
-			return 0, fmt.Errorf("unknown capability %q (use tunnel, create, manage or full)", t)
-		}
-		if seen[t] {
-			return 0, fmt.Errorf("capability %q is listed twice", t)
-		}
-		seen[t] = true
-		m |= tierBits(bit)
-	}
-	return m, nil
-}
-
-// tierBits expands a tier token to every bit at or below it: create grants
-// tunnel too, manage grants create, full grants everything.
+// tierBits expands one tier word's bit to every bit at or below it: create
+// grants tunnel too, manage grants create, full grants everything — the same
+// tower CapFromName builds on the engine side.
 func tierBits(tier ScepterCaps) ScepterCaps {
 	switch tier {
 	case CapFull:
@@ -140,18 +122,30 @@ func tierBits(tier ScepterCaps) ScepterCaps {
 	return CapTunnel
 }
 
-// MakePairingLine renders a watp1: line (standard padded base64 for the key,
-// canonical lowercase UUID, tier tokens in D4 order) — the round-trip twin of
-// ReadPairingLine and what a Kharej owner copies out of install.sh.
-func MakePairingLine(version, uuid string, key []byte, caps ScepterCaps) string {
-	var toks []string
-	for _, c := range []ScepterCaps{CapTunnel, CapCreate, CapManage, CapFull} {
-		if caps&c != 0 {
-			toks = append(toks, capLabel(c))
-		}
+// capTier is a mask's highest tier word — the ONE token the engine's
+// ParsePairingLine accepts and its CapName renders ("" for an empty mask). A
+// line field is a tier word, never a comma list (F10-parser, 2026-11-22).
+func capTier(caps ScepterCaps) string {
+	switch {
+	case caps&CapFull != 0:
+		return "full"
+	case caps&CapManage != 0:
+		return "manage"
+	case caps&CapCreate != 0:
+		return "create"
+	case caps&CapTunnel != 0:
+		return "tunnel"
 	}
+	return ""
+}
+
+// MakePairingLine renders a watp1: line (standard padded base64 for the key,
+// canonical lowercase UUID, the mask's highest tier as one word) — the
+// round-trip twin of ReadPairingLine and what a Kharej owner copies out of
+// install.sh.
+func MakePairingLine(version, uuid string, key []byte, caps ScepterCaps) string {
 	return fmt.Sprintf("watp1:%s|%s|%s|%s",
-		version, strings.ToLower(uuid), base64.StdEncoding.EncodeToString(key), strings.Join(toks, ","))
+		version, strings.ToLower(uuid), base64.StdEncoding.EncodeToString(key), capTier(caps))
 }
 
 // ======================================================================================

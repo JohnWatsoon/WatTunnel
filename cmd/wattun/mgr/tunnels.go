@@ -1098,7 +1098,9 @@ func changeKey(n string) {
 		atomicWrite(filepath.Join(P.Conf, n+".key"), []byte(k+"\n"), 0o600)
 		if tok := strings.TrimSpace(p2ReadText(filepath.Join(P.Conf, n+".token"))); tok != "" {
 			if t, err := ReadToken(tok); err == nil {
-				nt := MakeToken(t.Carrier, t.Peer, k, t.Path, t.SNI, t.Icmp, t.Ports, t.Rev, t.Auto)
+				// field 10 rides along (bash change_key passes "$T_PAIR"): the
+				// pair capability follows the key rotation
+				nt := MakeToken(t.Carrier, t.Peer, k, t.Path, t.SNI, t.Icmp, t.Ports, t.Rev, t.Auto, t.Pair)
 				atomicWrite(filepath.Join(P.Conf, n+".token"), []byte(nt+"\n"), 0o600)
 			}
 		}

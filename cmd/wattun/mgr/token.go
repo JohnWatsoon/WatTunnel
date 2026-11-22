@@ -9,11 +9,14 @@ import (
 )
 
 // Connection token (wattun-manager L920-924):
-//   wat1:BASE64("carrier|peer|key|path|sni|icmp-type|allowed-ports[|reverse][|auto-plan]")
+//   wat1:BASE64("carrier|peer|key|path|sni|icmp-type|allowed-ports[|reverse][|auto-plan][|pair]")
 // Field 7 (allowed ports on Kharej, comma list, empty = any) was added in 1.9.0;
 // 6-field tokens still parse. Field 8 ("1" = reverse ICMP, >= 2.0.0) is written
 // only when set. Field 9 (auto plan) only for carrier "auto" tokens, where
 // field 8 stays empty; its d=/r= lists use only ; , : = , never '|'.
+// Field 10 (3.5.0, Scepter plan D5) is the pairing capability tier of a
+// token-bootstrap pairing, written only when set like fields 8/9, so an older
+// parser stops at field 9 and ignores it.
 
 // Token mirrors the T_* variables of read_token.
 type Token struct {
@@ -26,18 +29,28 @@ type Token struct {
 	Ports   string // T_PORTS
 	Rev     string // T_REV
 	Auto    string // T_AUTO
+	Pair    string // T_PAIR: token field 10, the pair capability tier ("pair" or "pair=<tier>")
 
 	LegC []string // T_LEG_C: per-leg carriers of a bond token (TokenBondLegs)
 	LegP []string // T_LEG_P: per-leg endpoints, parallel to LegC
 }
 
 // MakeToken mirrors make_token(): fields 8/9 only when set, so every other
-// token stays 7 fields and old peers keep parsing it.
-func MakeToken(carrier, peer, key, path, sni, icmp, ports, rev, auto string) string {
+// token stays 7 fields and old peers keep parsing it. The optional pair
+// argument is field 10 (T_PAIR, make_token's $10): written only when set, and
+// when it is, fields 8/9 ride along (possibly empty) exactly like the bash.
+func MakeToken(carrier, peer, key, path, sni, icmp, ports, rev, auto string, pair ...string) string {
+	p := ""
+	if len(pair) > 0 {
+		p = pair[0]
+	}
 	f := strings.Join([]string{carrier, peer, key, path, sni, icmp, ports}, "|")
-	if auto != "" {
+	switch {
+	case p != "":
+		f += "|" + rev + "|" + auto + "|" + p
+	case auto != "":
 		f += "|" + rev + "|" + auto
-	} else if rev == "1" {
+	case rev == "1":
 		f += "|1"
 	}
 	// base64 -w0: standard alphabet with padding, so bash-made tokens compare equal
@@ -45,7 +58,11 @@ func MakeToken(carrier, peer, key, path, sni, icmp, ports, rev, auto string) str
 }
 
 // ReadToken mirrors read_token(): parse a wat1: token; error when the prefix,
-// the base64 or the mandatory carrier/peer/key triple is missing.
+// the base64 or the mandatory carrier/peer/key triple is missing. Field 10 is
+// carried verbatim (F7, 2026-11-22): what marks a pair credential is decided by
+// the engine's ParsePairingTokenField (L5-strict, exact "pair"/"pair=<tier>",
+// lookalikes ignored), never by a rewrite — the field must survive one
+// byte-for-byte or a token-bootstrap pairing silently loses its capability.
 func ReadToken(tok string) (Token, error) {
 	var t Token
 	b64, ok := strings.CutPrefix(tok, "wat1:")
@@ -67,8 +84,8 @@ func ReadToken(tok string) (Token, error) {
 		}
 		return ""
 	}
-	t.Carrier, t.Peer, t.Key, t.Path, t.SNI, t.Icmp, t.Ports, t.Rev, t.Auto =
-		get(0), get(1), get(2), get(3), get(4), get(5), get(6), get(7), get(8)
+	t.Carrier, t.Peer, t.Key, t.Path, t.SNI, t.Icmp, t.Ports, t.Rev, t.Auto, t.Pair =
+		get(0), get(1), get(2), get(3), get(4), get(5), get(6), get(7), get(8), get(9)
 	if t.Carrier == "" || t.Peer == "" || t.Key == "" {
 		return t, fmt.Errorf("token misses carrier, peer or key")
 	}
@@ -189,13 +206,17 @@ func refreshToken(name string, fortress bool) error {
 		return nil
 	}
 	// umask 077 equivalent: the temp file is created 0600 and renamed in place
-	out := MakeToken(cr, bp, tok.Key, tok.Path, tok.SNI, tok.Icmp, allow, tok.Rev, tok.Auto)
+	// (field 10 rides along like the bash refresh_token's "$T_PAIR", or a
+	// token-bootstrap pairing loses its capability on the first refresh — F7)
+	out := MakeToken(cr, bp, tok.Key, tok.Path, tok.SNI, tok.Icmp, allow, tok.Rev, tok.Auto, tok.Pair)
 	return atomicWrite(f, []byte(out), 0o600)
 }
 
 // rebuildKharejToken mirrors bash rebuild_kharej_token (3.3.8): recover NAME.token that a 3.3.3-3.3.7 finalize (or a
 // manual rm) removed. An auto tunnel gets a fresh plan on new ports, so it leaves NAME.repaste: Iran's saved plan is
 // stale until the new token is pasted there (showToken clears it). true when NAME.token exists afterwards.
+// shortcut: a rebuilt token carries no field-10 pair capability — the source token (and its field) is gone; the bash
+// rebuild has the same ceiling, and re-pairing from Kharej's console re-arms it.
 func rebuildKharejToken(n string) bool {
 	tf := filepath.Join(P.Conf, n+".token")
 	if Role(n) != "Kharej" {

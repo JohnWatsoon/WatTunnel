@@ -1,12 +1,65 @@
 package mgr
 
 import (
+	"encoding/base64"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JohnWatsoon/WatTunnel/wat"
 )
+
+// TestMain doubles as the fake engine of the -pair-to contract tests (the
+// exec-helper pattern): with WAT_MGR_FAKE_ENGINE set, this binary IS the child
+// `wattun` and behaves like the engine's standalone -pair-to action (b24af32,
+// 2026-11-22) — validate the watp1: line, write `pairing: true` into the tunnel
+// yml, exit 0; a refused attach exits 1 with its reason on stderr. No hang: the
+// parent's shell-out always gets an exit code.
+func TestMain(m *testing.M) {
+	if os.Getenv("WAT_MGR_FAKE_ENGINE") != "" {
+		os.Exit(fakePairToEngine())
+	}
+	os.Exit(m.Run())
+}
+
+// fakePairToEngine validates with the ENGINE's own parser (wat.ParsePairingLine
+// — test-only import; production mgr does not import wat), so a line the mgr
+// accepts and the engine would reject fails here instead of shipping: exactly
+// the drift class the F10-parser bug was.
+func fakePairToEngine() int {
+	fail := func(msg string) int {
+		fmt.Fprintln(os.Stderr, msg)
+		return 1
+	}
+	fs := flag.NewFlagSet("fake-wattun", flag.ContinueOnError)
+	cfg := fs.String("config", "", "")
+	line := fs.String("pair-to", "", "")
+	if fs.Parse(os.Args[1:]) != nil {
+		return fail("fake wattun: bad flags")
+	}
+	if _, err := wat.ParsePairingLine(*line); err != nil {
+		return fail(err.Error())
+	}
+	body, err := os.ReadFile(*cfg)
+	if err != nil {
+		return fail(err.Error())
+	}
+	if strings.Contains(string(body), "pairing:") {
+		return fail("pairing already attached to this tunnel")
+	}
+	f, err := os.OpenFile(*cfg, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fail(err.Error())
+	}
+	defer f.Close()
+	if _, err := f.WriteString("pairing: true\n"); err != nil {
+		return fail(err.Error())
+	}
+	return 0
+}
 
 func testKey() []byte {
 	k := make([]byte, 32)
@@ -24,15 +77,20 @@ func TestPairingLineRoundTrip(t *testing.T) {
 		toks string
 	}{
 		{"tunnel tier", "1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9e4", CapTunnel, "tunnel"},
-		{"create tier", "1B0E6A52-9F3D-4C2A-8E77-2F0A51D3C9E4", CapTunnel | CapCreate, "tunnel,create"},
-		{"manage tier", "00000000-0000-0000-0000-000000000001", CapTunnel | CapCreate | CapManage, "tunnel,create,manage"},
-		{"full tier", "ffffffff-ffff-ffff-ffff-ffffffffffff", CapTunnel | CapCreate | CapManage | CapFull, "tunnel,create,manage,full"},
+		{"create tier", "1B0E6A52-9F3D-4C2A-8E77-2F0A51D3C9E4", CapTunnel | CapCreate, "create"},
+		{"manage tier", "00000000-0000-0000-0000-000000000001", CapTunnel | CapCreate | CapManage, "manage"},
+		{"full tier", "ffffffff-ffff-ffff-ffff-ffffffffffff", CapTunnel | CapCreate | CapManage | CapFull, "full"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			line := MakePairingLine(ScepterVersion, c.uuid, testKey(), c.caps)
 			if !strings.HasPrefix(line, "watp1:") {
 				t.Fatalf("line %q lacks the watp1: prefix", line)
+			}
+			// the render is ONE tier word (what the engine's CapName writes and
+			// ParsePairingLine accepts), never a comma list
+			if !strings.HasSuffix(line, "|"+c.toks) {
+				t.Errorf("MakePairingLine rendered %q, want the single %q tier word", line, c.toks)
 			}
 			p, err := ReadPairingLine(line)
 			if err != nil {
@@ -79,9 +137,14 @@ func TestReadPairingLineRejects(t *testing.T) {
 		{"uuid hex", fields("\x00", "1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9gg", "\x00"), "not a pairing UUID"},
 		{"key base64", fields("\x00", "\x00", "!!!"), "not valid base64"},
 		{"key short", fields("\x00", "\x00", "QUJD", "\x00"), "want exactly 32"},
-		{"unknown cap", fields("\x00", "\x00", "\x00", "root"), "unknown capability"},
-		{"empty caps", fields("\x00", "\x00", "\x00", ""), "capabilities) is empty"},
-		{"dup cap", fields("\x00", "\x00", "\x00", "tunnel,tunnel"), "listed twice"},
+		// F10-parser: the engine takes exactly one tier word (CapFromName), so a
+		// comma list must be refused HERE — the pasted line reaches -pair-to
+		// verbatim and the engine would refuse it only at attach
+		{"comma list", fields("\x00", "\x00", "\x00", "tunnel,create"), "one tier word"},
+		{"dup cap", fields("\x00", "\x00", "\x00", "tunnel,tunnel"), "one tier word"},
+		{"unknown cap", fields("\x00", "\x00", "\x00", "root"), "one tier word"},
+		{"uppercase cap", fields("\x00", "\x00", "\x00", "FULL"), "one tier word"},
+		{"empty caps", fields("\x00", "\x00", "\x00", ""), "one tier word"},
 	}
 	for _, c := range bad {
 		t.Run(c.name, func(t *testing.T) {
@@ -97,32 +160,37 @@ func TestReadPairingLineRejects(t *testing.T) {
 }
 
 func TestCaps(t *testing.T) {
-	// D4 tiers are cumulative: a token names a tier, the mask carries the tower
-	for tok, want := range map[string]ScepterCaps{
-		"tunnel": CapTunnel,
-		"create": CapTunnel | CapCreate,
-		"manage": CapTunnel | CapCreate | CapManage,
-		"full":   CapTunnel | CapCreate | CapManage | CapFull,
+	// D4 tiers are cumulative: the line names ONE tier word (all the engine's
+	// ParsePairingLine accepts), the mask carries the tower
+	key := base64.StdEncoding.EncodeToString(testKey())
+	for tok, want := range map[string]struct {
+		caps   ScepterCaps
+		labels string
+	}{
+		"tunnel": {CapTunnel, "tunnel"},
+		"create": {CapTunnel | CapCreate, "tunnel,create"},
+		"manage": {CapTunnel | CapCreate | CapManage, "tunnel,create,manage"},
+		"full":   {CapTunnel | CapCreate | CapManage | CapFull, "tunnel,create,manage,full"},
 	} {
-		m, err := CapsFromTokens(strings.Split(tok, ","))
+		p, err := ReadPairingLine("watp1:1|1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9e4|" + key + "|" + tok)
 		if err != nil {
-			t.Fatalf("CapsFromTokens(%q): %v", tok, err)
+			t.Fatalf("ReadPairingLine tier %q: %v", tok, err)
 		}
-		if m != want {
-			t.Errorf("token %q -> mask %d, want %d", tok, m, want)
+		if p.Caps != want.caps {
+			t.Errorf("tier %q -> mask %d, want %d", tok, p.Caps, want.caps)
 		}
-		if got := m.Labels(); got != want.Labels() {
-			t.Errorf("Labels(%q) = %q, want %q", tok, got, want.Labels())
+		if got := want.caps.Labels(); got != want.labels {
+			t.Errorf("Labels(%q) = %q, want %q", tok, got, want.labels)
 		}
 	}
 	if s := ScepterCaps(0).Labels(); s != "" {
 		t.Errorf("empty mask labels = %q, want \"\"", s)
 	}
-	full, _ := CapsFromTokens([]string{"full"})
-	if !(CapTunnel | CapCreate | CapManage).Has(CapManage) || full.Has(CapFull) != true {
+	tower := CapTunnel | CapCreate | CapManage | CapFull
+	if !(CapTunnel | CapCreate | CapManage).Has(CapManage) || !tower.Has(CapFull) {
 		t.Error("Has is broken")
 	}
-	if !full.Has(CapTunnel | CapCreate | CapManage | CapFull) {
+	if !tower.Has(CapTunnel | CapCreate | CapManage | CapFull) {
 		t.Error("full must have every bit")
 	}
 }
@@ -636,5 +704,75 @@ func TestScepterTunnelPageSmoke(t *testing.T) {
 	}
 	if len(cl.cmds["tunnel.stats"]) != 1 {
 		t.Errorf("stats called %d times, want 1", len(cl.cmds["tunnel.stats"]))
+	}
+}
+
+// TestScepterPairToEngineContract pins scepterPairTo against the engine's
+// standalone -pair-to action (b24af32): exit 0 after writing `pairing: true`
+// into the tunnel yml (IsPaired flips), and a refusal (exit 1 + stderr)
+// surfaces as the engine's own words — both with a real exec, no hang.
+func TestScepterPairToEngineContract(t *testing.T) {
+	InitColor(false, 8)
+	dir := t.TempDir()
+	oldConf, oldBin := P.Conf, P.Bin
+	defer func() { P.Conf, P.Bin = oldConf, oldBin }()
+	P.Conf = dir
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n"), 0o600)
+	os.Setenv("WAT_MGR_FAKE_ENGINE", "1")
+	defer os.Unsetenv("WAT_MGR_FAKE_ENGINE")
+	P.Bin = os.Args[0] // the test binary, running as the fake engine (TestMain)
+	line := MakePairingLine(ScepterVersion, "1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9e4", testKey(), CapManage)
+	if err := scepterPairTo("ir", line); err != nil {
+		t.Fatalf("exit-0 attach refused: %v", err)
+	}
+	body, _ := os.ReadFile(filepath.Join(dir, "ir.yml"))
+	if !strings.Contains(string(body), "pairing: true") {
+		t.Errorf("yml lacks `pairing: true` after the exit-0 attach:\n%s", body)
+	}
+	if !IsPaired("ir") {
+		t.Error("the attached tunnel is not IsPaired")
+	}
+	// a second attach is refused by the fake engine (exit 1 + stderr): the
+	// refusal text reaches the caller untouched, so the screen can print it
+	err := scepterPairTo("ir", line)
+	if err == nil || !strings.Contains(err.Error(), "already attached") {
+		t.Errorf("engine refusal not surfaced: %v", err)
+	}
+}
+
+// TestScepterAttachScreenFlow drives scepterAttach end to end against the fake
+// engine: paste (the local validator accepts what the engine will), confirm,
+// and the shell-out lands the exit-0 write; a refused attach prints the
+// engine's stderr on the screen.
+func TestScepterAttachScreenFlow(t *testing.T) {
+	InitColor(false, 8)
+	ni := NonInteractive
+	NonInteractive = false
+	defer func() { NonInteractive = ni }()
+	dir := t.TempDir()
+	oldConf, oldBin := P.Conf, P.Bin
+	defer func() { P.Conf, P.Bin = oldConf, oldBin }()
+	P.Conf = dir
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	os.Setenv("WAT_MGR_FAKE_ENGINE", "1")
+	defer os.Unsetenv("WAT_MGR_FAKE_ENGINE")
+	P.Bin = os.Args[0]
+	line := MakePairingLine(ScepterVersion, "1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9e4", testKey(), CapFull)
+	restore := feed(line + "\ny") // the AskOK paste, then the Confirm y
+	out := capture(t, func() { scepterAttach("ir") })
+	restore()
+	body, _ := os.ReadFile(filepath.Join(dir, "ir.yml"))
+	if !strings.Contains(string(body), "pairing: true") {
+		t.Errorf("yml lacks `pairing: true` after the screen attach:\n%s", body)
+	}
+	if !IsPaired("ir") {
+		t.Error("the attached tunnel is not IsPaired")
+	}
+	// the engine's refusal (second attach, exit 1 + stderr) is printed verbatim
+	restore = feed(line + "\ny")
+	out = capture(t, func() { scepterAttach("ir") })
+	restore()
+	if !strings.Contains(out, "already attached") {
+		t.Errorf("engine refusal not on the screen:\n%s", out)
 	}
 }

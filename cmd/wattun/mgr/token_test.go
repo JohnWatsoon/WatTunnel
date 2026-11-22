@@ -249,3 +249,73 @@ func TestRebuildKharejTokenRepaste(t *testing.T) {
 		t.Error("showToken kept .repaste")
 	}
 }
+
+// F7 (2026-11-22): token field 10 (T_PAIR, the token-bootstrap pair capability)
+// must survive a read+render round trip byte-for-byte — every rewriter (bash
+// and mgr alike) carries it, and dropping it silently strips the pairing.
+func TestTokenPairFieldRoundTrip(t *testing.T) {
+	for _, pair := range []string{"pair", "pair=manage", "pair=full"} {
+		s := MakeToken("udp", "h:1", "k", "", "", "", "", "", "", pair)
+		tok, err := ReadToken(s)
+		if err != nil {
+			t.Fatalf("pair %q: %v", pair, err)
+		}
+		if tok.Pair != pair {
+			t.Errorf("pair = %q, want %q", tok.Pair, pair)
+		}
+		if tok.Carrier != "udp" || tok.Peer != "h:1" || tok.Key != "k" {
+			t.Errorf("base fields lost: %+v", tok)
+		}
+		// the refresh path re-renders a read token: the field must ride along
+		out := MakeToken(tok.Carrier, tok.Peer, tok.Key, tok.Path, tok.SNI, tok.Icmp, tok.Ports, tok.Rev, tok.Auto, tok.Pair)
+		if out != s {
+			t.Errorf("re-render lost the pair field: %q != %q", out, s)
+		}
+	}
+	// 6/7/8/9-field tokens have no field 10 and stay Pair "" (old tokens unchanged)
+	if tok, _ := ReadToken(MakeToken("auto", "h:1", "k", "", "", "", "", "", "d=udp:4443")); tok.Pair != "" || tok.Auto != "d=udp:4443" {
+		t.Errorf("9-field token changed: %+v", tok)
+	}
+	if tok, _ := ReadToken(MakeToken("icmp", "h:1", "k", "", "", "", "", "1", "")); tok.Pair != "" || tok.Rev != "1" {
+		t.Errorf("8-field token changed: %+v", tok)
+	}
+	if tok, _ := ReadToken(MakeToken("udp", "h:1", "k", "", "", "", "", "", "")); tok.Pair != "" {
+		t.Errorf("7-field token changed: %+v", tok)
+	}
+	// a lookalike field ("pairxyz") is data, not a credential: carried verbatim,
+	// never rewritten (the engine's L5-strict parser decides what marks a pair)
+	if tok, err := ReadToken(MakeToken("udp", "h:1", "k", "", "", "", "", "", "", "pairxyz")); err != nil || tok.Pair != "pairxyz" {
+		t.Errorf("lookalike field not carried: %+v err=%v", tok, err)
+	}
+}
+
+// A refresh that rewrites the token (ports change, bond finalizes) must keep
+// field 10 — the same guarantee the bash refresh_token's "$T_PAIR" gives.
+func TestRefreshTokenKeepsPairField(t *testing.T) {
+	InitColor(false, 8)
+	dir := t.TempDir()
+	oldConf := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = oldConf }()
+	conf := "mode: server\ncarrier: udp+tcp\nlisten: 0.0.0.0:4443\nlisten-udp: 0.0.0.0:4443\nlisten-tcp: 0.0.0.0:8443\nports:\n  - 443\n  - 53/udp\n"
+	if err := os.WriteFile(filepath.Join(dir, "p.yml"), []byte(conf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "p.token"),
+		[]byte(MakeToken("udp", "198.51.100.7:4443", "secret", "", "", "", "8443", "", "", "pair=manage")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshToken("p"); err != nil {
+		t.Fatalf("RefreshToken: %v", err)
+	}
+	tok, err := readTokFile("p")
+	if err != nil {
+		t.Fatalf("refreshed token unreadable: %v", err)
+	}
+	if tok.Carrier != "udp+tcp" || tok.Ports != "443,53/udp" {
+		t.Errorf("refresh did not rewrite as expected: %+v", tok)
+	}
+	if tok.Pair != "pair=manage" {
+		t.Errorf("refresh dropped the pair field: %+v", tok)
+	}
+}
