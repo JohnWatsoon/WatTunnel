@@ -1280,3 +1280,20 @@ owner decision.
 Lanes: G1 (engine derivation + auto-revival, commits own), G2 (wizard/cockpit automation,
 uncommitted), G3 (installer + docs rewrite) after G1/G2.
 Commit: none yet (dispatch record)
+
+## 2026-11-22 · supervisor · Automation pass closed — zero manual setup steps (owner directive)
+Lanes: G1 137a34c (engine: the tunnel token's field 10 pair[=<tier>] derives the pairing at config load
+on BOTH roles — no -pair, no -pair-to, no .pairing needed; file overrides token; pairing: false beats
+all; client auto-contacts the latch once per 30 s while the tunnel is down), G2 5aaa9dc (wizard mints
+pair=full into the token automatically + writes latch-port 20443 into the server config; Iran wizard's
+only step is pasting the token; cockpit IsPaired/caps from token field 10; auto anti-censor verdict
+after carrier changes; MGR 2026112213), G3 41ec0a9 (installer pairing block deleted — SIG_PUB
+untouched; docs/READMEs rewritten to the automated flow; the G3-found gap closed: latch-port now also
+written on Iran + the cockpit self-heals the real port from doctor.fetch's latch fragment, pin updated).
+The setup is now: Kharej install -> wizard -> ONE printed line (the token); Iran install -> paste the
+token -> cockpit. Nothing else; revival automatic; the only Kharej-local action left is revoke/rotate
+(trust boundary). Gates: FULL wat suite 729.0 s exit 0; test-manager ALL OK 1100; mgr suite ok;
+gofmt/vet + GOOS=linux clean; bash -n install.sh OK; SIG_PUB cmp identical. The two Windows
+environmental cmd failures (TestDNSRelayGuards/TestDialLocalIPv6) unchanged, proven at baseline.
+READY FOR REVIEW (48b4445) extended by this pass.
+Commit: 137a34c, 5aaa9dc, 41ec0a9, (this entry)
