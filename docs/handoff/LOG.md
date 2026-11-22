@@ -1224,3 +1224,43 @@ D10 mgr screens, D11 bash console, D12 docs-vs-code. Focus: the wave-2 fix code 
 adversarially reviewed) + wave-1 SUSPECTED items. Reports will be verified by the supervisor before
 any fix cluster dispatches.
 Commit: none (dispatch record)
+
+## 2026-11-22 · supervisor · Debug round 2 closed — 12 reviewers, 3 fix clusters, full battery green
+Round 2 (owner-requested 12-agent concurrent swarm) reviewed the wave-2 fix code and wave-1 SUSPECTED
+areas. Findings: 5 HIGH, 14 MED, ~20 LOW/INFO; supervisor verified the majors against the code; fixed
+in three parallel clusters on disjoint files + a docs pass:
+- ff9d43c (docs): backup.export section corrected (`.pairing` EXCLUDED since b24af32 — the doc still
+  claimed inclusion), phantom carrier.change `link` key removed, deny-list doc updated
+  (+update-job/metrics/key-file, one-line param values), Kharej console named `wattun-manager scepter`
+  in three surfaces, auto.test shapes=COUNT, journal reads-re-execute + TTL clamp documented.
+- 4419d59 (F1, wat/): id-reuse-with-different-cmd → bad_request without re-recording; CodeInternal no
+  longer journaled (failures re-execute); capability check before replay; ttl_s always type-checked;
+  line cap counts content bytes; decode rejects audit the parsed cmd; Windows audit-rotation rename
+  retry; watcher double-fire dedup (2×poll same-direction suppression + watchGone); two-miss rule for
+  transient listing hiccups; scepterUpdateStale 10→20 min (> the 15 min download cap). Full wat suite
+  710.3 s exit 0.
+- db27ada (F2, cmd/wattun): provenance matched FIRST-LINE only + \n\r param rejection (the wave-1 fix
+  had never actually been dispatched — supervisor miss, owned); disable in closeProbe + orphan sweep
+  (HIGH: every expired probe left an enabled fileless unit); auto.apply refuses failed rows; metrics/
+  key-file denied; Create re-parses composed yml before any write; Delete via the unit seam; update
+  worker re-stamps the mailbox at LAUNCH (in-flight gate safe across long downloads — deviation noted:
+  started rewritten rather than a staged phase, avoiding a spurious watcher failure; gate pinned);
+  latch arm snapshot + revoke-race re-check; rePair clears revoked and respawns the loop; srv.New
+  consumer exit; pairing: false = silent opt-out; BOM trim; poller seeded from the attach read; -pair
+  help wording. Full wat suite 710.7 s exit 0.
+- 6f68a77 (F3, mgr+bash): local follow matches by PEER HOST (HIGH: wrong-tunnel rewrite across two
+  paired Kharej); port_busy re-asks listen (HIGH: unrecoverable loop); carrier_needs rebuild; fleet
+  selection + no per-second re-dial; base_seq from state_seq; scepterPairTo 65 s deadline; padded-only
+  keys; fake-engine re-attach parity; bash pairing_audit rc, CRLF strip, probe-conflict wording,
+  rotation reminder, first-pair gate; MGR 2026112212; test-manager 1090 ALL OK.
+Final battery on db27ada: gofmt empty; build+vet + GOOS=linux clean; mgr/wprobe ok; Scepter cmd tests
+ok; FULL wat suite 715.3 s exit 0; bash -n ×3 clean; bash test-manager.sh ALL OK (1090); DPI self-test
+OK (38). Two NEW environmental Windows failures recorded (TestDNSRelayGuards intermittent, TestDialLo
+calIPv6 ::1 refused) — proven identical at clean HEAD in a detached worktree; same class as the
+MultiPeerSkipsDeadAtOnce caveat; tests untouched; CI arbitrates.
+Deliberately accepted (documented): bash auto_apply's shaped-token rewrite has no Go counterpart (Go
+autoApply never mints the reusable token — pre-existing parity divergence, logged); dirOf relative-
+config edge (dev-only); probe PSK on argv (throwaway, D3 model); CloseScepter has no production caller
+(the poller's lives-Reset routes through killStream); base_seq TOCTOU vs watcher (non-fatal per plan).
+READY FOR REVIEW stands (48b4445), now including round 2.
+Commit: ff9d43c, 4419d59, db27ada, 6f68a77, (this entry)
