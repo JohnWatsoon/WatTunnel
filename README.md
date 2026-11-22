@@ -127,13 +127,26 @@ finalized tunnels reopen automatically on update.
 ## Scepter: pair once, manage from Iran
 
 3.5.0 adds an optional pairing between the two servers (both ends need 3.5.0). `install.sh` prints a `watp1:`
-pairing line next to the first token; `wattun -pair 'watp1:…'` stores it on Kharej and `-pair-to` (or
-`pairing: true` in the config) attaches it on Iran. The tunnel then carries a hidden, encrypted management
-channel: Iran can read Kharej's live state, per-tunnel stats, logs and events over the tunnel itself — no SSH
-needed. If every tunnel of the pair dies, Kharej's **scepter latch** (`-latch-port`, opt-in) opens a shaped
+pairing line next to the first token; `wattun -pair 'watp1:…'` stores it on Kharej, `-pair-to` (or
+`pairing: true` in the config) attaches it on Iran, and Kharej's own console (`wattun scepter`) can pair,
+rotate the key (the old one is accepted for 24 h more) and revoke. The tunnel then carries a hidden, encrypted
+management channel — a reserved stream inside the session's encryption, with a capability tier on the
+credential (`tunnel` < `create` < `manage` < `full`) and every command checked, rate-limited and journaled on
+Kharej. If every tunnel of the pair dies, Kharej's **scepter latch** (`-latch-port`, opt-in) opens a shaped
 wss listener on that port so Iran can reach the management plane and revive the pair; a contact must prove the
 32-byte pairing key before anything is served, and the listener closes again on first contact. The channel
-never appears on any dashboard; only the doctor sees it. Details and the command table:
+never appears on any dashboard; only the doctor sees it.
+
+What Iran can do over the channel — all of it from the Go manager's `wattun scepter` cockpit (`wattun -scepter-call CMD` is the scriptable one-shot form):
+
+| Area | Commands |
+|---|---|
+| Read | live state, the tunnel list, per-tunnel stats, logs, events, history |
+| Write | create, edit and delete tunnels, start/stop/restart, per-port limits, presets — each is validate → backup → apply → verify, rolled back on failure |
+| Remote carrier work | open a probe listener on Kharej and speed-test it from Iran (`test.open`/`test.close`), switch a remote tunnel's carrier with an automatic rollback (`carrier.change`), run and apply the carrier ranking (`auto.test`/`auto.rows`/`auto.apply`) |
+| Operations | update Kharej's binary with a rollback watchdog (`update.run`), structured doctor output, a full config backup as a verified tarball, the audit trail |
+
+Details and the full command table:
 [TECHNICAL.md](docs/TECHNICAL.md#scepter-the-pairing-and-management-plane-350).
 
 ## What it does

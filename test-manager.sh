@@ -2319,6 +2319,25 @@ EOF
   chk "hidden: the audit log never appears as a tunnel" "$(tunnels | grep -c audit)" "0"
   rm -f "$WAT_CONF/hidden.yml"
 
+  # the test.open probe units (phase E4): the engine leaves transient probe-<unix-ts>.yml files (its
+  # provenance line, mode: server, bare ports:) in Kharej's conf dir for the ttl, and they must be hidden
+  # from every user-facing listing like the auto helpers are — while a user tunnel that merely carries a
+  # probe-shaped name predating Scepter keeps listing. tunnels_all stays complete for uninstall/cleanup.
+  _ts=$(date +%s)
+  printf '# %s %s (wat 3.5.0); removed at ttl expiry or test.close\nmode: server\nkey: AAAA\ncarrier: udp\nlisten: ":20500"\nports:\n' \
+    'probe tunnel created by scepter test.open' "2026-11-22T00:00:00Z" >"$WAT_CONF/probe-$_ts.yml"
+  cp "$WAT_CONF/probe-$_ts.yml" "$WAT_CONF/probe-$_ts-2.yml" # the same-second collision name openProbe produces
+  printf 'mode: server\ncarrier: tcp\nlisten: ":26443"\n' >"$WAT_CONF/probe-12345.yml" # user tunnel, no provenance
+  chk "probe: a live probe yml is hidden from the listing" "$(tunnels | grep -c "^probe-$_ts\$")" "0"
+  chk "probe: the collision-suffix shape is hidden too" "$(tunnels | grep -c "^probe-$_ts-2\$")" "0"
+  chk "probe: a user tunnel named probe-12345 stays listed (control)" "$(tunnels | grep -c '^probe-12345$')" "1"
+  chk "probe: tunnels_all still sees the probes for cleanup" "$(tunnels_all | grep -c '^probe-')" "3"
+  chk "probe: the discriminator needs the provenance line" "$(is_probe_unit probe-12345 && echo y || echo n)" "n"
+  printf '# %s x\nmode: server\ncarrier: tcp\n' 'probe tunnel created by scepter test.open' >"$WAT_CONF/hidden2.yml"
+  chk "probe: the provenance line alone does not hide a normal name" "$(tunnels | grep -c '^hidden2$')" "1"
+  rm -f "$WAT_CONF/hidden2.yml" "$WAT_CONF/probe-$_ts.yml" "$WAT_CONF/probe-$_ts-2.yml" "$WAT_CONF/probe-12345.yml"
+  chk "mgr: MGR_VERSION bumped with the probe filter" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112210"
+
   # refresh_token keeps field 10 when the allowed ports change
   role() { echo Kharej; }
   printf 'mode: server\ncarrier: tcp\nports:\n  - 443\n' >"$WAT_CONF/t_pk.yml"

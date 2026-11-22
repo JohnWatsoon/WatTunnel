@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112108   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112210   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -562,8 +562,20 @@ run_flow() { # fn args... : run in a subshell; Ctrl+C cancels just this flow
 is_auto_helper() { # hidden internal helpers: per-shape auto listeners (-e-*) and auto reverse companions (-r)
   is_auto_ext "$1" || [ -n "$(companion_of "$1")" ]
 }
-tunnels() { # every *visible* tunnel: hidden per-shape listeners (-e-*) and reverse companions (-r) stay invisible
-  local f b; for f in "$CONF"/*.yml; do [ -e "$f" ] || continue; b=${f##*/}; b=${b%.yml}; is_auto_helper "$b" && continue; echo "$b"; done
+is_probe_unit() { # hidden scepter machinery (3.5.0, plan D2/E4): the engine's test.open probe listeners live
+  # as probe-<unix-ts>.yml in Kharej's conf dir for their ttl (probe-<unix-ts>-N.yml on a same-second
+  # collision, the shape openProbe really produces). Discriminator = the name shape AND the provenance line
+  # the engine stamps every probe yml with (cmd/wattun/scepter_ops.go probeProvenance, the same string its
+  # orphan sweep matches) AND mode: server — so a user tunnel merely named probe-12345 predating Scepter,
+  # which carries none of those, keeps listing (the .autoext sidecar's M1 rule, applied to probes).
+  [[ "$1" =~ ^probe-[0-9]+(-[0-9]+)?$ ]] || return 1
+  grep -qs 'probe tunnel created by scepter test.open' "$CONF/$1.yml" || return 1
+  [ "$(cfg "$1" mode)" = server ] || return 1
+  return 0
+}
+tunnels() { # every *visible* tunnel: hidden per-shape listeners (-e-*), reverse companions (-r) and the
+  # transient scepter test.open probes stay invisible (cleanup paths use tunnels_all, which sees them all)
+  local f b; for f in "$CONF"/*.yml; do [ -e "$f" ] || continue; b=${f##*/}; b=${b%.yml}; is_auto_helper "$b" && continue; is_probe_unit "$b" && continue; echo "$b"; done
 }
 listed_tunnels() { # what a status list shows: hidden auto helpers (-r and -e-*) never appear as separate tunnels
   local n; for n in $(tunnels); do
@@ -1387,7 +1399,7 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   pair/pair-to: the one-shot bootstrap forms of the same (engine flags; the manager writes .pairing itself)
 #   latch-port/latch-dial: the scepter latch listener and its one-shot contact/drill form (3.5.0, Kharej side; opt-in with a stored pairing)
 #   scepter-call/scepter-args: the one-shot write-intent/RPC call form (3.5.0, Iran side; the Go manager shells out to it)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial scepter-call scepter-args'
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial scepter-call scepter-args update-job'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'
@@ -9830,6 +9842,7 @@ is_stale() {
 stale_tunnels() { # prints unique visible tunnel names whose service (or hidden auto helper) still runs an old binary
   local u p seen=' '
   for u in $(tunnels_all); do
+    is_probe_unit "$u" && continue # a live probe is throw-away machinery: it dies at its ttl, never a restart prompt
     systemctl is-active -q "${WAT_PREFIX}@$u" 2>/dev/null || continue
     is_stale "$u" || continue
     p=$(companion_of "$u")
