@@ -35,8 +35,12 @@ func Banner(anim bool) {
 		CurHide()
 		for f := 1; f <= 6; f++ {
 			cut := w * f / 6
-			for _, r := range rows {
-				fmt.Fprintf(Stdout, "  %s%s\n", Grad(string([]rune(r)[:cut]), w), EL)
+			shown := make([]string, len(rows))
+			for i, r := range rows {
+				shown[i] = string([]rune(r)[:cut])
+			}
+			for _, r := range GradRows(shown, w) {
+				fmt.Fprintf(Stdout, "  %s%s\n", r, EL)
 			}
 			if f < 6 {
 				time.Sleep(35 * time.Millisecond)
@@ -46,8 +50,8 @@ func Banner(anim bool) {
 		CurShow()
 		return
 	}
-	for _, r := range rows {
-		fmt.Fprintf(Stdout, "  %s\n", Grad(r, w))
+	for _, r := range GradRows(rows[:], w) {
+		fmt.Fprintf(Stdout, "  %s\n", r)
 	}
 }
 
