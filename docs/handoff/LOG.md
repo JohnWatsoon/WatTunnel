@@ -1018,3 +1018,40 @@ PHASE C READY FOR REVIEW. Proceeding to phase D (operations): update orchestrati
 update.run gated on full, wattun.prev required, latch covers the channel gap), doctor.fetch,
 backup.export (chunked), audit.tail, CI update drill.
 Commit: fcfee6c, 1be4dfb
+
+## 2026-11-22 (morning) · Lane I (engine, phase D) · Scepter operations committed (a86676a)
+- update.status / update.run (the one CapFull command) / doctor.fetch / backup.export / audit.tail; events
+  update_started (in-life, the handler) + update_applied / update_failed (the revived engine's mailbox
+  watcher; interrupted variant for a started record silent past the job window); updateRate bucket (1 burst,
+  1 per 5 min); version gates: tag shape, running version = nothing-to-do, below 3.5.0 refused (channel
+  loss), 3.5.x+ recovery downgrades deliberate; at-most-once via the journal plus a cross-restart
+  already_running guard on the mailbox.
+- Update mechanism (documented choice): engine stages a verified release (native crypto/rsa verify of
+  SHA256SUMS against scepterSigPub — a third byte-identical SIG_PUB copy, test-pinned against install.sh;
+  hash line; -version sanity; mis-tag refusal), then `systemd-run` a transient unit running
+  `wattun -update-job <stagedir>`: parented by PID 1 (survives the restart it performs), unsandboxed
+  (ProtectSystem=strict forbids the engine writing /usr/local/bin; a watchdog child dies with the cgroup).
+  install.sh rejected (interactive, no auto-rollback). The job = the rollback watchdog: backup wattun.prev
+  FIRST (refuse-without-backup-path gate, abort untouched), install, restart pre-active units (self
+  included), 40 s watch with 10 s stable-active (Type=simple flicker), restore + restart on a dead engine,
+  mailbox at every transition. main.go touch: 4 lines (internal -update-job flag + branch).
+- Channel survival: 3 s worker grace + restart-after-download means the journaled response is flushed long
+  before the session dies; the latch (30 s arm < 40 s watch) covers the dead window; drill test pins
+  response-before-restart, journal replay of the same id (ops never re-run), and update_applied after
+  revival. backup.export: tarball of every conf file except the journal/.update/tmp (keys + pairing store
+  included on purpose; 4 MB/member, 5 MB total caps), chunked-logs convention. audit.tail: raw lines of
+  .pairing.audit + .pairing.journal, parse-free (the audit schema is the manager's).
+- Tests: wat — TestScepterUpdateRPC (denied at manage, gates, bucket), TestScepterDoctorFetchRPC,
+  TestScepterBackupExportChunked (3+ chunks, sha256 pinned, too_large), TestScepterAuditTailRPC,
+  TestScepterUpdateChannelSurvival, TestScepterUpdateWatcher (applied/rolled_back/interrupted, stale
+  silent); cmd — TestFileScepterOpsUpdateStatus, TestFileScepterOpsUpdateRunGates (portable gates +
+  mailbox in-flight guard), TestFileScepterOpsUpdateDrill (real worker + real job over fake units: applied,
+  rolled_back with wattun.prev restored byte-for-byte, no-backup-path abort untouched,
+  staged-binary-refuses), TestFileScepterOpsBackupExport, TestFileScepterOpsAuditTail,
+  TestFileScepterOpsDoctor, TestScepterUpdateSigPubMatchesInstallSh (drift pin).
+- Gates: gofmt empty; build+vet clean; GOOS=linux build+vet clean; cmd suite ok (41.9 s); TestScepter ./wat/
+  ok 15.5 s; FULL wat suite ok 711.2 s EXIT 0. Not run: diag (-tags diag), race subset (CI),
+  test-manager.sh (no manager changes), live hosts (forbidden).
+- Left for later: first live proof of systemd-run launch + -update-job swap + fetchRelease on a real Kharej
+  pair (no systemd on Windows dev, unprivileged CI); cockpit screens for the phase D commands (phase E).
+Commit: a86676a
