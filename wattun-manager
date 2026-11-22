@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112212   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112213   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -936,6 +936,8 @@ set_port_limit() { # name port rate quota [period: day|week|month, 3.3.6; writte
 #   reverse test. Only ; , : = are used, never '|'. 7/8-field tokens still parse.
 # Field 10 (3.5.0, Scepter plan D5) is the pairing capability tier (tunnel|create|manage|full) of a token-bootstrap
 # pairing: written only when set, exactly like fields 8/9, so an older parser stops at field 9 and ignores it.
+# Owner directive (2026-11-22): the wizards' first mints write pair=full automatically — the engine derives the
+# pairing from the token on both ends, Iran's wizard asks nothing extra; a pasted watp1: line stays for explicit/rotate.
 make_token() {
   local f; f=$(printf '%s|%s|%s|%s|%s|%s|%s' "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}")
   if [ -n "${10:-}" ]; then f="$f|${8:-}|${9:-}|${10}"; elif [ -n "${9:-}" ]; then f="$f|${8:-}|$9"; elif [ "${8:-}" = 1 ]; then f="$f|1"; fi
@@ -1090,6 +1092,28 @@ token_bond_legs() { # T_CARRIER (a bond) + T_PEER -> T_LEG_C/T_LEG_P arrays; T_P
 #  (Phase B.3 parity decision: cockpit features live in the Go manager/panel).
 # ======================================================================================
 PAIR_CAPS='tunnel create manage full'
+# Token-bootstrap pairing is the default shape now (owner directive 2026-11-22:
+# zero extra manual steps — the wizard's first mint embeds field 10 pair=full and
+# the engine derives the pairing from it; a pasted watp1: line stays available for
+# explicit/rotate flows on Kharej's console). The default tier rides T_PAIR:
+# a first mint writes "full" unless an expert row/flag preset a tier.
+SCEPTER_DEFAULT_TIER=full
+# The scepter latch listener's default port (owner directive 2026-11-22: a
+# manager-made Kharej tunnel carries latch-port without asking). 20443 sits in
+# the manager's reserved 20400-20999 band — free_metrics_port and the probe
+# ports never land there — so the latch cannot collide with either.
+SCEPTER_LATCH_DEFAULT=20443
+pick_latch_port() { # [exclude...] : latch-port for a new Kharej tunnel; 20443 unless this
+  # tunnel's picked ports or another listener on this server holds it (scan up to 20499, then give up: the
+  # engine's key-derived default applies when the yml carries no latch-port)
+  local p=$SCEPTER_LATCH_DEFAULT e
+  while [ "$p" -le 20499 ]; do
+    for e in "$@"; do [ "$e" = "$p" ] && { p=$((p+1)); continue 2; }; done
+    if ! listen_blocked tcp "$p"; then echo "$p"; return 0; fi
+    p=$((p+1))
+  done
+  return 1
+}
 PAIR_STORE=$CONF/.pairing
 PAIR_AUDIT=$CONF/.pairing.audit
 pair_caps_ok() { case " $PAIR_CAPS " in *" ${1:-} "*) return 0 ;; esac; return 1; }
@@ -3011,7 +3035,8 @@ pick_carrier() { # [auto] : with "auto" (Kharej wizard) the first choice is the 
 summary_line() { printf '    %s%-14s%s %s\n' "$GRY" "$1" "$RST" "$2"; }
 
 wizard_kharej() {
-  local name cr listen='' path='' sni='' itype='' mbps='' fec='' fecb='' addr key m peer allow t rev='' iranip='' advdef=n udpdns='' lisip='' ask='' cdn_mode=0
+  local name cr listen='' path='' sni='' itype='' mbps='' fec='' fecb='' addr key m peer allow t rev='' iranip='' advdef=n udpdns='' lisip='' ask='' cdn_mode=0 latch=''
+  T_PAIR='' # a stale T_PAIR from an earlier token display must not ride this mint; the default (or an expert row) sets it below
   page "New tunnel" "Kharej"
   [ "$NONINTERACTIVE" = 1 ] || conf_set side kharej
   name=$(suggest_name kharej); [ -n "$NI_NAME" ] && name=$NI_NAME
@@ -3142,6 +3167,12 @@ wizard_kharej() {
 
   key=$(new_key); m=$(free_metrics_port)
   peer=$(join_hp "$addr" "$listen")
+  # Owner directive (2026-11-22): zero extra manual steps. The first mint embeds the
+  # token-bootstrap pairing (field 10, pair=full unless an expert row preset a tier) and the
+  # server config carries latch-port — no ask for either; the engine derives the pairing from
+  # the token, a stored .pairing overrides it, `pairing: false` disables.
+  T_PAIR=${T_PAIR:-$SCEPTER_DEFAULT_TIER}
+  latch=$(pick_latch_port "$listen" "$m")
   write_server() {
     local old; old=$(umask); umask 077
     printf '%s\n' "$key" >"$CONF/$name.key" || return 1
@@ -3154,6 +3185,7 @@ wizard_kharej() {
       [ "$udpdns" = 1 ] && echo "udp-dns: true"
       [ -n "$path" ] && echo "path: $path"
       [ -n "$itype" ] && [ "$itype" != echo ] && echo "icmp-type: $itype"
+      [ -n "$latch" ] && echo "latch-port: $latch" # the scepter latch listener (3.5.0); picked collision-free
       if [ "$rev" = 1 ]; then
         echo "reverse: true"
         if is_rpool "$cr"; then
@@ -3167,7 +3199,7 @@ wizard_kharej() {
       [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: free_metrics_port found no port; write no invalid line
       maps_yaml_block
     } >"$CONF/$name.yml"
-    make_token "$cr" "$peer" "$key" "${path:-${udpdns:+dns}}" "$sni" "$itype" "$allow" "$rev" >"$CONF/$name.token"
+    make_token "$cr" "$peer" "$key" "${path:-${udpdns:+dns}}" "$sni" "$itype" "$allow" "$rev" "" "$T_PAIR" >"$CONF/$name.token"
     umask "$old"
   }
   mkdir -p "$CONF"; chmod 700 "$CONF"
@@ -3187,6 +3219,7 @@ wizard_kharej() {
   echo
   say "  Next on Iran: run ${CYN}${SELF}${RST} → $(key_label n) → paste token"
   hint "Token contains secret key — share privately ($SELF token $name)"
+  hint "Pairing rides this token (field 10, pair=$T_PAIR): Iran's wizard picks it up, no watp1: line needed."
   [ "$NONINTERACTIVE" = 1 ] && printf 'TUNNEL=%s\nTOKEN=%s\n' "$name" "$(cat "$CONF/$name.token")"
   if [ "$fecb" = 1 ] && [ "$NONINTERACTIVE" != 1 ]; then
     echo; adv_menu "$name"
@@ -3721,6 +3754,11 @@ wizard_iran() {
   echo
   ask_ok "Token from Kharej (wat1:...)" "$NI_TOKEN" v_token || return 1
   tok=$REPLY_V; read_token "$tok"
+  # Owner directive (2026-11-22): pasting the token is the only step. A field-10
+  # pair rides it — the engine derives the pairing from the token, so this wizard
+  # never asks for a watp1: line and writes no pairing: key (the Go cockpit keeps
+  # the attach screen for explicit/rotate flows).
+  [ -n "$T_PAIR" ] && hint "Pairing rides this token (field 10): nothing else to paste or set."
   if [ "$T_CARRIER" = auto ]; then
     ok "auto token · ${T_PEER%%[:,]*} · ${T_PORTS:-any port}"
     auto_iran_front "$tok" || return 1
@@ -4434,6 +4472,17 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
 
   key=$(new_key); m=$(free_metrics_port); apath=$(rand_path)
   for c in ${AUTO_D//,/ }; do cars="$cars+${c%%:*}"; done
+  # Owner directive (2026-11-22): the first mint embeds the token-bootstrap pairing
+  # (field 10, pair=full unless an expert row preset a tier) and latch-port rides the
+  # server config — no ask for either; collision-checked against every port this
+  # wizard picked (plan, reverse plan, metrics).
+  T_PAIR=${T_PAIR:-$SCEPTER_DEFAULT_TIER}
+  local latch='' re ex
+  ex=" $m "
+  for re in $AUTO_USED_PORTS; do ex+="$re "; done
+  for re in ${rplan//,/ }; do p=$(plan_entry_port "$re"); [ -n "$p" ] && ex+="$p "; done
+  for re in ${AUTO_EXT_D//,/ }; do p=$(plan_entry_port "$re"); [ -n "$p" ] && ex+="$p "; done
+  latch=$(pick_latch_port $ex) || latch=''
   write_auto_server() {
     local old; old=$(umask); umask 077
     printf '%s\n' "$key" >"$CONF/$name.key" || return 1
@@ -4444,10 +4493,11 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
       echo "carrier: icmp$cars"
       for c in ${AUTO_D//,/ }; do p=$(plan_entry_port "$c"); [ -n "$p" ] && echo "listen-${c%%:*}: \":$p\""; done
       echo "path: $apath"
+      [ -n "$latch" ] && echo "latch-port: $latch" # the scepter latch listener (3.5.0); picked collision-free
       [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: free_metrics_port found no port; write no invalid line
       maps_yaml_block
     } >"$CONF/$name.yml"
-    make_token auto "$AUTO_ADDR" "$key" "$apath" "$cdn" "" "$allow" "" "$plan" >"$CONF/$name.token"
+    make_token auto "$AUTO_ADDR" "$key" "$apath" "$cdn" "" "$allow" "" "$plan" "$T_PAIR" >"$CONF/$name.token"
     umask "$old"
   }
   mkdir -p "$CONF"; chmod 700 "$CONF"
@@ -4489,6 +4539,7 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   echo
   say "  Next on Iran: run ${CYN}${SELF}${RST} → $(key_label n) → paste token"
   hint "Token contains secret key — share privately ($SELF token $name)"
+  hint "Pairing rides this token (field 10, pair=$T_PAIR): Iran's wizard picks it up, no watp1: line needed."
   [ "$NONINTERACTIVE" = 1 ] && printf 'TUNNEL=%s\nTOKEN=%s\n' "$name" "$(cat "$CONF/$name.token")"
   return 0
 }

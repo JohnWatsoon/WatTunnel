@@ -2280,6 +2280,43 @@ EOF
   read_token "$(make_token auto 198.51.100.3 kauto1234567 /wat '' '' '' '' '' manage)"
   chk "f11: a rewritten auto token keeps the plan empty and the cap in field 10" "$T_CARRIER/$T_AUTO/$T_PAIR" "auto//manage"
 
+  # Owner directive (2026-11-22, zero extra manual steps): the wizard's first mint
+  # embeds the token-bootstrap pairing itself (field 10, pair=full), latch-port rides
+  # the created server config collision-checked, and Iran's only step is the token —
+  # no watp1 ask, no pairing: key written by the Iran wizard.
+  _bt_sctl=$(declare -f systemctl); _bt_fmp=$(declare -f free_metrics_port)
+  _bt_lb=$(declare -f listen_blocked); _bt_su=$(declare -f start_unit); _bt_cf=$(declare -f confirm)
+  _bt_bv=$(declare -f bin_ver); _bt_bvok=$(declare -f bin_ver_ok); _bt_ver=$VER
+  # the harness's confirm() leak above (line ~942, never restored) answers YES to everything;
+  # the wizards here must take the real NONINTERACTIVE defaults (reverse = no)
+  systemctl() { return 0; }; systemd-run() { :; }; start_unit() { :; }
+  listen_blocked() { return 1; }; free_metrics_port() { echo 19999; }
+  confirm() { [ "${2:-n}" = y ]; }
+  VER=3.5.0; bin_ver() { echo "$VER"; }; bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
+  ( NONINTERACTIVE=1 NI_CARRIER=tcp NI_NAME=t_pair NI_ADDR=203.0.113.5 NI_LISTEN=26443 wizard_kharej ) >/dev/null 2>&1
+  read_token "$(cat "$WAT_CONF/t_pair.token")"
+  chk "pair wizard: the first mint embeds pair=full (field 10)" "$T_CARRIER/$T_PAIR" "tcp/full"
+  chk "pair wizard: the minted token has exactly 10 pipe fields" "$(sed 's/^wat1://' <<<"$(cat "$WAT_CONF/t_pair.token")" | base64 -d | tr -cd '|' | wc -c | tr -d ' ')" "9"
+  chk "pair wizard: the server config carries latch-port" "$(grep -c '^latch-port: 20443$' "$WAT_CONF/t_pair.yml")" "1"
+  # collision-checked: a tunnel that picked the default latch port itself moves it off
+  ( NONINTERACTIVE=1 NI_CARRIER=tcp NI_NAME=t_pairc NI_ADDR=203.0.113.5 NI_LISTEN=20443 wizard_kharej ) >/dev/null 2>&1
+  chk "pair wizard: latch-port moves off the tunnel's own port" "$(grep -c '^latch-port: 20444$' "$WAT_CONF/t_pairc.yml")" "1"
+  ( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_paira NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
+  read_token "$(cat "$WAT_CONF/t_paira.token")"
+  chk "auto wizard: the mint keeps the plan in field 9" "$T_CARRIER/$(plan_part "$T_AUTO" d | grep -cE '^udp:[0-9]+,tcp:[0-9]+')" "auto/1"
+  chk "auto wizard: the mint embeds pair=full beside the plan" "$T_PAIR" "full"
+  chk "auto wizard: the server config carries latch-port too" "$(grep -c '^latch-port: 20443$' "$WAT_CONF/t_paira.yml")" "1"
+  ( wait_link() { return 1; }; test_tunnel() { :; }
+    NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
+    NONINTERACTIVE=1 NI_TOKEN="$(cat "$WAT_CONF/t_pair.token")" NI_NAME=t_iran_pair NI_MAP='8443:8443' wizard_iran ) >/dev/null 2>&1
+  chk "iran wizard: pasting the token is the only step (no pairing key)" "$(grep -c '^pairing:' "$WAT_CONF/t_iran_pair.yml")" "0"
+  chk "iran wizard: no watp1 ask anywhere in the wizard" "$(sed -n '/^wizard_iran() {/,/^}$/p' wattun-manager | grep -vE '^[[:space:]]*(#.*)?$' | grep -c 'watp1')" "0"
+  chk "iran wizard: no latch-port on the client config" "$(grep -c '^latch-port:' "$WAT_CONF/t_iran_pair.yml")" "0"
+  rm -f "$WAT_CONF"/t_pair* "$WAT_CONF"/t_iran_pair*
+  eval "$_bt_sctl"; eval "$_bt_fmp"; eval "$_bt_lb"; eval "$_bt_su"; eval "$_bt_cf"
+  eval "$_bt_bv"; eval "$_bt_bvok"; VER=$_bt_ver
+  unset -f systemd-run
+
   # the .pairing store (F1-B, 2026-11-22): line 1 is the ENGINE's credential line (watp1:...), the
   # manager's metadata rides as `# ` comments the engine ignores; the old key=value file still reads,
   # but nothing writes that shape any more.
@@ -2431,7 +2468,7 @@ EOF
   chk "conflict: a normal tunnel keeps its name" \
     "$(eval "$_tul"; listen_conflict_desc tcp 26443)" "tunnel 'probe-12345'"
   rm -f "$WAT_CONF/hidden2.yml" "$WAT_CONF/probe-$_ts.yml" "$WAT_CONF/probe-$_ts-2.yml" "$WAT_CONF/probe-12345.yml"
-  chk "mgr: MGR_VERSION bumped with the round-2 pairing fixes" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112212"
+  chk "mgr: MGR_VERSION bumped with the token-bootstrap wizard (owner directive 2026-11-22)" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112213"
 
   # refresh_token keeps field 10 when the allowed ports change
   role() { echo Kharej; }

@@ -973,3 +973,145 @@ func TestScepterTunnelPageBaseSeq(t *testing.T) {
 		})
 	}
 }
+
+// Token-bootstrap pairing (owner directive 2026-11-22): field 10 of the tunnel's
+// token pairs it without any yml key; `pairing: false` is the explicit off
+// switch; a lookalike or unknown tier field is not a credential (the engine's
+// L5-strict ParsePairingTokenField gate, mirrored here).
+func TestIsPairedTokenField(t *testing.T) {
+	InitColor(false, 8)
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	ir := "mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n"
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte(ir), 0o600)
+	os.WriteFile(filepath.Join(dir, "iroff.yml"), []byte(ir+"pairing: false\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "irtrue.yml"), []byte(ir+"pairing: true\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "kh.yml"), []byte("mode: server\ncarrier: udp\n"), 0o600)
+	mint := func(f10 string) {
+		os.WriteFile(filepath.Join(dir, "ir.token"),
+			[]byte(MakeToken("udp", "198.51.100.7:4443", "k", "", "", "", "", "", "", f10)), 0o600)
+	}
+	mint("pair=full")
+	if !IsPaired("ir") {
+		t.Error("a token-bootstrap pair (field 10 pair=full) is not IsPaired")
+	}
+	if got := PairedBadge("ir"); got != " [paired]" {
+		t.Errorf("token-pair badge = %q, want \" [paired]\"", got)
+	}
+	if IsPaired("iroff") {
+		t.Error("pairing: false must beat the token's pair field")
+	}
+	if !IsPaired("irtrue") {
+		t.Error("pairing: true with no token is not IsPaired")
+	}
+	for f10, want := range map[string]bool{
+		"pair":        true,  // bare pair = tunnel-tier credential
+		"pair=manage": true,  // any valid tier pairs
+		"pairxyz":     false, // a lookalike is not the pair field (L5-strict)
+		"pairing":     false,
+		"pair=root":   false, // the engine refuses an unknown tier
+		"":            false,
+	} {
+		mint(f10)
+		if got := IsPaired("ir"); got != want {
+			t.Errorf("IsPaired(field 10 %q) = %v, want %v", f10, got, want)
+		}
+	}
+	os.Remove(filepath.Join(dir, "ir.token"))
+	if IsPaired("ir") {
+		t.Error("no token and no pairing key must not be IsPaired")
+	}
+	if IsPaired("kh") {
+		t.Error("a Kharej config is never an Iran pair")
+	}
+}
+
+// The pair screen's local mask: Kharej's hello answer first; with no hello a
+// token-bootstrap pair falls back to its own field-10 tier (owner directive
+// 2026-11-22 — the mask never needs the yml pairing key).
+func TestScepterPairCapsFallback(t *testing.T) {
+	InitColor(false, 8)
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.token"),
+		[]byte(MakeToken("udp", "198.51.100.7:4443", "k", "", "", "", "", "", "", "pair=manage")), 0o600)
+	if got := scepterPairCaps("ir", map[string]any{"caps": "tunnel"}, ""); got != CapTunnel {
+		t.Errorf("hello caps = %v, want tunnel", got)
+	}
+	if got := scepterPairCaps("ir", nil, "channel error"); got != CapTunnel|CapCreate|CapManage {
+		t.Errorf("fallback caps = %v, want the manage tower", got)
+	}
+	if got := scepterPairCaps("ir", map[string]any{}, ""); got != 0 {
+		t.Errorf("an answered hello without caps = %v, want none (Kharej's word stands)", got)
+	}
+}
+
+// The automatic fast-preset anti-censor verdict (owner directive 2026-11-22):
+// after a successful follow it runs the existing fast machinery on the changed
+// carrier and prints the ranked table plus a verdict; the shared at_* state
+// comes back out the way it went in.
+func TestScepterACVerdict(t *testing.T) {
+	InitColor(false, 8)
+	dir := t.TempDir()
+	oldP, oldVer, oldSpawn, oldFetch, oldSpeed, oldDesync, oldBusy, savedPreset, savedQuiet := P, engineVer,
+		envSpawnClient, p1FetchStats, p1Speedtest, scepterCanDesync, scepterVerdictBusy.Load(), atPreset, atQuiet
+	P.Conf, P.Run = dir, dir
+	engineVer = func() string { return "9.9.9" }
+	scepterCanDesync = func() bool { return true }
+	scepterVerdictBusy.Store(false)
+	t.Cleanup(func() {
+		P, engineVer, envSpawnClient, p1FetchStats, p1Speedtest = oldP, oldVer, oldSpawn, oldFetch, oldSpeed
+		scepterCanDesync, atPreset, atQuiet = oldDesync, savedPreset, savedQuiet
+		scepterVerdictBusy.Store(oldBusy)
+	})
+	yml := "mode: client\ncarrier: tcp\npeer: 203.0.113.10:26443\nkey-file: " + dir + "/ir.key\nmetrics: 127.0.0.1:19999\nports:\n  - 443\n"
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte(yml), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.key"), []byte("kk\n"), 0o600)
+	probes := 0
+	envSpawnClient = func(args []string, logFile string) (clientProc, error) {
+		probes++
+		for i, a := range args {
+			if a == "-carrier" && i+1 < len(args) && args[i+1] == "tcp" {
+				return fakeProc{}, nil
+			}
+		}
+		return nil, os.ErrPermission //nolint:staticcheck // the icmp row reports its own failure
+	}
+	p1FetchStats = func(addr string) string { return `{"alive":true,"rtt_ms":21.5}` }
+	p1Speedtest = func(int, string) (bool, float64) { return true, 25 }
+	timeSleep = func(int) {}
+	atPreset = "normal"
+	var out string
+	out = capture(t, func() { scepterACVerdict("ir") })
+	if !strings.Contains(out, "Anti-censor verdict") || !strings.Contains(out, "the plain shape passes") {
+		t.Errorf("verdict missing:\n%s", out)
+	}
+	if !strings.Contains(out, "tcp rst mci.ir") { // the fast grid's rows, ranked table included
+		t.Errorf("fast rows missing from the table:\n%s", out)
+	}
+	if probes < 7 { // plain + rst/synrst x 3 SNIs (icmp fails fast)
+		t.Errorf("probe count = %d, want the fast grid", probes)
+	}
+	if atPreset != "normal" { // the run restores the shared at_* state
+		t.Errorf("atPreset = %q after the verdict, want %q restored", atPreset, savedPreset)
+	}
+	// gates: no desync host, non-dialing end, reverse, udp, bond — none of them probe
+	for _, tc := range []struct {
+		name, yml string
+		desync    bool
+	}{{"no desync host", yml, false}, {"udp has no SNI rows", "mode: client\ncarrier: udp\npeer: 203.0.113.10:4443\nkey-file: " + dir + "/ir.key\n", true},
+		{"reverse", yml + "reverse: true\n", true}, {"bond", "mode: client\ncarrier: tcp+udp\npeer: 203.0.113.10:4443\nkey-file: " + dir + "/ir.key\n", true}} {
+		os.WriteFile(filepath.Join(dir, "ir.yml"), []byte(tc.yml), 0o600)
+		scepterCanDesync = func() bool { return tc.desync }
+		before := probes
+		out = capture(t, func() { scepterACVerdict("ir") })
+		if probes != before {
+			t.Errorf("%s: %d probes ran, want none\n%s", tc.name, probes-before, out)
+		}
+	}
+}

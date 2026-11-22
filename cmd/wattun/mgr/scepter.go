@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -461,10 +462,49 @@ func init() {
 	})
 }
 
-// IsPaired: the config carries `pairing: true` (engine key, Phase A.2). Iran
-// side only — on Kharej the pairing lives in .pairing, not in a tunnel yml.
+// IsPaired: the config carries `pairing: true` (engine key, Phase A.2), or a
+// token-bootstrap pairing rides the tunnel's token (field 10 `pair`/`pair=<tier>`,
+// owner directive 2026-11-22: pairing is derived from the minted token, the yml
+// key is optional). `pairing: false` in the yml wins — the explicit off switch.
+// Iran side only — on Kharej the pairing lives in .pairing, not in a tunnel yml.
 func IsPaired(name string) bool {
-	return Role(name) == "Iran" && Cfg(name, "pairing") == "true"
+	if Role(name) != "Iran" {
+		return false
+	}
+	if Cfg(name, "pairing") == "false" {
+		return false
+	}
+	return Cfg(name, "pairing") == "true" || tokenPairCaps(name) != 0
+}
+
+// tokenPairCaps reads the tunnel's token field 10 and returns its capability
+// mask, 0 when there is none. Exactly the engine's ParsePairingTokenField gate
+// (wat/scepter.go, L5-strict): only "pair" or "pair=<tier>" marks a credential,
+// a lookalike ("pairxyz") is not one — the field must survive byte-for-byte.
+func tokenPairCaps(name string) ScepterCaps {
+	raw, err := os.ReadFile(filepath.Join(P.Conf, name+".token"))
+	if err != nil {
+		return 0
+	}
+	t, err := ReadToken(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0
+	}
+	f := t.Pair
+	if f == "" || !strings.HasPrefix(f, "pair") {
+		return 0
+	}
+	if rest := f[len("pair"):]; rest != "" && rest[0] != '=' {
+		return 0 // a lookalike field (a future pair* extension): not a pairing credential
+	}
+	if _, v, ok := strings.Cut(f, "="); ok {
+		bit, valid := capName[v]
+		if !valid {
+			return 0 // the engine refuses an unknown tier, so no pair
+		}
+		return tierBits(bit)
+	}
+	return CapTunnel
 }
 
 // PairedBadge is the fleet/tunnel-view mark of a paired Iran tunnel; "" when

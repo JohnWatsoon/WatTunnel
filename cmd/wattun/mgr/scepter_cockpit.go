@@ -136,6 +136,19 @@ func scepterCapsOf(hello map[string]any) ScepterCaps {
 	return 0
 }
 
+// scepterPairCaps resolves the pair screen's local capability mask: Kharej's
+// hello answer first; with no hello (dead link, old peer) a token-bootstrap
+// pairing falls back to the token's own field-10 tier (owner directive
+// 2026-11-22 — the mask never needs the yml pairing key). Client-side UX only:
+// Kharej re-checks on every command, so a stale local tier can only ever
+// over-offer an item.
+func scepterPairCaps(n string, hello map[string]any, helloErr string) ScepterCaps {
+	if helloErr == "" {
+		return scepterCapsOf(hello)
+	}
+	return tokenPairCaps(n)
+}
+
 // scepterUp renders an uptime in seconds compactly.
 func scepterUp(s int64) string {
 	switch {
@@ -257,8 +270,10 @@ func scepterAct(cl ScepterClient, cmd string, args map[string]any) (ScepterResul
 // the remote state of its Kharej.
 // ======================================================================================
 
-// pairedTunnels lists the visible Iran tunnels carrying `pairing: true` — the
-// fleet. Hidden helpers are never pairs (a companion carries no pairing line).
+// pairedTunnels lists the visible Iran tunnels IsPaired accepts — the fleet
+// (`pairing: true` in the yml, or a token-bootstrap pair riding field 10 of
+// the tunnel's token; owner directive 2026-11-22). Hidden helpers are never
+// pairs (a companion carries no pairing line).
 func pairedTunnels() []string {
 	var out []string
 	for _, n := range Tunnels() {
@@ -359,15 +374,16 @@ func scepterPairScreen(n string) {
 	}
 	// One hello per entry: version and capabilities gate the write items
 	// (client-side UX; Kharej re-checks). A failed hello keeps the reads.
-	caps := ScepterCaps(0)
 	helloErr := ""
+	var hello map[string]any
 	if h, e := cl.Call("scepter.hello", nil); e != nil {
 		helloErr = e.Error()
 	} else if h.Code != scepterCodeOK {
 		helloErr = fmt.Sprintf("scepter.hello answered code %d", h.Code)
 	} else {
-		caps = scepterCapsOf(h.Params)
+		hello = h.Params
 	}
+	caps := scepterPairCaps(n, hello, helloErr)
 	refetch := func() (scepterDoc, string) {
 		doc, err := scepterFetchDoc(cl)
 		if err != nil {

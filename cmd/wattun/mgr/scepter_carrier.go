@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -333,7 +335,108 @@ func scepterFollowLocal(pair, remote, carrier string, params map[string]string, 
 		return false
 	}
 	Ok("Link is up — " + local + " follows on " + carrier + ".")
+	scepterACVerdict(local)
 	return true
+}
+
+// scepterVerdictBusy keeps one auto-verdict at a time (the rate limit the owner
+// directive asks for: ONE verdict per change, never overlapping runs).
+var scepterVerdictBusy atomic.Bool
+
+// scepterCanDesync gates the auto-verdict's fake-SNI rows (the desync layer
+// needs Linux CAP_NET_RAW, like the icmp carrier — elsewhere every row would
+// fail and print a misleading verdict); a var so tests can arm it.
+var scepterCanDesync = isLinuxHost
+
+// slicesContainStr: membership in a string slice (scepterACVerdict's carrier gate).
+func slicesContainStr(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// scepterACVerdict — owner directive (2026-11-22, zero extra manual steps):
+// after a carrier.change follow succeeds, the fast-preset anti-censor verdict
+// runs automatically and its result is shown — no "your call" step. The run is
+// the existing --test fast machinery (atPreset=fast: throw-away client probes,
+// rst/synrst x the three fast SNIs, ranked table), cut to the changed carrier:
+// the plan is synthesized from the tunnel's own shape, so nothing is asked and
+// nothing is applied — the verdict only reports.
+func scepterACVerdict(n string) {
+	// Gates: fake-SNI rows need Linux (CAP_NET_RAW, like the icmp carrier —
+	// elsewhere every row would fail and print a misleading verdict); the
+	// verdict belongs to the dialing end (Iran, since reverse follows keep
+	// their own flows); one SNI-capable pool carrier with a dialable port.
+	// Anything else: silent skip — the fleet auto-test and the tunnel page (z)
+	// remain the surfaces.
+	if !scepterVerdictBusy.CompareAndSwap(false, true) {
+		Warn("Anti-censor verdict skipped: one is already running.")
+		return
+	}
+	defer scepterVerdictBusy.Store(false)
+	if !scepterCanDesync() || Role(n) != "Iran" || IsReverse(n) {
+		return
+	}
+	cr, peer := Cfg(n, "carrier"), Cfg(n, "peer")
+	if strings.Contains(cr, "+") {
+		return // bonds rank through the fleet auto-test
+	}
+	if !slicesContainStr(strings.Fields(autoVarAnti), cr) {
+		return
+	}
+	_, port := SplitHP(peer)
+	if port == "" {
+		return
+	}
+	key := strings.TrimSpace(mustRead(filepath.Join(P.Conf, n+".key")))
+	if key == "" {
+		return
+	}
+	fmt.Fprintln(Stdout)
+	Hint("Anti-censor verdict (fast preset) on " + cr + " — probe rows x rst/synrst, about 2-5 min.")
+	// save/restore the shared at_* state the run touches; av/ar are reset by
+	// autoVariants itself, like every other caller of this machinery
+	savedPreset, savedQuiet, savedSkip, savedAct, savedStop, savedGSkip :=
+		atPreset, atQuiet, atSkip, atAct, atStop, atGSkip
+	defer func() {
+		atPreset, atQuiet, atSkip, atAct, atStop, atGSkip =
+			savedPreset, savedQuiet, savedSkip, savedAct, savedStop, savedGSkip
+	}()
+	atPreset, atQuiet, atSkip, atAct, atStop, atGSkip = "fast", false, "", "", false, ""
+	autoTest(Token{
+		Peer: peer,
+		Key:  key,
+		Path: orStr(Cfg(n, "path"), "/wat"),
+		SNI:  Cfg(n, "sni"),
+		Icmp: Cfg(n, "icmp-type"),
+		Auto: "d=" + cr + ":" + port,
+	})
+	plain := -1
+	for i := range av {
+		if av[i].Kind == "d" && av[i].Car == cr && !avAnti(av[i]) {
+			plain = i
+		}
+	}
+	rank := autoRefine(atRank(av, ar, ""))
+	if len(rank) == 0 {
+		Warn("Verdict: no probe row passed (the tunnel itself links — judge on the tunnel page, z).")
+		return
+	}
+	atTable(Stdout, av, ar, rank, atMB, atSecs)
+	w := av[rank[0]]
+	switch {
+	case plain >= 0 && ar[plain].OK && !avAnti(w):
+		Ok("Verdict: the plain shape passes; fastest row " + w.Label + ".")
+	case plain >= 0 && ar[plain].OK:
+		Ok(fmt.Sprintf("Verdict: the plain shape passes; fake-SNI row %q outruns it — arm that on the tunnel page (z) if filtering appears.", w.Label))
+	case avAnti(w):
+		Warn(fmt.Sprintf("Verdict: the plain probe failed but %q passes — a filtering signal; arm it on the tunnel page (z).", w.Label))
+	default:
+		Warn("Verdict: no plain or fake-SNI probe passed (the tunnel itself links — judge on the tunnel page, z).")
+	}
 }
 
 // ======================================================================================
