@@ -938,3 +938,20 @@ Commit: 9fbe625, eae9c41
 - Lane F (Go mgr cockpit: real shell-out transport, fleet view, create wizard, tunnel pages)
   dispatched against the committed -scepter-call contract; delivers uncommitted.
 Commit: bc26b3a
+
+## 2026-11-22 · supervisor · Phase B closed — cockpit committed (f264005); PHASE B READY FOR REVIEW
+- Lane F (Go mgr cockpit) reviewed and committed as f264005: real transport (per-call shell-out to
+  -scepter-call, chunk-aware JSONL parser, code hints), fleet view, pair screen, remote tunnel pages
+  (state/stats/logs/edit/presets/limits/restart/delete), create wizard as intent builder, idempotent
+  submit loop (same id on transport failure; stale -> refetch + rebuild). Superseded the phase A
+  empty-args read keys (they were guaranteed bad_request). 19 tests green; gates re-run by supervisor
+  (gofmt/vet/build, mgr 0.62 s, cmd suite ok). 1279-line scepter_cockpit.go fits the mgr screen idiom.
+- Phase B commits: bc26b3a (engine write intents + ops + queue + -scepter-call + hot-spin fix),
+  73eb08f (CFG_FILE_ONLY coverage), f264005 (cockpit), e659b1d (log).
+- Deliberately deferred inside phase B (recorded): history view on the tunnel page, reverse/FEC/
+  bonding knobs in the wizard (tunnel.edit covers), push-based panel refresh, latch-port visibility
+  in the ops port scan (kernel + rollback cover it today).
+PHASE B READY FOR REVIEW. Proceeding to phase C (remote carrier work): Lane G engine (test.open
+probe lifecycle, carrier.change with link-check rollback, auto.test cockpit trigger/read/apply)
+first, then the mgr surfaces on the committed RPC.
+Commit: f264005
