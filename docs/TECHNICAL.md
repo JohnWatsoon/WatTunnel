@@ -2377,9 +2377,9 @@ cockpit — reading state, stats, logs and events of its tunnels on Kharej over 
 with no SSH to Kharej. It landed in phases inside 3.5.0: the read-only channel (A), write intents (B), remote
 carrier work (C), operations (D: update orchestration, doctor, backup, audit) and the event-hardening /
 audit-completeness pass (E). Everything is API-first: a future web panel is just another client. Humans reach
-the plane through two consoles — Kharej's local `wattun scepter` (pair / rotate / revoke / audit tail, the bash
-manager) and Iran's cockpit, the Go manager's `wattun scepter` (fleet view, create wizard, remote tunnel pages,
-remote carrier tests, operations) — plus the scriptable one-shot `wattun -scepter-call`.
+the plane through two consoles — Kharej's local `wattun-manager scepter` (pair / rotate / revoke / audit tail,
+the bash manager) and Iran's cockpit, the Go manager's `wattun scepter` (fleet view, create wizard, remote
+tunnel pages, remote carrier tests, operations) — plus the scriptable one-shot `wattun -scepter-call`.
 
 **Version matrix: both ends need 3.5.0** for any Scepter feature. A 3.4.x Kharej paired by a 3.5 Iran degrades
 to today's behavior: no scepter traffic beyond at most one rejected hello, the tunnel itself is untouched.
@@ -2432,7 +2432,8 @@ seq and replayable (`events.since {seq}`, last 512): `tunnel_up`, `tunnel_down`,
 (phase C: a remote probe listener came up / closed), `auto_test` (phase C: a ranking run finished, with
 `ok`/`total`), `update_started` / `update_applied` / `update_failed` (phase D: an update intent was
 accepted / the new engine verified up / the update failed or rolled back), `heal_action`, `sla_breach`,
-`update_available`, `pair_rotated`, `pair_revoked`, `scepter_up`, `scepter_down`. Every intent is journaled
+`update_available`, `pair_rotated`, `pair_revoked`, `scepter_up`, `scepter_down`. Every mutating intent is journaled (reads re-execute — they are pure functions of the state; the intent
+TTL is clamped to 60..3600 s, default 600)
 (append-only, atomic writes, rotated at 1 MB) with its outcome; a retry of the same command id returns the
 recorded outcome (at-most-once application). Applied intents and rolled-back Kharej-side failures
 (`code=internal`) are journaled; pure rejections (`denied`/`stale`/`rate_limited`/`bad_request`) are
@@ -2506,8 +2507,9 @@ this binary does not ship). `4 rate_limited` also covers the per-pair **create**
 (with `{"need":tier}`) and `1 bad_request` are unchanged. Name rules are byte-for-byte the manager's:
 1-32 chars of `[A-Za-z0-9_-]` (the name becomes `wattun@NAME` and `NAME.yml`). Params keys must be config
 keys this binary parses; the keys the ops write themselves (`mode`, `key`, `carrier`, `ports`, `limits`,
-`header`) and the standalone action flags (`config`, `version`, `pair`, `pair-to`, `pairing`, `latch-port`,
-`latch-dial`, `scepter-call`, `scepter-args`, `state-dir`) are refused. A pairing may never edit, delete or
+`header`, `metrics`, `key-file`) and the standalone action flags (`config`, `version`, `pair`, `pair-to`,
+`pairing`, `latch-port`, `latch-dial`, `scepter-call`, `scepter-args`, `update-job`, `state-dir`) are
+refused. Param values must be one line (newlines rejected — they cannot smuggle comment lines). A pairing may never edit, delete or
 restart its OWN unit (`code=1` with `{"self":…}`) — the cockpit channel rides that very unit; the local
 console handles it.
 
@@ -2522,8 +2524,8 @@ listeners are separate units and the link check dials loopback sockets, so tunne
 |---|---|---|---|
 | `test.open` | `{carrier, ttl?}` | manage | opens a probe listener of the requested shape for `ttl` seconds (default 300, clamped to 10..3600, the effective value is echoed); answers `{id, carrier, port, key, path?, metrics?, ttl}` |
 | `test.close` | `{probe}` | manage | closes a probe before its ttl (`probe`, not `id` — the one-shot CLI lifts a top-level `id` as the command id) |
-| `carrier.change` | `{name, carrier, params?, base_seq?, ttl_s?}` | manage | the edit path plus a link check with automatic rollback; answers `{name, carrier, listen?, link:"ok"}` |
-| `auto.test` | `{mode?}` | manage | triggers the ranking run and answers `{run, mode, shapes}` BEFORE it finishes; `EvAutoTested` fires when done; a second trigger answers `{run, already_running:true}` |
+| `carrier.change` | `{name, carrier, params?, base_seq?, ttl_s?}` | manage | the edit path plus a link check with automatic rollback; answers `{name, carrier, listen?}` (the verify result rides `OK` vs `rolled_back {detail}` — there is no `link` key) |
+| `auto.test` | `{mode?}` | manage | triggers the ranking run and answers `{run, mode, shapes}` (a COUNT of the shapes probed, not the list) BEFORE it finishes; `EvAutoTested` fires when done; a second trigger answers `{run, already_running:true}` |
 | `auto.rows` | — | manage | the stored ranked table `{run, mode, done, ok, rows:[{rank, carrier, port, ok, down_mbps?, why?}]}` |
 | `auto.apply` | `{name, row, base_seq?, ttl_s?}` | manage | applies ranked row N (1-based) through `carrier.change`; answers like it plus `row` |
 
@@ -2652,12 +2654,14 @@ unit that carries the cockpit channel.** The contract, in order:
    journal replays the `started` answer) and call `update.status` for the outcome.
 
 **backup.export** tarballs the config dir for a host rebuild: every regular file in `$CONF` — `NAME.yml`,
-`NAME.key`, `NAME.token`, `NAME.yml.bak` (pre-edit states), `.pairing` (the pairing store), `.pairing.audit`
-(the credential audit) and anything else an operator or the manager left there. Deliberately excluded: the
-command journal `.pairing.journal` (machine replay state, not restore data — the one file that grows with
-command traffic), the `.update/` staging dir and tmp files. Keys and the pairing store are INCLUDED on
-purpose: a config dir without keys restores nothing, and keys already travel this channel (`tunnel.create`
-returns them inside the session AEAD). Caps: one member > 4 MB or a total > 5 MB is refused (`too_large`)
+`NAME.key`, `NAME.token`, `NAME.yml.bak` (pre-edit states), `.pairing.audit` (the credential audit) and
+anything else an operator or the manager left there. Deliberately excluded: `.pairing` (the pairing
+credential — a manage-tier credential could otherwise extract the key and mint a full-capability cockpit;
+re-pair from Kharej's console after a restore, 2026-11-22 review), the command journal `.pairing.journal`
+(machine replay state, not restore data — the one file that grows with command traffic), the `.update/`
+staging dir, and any file with `.tmp` anywhere in its name (manager/engine write partials). Keys are
+INCLUDED on purpose: a config dir without keys restores nothing, and keys already travel this channel
+(`tunnel.create` returns them inside the session AEAD). Caps: one member > 4 MB or a total > 5 MB is refused (`too_large`)
 — the chunked transfer tops out at 512 x 16 KiB. The doc carries the tar's sha256 and size so the cockpit
 can verify the decode.
 
