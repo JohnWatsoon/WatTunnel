@@ -355,7 +355,7 @@ func scepterOpsScreen(pair string, cl ScepterClient, caps ScepterCaps) {
 			scepterUpdateStatusView(cl)
 			Pause()
 		case "d":
-			scepterDoctorView(cl)
+			scepterDoctorView(pair, cl)
 			Pause()
 		case "b":
 			scepterBackupExport(pair, cl)
@@ -514,13 +514,14 @@ func scepterUpdateRun(pair string, cl ScepterClient, caps ScepterCaps) {
 
 // ---- doctor.fetch ----
 
-func scepterDoctorView(cl ScepterClient) {
+func scepterDoctorView(pair string, cl ScepterClient) {
 	fmt.Fprintln(Stdout)
 	Hint("doctor.fetch — the pair's structured self-report (state, recent commands, ops fragments)")
 	res, ok := scepterAct(cl, "doctor.fetch", nil)
 	if !ok {
 		return
 	}
+	scepterLearnLatchPort(pair, res.Params)
 	rows := scepterRenderRows(res.Params)
 	if len(rows) == 0 {
 		Warn("doctor.fetch answered nothing.")
@@ -532,6 +533,33 @@ func scepterDoctorView(cl ScepterClient) {
 			continue
 		}
 		Say("  " + row)
+	}
+}
+
+// scepterLearnLatchPort self-heals the client-side latch-port key from the
+// doctor answer (owner directive 2026-11-22: automatic revival needs the port
+// on Iran, and Kharej's wizard may have moved off the 20443 default on a port
+// collision — the doctor's latch fragment is the authority). A different or
+// absent local value is rewritten; a doctor without a latch fragment (older
+// engine, latch off) touches nothing.
+func scepterLearnLatchPort(pair string, params map[string]any) {
+	latch, ok := params["latch"].(map[string]any)
+	if !ok {
+		return
+	}
+	if enabled, _ := latch["enabled"].(bool); !enabled {
+		return
+	}
+	portf, ok := latch["port"].(float64)
+	if !ok || portf <= 0 || portf > 65535 {
+		return
+	}
+	port := fmt.Sprintf("%d", int(portf))
+	if Cfg(pair, "latch-port") == port {
+		return
+	}
+	if err := SetValue(pair, "latch-port", port); err == nil {
+		Ok(fmt.Sprintf("latch-port %s learned from Kharej's doctor answer (automatic revival armed).", port))
 	}
 }
 

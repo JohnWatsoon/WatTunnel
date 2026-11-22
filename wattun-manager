@@ -4049,6 +4049,11 @@ wizard_iran() {
       [ -n "$T_ICMP" ] && [ "$T_ICMP" != echo ] && echo "icmp-type: $T_ICMP"
       [ "$T_REV" = 1 ] && echo "reverse: true"
       [ -n "$rport" ] && echo "listen: \":$rport\""
+      # Owner directive (2026-11-22): automatic latch revival needs the port on
+      # Iran too — when the pairing rides the token, the client config carries the
+      # default (Kharej's wizard may have moved off it on a collision; the Go
+      # cockpit self-heals the real port from doctor.fetch).
+      [ -n "$T_PAIR" ] && echo "latch-port: $SCEPTER_LATCH_DEFAULT"
       [ -n "$AT_EXTRA" ] && printf '%s\n' "$AT_EXTRA"
       ech_cache_line "$name"
       [ -n "$bind" ] && [ "$bind" != 0.0.0.0 ] && echo "bind: $bind"

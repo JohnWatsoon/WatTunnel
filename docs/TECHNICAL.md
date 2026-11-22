@@ -1795,8 +1795,8 @@ The server allowlist is the **target** ports, so Kharej's list contains `443` an
 | `state-dir` | empty (next to the config) | both, needs `-config` (3.3.0) | Directory that holds the quota-usage and lifetime-totals files (`<config>.quota.json`, `<config>.totals.json`). Created 0700 when missing; an existing directory with wider permissions is tightened to 0700 (chmod failure stops startup). The file names keep the config's base name, so one directory can hold several tunnels. Point it at tmpfs (`/run/wattun`) to spare the disk: the shipped unit creates that directory and keeps it across a service restart, but the counters are still lost on reboot. See "State files". |
 | `state-save` | 30 | both (3.3.0) | Seconds between state-file saves (quota usage and lifetime totals); `0` = only on shutdown, at most 2592000 (30 days; a larger value stops startup). The save itself is atomic (tmp + rename), as before. |
 | `debug` | false | both | Log every stream open and close. |
-| `pairing` | empty (off) | client | Attach the Scepter pairing credential (3.5.0): `true` opens the management stream with the pairing stored by `-pair-to` (`.pairing` in the config dir), a full `watp1:` line as the value uses it directly, `false` = off with no credential read. The server needs no key in its config: it serves the channel whenever a stored pairing exists. See [Scepter](#scepter-the-pairing-and-management-plane-350). |
-| `latch-port` | 0 (off) | server | Scepter (3.5.0): port of the scepter latch — the fallback wss listener that arms while every unit of the pairing is inactive, so the cockpit can revive the pair; the first contact must prove the pairing key. 0 = off, and the latch never exists without a stored pairing. File-only in the manager. See [Scepter](#scepter-the-pairing-and-management-plane-350). |
+| `pairing` | empty (off) | client | Scepter (3.5.0) credential switch: by default the pairing rides the token (field 10 `pair=<tier>`, derived at config load) and no key is needed. `true` opens the management stream with the stored `.pairing` — a file overrides the token-derived credential (the rotate/revoke store), a full `watp1:` line as the value is used directly, `false` = off and beats every other source (token or file). The server needs no key in its config: it serves the channel whenever a stored or token-derived pairing exists. See [Scepter](#scepter-the-pairing-and-management-plane-350). |
+| `latch-port` | 0 (off) | server, client | Scepter (3.5.0). Server: port of the scepter latch — the fallback wss listener that arms while every unit of the pairing is inactive, so the cockpit can revive the pair; the first contact must prove the pairing key (the manager writes 20443 into new Kharej configs, collision-checked). Client: the peer's latch is at peerhost:N — while the tunnel is down the client contacts it automatically (proof + hello + ping, one attempt per 30 s) and revives the cockpit channel; without a peer address one log line and revival off. See [Scepter](#scepter-the-pairing-and-management-plane-350). |
 
 ### Example: ICMP (the production setup)
 
@@ -1974,10 +1974,10 @@ Every flag can also be a config key. Flags win over the file.
 | `-state-save SECONDS` | 30 | Both ends (3.3.0): seconds between state-file saves; 0 = only on shutdown, at most 2592000 (30 days; a larger value stops startup). |
 | `-metrics ADDR` | off | Serve `/stats` and pprof. |
 | `-debug` | off | Log every stream. |
-| `-pair LINE` | | Server, standalone action (3.5.0): store a `watp1:` pairing line as this server's Scepter pairing (`.pairing` in the config dir, mode 0600, atomic write) and exit; the management channel serves from the next restart on. See [Scepter](#scepter-the-pairing-and-management-plane-350). |
-| `-pair-to LINE` | | Client (3.5.0): attach this `watp1:` pairing line to the tunnel — the credential is stored and the reserved management stream (sid 0) opens alongside normal forwarding. |
-| `-pairing V` | empty | Client (3.5.0): `true` opens the management stream with the pairing stored by `-pair-to`; a full `watp1:` line as the value is used directly; `false` = off. Same key as the config key `pairing`. |
-| `-latch-port N` | 0 (off) | Server (3.5.0): arm the scepter latch on port N (the fallback listener; see [Scepter](#scepter-the-pairing-and-management-plane-350)). |
+| `-pair LINE` | | Server, standalone action (3.5.0): store a `watp1:` pairing line as this server's Scepter pairing (`.pairing` in the config dir, mode 0600, atomic write) and exit; the management channel serves from the next restart on, and the stored file overrides a token-derived credential. The explicit/rotate form — the wizard's first token already carries the pairing (field 10). See [Scepter](#scepter-the-pairing-and-management-plane-350). |
+| `-pair-to LINE` | | Client, standalone (3.5.0): attach this `watp1:` pairing line to the tunnel — the credential is stored (`.pairing`) and the reserved management stream (sid 0) opens alongside normal forwarding. The explicit/rotate form; the pasted token's field 10 (`pair=<tier>`) arms the pairing without it. |
+| `-pairing V` | empty | Client (3.5.0): by default the pairing rides the token (field 10); `true` opens the management stream with the stored `.pairing` (a file overrides the token-derived credential), a full `watp1:` line as the value is used directly, `false` = off and beats every other source. Same key as the config key `pairing`. |
+| `-latch-port N` | 0 (off) | Scepter (3.5.0). Server: arm the scepter latch on port N (the fallback listener; see [Scepter](#scepter-the-pairing-and-management-plane-350)). Client: the peer's latch is at peerhost:N — while the tunnel is down the client contacts it automatically (one attempt per 30 s) to revive the cockpit channel. |
 | `-latch-dial HOST:PORT` | | Client, standalone (3.5.0): contact the scepter latch at host:port with the pairing attached, prove the key, run the hello and one ping, then exit — the cockpit revival primitive and drill tool. |
 | `-scepter-call CMD` | | Client, standalone one-shot (3.5.0): dial the paired session's reserved stream, run ONE command, print every response line as JSONL on stdout and exit; exit 0 once the command was answered (the machine code rides the JSON), 1 on a transport failure. |
 | `-scepter-args JSON` | | With `-scepter-call`: the command's args as a JSON object; a top-level `"id"` becomes the command id, so a retried call replays the journaled outcome at-most-once. |
@@ -2384,27 +2384,39 @@ tunnel pages, remote carrier tests, operations) — plus the scriptable one-shot
 **Version matrix: both ends need 3.5.0** for any Scepter feature. A 3.4.x Kharej paired by a 3.5 Iran degrades
 to today's behavior: no scepter traffic beyond at most one rejected hello, the tunnel itself is untouched.
 
-### The pairing credential and the watp1: line
+### The pairing credential: rides the token; watp1: is the explicit/rotate form
 
 A credential is `{pairing UUID, 32-byte key, capability, version}`. Capabilities are cumulative tiers:
 `tunnel` < `create` < `manage` < `full` (each tier carries the lower ones; phase A serves reads at `tunnel`
-except telemetry, which needs `manage`). The bootstrap line, printed by `install.sh` next to the first token
-and accepted by `-pair`, is verbatim:
+except telemetry, which needs `manage`).
+
+**The automated flow (owner directive 2026-11-22: zero manual setup steps).** The pairing travels INSIDE the
+tunnel token: a classic `wat1:` token may carry optional field 10 (`pair` or `pair=<capability>`); old parsers
+ignore it per the token-format rule, so a token minted for a 3.5 pair still bootstraps a 3.4 tunnel. At config
+load the engine DERIVES the pairing credential from that field, on both roles — no `pairing:` key and no
+separate credential line is needed. The manager's Kharej wizard embeds `pair=full` in the first mint
+automatically and writes `latch-port` (default 20443, collision-checked) into the server config; Iran's wizard
+takes the pasted token as its only step. Precedence: an explicit `pairing: false` beats everything; a stored
+`.pairing` file overrides the token-derived credential (the file is the rotate/revoke store — one written
+LATER overrides the token-derived base, and the revoke poller watches it in that mode); no credential anywhere
+= exactly the pre-3.5 behavior (sid 0 is never opened and never accepted). The derived credential feeds the
+latch exactly like a stored one.
+
+The explicit `watp1:` line stays documented as the rotate/attach form (what the manager consoles drive):
 
 ```
 watp1:<version>|<pairing UUID>|<base64 32-byte key>|<capability>
 ```
 
-Example: `watp1:1|0a0b0c0d-0e0f-1011-1213-141516171819|AAAA...=|manage`. Version is 1. A classic `wat1:` token
-may also carry pairing as optional field 10 (`pair` or `pair=<capability>`); old parsers ignore it per the
-token-format rule.
-
-Setup:
+Example: `watp1:1|0a0b0c0d-0e0f-1011-1213-141516171819|AAAA...=|manage`. Version is 1.
 
 - Kharej: `wattun -pair 'watp1:...'` stores `/etc/wattun/.pairing` (mode 0600, atomic write) and exits; every
-  later start serves the channel. `-latch-port N` additionally arms the fallback latch (below).
+  later start serves the channel, and the stored file overrides a token-derived credential. `-latch-port N`
+  arms the fallback latch (below; the manager writes it into new Kharej configs by default).
 - Iran: `wattun -pair-to 'watp1:...'` (or config key `pairing: true` with the stored file, or the key's value
   being a full `watp1:` line) attaches the credential to the tunnel; the cockpit channel opens with it.
+  Revocation and rotation remain Kharej-console actions (the trust boundary): the console rewrites
+  `.pairing`, and the engine picks the change up live.
 
 ### Wire format: JSON Lines on the reserved stream
 
@@ -2715,15 +2727,26 @@ contact (the contact's connections stay alive) and re-arms only after that sessi
 inactive; it also stands down the moment a unit is alive again. On the Iran side, `wattun -latch-dial
 host:port` (with the pairing attached) is the contact primitive: it proves, runs the hello and one ping.
 
+Automatic revival (owner directive 2026-11-22): a client config that carries `latch-port: N` too means "the
+peer's latch is at peerhost:N" — while the tunnel is down the client repeats proof + hello + ping against it,
+one attempt per 30 s (`latchRetryEvery`), and restarts the in-band cockpit loop the moment the latch answers;
+the tunnel keeps its own dial cadence in parallel. Without a peer address the client logs once and revival
+stays off; `-latch-dial` remains the manual one-shot drill. The manager writes the server-side `latch-port`
+into new Kharej configs by default (20443, collision-checked against the listen/metrics/probe picks); the
+in-band channel itself always revives on its own the moment the tunnel comes back.
+
 Hidden infrastructure: the latch listener and the scepter session appear in NO user-facing listing or dashboard
 and never in `/stats`. The only visible trace is the doctor's, served by the loopback `/scepter` endpoint on the
 metrics address: pairing UUID, capability, latch state (armed/port/contacts/rejected/revoked) and the last 16
 commands.
 
-Revocation and rotation are engine-live for FILE-backed credentials: a poller (5 s) watches `.pairing` — a
-removed or unparsable store disarms the channel and revokes the latch (`ReloadPairing(nil)`; the tunnel keeps
-running), a changed store reloads the credential and re-arms the latch from the NEW key. A config-key `watp1:`
-pairing is static by definition (restart the unit without the key to revoke).
+Revocation and rotation are engine-live wherever a credential can change under a running unit: a poller (5 s)
+watches `.pairing` — a removed or unparsable store disarms the channel and revokes the latch
+(`ReloadPairing(nil)`; the tunnel keeps running), a changed store reloads the credential and re-arms the latch
+from the NEW key. A token-derived credential is polled in override mode: the token armed the channel, so the
+file is not required — but a `.pairing` that appears IS the rotate/revoke store and overrides the derived
+credential (the console rewrites or removes the file, the change lands live). A config-key `watp1:` pairing
+is static by definition (restart the unit without the key to revoke).
 
 ### Accepted limitations (review wave 1, 2026-11-22 — recorded, not bugs to fix today)
 

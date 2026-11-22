@@ -2311,7 +2311,7 @@ EOF
     NONINTERACTIVE=1 NI_TOKEN="$(cat "$WAT_CONF/t_pair.token")" NI_NAME=t_iran_pair NI_MAP='8443:8443' wizard_iran ) >/dev/null 2>&1
   chk "iran wizard: pasting the token is the only step (no pairing key)" "$(grep -c '^pairing:' "$WAT_CONF/t_iran_pair.yml")" "0"
   chk "iran wizard: no watp1 ask anywhere in the wizard" "$(sed -n '/^wizard_iran() {/,/^}$/p' wattun-manager | grep -vE '^[[:space:]]*(#.*)?$' | grep -c 'watp1')" "0"
-  chk "iran wizard: no latch-port on the client config" "$(grep -c '^latch-port:' "$WAT_CONF/t_iran_pair.yml")" "0"
+  chk "iran wizard: the client config carries the latch default (auto revival)" "$(grep -c '^latch-port: 20443$' "$WAT_CONF/t_iran_pair.yml")" "1"
   rm -f "$WAT_CONF"/t_pair* "$WAT_CONF"/t_iran_pair*
   eval "$_bt_sctl"; eval "$_bt_fmp"; eval "$_bt_lb"; eval "$_bt_su"; eval "$_bt_cf"
   eval "$_bt_bv"; eval "$_bt_bvok"; VER=$_bt_ver

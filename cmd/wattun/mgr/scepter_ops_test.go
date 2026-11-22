@@ -352,14 +352,18 @@ func TestScepterUpdateRunConfirmFlow(t *testing.T) {
 }
 
 func TestScepterDoctorView(t *testing.T) {
-	InitColor(false, 8)
+	dir := scepterCarrierTestConf(t)
+	writeTestYml(t, dir, "ir", "mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n")
 	res := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
 		"ver": "3.5.0", "state_seq": float64(9),
-		"latch":  map[string]any{"armed": false},
+		"latch":  map[string]any{"armed": false, "enabled": true, "port": float64(20443)},
 		"recent": []any{map[string]any{"cmd": "update.status", "code": float64(0)}},
 		"update": map[string]any{"phase": "applied", "run": "upd-1"},
 	}}
-	out := capture(t, func() { scepterDoctorView(stubClient{res}) })
+	out := capture(t, func() { scepterDoctorView("ir", stubClient{res}) })
+	if Cfg("ir", "latch-port") != "20443" {
+		t.Errorf("doctor answer must self-heal the client latch-port, got %q", Cfg("ir", "latch-port"))
+	}
 	for _, want := range []string{"latch.armed: false", "recent[0].cmd: update.status",
 		"update.phase: applied", "ver: 3.5.0"} {
 		if !strings.Contains(out, want) {

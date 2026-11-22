@@ -860,23 +860,7 @@ if [ "$PREV_WARN" = 1 ]; then
 fi
 if [ "${#WARNINGS[@]}" -gt 0 ] || [ "$PREV_WARN" = 1 ]; then echo; fi
 
-# ---- Scepter pairing material (3.5.0, plan D5) ----
-# First install only, and never over an existing credential: mint one pairing line so the operator can pair
-# Kharej and Iran without another SSH round trip. Stored as .pairing.pending — NOT the live .pairing — so
-# activation stays opt-in: `wattun -pair 'watp1:…'` on Kharej (then -pair-to, or `pairing: true`, on Iran).
-# Atomic write + 0600, the same discipline as the key files. od/base64 are coreutils, always present here.
-PAIR_LINE=''
-if [ -z "$OLD" ] && [ ! -f "$CONF/.pairing" ] && [ ! -f "$CONF/.pairing.pending" ]; then
-  _phex=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
-  _pkey=$(head -c 32 /dev/urandom | base64 -w0)
-  if [ ${#_phex} = 32 ] && [ ${#_pkey} = 44 ]; then
-    PAIR_LINE=$(printf 'watp1:1|%.8s-%.4s-%.4s-%.4s-%.12s|%s|full' \
-      "$_phex" "${_phex:8:4}" "${_phex:12:4}" "${_phex:16:4}" "${_phex:20:12}" "$_pkey")
-    printf '%s\n' "$PAIR_LINE" >"$CONF/.pairing.pending.tmp"
-    chmod 600 "$CONF/.pairing.pending.tmp"
-    mv -f "$CONF/.pairing.pending.tmp" "$CONF/.pairing.pending" || PAIR_LINE=''
-  fi
-fi
+# Scepter pairing no longer needs installer material (owner directive 2026-11-22: zero manual steps — the pairing rides the wizard's token as field 10, the engine derives it); a .pairing.pending left by an older install is inert — the engine never reads it.
 
 # ---- summary & post-install status card ----
 total=0; running=0; stale_names=''
@@ -907,13 +891,6 @@ box "$title" \
   "${GRY}binary    ${RST} $BIN" \
   "${GRY}config    ${RST} $CONF · $total tunnel$([ "$total" = 1 ] || echo s) ($running running)" \
   "${GRY}rollback  ${RST} ${prev:-none}${prev:+ ${GRY}(wattun -> Settings -> v)${RST}}"
-
-if [ -n "$PAIR_LINE" ]; then
-  echo
-  ok "Scepter pairing material for this pair (keep secret; both ends need 3.5.0):"
-  printf '  %s\n' "$PAIR_LINE"
-  hint "Kharej: wattun -pair '<the watp1: line>' · Iran: -pair-to '<the same line>' — nothing is active until then"
-fi
 
 if [ -n "$stale_names" ]; then
   echo
