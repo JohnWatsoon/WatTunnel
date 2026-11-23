@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
@@ -445,25 +444,4 @@ func (r *logRing) tail(n int) []string {
 	out := make([]string, n)
 	copy(out, r.lines[len(r.lines)-n:])
 	return out
-}
-
-// scepterClientLoop (client, 3.5.0): open the reserved stream on the tunnel's session, run the pairing hello and
-// keep the channel warm with a 30 s ping (also the cockpit's scepter_up/down signal). A failed hello — an old
-// peer without pairing material, or a reset stream — logs once and stops: no retry storm, and the tunnel itself
-// is untouched (the mixed-version rule: at most one hello attempt of scepter traffic toward an old peer).
-func scepterClientLoop(tun *tunnel, pair *wat.PairingConfig) {
-	c, err := wat.DialScepter(tun.pick())
-	if err != nil {
-		log.Printf("scepter: %v (pairing needs %s on both ends; the tunnel runs without the cockpit)", err, wat.Version)
-		return
-	}
-	defer c.Close()
-	seq, _ := c.Hello["state_seq"].(float64)
-	log.Printf("scepter: paired with %s (peer %s, caps %s, state_seq %.0f)", pair.UUIDString(), c.Hello["ver"], c.Hello["caps"], seq)
-	for range time.Tick(30 * time.Second) {
-		if _, code := c.Call("scepter.ping", nil); code != wat.CodeOK {
-			log.Printf("scepter: channel down (code %d); the tunnel keeps running", code)
-			return
-		}
-	}
 }

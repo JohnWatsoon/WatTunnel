@@ -350,8 +350,26 @@ func main() {
 		if *mode != "client" {
 			log.Fatal("-scepter-call is a client action: it dials the paired Kharej through this tunnel")
 		}
-		if _, _, err := parseScepterCallArgs(*scepterArgs); err != nil {
+		args, id, err := parseScepterCallArgs(*scepterArgs)
+		if err != nil {
 			log.Fatalf("-scepter-args: %v", err)
+		}
+		// Handoff 4 R1: a running unit answers over its control socket, through the session it already has.
+		// Only when no unit listens does this fall back to its own one-shot tunnel below — never on a reverse
+		// tunnel, whose one-shot would have to bind the listen port the unit holds.
+		if *cfgPath != "" {
+			err := scepterCallSock(scepterSockPath(*cfgPath), *scepterCall, args, id, os.Stdout)
+			if err == nil {
+				os.Exit(0)
+			}
+			if !errors.Is(err, errNoSock) {
+				fmt.Fprintln(os.Stderr, "scepter-call:", err)
+				os.Exit(1)
+			}
+		}
+		if *reverse {
+			fmt.Fprintln(os.Stderr, "scepter-call: the tunnel unit is not running (a reverse tunnel reaches Kharej only through its running unit)")
+			os.Exit(1)
 		}
 	}
 
@@ -1123,7 +1141,7 @@ func main() {
 			os.Exit(runScepterCall(tun, *scepterCall, *scepterArgs))
 		}
 		if cfg.Pairing != nil {
-			go scepterClientLoop(tun, cfg.Pairing)
+			hub := startScepterClient(tun, *cfgPath, nil)
 			// The latch's client side (owner directive 2026-11-22): `latch-port: N` on a client run means
 			// "the peer's latch is at peerhost:N" — while the tunnel is down, contact it automatically
 			// (proof + hello + ping, one attempt per latchRetryEvery) and keep the revived channel warm;
@@ -1137,7 +1155,7 @@ func main() {
 						alive: tun.alive, pair: cfg.Pairing,
 						addr:   net.JoinHostPort(host, strconv.Itoa(*latchPort)),
 						logf:   log.Printf,
-						inband: func() { go scepterClientLoop(tun, cfg.Pairing) },
+						inband: func() { go hub.callRaw("scepter.ping", nil, "", io.Discard) },
 					})
 				}
 			}

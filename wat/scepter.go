@@ -2456,6 +2456,10 @@ func (c *ScepterClient) helloExchange(sess *Session) error {
 // CloseWrite half-closes; the server's ServeScepter then returns.
 func (c *ScepterClient) Close() error { return c.st.CloseWrite() }
 
+// Abort resets the reserved stream: after a transport error the stream state is unknown, and the session allows
+// one sid-0 stream at a time, so a broken client must free it before the next DialScepter.
+func (c *ScepterClient) Abort() { c.st.Reset() }
+
 // Call runs one command with a fresh id and returns (params, code). Chunked responses are reassembled into
 // {"logs": [...]} by splitting the concatenated data on newlines.
 func (c *ScepterClient) Call(cmd string, args map[string]any) (map[string]any, int) {
@@ -2482,6 +2486,10 @@ func (c *ScepterClient) CallRaw(cmd string, args map[string]any, id string, w io
 		return CodeInternal, werr
 	}
 	deadline := time.Now().Add(30 * time.Second)
+	// the stream has no read deadline: a peer that never answers would block ReadSlice forever, so the
+	// timeout resets the stream (the caller must re-dial; the session itself is untouched)
+	stop := time.AfterFunc(30*time.Second, c.st.Reset)
+	defer stop.Stop()
 	var nChunks, got int
 	for {
 		if time.Now().After(deadline) {
@@ -2541,6 +2549,8 @@ func (c *ScepterClient) call(cmd string, args map[string]any, id string, ts int6
 // interleaved lines for other ids. Shared by call and the latch proof ack (latch.go).
 func (c *ScepterClient) waitResp(id string, timeout time.Duration) (map[string]any, int) {
 	deadline := time.Now().Add(timeout)
+	stop := time.AfterFunc(timeout, c.st.Reset) // CallRaw's rule: a silent peer must not block ReadSlice forever
+	defer stop.Stop()
 	var chunks map[int]string
 	var nChunks int
 	for {
