@@ -1346,3 +1346,27 @@ races, R3-9 mgr-wide collateral, R3-10 docs accuracy, R3-11 bash parity + test-m
 test honesty (delete-test + race coverage). Findings will be verified by the supervisor, then fix
 clusters dispatch (night 3).
 Commit: none (dispatch record)
+
+## 2026-11-23 · supervisor · Live VPS test closed the loop — default flipped, wizard bugs fixed, role-aware dashboards
+The owner's first live pair test (two VPS, Kharej 46.8.103.30 + Iran-fake 185.190.53.42; both since
+DISABLED by the owner — no further remote work) found what no review could:
+- The Go manager was still gated behind WAT_GO_MGR=1 (the owner's own pre-review decision) — `wattun`
+  exec'd the bash console, so the whole UI pass looked "not done". FLIPPED: the Go manager is the
+  default; WAT_BASH_MGR=1 is the opt-out (504c6b8).
+- The wizard minted token field 10 as a bare `full` — the engine's L5-strict parser reads that as a
+  lookalike and armed NOTHING; the channel stayed down until a hand-regenerated pair=full token. Both
+  wizards fixed to the strict form; the Iran wizard now also stores the pasted token as NAME.token
+  (the cockpit's paired detection reads it). MGR 2026112214, test-manager ALL OK 1101.
+- Owner UI feedback (same session): the two sides' dashboards were identical, Kharej showed the
+  cockpit entry, the monitor was the bash spark. Landed (820608f): role banners (IRAN — the cockpit /
+  KHAREJ — the server / mixed), role-aware menus (Kharej's Scepter slot = the LOCAL console, no
+  "cockpit" wording on Kharej), server-glance rows on Kharej's head, and a real dual-direction
+  braille gradient chart in the monitor (shared auto-scale, peak labels, RTT trace, honest counter
+  deltas, tier-degrading, fleet meters + selected-tunnel chart).
+- Earlier in the session: the full UI swarm (design system c0a22d2, Iran dashboard 3cd9e88, cockpit
+  coverage 6e3ee88, restyle 1748dba, engine gaps 74db690, wires), the 12-reviewer debug round
+  (findings logged) and its fix clusters (FX-A 3006b73, FX-B 545e819, FX-C 92992e0, FX-D 5cb8035,
+  docs 84ab654), full battery green (wat suite 713.0 s exit 0, test-manager 1101, mgr/cmd suites ok).
+Deliberately left: usage_text role wording could mention the banners; VPS re-test with the new build
+whenever the owner re-enables hosts; wat/version stays 3.5.0 (unreleased; owner releases on request).
+Commit: 504c6b8, 820608f
