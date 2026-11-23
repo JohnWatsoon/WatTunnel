@@ -1403,3 +1403,12 @@ UseAnim/IsTTY/NonInteractive gated (NONINTERACTIVE byte-stable), animNow-seamed,
 Final combined gates: gofmt empty; build+vet + GOOS=linux clean; mgr suite ok; cmd suite ok (3/3 incl.
 the two env-flaky tests this run). Deliberately left: the empty-tunnels hint gets badge+sweep only.
 Commit: a3a6cf9, 7ed4e02, 5962844, (this entry)
+
+## 2026-11-23 · supervisor · OWNER DIRECTIVE (standing): no feature may be flag-only
+The owner (explicit, after the extended-shapes complaint): EVERY feature must be reachable in the
+manager UI — flags nobody discovers are dead features. First enforcement: the 13 F19 shaped carriers
+become a first-class `shaped` preset in the auto-test menu (Go + bash + NI), the Kharej wizard asks
+"also test the shaped carriers?" interactively again (prompt had silently disappeared; only
+--extended worked), and the cockpit's remote auto.test gains the shaped mode. Lane dispatched; the
+pending wizard/UI audit will surface any remaining flag-only gaps for the same treatment.
+Commit: none (directive record)
