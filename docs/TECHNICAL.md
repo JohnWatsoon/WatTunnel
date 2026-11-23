@@ -2501,7 +2501,8 @@ concurrent clients serialize, and no write ever touches the session pump.
 | `tunnel.delete` | `{name, confirm}` | manage | `confirm` must equal `name`; stops the unit, moves `yml`/`key`/`token` to `.bak` |
 | `tunnel.start` / `tunnel.stop` / `tunnel.restart` | `{name}` | manage | systemd unit ops with liveness verify (`start` is `enable --now`) |
 | `limits.set` | `{name, limits:[items]}` | manage | rewrites the `limits:` list (same `PORT rate=… quota=… period=…` syntax); `limits: []` clears; hot-reloaded by the unit's watcher — never restarts |
-| `preset.apply` | `{name, preset}` | manage | a named patch through the edit path; catalog (engine-owned): `stealth` (`shape-data: 8`, `noise: med`), `plain` (drops both) |
+| `preset.apply` | `{name, preset}` | manage | a named patch through the edit path; catalog (engine-owned, mirrors the manager's apply_preset): `stealth`, `plain`, `cf`, `rst-fast`, `mci`, `irancell`, `blackout`, `low-churn`, `off` — key-patches with the manager's exact governor/asymmetry semantics |
+| `preset.list` | — | manage | the catalog `{presets:[{name, desc}]}`; answers on any 3.5.0 server (no ops needed) |
 
 `ttl_s` in the args is the args-alias of the wire `ttl` field (the intent lifetime; default 600, expired =
 `code=stale`). `base_seq` is the state_seq the intent was built on: a mismatch is not fatal (Kharej
@@ -2598,7 +2599,11 @@ restart units, so both are structural.
 Phase D makes the cockpit an operations console: remote updates, structured doctor output, a disaster-recovery
 backup and the audit trail. **Version matrix: both ends need 3.5.0** (the client-side hello already refuses
 older peers). No new rejection codes: `denied`, `bad_request`, `rate_limited`, `internal` and `too_large`
-mean what they mean everywhere else.
+mean what they mean everywhere else. The one command queue holds every command of a pair, so a
+tunnel restart-shaped op (restart, carrier.change, tunnel.keyrotate) queues the pair behind its
+systemd restart - worst case a couple of minutes, reads included; the cockpit's 30 s deadline fires
+first and the retry replays the journaled outcome. `tunnel.keyrotate` rewrites the tunnel's token
+file in place (field-3 swap; the Iran twin re-pastes or the cockpit fetches it from the answer).
 
 | Command | Args | Capability | Notes |
 |---|---|---|---|
@@ -2607,6 +2612,10 @@ mean what they mean everywhere else.
 | `doctor.fetch` | — | manage | the state document plus `recent` (the doctor's last-commands trace) and the ops fragments `latch` / `unit` / `update` / `journal` — the same data the loopback `/scepter` endpoint serves, packaged for the cockpit |
 | `backup.export` | — | manage | a tarball of the config dir as one chunked JSON doc `{b64, sha256, size, files}` |
 | `audit.tail` | `{n?}` | manage | the last n entries (default 100, cap 1000) of each audit source, as two chunked JSON docs `{src:"audit"\|"journal", entries:[raw lines]}` |
+| `tunnel.keyrotate` | `{name, base_seq?, ttl_s?}` | manage | rotates the tunnel PSK remotely: backup -> mint -> rewrite yml+key+token -> restart -> verify, edit-path rollback; answers `{name, key, token?}` (the rebuilt token the Iran twin needs); refuses the channel's own unit; a pre-existing UNPARSABLE token file fails the rotate before any move |
+| `pair.rotate` | `{window_s?}` | manage | rotates the CALLING credential in place (same UUID+caps, new key, old-key window kept as store comments); the live channel keeps serving (session keys ride the tunnel PSK) and the handler adopts the new credential immediately; answers `{watp1, uuid, window_s}` — that line is for OTHER cockpits, this one already runs it. Rate-limited 1 per 5 min; a lost response cannot be replayed until the bucket refills. Revocation deliberately has NO channel command: it stays a Kharej-console action (the D3 trust boundary - the channel must not revoke itself) |
+| `carrier.mute` | `{name, carrier, mute}` | manage | mutes/unmutes a bonded path via the engine's local metrics API; answers `{name?, carrier, muted, changed?, why?}`; non-bond refused; journaled, replay-safe (the ops align to the wanted state before toggling) |
+| `limits.reset` | `{name, port?}` | manage | resets quota counters via the local metrics API; answers `{name, reset:[ports]}`; deliberately NOT journaled (idempotent re-execution) |
 
 **The large-payload convention** (backup.export, audit.tail): big answers ride the tunnel.logs chunking —
 params `{"logs":[...]}` whose elements are newline-free JSON documents; the serve loop splits anything over

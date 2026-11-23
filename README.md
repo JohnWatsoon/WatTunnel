@@ -136,8 +136,9 @@ Kharej. If the tunnel dies, revival is automatic: it keeps dialing on its own, a
 carries the latch port contacts Kharej's **scepter latch** — a shaped wss listener that arms while every unit
 of the pair is down — once every 30 seconds until the channel is back; a contact must prove the 32-byte
 pairing key before anything is served, and the listener closes again on first contact. The channel never
-appears on any dashboard; only the doctor sees it. Rotating or revoking the pairing stays a Kharej-console
-action (`wattun-manager scepter`: pair, rotate, revoke) — that is the trust boundary.
+appears on any dashboard; only the doctor sees it. Rotating the pairing key works from the cockpit or the
+Kharej console; revoking stays a Kharej-console action (`wattun-manager scepter`: revoke) — the channel
+must not be able to revoke itself, that is the trust boundary.
 
 What Iran can do over the channel — all of it from the Go manager's `wattun scepter` cockpit (`wattun -scepter-call CMD` is the scriptable one-shot form):
 
