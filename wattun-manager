@@ -3220,7 +3220,7 @@ wizard_kharej() {
       [ "$udpdns" = 1 ] && echo "udp-dns: true"
       [ -n "$path" ] && echo "path: $path"
       [ -n "$itype" ] && [ "$itype" != echo ] && echo "icmp-type: $itype"
-      [ -n "$latch" ] && echo "latch-port: $latch" # the scepter latch listener (3.5.0); picked collision-free
+      [ -n "$latch" ] && [ "$rev" != 1 ] && echo "latch-port: $latch" # the scepter latch listener (3.5.0); picked collision-free
       if [ "$rev" = 1 ]; then
         echo "reverse: true"
         if is_rpool "$cr"; then
@@ -4091,7 +4091,7 @@ wizard_iran() {
       # Iran too — when the pairing rides the token, the client config carries the
       # default (Kharej's wizard may have moved off it on a collision; the Go
       # cockpit self-heals the real port from doctor.fetch).
-      [ -n "$T_PAIR" ] && echo "latch-port: $SCEPTER_LATCH_DEFAULT"
+      [ -n "$T_PAIR" ] && [ "$T_REV" != 1 ] && echo "latch-port: $SCEPTER_LATCH_DEFAULT" # no latch on reverse: Kharej's re-dial revives it
       [ -n "$AT_EXTRA" ] && printf '%s\n' "$AT_EXTRA"
       ech_cache_line "$name"
       [ -n "$bind" ] && [ "$bind" != 0.0.0.0 ] && echo "bind: $bind"

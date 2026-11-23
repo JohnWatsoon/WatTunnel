@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -470,5 +471,52 @@ func TestStatsHandlerHidesScepter(t *testing.T) {
 	}
 	if !strings.Contains(src, "/scepter") {
 		t.Fatal("main.go must register /scepter (the doctor's only view of the management plane)")
+	}
+}
+
+// Handoff 4 R6: the latch retry backs off 30 s -> 10 min, each wait jittered within +-50 % of its base.
+func TestLatchBackoffBounds(t *testing.T) {
+	var base time.Duration
+	want := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 10 * time.Minute, 10 * time.Minute}
+	for i, w := range want {
+		var j time.Duration
+		base, j = latchNextWait(base)
+		if base != w {
+			t.Fatalf("step %d: base %s, want %s", i, base, w)
+		}
+		if j < w/2 || j >= w*3/2 {
+			t.Fatalf("step %d: jittered %s outside [%s, %s)", i, j, w/2, w*3/2)
+		}
+	}
+}
+
+// Handoff 4 R2+R6: after a claim the server's latch keys from the claimed credential, so the client's revival
+// must prove a claim; a failed proof moves to the next credential and backs off.
+func TestLatchReviveTriesClaims(t *testing.T) {
+	r := &latchRevive{alive: func() bool { return false }, pair: testLatchPairing(),
+		addr: "127.0.0.1:1", logf: t.Logf}
+	claim := testLatchPairing()
+	claim.Key[0] ^= 1
+	r.claims = func() []*wat.PairingConfig { return []*wat.PairingConfig{claim} }
+	var tried []*wat.PairingConfig
+	r.dial = func(_ string, p *wat.PairingConfig) (*wat.Session, *wat.ScepterClient, error) {
+		tried = append(tried, p)
+		return nil, nil, errors.New("proof rejected")
+	}
+	r.tick() // the claim is proven first and fails: the token is next, the wait grew
+	if len(tried) != 1 || tried[0] != claim {
+		t.Fatalf("the first attempt must prove the claim: %v", tried)
+	}
+	r.mu.Lock()
+	next, wait := r.next, r.wait
+	r.mu.Unlock()
+	if next != 1 || wait < 15*time.Second {
+		t.Fatalf("after a failed contact: next %d, wait %s", next, wait)
+	}
+	r.tick() // not due yet: no second attempt
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.next != 1 {
+		t.Fatal("the backoff must hold the next attempt")
 	}
 }

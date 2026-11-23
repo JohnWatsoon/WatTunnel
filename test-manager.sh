@@ -2313,7 +2313,12 @@ EOF
   chk "iran wizard: no watp1 ask anywhere in the wizard" "$(sed -n '/^wizard_iran() {/,/^}$/p' wattun-manager | grep -vE '^[[:space:]]*(#.*)?$' | grep -c 'watp1')" "0"
   chk "iran wizard: the client config carries the latch default (auto revival)" "$(grep -c '^latch-port: 20443$' "$WAT_CONF/t_iran_pair.yml")" "1"
   chk "iran wizard: the pasted token is stored for the cockpit paired detection" "$(grep -c '^wat1:' "$WAT_CONF/t_iran_pair.token")" "1"
-  rm -f "$WAT_CONF"/t_pair* "$WAT_CONF"/t_iran_pair*
+  # Handoff 4 R6: no latch on reverse — Kharej's own re-dial is the revival path
+  ( wait_link() { return 1; }; test_tunnel() { :; }
+    NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
+    NONINTERACTIVE=1 NI_TOKEN="$(make_token tcp 198.51.100.9:27443 krev12345678 '' '' '' 8443 1 '' pair=full)" NI_NAME=t_iran_rev NI_MAP='8443:8443' wizard_iran ) >/dev/null 2>&1
+  chk "iran wizard: a reverse token writes no latch-port" "$(grep -c '^latch-port:' "$WAT_CONF/t_iran_rev.yml")/$(grep -c '^reverse: true' "$WAT_CONF/t_iran_rev.yml")" "0/1"
+  rm -f "$WAT_CONF"/t_pair* "$WAT_CONF"/t_iran_pair* "$WAT_CONF"/t_iran_rev*
   eval "$_bt_sctl"; eval "$_bt_fmp"; eval "$_bt_lb"; eval "$_bt_su"; eval "$_bt_cf"
   eval "$_bt_bv"; eval "$_bt_bvok"; VER=$_bt_ver
   unset -f systemd-run

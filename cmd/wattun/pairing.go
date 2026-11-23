@@ -418,7 +418,10 @@ func (p *pairingPoller) check() {
 		return
 	}
 	if p.armed && p.scepter.Holds(pair) {
-		p.fileSeen = true // this process wrote it (the claim): nothing to reload
+		p.fileSeen = true // this process wrote it (the claim): nothing to reload, but the latch still keys from the token
+		if p.latch != nil {
+			p.latch.rePair(pair)
+		}
 		return
 	}
 	if p.armed {

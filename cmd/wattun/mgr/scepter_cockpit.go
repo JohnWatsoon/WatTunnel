@@ -23,6 +23,7 @@ package mgr
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -820,8 +821,8 @@ func scepterAskParams(cr, listenDef, pathDef, sniDef string) (map[string]string,
 func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	baseSeq := base.StateSeq
 	Page("Create tunnel on Kharej", n+" · built on seq "+strconv.FormatUint(baseSeq, 10))
-	Hint("Kharej validates, writes the files, starts the unit and reports; the key")
-	Hint("and the Iran token come back inside the encrypted channel.")
+	Hint("Kharej checks the request, starts the tunnel and answers; then this server")
+	Hint("sets up its own side of the tunnel, with no token to copy.")
 	fmt.Fprintln(Stdout)
 	name := scepterRemoteNameSuggest(base.Tunnels)
 	if !AskOK("Tunnel name", name, vScepterName) {
@@ -937,34 +938,71 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 		if res.Code != scepterCodeOK {
 			return
 		}
-		scepterShowCreated(res.Params)
+		scepterShowCreated(n, res.Params, params)
 		return
 	}
 }
 
-// scepterShowCreated reports a created tunnel: what Kharej answered, the Iran
-// token when the carrier is client-facing, and the base_seq tail when the
-// state moved under the intent.
-func scepterShowCreated(p map[string]any) {
+// scepterShowCreated reports a created tunnel and sets up its Iran side on
+// this server (Handoff 4 R4): the token goes straight into the Iran wizard,
+// and is printed only when the user asks for it (to set the Iran side up on
+// another server) or when this server cannot build one.
+func scepterShowCreated(pair string, p map[string]any, params map[string]string) {
 	name, _ := p["name"].(string)
 	Ok("Tunnel '" + orStr(name, "?") + "' created on Kharej.")
 	if c, _ := p["carrier"].(string); c != "" {
 		Say("  " + kv("Carrier", c))
 	}
-	if m, _ := p["metrics"].(string); m != "" {
-		Say("  " + kv("Metrics", m+" (on Kharej)"))
-	}
-	if k, _ := p["key"].(string); k != "" {
-		Say("  " + kv("Key", k))
-	}
-	if tok, _ := p["token"].(string); tok != "" {
-		fmt.Fprintln(Stdout)
-		fmt.Fprintf(Stdout, "  %sToken for this tunnel's Iran side%s (contains the secret; share privately):\n", BOLD, RST)
-		fmt.Fprintf(Stdout, "  %s%s%s\n", BOLD+YEL, tok, RST)
-	}
 	if _, moved := p["state"]; moved {
-		Hint("The state moved while the create ran (the answer carries the fresh document); press r to refresh.")
+		Hint("Kharej changed while the tunnel was being made; press r to refresh.")
 	}
+	tok := scepterCreatedToken(pair, p, params)
+	if tok == "" {
+		Warn("This server cannot build the Iran side by itself (no single carrier port, or no Kharej address).")
+		Hint("Take the token from Kharej's console (Tunnels, show token) and paste it in New tunnel.")
+		return
+	}
+	fmt.Fprintln(Stdout)
+	if Confirm("Set up this tunnel's Iran side on this server now?", true) {
+		local := name
+		if local == "" || fileExists(filepath.Join(P.Conf, local+".yml")) {
+			local = suggestName("iran")
+		}
+		if wizardIranWith(tok, local) {
+			return
+		}
+		Warn("The Iran side was not set up.")
+	}
+	if Confirm("Show the token (to set the Iran side up on another server)?", false) {
+		scepterShowToken(tok)
+	}
+}
+
+// scepterCreatedToken is the Iran token of a created tunnel: Kharej's own
+// when it knew its public address, else built here from this pair's Kharej
+// host, the carrier port Kharej bound and the shape params. "" when it
+// cannot be built (a bond's several ports, no host, an older Kharej).
+func scepterCreatedToken(pair string, p map[string]any, params map[string]string) string {
+	if tok, _ := p["token"].(string); tok != "" {
+		return tok
+	}
+	host := scepterPeerHost(pair)
+	if Cfg(pair, "reverse") == "true" {
+		host = "" // a reverse pair's peer is this server's own address, not Kharej's
+	}
+	cr, _ := p["carrier"].(string)
+	key, _ := p["key"].(string)
+	if host == "" || cr == "" || key == "" {
+		return ""
+	}
+	peer := host
+	if port, ok := p["listen_port"].(float64); ok && port > 0 {
+		peer = net.JoinHostPort(host, strconv.Itoa(int(port)))
+	} else if carrierWriteListen(cr) {
+		return ""
+	}
+	allow, _ := p["allow"].(string)
+	return MakeToken(cr, peer, key, params["path"], params["sni"], "", allow, "", "")
 }
 
 // ======================================================================================
@@ -1982,8 +2020,8 @@ func scepterRemoteMute(cl ScepterClient, name string, row scepterTunRow) bool {
 func scepterRemoteKeyrotate(pair string, cl ScepterClient, name string, baseSeq uint64) bool {
 	Page("Rotate key", name+" · on Kharej "+pair)
 	GradBand(Stdout, uiW())
-	Warn("Kharej mints a new PSK and restarts the unit; every Iran side dialing with")
-	Warn("the old key stops linking until it gets the new token.")
+	Warn("Kharej makes a new key and restarts the tunnel. This server switches to it")
+	Warn("by itself; any other Iran server on this tunnel needs the new token.")
 	fmt.Fprintln(Stdout)
 	if !Confirm("Rotate the key of '"+name+"' now?", false) {
 		Warn("Cancelled.")
@@ -2026,19 +2064,18 @@ func scepterRemoteKeyrotate(pair string, cl ScepterClient, name string, baseSeq 
 		// the rewrite merged the old token's field in (round-3 finding — the
 		// old line claimed it even with no old token at all)
 		if carried {
-			Ok("Local twin '" + local + "' rewritten: new key and token, pair capability carried over.")
+			Ok("'" + local + "' here now uses the new key (Kharej management access kept).")
 		} else {
-			Ok("Local twin '" + local + "' rewritten: new key and token.")
+			Ok("'" + local + "' here now uses the new key.")
 		}
 		scepterRotMark(local)
-		if Confirm("Restart "+Unit(local)+" now to dial with the new key?", true) {
-			if scepterRestartAndCheck(local) {
-				Ok(local + " links on the new key.")
-			} else {
-				Hint("Kharej is on the new key; " + local + " must come up with it — check the tunnel page for why.")
-			}
+		if scepterRestartAndCheck(local) {
+			Ok(local + " is connected on the new key.")
 		} else {
-			Hint("Restart " + Unit(local) + " when ready; it dials with the old key until then.")
+			Hint("Kharej is on the new key; " + local + " has not connected with it yet — check its tunnel page.")
+		}
+		if Confirm("Show the new token (for another Iran server on this tunnel)?", false) {
+			scepterShowToken(tok)
 		}
 	}
 	Pause()

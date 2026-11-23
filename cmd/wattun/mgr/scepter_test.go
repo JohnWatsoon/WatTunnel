@@ -1231,7 +1231,7 @@ func TestScepterRemoteKeyrotateTwin(t *testing.T) {
 	cl := &scriptClient{byCmd: map[string][]scriptAns{
 		"tunnel.keyrotate": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "ir", "token": newTok}}}},
 	}}
-	defer feed("yn")() // y rotates, n skips the twin restart
+	defer feed("yn")() // y rotates (the twin restarts by itself), n keeps the token hidden
 	out := capture(t, func() { scepterRemoteKeyrotate("ir", cl, "ir", 6) })
 	sent := cl.cmds["tunnel.keyrotate"]
 	if len(sent) != 1 || sent[0]["name"] != "ir" {
@@ -1249,13 +1249,13 @@ func TestScepterRemoteKeyrotateTwin(t *testing.T) {
 	if scepterRotSuffix("ir") == "" {
 		t.Error("the rotation marker is missing from the pair status")
 	}
-	if !strings.Contains(out, "now to dial with the new key") {
+	if !strings.Contains(out, "is connected on the new key") && !strings.Contains(out, "has not connected with it yet") {
 		t.Errorf("the restart offer is missing:\n%s", out)
 	}
 	// the carry claim is honest: the old token DID carry pair=manage and the
 	// rewrite merged it in, so and only so the line says "carried over"
 	// (round-3 finding)
-	if !strings.Contains(out, "pair capability carried over") {
+	if !strings.Contains(out, "management access kept") {
 		t.Errorf("the carried-over claim is missing:\n%s", out)
 	}
 }
@@ -1276,15 +1276,15 @@ func TestScepterRemoteKeyrotateTwinNoOldToken(t *testing.T) {
 	cl := &scriptClient{byCmd: map[string][]scriptAns{
 		"tunnel.keyrotate": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "ir", "token": newTok}}}},
 	}}
-	defer feed("yn")() // y rotates, n skips the twin restart
+	defer feed("yn")() // y rotates (the twin restarts by itself), n keeps the token hidden
 	out := capture(t, func() { scepterRemoteKeyrotate("ir", cl, "ir", 6) })
 	if key := mustRead(filepath.Join(dir, "ir.key")); !strings.Contains(key, "brand-new-key-42") {
 		t.Errorf("the twin's key file was not rewritten: %q", key)
 	}
-	if strings.Contains(out, "carried over") {
+	if strings.Contains(out, "access kept") {
 		t.Errorf("no old token existed — the line must not claim a carry:\n%s", out)
 	}
-	if !strings.Contains(out, "rewritten: new key and token") {
+	if !strings.Contains(out, "here now uses the new key.") {
 		t.Errorf("the honest success line is missing:\n%s", out)
 	}
 }

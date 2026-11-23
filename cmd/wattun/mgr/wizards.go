@@ -739,7 +739,12 @@ func wizardIran() bool {
 	if !AskOK("Token from Kharej (wat1:...)", NI.Token, vToken) {
 		return false
 	}
-	tok := ReplyV
+	return wizardIranWith(ReplyV, name)
+}
+
+// wizardIranWith is the Iran wizard past the token prompt: the cockpit's remote create hands it the token
+// it built (Handoff 4 R4), so the user never sees or pastes one.
+func wizardIranWith(tok, name string) bool {
 	t, err := ReadToken(tok)
 	if err != nil {
 		return false

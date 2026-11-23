@@ -800,7 +800,7 @@ func scepterPrintDoctorRows(w io.Writer, params map[string]any, rows []string) {
 // engine, latch off) touches nothing.
 func scepterLearnLatchPort(pair string, params map[string]any) {
 	latch, ok := params["latch"].(map[string]any)
-	if !ok {
+	if !ok || Cfg(pair, "reverse") == "true" { // no latch on reverse (Handoff 4 R6): Kharej's re-dial revives it
 		return
 	}
 	if enabled, _ := latch["enabled"].(bool); !enabled {
@@ -815,7 +815,7 @@ func scepterLearnLatchPort(pair string, params map[string]any) {
 		return
 	}
 	if err := SetValue(pair, "latch-port", port); err == nil {
-		Ok(fmt.Sprintf("latch-port %s learned from Kharej's doctor answer (automatic revival armed).", port))
+		Ok(fmt.Sprintf("Kharej's backup control port (%s) saved: the Kharej controls reconnect by themselves when the tunnel is down.", port))
 	}
 }
 

@@ -144,6 +144,10 @@ func TestFileScepterOpsCreateRoundTrip(t *testing.T) {
 		Params: map[string]string{"listen": ":20031"}}); code != wat.CodeOK || p["name"] != "tunnel" {
 		t.Fatalf("suggested name: %d %v", code, p)
 	}
+	// Handoff 4 R4: the answer carries what the cockpit needs to build the token itself
+	if p["listen_port"] != 20031 || p["allow"] != "20031" {
+		t.Fatalf("listen_port/allow for the cockpit: %v", p)
+	}
 	if p, _ := o.Create(wat.ScepterTunnelSpec{Carrier: "udp", Ports: "20032", Key: spec.Key,
 		Params: map[string]string{"listen": ":20032"}}); p["name"] != "tunnel-2" {
 		t.Fatalf("second suggested name: %v", p)

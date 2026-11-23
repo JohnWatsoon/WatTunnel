@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strings"
@@ -366,7 +367,8 @@ func dialLatchSession(addr string, pair *wat.PairingConfig) (*wat.Session, *wat.
 // Var, not const (the latchPoll precedent): the tests shrink the cadences.
 var (
 	latchRevivePoll = newDur(5 * time.Second)  // revival loop cadence
-	latchRetryEvery = newDur(30 * time.Second) // rate limit: at most one latch attempt per 30 s while the tunnel is down
+	latchRetryEvery = newDur(30 * time.Second) // first retry interval while the tunnel is down; failures double it
+	latchRetryMax   = newDur(10 * time.Minute) // the backoff ceiling (Handoff 4 R6)
 	latchWarmEvery  = newDur(30 * time.Second) // ping cadence of a revived channel
 )
 
@@ -391,19 +393,38 @@ func latchPeerHost(peer string) string {
 type latchRevive struct {
 	alive  func() bool // the tunnel's liveness (tunnel.alive in main; tests drive it directly)
 	pair   *wat.PairingConfig
-	addr   string // peerhost:N
-	inband func() // called once per revival when the tunnel is back: re-open the in-band channel
+	dial   func(string, *wat.PairingConfig) (*wat.Session, *wat.ScepterClient, error) // test seam; nil = dialLatchSession
+	claims func() []*wat.PairingConfig                                                // credentials this box claimed (Handoff 4 R2), tried before the token's; nil = none
+	addr   string                                                                     // peerhost:N
+	inband func()                                                                     // called once per revival when the tunnel is back: re-open the in-band channel
 	logf   func(string, ...any)
 
 	mu      sync.Mutex
 	sess    *wat.Session // the open latch contact (nil = none; while set, no new attempt)
 	revived bool         // a contact succeeded and has not yet been handed back to the in-band channel
 	lastTry time.Time
+	base    time.Duration // un-jittered retry interval (0 = latchRetryEvery); doubles per failure
+	wait    time.Duration // jittered interval before the next attempt
+	next    int           // which credential the next attempt proves (rotates on failure)
 
 	contacts atomic.Int64 // successful automatic contacts (test seam; not exported anywhere user-facing)
 }
 
 func startLatchRevive(r *latchRevive) { go r.run() }
+
+// latchNextWait doubles the retry interval (from latchRetryEvery, capped at latchRetryMax) and jitters it
+// +-50 %, so Iran units that lost the same Kharej do not dial its latch in lockstep (Handoff 4 R6). base is
+// the un-jittered interval the next doubling starts from.
+func latchNextWait(base time.Duration) (next, jittered time.Duration) {
+	next = base * 2
+	if base == 0 {
+		next = latchRetryEvery.get()
+	}
+	if m := latchRetryMax.get(); next > m {
+		next = m
+	}
+	return next, next/2 + rand.N(next)
+}
 
 func (r *latchRevive) run() {
 	for range time.Tick(latchRevivePoll.get()) {
@@ -417,22 +438,44 @@ func (r *latchRevive) tick() {
 		r.resume()
 		return
 	}
+	cands := []*wat.PairingConfig{}
+	if r.claims != nil {
+		cands = r.claims()
+	}
+	if r.pair != nil {
+		cands = append(cands, r.pair)
+	}
+	if len(cands) == 0 {
+		return
+	}
 	r.mu.Lock()
-	due := r.sess == nil && time.Since(r.lastTry) >= latchRetryEvery.get()
+	due := r.sess == nil && time.Since(r.lastTry) >= r.wait
 	if due {
 		r.lastTry = time.Now()
 	}
+	pair := cands[r.next%len(cands)]
 	r.mu.Unlock()
 	if !due {
 		return
 	}
-	sess, c, err := dialLatchSession(r.addr, r.pair)
+	dial := dialLatchSession
+	if r.dial != nil {
+		dial = r.dial
+	}
+	sess, c, err := dial(r.addr, pair)
 	if err != nil {
-		r.logf("scepter latch: automatic contact with %s failed (%v); retrying while the tunnel is down", r.addr, err)
+		r.mu.Lock()
+		r.base, r.wait = latchNextWait(r.base)
+		r.lastTry = time.Now() // the wait counts from the failed attempt's end (a dial can take longer than the wait)
+		r.next++
+		wait := r.wait
+		r.mu.Unlock()
+		r.logf("scepter latch: automatic contact with %s failed (%v); next try in %s while the tunnel is down", r.addr, err, wait.Round(time.Second))
 		return
 	}
 	r.mu.Lock()
 	r.sess, r.revived = sess, true
+	r.base, r.wait = 0, latchRetryEvery.get() // a success resets the backoff; the old rate limit still holds
 	r.mu.Unlock()
 	r.contacts.Add(1)
 	seq, _ := c.Hello["state_seq"].(float64)

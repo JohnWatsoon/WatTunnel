@@ -294,6 +294,15 @@ func (o *fileScepterOps) Create(spec wat.ScepterTunnelSpec) (map[string]any, int
 	if tok := scepterToken(spec, ports); tok != "" {
 		p["token"] = tok // the token a client-facing tunnel needs; empty peer = the cockpit fills it itself
 	}
+	// what the cockpit needs to build that token itself (Handoff 4 R4): the carrier port Iran dials and the
+	// allowlist; the cockpit knows Kharej's host from its own paired tunnel
+	if b := scepterBinds(spec.Carrier, scepterIsReverse(spec.Params),
+		func(k string) string { return spec.Params[k] }, ""); len(b) == 1 {
+		for port := range b {
+			p["listen_port"] = port // a bond has several binds: no single peer port, the token stays manual
+		}
+	}
+	p["allow"] = scepterAllowStr(ports)
 	o.logf("scepter ops: created tunnel %s (carrier %s, ports %s)", name, spec.Carrier, spec.Ports)
 	return p, wat.CodeOK
 }

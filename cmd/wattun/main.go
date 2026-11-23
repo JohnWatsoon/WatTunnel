@@ -1147,13 +1147,16 @@ func main() {
 			// "the peer's latch is at peerhost:N" — while the tunnel is down, contact it automatically
 			// (proof + hello + ping, one attempt per latchRetryEvery) and keep the revived channel warm;
 			// -latch-dial stays the manual one-shot. Without a peer address there is nothing to dial.
-			if *latchPort > 0 {
+			if *latchPort > 0 && *reverse {
+				log.Printf("scepter latch: latch-port %d ignored on a reverse tunnel (Kharej's own re-dial revives it)", *latchPort)
+			} else if *latchPort > 0 {
 				host := latchPeerHost(pick(peerBy, *peer, bases[0]))
 				if host == "" {
 					log.Printf("scepter latch: latch-port %d set but the tunnel has no peer address; automatic revival off", *latchPort)
 				} else {
 					startLatchRevive(&latchRevive{
 						alive: tun.alive, pair: cfg.Pairing,
+						claims: func() []*wat.PairingConfig { return readClaims(claimsPath(*cfgPath)) },
 						addr:   net.JoinHostPort(host, strconv.Itoa(*latchPort)),
 						logf:   log.Printf,
 						inband: func() { go hub.callRaw("scepter.ping", nil, "", io.Discard) },
@@ -1478,7 +1481,11 @@ func main() {
 			scepterNow.Store(scepter) // the /scepter handler reads this (it registered before arming)
 			// The scepter latch (3.5.0, phase A item 4): opt-in with -latch-port next to the attached pairing.
 			var mon *latchMonitor
-			if *latchPort > 0 {
+			if *latchPort > 0 && *reverse {
+				// Handoff 4 R6: a reverse Kharej re-dials Iran forever, which already is the revival path; a
+				// latch listener here only adds an open port
+				log.Printf("scepter latch: latch-port %d ignored on a reverse tunnel (Kharej's own re-dial revives it)", *latchPort)
+			} else if *latchPort > 0 {
 				mon = startLatch(&latchMonitor{pair: cfg.Pairing, scepter: scepter, alive: alive, port: *latchPort,
 					lo: *allowLo, hi: *allowHi, al: al, base: cfg, logf: log.Printf})
 				log.Printf("scepter latch: watching port %d (arms %s after every unit of the pairing goes inactive)", *latchPort, latchArmAfter)

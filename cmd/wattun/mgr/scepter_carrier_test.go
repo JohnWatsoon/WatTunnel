@@ -704,3 +704,30 @@ func TestChangeTypePairedRoutesRemote(t *testing.T) {
 		t.Errorf("unpaired [c] keeps the honest dead-end:\n%s", out2)
 	}
 }
+
+// Handoff 4 R4: a remote create builds the Iran token from the pair's Kharej host and the carrier port
+// Kharej bound; it round-trips, and a reverse pair or a portless answer for a port carrier builds none.
+func TestScepterCreatedToken(t *testing.T) {
+	dir := scepterCarrierTestConf(t)
+	writeTestYml(t, dir, "pair", "mode: client\ncarrier: udp\npeer: 198.51.100.9:4443\npairing: true\n")
+	ans := map[string]any{"carrier": "wss", "key": "k1", "listen_port": float64(8443), "allow": "443,80"}
+	tok := scepterCreatedToken("pair", ans, map[string]string{"path": "/x", "sni": "a.ir"})
+	got, err := ReadToken(tok)
+	if err != nil || got.Carrier != "wss" || got.Peer != "198.51.100.9:8443" || got.Key != "k1" ||
+		got.Path != "/x" || got.SNI != "a.ir" || got.Ports != "443,80" || got.Rev == "1" {
+		t.Fatalf("built token %+v (%v)", got, err)
+	}
+	if tok := scepterCreatedToken("pair", map[string]any{"carrier": "icmp", "key": "k1"}, nil); tok == "" {
+		t.Fatal("icmp has no carrier port: the token needs only the host")
+	}
+	if scepterCreatedToken("pair", map[string]any{"carrier": "udp", "key": "k1"}, nil) != "" {
+		t.Fatal("a port carrier without listen_port must not guess the port")
+	}
+	writeTestYml(t, dir, "rev", "mode: client\ncarrier: tcp\npeer: 203.0.113.5:9000\nreverse: true\n")
+	if scepterCreatedToken("rev", ans, nil) != "" {
+		t.Fatal("a reverse pair's peer is this server, not Kharej")
+	}
+	if tok := scepterCreatedToken("rev", map[string]any{"token": "wat1:x"}, nil); tok != "wat1:x" {
+		t.Fatal("Kharej's own token wins")
+	}
+}
