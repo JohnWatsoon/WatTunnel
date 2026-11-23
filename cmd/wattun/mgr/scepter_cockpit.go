@@ -648,23 +648,80 @@ func scepterEventsView(cl ScepterClient, since uint64) {
 	if len(events) == 0 {
 		Say("  " + GRY + "no events since " + strconv.FormatUint(since, 10) + RST)
 	}
+	rows := make([]scepterEvRow, 0, len(events))
 	for _, e := range events {
 		m, ok := e.(map[string]any)
 		if !ok {
 			continue
 		}
 		typ, _ := m["type"].(string)
-		line := fmt.Sprintf("  %s%-6s%s %s", GRY, strconv.FormatUint(scepterU64(m["seq"]), 10), RST, typ)
-		if ts := int64(scepterU64(m["ts"])); ts > 0 {
-			line += " " + GRY + time.Unix(ts, 0).Format("15:04:05") + RST
-		}
-		if d := scepterDetailStr(m["detail"]); d != "" {
-			line += "  " + d
-		}
-		Say(line)
+		rows = append(rows, scepterEvRow{
+			seq: scepterU64(m["seq"]), typ: typ,
+			ts: int64(scepterU64(m["ts"])), detail: scepterDetailStr(m["detail"]),
+		})
 	}
+	// newest first: the reader cares about what just happened; the engine's
+	// ring answers oldest-first
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	scepterTimeline(Stdout, rows)
 	if c := scepterU64(res.Params["cursor"]); c > since {
 		Hint(fmt.Sprintf("cursor is now %d", c))
+	}
+}
+
+// scepterEvRow is one timeline node: the event's seq, type, timestamp and the
+// rendered detail — every field straight from the engine's ring.
+type scepterEvRow struct {
+	seq    uint64
+	typ    string
+	ts     int64
+	detail string
+}
+
+// scepterEvColor pins the timeline's node palette (owner directive
+// 2026-11-23): up green, down/deleted red, a carrier rotate saffron, the
+// update family cyan, everything else grey — a colour only ever says what the
+// event's own type word already says.
+func scepterEvColor(typ string) string {
+	switch {
+	case typ == "tunnel_up" || typ == "scepter_up":
+		return GRN
+	case typ == "tunnel_down" || typ == "scepter_down" || typ == "tunnel_deleted":
+		return RED
+	case typ == "carrier_switched":
+		return SAF
+	case strings.HasPrefix(typ, "update_"):
+		return CYN
+	}
+	return GRY
+}
+
+// scepterTimeline renders the events as a vertical timeline: a gradient spine
+// down the left (▎, the ramp top at the newest node), one coloured node (●)
+// per event, newest at top. Under anim each row drops in staggered (~40 ms,
+// capped so a long tail lands within ~0.5 s); anim off and NI print the same
+// rows as one static list, byte-stable.
+func scepterTimeline(w io.Writer, rows []scepterEvRow) {
+	n := len(rows)
+	for i, e := range rows {
+		if i > 0 && UseAnim && IsTTY && !NonInteractive && i <= 12 {
+			time.Sleep(40 * time.Millisecond) // the drop-in stagger, capped
+		}
+		t := 0.0
+		if n > 1 {
+			t = float64(i) / float64(n-1)
+		}
+		line := fmt.Sprintf("%s▎%s %s●%s %s%-6s%s %s", GradRGB(t), RST, scepterEvColor(e.typ),
+			RST, GRY, strconv.FormatUint(e.seq, 10), RST, e.typ)
+		if e.ts > 0 {
+			line += " " + GRY + time.Unix(e.ts, 0).Format("15:04:05") + RST
+		}
+		if e.detail != "" {
+			line += "  " + e.detail
+		}
+		fmt.Fprintln(w, "  "+line)
 	}
 }
 
@@ -1123,6 +1180,77 @@ func scepterFmtPct(v any) string {
 	return fmt.Sprintf("%.1f %%", scepterF64(v))
 }
 
+// scepterStatSample is one Stats view's honest readings: the engine's own
+// rate_bps and srtt_ms counters as answered (each sample is one real RPC
+// reading, never smoothed or fabricated — the monitor's chartSample rule).
+type scepterStatSample struct {
+	T          time.Time
+	Rate, RTTT float64
+}
+
+// scepterStatHist is the per-tunnel ring behind the mini chart (the monitor's
+// chartHist pattern, separate so the two never alias). Built only from Stats
+// views: repeated views are the sampling.
+var scepterStatHist = map[string][]scepterStatSample{}
+
+// scepterStatCap bounds the ring: 120 Stats views per tunnel, in-memory only.
+const scepterStatCap = 120
+
+func scepterStatPush(name string, at time.Time, rate, rtt float64) {
+	s := append(scepterStatHist[name], scepterStatSample{T: at, Rate: rate, RTTT: rtt})
+	if len(s) > scepterStatCap {
+		s = s[len(s)-scepterStatCap:]
+	}
+	scepterStatHist[name] = s
+}
+
+// scepterMiniChart renders the compact two-row rate history of one remote
+// tunnel under its stats: one braille row of rate_bps (the ramp; cyan at
+// tier 8), one thin grey srtt trace — the monitor's RateChart in miniature.
+// Honesty rule: fewer than two samples prints the placeholder, never an
+// invented shape.
+func scepterMiniChart(w io.Writer, name string) {
+	s := scepterStatHist[name]
+	if len(s) < 2 {
+		fmt.Fprintf(w, "  %sno rate history yet (%d/2 stats views) — the mini chart builds from repeated Stats reads%s\n",
+			GRY, len(s), RST)
+		return
+	}
+	cols := uiW() - 8
+	if cols < 8 {
+		cols = 8
+	}
+	show := len(s)
+	if show > cols*2 {
+		show = cols * 2
+	}
+	rates := make([]float64, show)
+	rtts := make([]float64, show)
+	for i := 0; i < show; i++ {
+		rates[i], rtts[i] = s[len(s)-show+i].Rate, s[len(s)-show+i].RTTT
+	}
+	rmax, rttmax := chartMax(rates), chartMax(rtts)
+	if rmax <= 0 {
+		rmax = 1 // all-flat honest baseline
+	}
+	if rttmax <= 0 {
+		rttmax = 1
+	}
+	for _, row := range brailleGrid(rates, rmax, 1, true) {
+		paintChartGrid(w, "  rate ", string(row), false)
+	}
+	for _, row := range brailleGrid(rtts, rttmax, 1, false) {
+		if ColorTier == 0 {
+			fmt.Fprintf(w, "  rtt  %s\n", string(row))
+		} else {
+			fmt.Fprintf(w, "  %srtt  %s%s\n", GRY, string(row), RST)
+		}
+	}
+	last := s[len(s)-1]
+	fmt.Fprintf(w, "  %snow %s/s · srtt %.0f ms · avg %s/s over %d view(s)%s\n",
+		GRY, Rate(last.Rate), last.RTTT, Rate(chartMean(rates)), show, RST)
+}
+
 func scepterTunnelStats(cl ScepterClient, name string) {
 	fmt.Fprintln(Stdout)
 	Hint("tunnel.stats — live numbers of the remote unit")
@@ -1147,6 +1275,13 @@ func scepterTunnelStats(cl ScepterClient, name string) {
 	for _, k := range ks {
 		Say("  " + kv(k, fmt.Sprintf("%v", res.Params[k])))
 	}
+	// the mini chart's ring only grows on answers that actually carry the
+	// rate counter — a rateless answer must not fabricate a zero sample
+	if _, present := res.Params["rate_bps"]; present {
+		scepterStatPush(name, time.Now(), scepterF64(res.Params["rate_bps"]), scepterF64(res.Params["srtt_ms"]))
+	}
+	fmt.Fprintln(Stdout)
+	scepterMiniChart(Stdout, name)
 }
 
 // scepterTunnelLogs prints the chunked log tail. The engine caps tail at 1000;
@@ -1506,17 +1641,30 @@ func scepterEditArgs(name string, patch scepterKeyPatch, baseSeq uint64, id stri
 // (the tunnel page's "k"). One edit per pick; the menu stays open, and a
 // successful edit refetches the state so the next intent is built on the new
 // seq instead of answering stale.
+// scepterOffDesc renders a disabled row's grey caption with a one-time grey
+// pulse: for the first ~600 ms of the menu's life the caption's brightness
+// toggles with the shimmer frames (so the row reads as switched off, not
+// merely dim), then it settles steady. Anim off is always the steady grey —
+// byte-stable.
+func scepterOffDesc(txt string, opened time.Time) string {
+	if UseAnim && animNow().Sub(opened) < 600*time.Millisecond && shimmerFrame() == 1 {
+		return BOLD + GRY + txt + RST
+	}
+	return GRY + txt + RST
+}
+
 func scepterRemoteKeyMenu(pair string, cl ScepterClient, name string, row scepterTunRow, baseSeq uint64) bool {
 	sel := 0
 	changed := false
 	rev := scepterTwinReverse(pair, name)
+	opened := animNow()
 	for {
 		rows := scepterKeyRows(row.Carrier, rev)
 		items := make([]Item, len(rows))
 		for i, r := range rows {
 			desc := r.hint
 			if r.ask == nil {
-				desc = GRY + "needs an engine command" + RST
+				desc = scepterOffDesc("needs an engine command", opened)
 			}
 			label := r.label
 			if r.key != "" {

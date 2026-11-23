@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -312,19 +313,17 @@ func vScepterBackupPath(s string) bool {
 // band falls back to the grey ─ rule, the spinner never runs).
 // ======================================================================================
 
-// scepterSpin runs fn with a spinner line while it blocks (design-motion: a
-// spinner while something works, nothing looping for no reason). fn must not
-// print — the spinner owns the line and is stopped and erased before the
-// outcome prints. Anim off (NONINTERACTIVE, WAT_NO_ANIM, tests): fn runs bare,
-// so anim-off output stays byte-stable.
-func scepterSpin(what string, fn func()) {
+// scepterSpinCore is the spinner line's engine: glyph() renders the moving
+// mark, fn runs underneath. The stop handshake runs in a defer, so a panicking
+// fn also stops the line (debug round 3, 2026-11-23); the order is close,
+// wait for the goroutine, then the erase — no frame can follow it.
+func scepterSpinCore(what string, glyph func() string, fn func()) {
 	if !UseAnim || !IsTTY {
 		fn()
 		return
 	}
 	done := make(chan struct{})
 	stopped := make(chan struct{})
-	var sp Spinner
 	go func() {
 		defer close(stopped) // runs after CurShow: no frame can follow the erase
 		CurHide()
@@ -334,21 +333,38 @@ func scepterSpin(what string, fn func()) {
 			case <-done:
 				return
 			case <-time.After(120 * time.Millisecond):
-				fmt.Fprintf(Stdout, "\r\x1b[K  %s%s%s %s…", CYN, sp.Frame(), RST, what)
+				fmt.Fprintf(Stdout, "\r\x1b[K  %s %s…", glyph(), what)
 			}
 		}
 	}()
-	// debug round 3 (2026-11-23): the stop handshake runs in a defer, so a
-	// panicking fn also stops the spinner (a bare close(done) after fn was
-	// skipped on the panic path and the goroutine spun forever). The order is
-	// unchanged: close, wait for the goroutine, then the erase — no frame can
-	// follow it, panic or not.
 	defer func() {
 		close(done)
 		<-stopped // the spinner line is quiescent before the outcome prints over it
 		fmt.Fprint(Stdout, "\r\x1b[K")
 	}()
 	fn()
+}
+
+// scepterSpin runs fn with a spinner line while it blocks (design-motion: a
+// spinner while something works, nothing looping for no reason). fn must not
+// print — the spinner owns the line and is stopped and erased before the
+// outcome prints. Anim off (NONINTERACTIVE, WAT_NO_ANIM, tests): fn runs bare,
+// so anim-off output stays byte-stable.
+func scepterSpin(what string, fn func()) {
+	var sp Spinner
+	scepterSpinCore(what, func() string { return CYN + sp.Frame() + RST }, fn)
+}
+
+// scepterShimmer is scepterSpin's short-step variant: a two-frame brightness
+// shimmer (no rotation) for sub-second work like the backup's sha256 verify —
+// the glyph holds still and glows, then the outcome's ✓ lands over the line.
+func scepterShimmer(what string, fn func()) {
+	scepterSpinCore(what, func() string {
+		if shimmerFrame() == 0 {
+			return CYN + BOLD + "◈" + RST
+		}
+		return CYN + "◈" + RST
+	}, fn)
 }
 
 // scepterActSpin is scepterAct with the channel call itself covered by the
@@ -490,6 +506,11 @@ func scepterPrintUpdStatus(st scepterUpdStatus) {
 		Hint("No update has run on this Kharej yet (no mailbox record).")
 	} else {
 		Say("  " + KV(11, "Update", scepterMailStr(*st.Mail)))
+		key := st.Mail.Run
+		if key == "" { // no run id in the record: the phase+ts still disambiguates reads
+			key = fmt.Sprintf("mail-%s-%d", st.Mail.Phase, st.Mail.Ts)
+		}
+		scepterStepperShow(key, st.Mail.Phase, false)
 		if st.Mail.Phase == "started" {
 			Hint("A started record means an update was accepted; if the channel died before")
 			Hint("the answer, the journal replays it for the same command id — and a record")
@@ -525,6 +546,114 @@ func scepterMailStr(m scepterUpdMail) string {
 		s += " · " + m.Detail
 	}
 	return s
+}
+
+// ---- the update stepper (owner directive 2026-11-23: purposeful motion) ----
+
+// scepterStepperPhases are the update job's five phases in order. The mailbox
+// records only the start and the terminal phase (wat's update orchestration),
+// so a mid-flight record pins "started" at Download and a terminal one at the
+// end — no intermediate phase is ever claimed complete without evidence.
+var scepterStepperPhases = []string{"Download", "Verify", "Install", "Restart", "Watch"}
+
+// scepterMailStepper maps a mailbox phase onto stepper coordinates: completed
+// phases before active, active is the spinner index (-1: none, the run ended),
+// failed marks the run's end red (failed/rolled_back — where it broke is in
+// detail, not in the phase, so nothing before it is claimed done).
+func scepterMailStepper(phase string) (completed, active int, failed bool) {
+	switch phase {
+	case "applied":
+		return len(scepterStepperPhases), -1, false
+	case "failed", "rolled_back":
+		return 0, 0, true
+	}
+	return 0, 0, false // started, and anything unknown reads as the recorded start
+}
+
+// shimmerFrame is the 2-frame brightness toggle (~400 ms per frame) an active
+// label breathes with; frame 0 whenever anim is off, so anim-off output is
+// byte-stable across prints (the ui_anim contract).
+func shimmerFrame() int {
+	if !UseAnim {
+		return 0
+	}
+	return int(animNow().UnixNano()/int64(400*time.Millisecond)) & 1
+}
+
+// scepterStepperStr renders one stepper row: completed phases carry the ramp
+// (the update's bright moment), the active phase the spinner with a shimmering
+// label, future phases grey; a failed run shows its mark red at the recorded
+// start. Deterministic when anim is off (spinner frame 0, shimmer frame 0).
+func scepterStepperStr(completed, active int, failed bool, sp *Spinner) string {
+	var b strings.Builder
+	for i, ph := range scepterStepperPhases {
+		if i > 0 {
+			b.WriteString(GRY + " ─→ " + RST)
+		}
+		switch {
+		case i < completed:
+			t := 0.0
+			if len(scepterStepperPhases) > 1 {
+				t = float64(i) / float64(len(scepterStepperPhases)-1)
+			}
+			b.WriteString(GradRGB(t) + BOLD + ph + RST)
+		case i == active && failed:
+			b.WriteString(RED + "✗ " + ph + RST)
+		case i == active:
+			pre := CYN + BOLD
+			if shimmerFrame() == 1 {
+				pre = CYN // the shimmer's dim frame
+			}
+			b.WriteString(pre + sp.Frame() + " " + ph + RST)
+		default:
+			b.WriteString(GRY + ph + RST)
+		}
+	}
+	return b.String()
+}
+
+// scepterStepBy tweens the displayed completed-count per mailbox run id, so a
+// revived update.status eases the stepper to the terminal phase instead of
+// teleporting (design-motion: motion follows data). In-memory only, like the
+// rotation markers; a manager restart just snaps.
+var scepterStepBy = map[string]*Tween{}
+
+// scepterStepperShow prints the stepper for one mailbox record. `live` is the
+// update.run path: the job just started, the spinner runs and the caption says
+// the channel returns via the latch. Otherwise the recorded phase is shown and
+// a terminal `applied` settles its completed count through the per-run tween
+// (one short settle burst, ~0.7 s, anim off snaps in one static line).
+func scepterStepperShow(key, phase string, live bool) {
+	completed, active, failed := scepterMailStepper(phase)
+	if live {
+		completed, active, failed = 0, 0, false
+	}
+	tw := scepterStepBy[key]
+	if tw == nil {
+		tw = NewTween(float64(completed))
+		scepterStepBy[key] = tw
+	}
+	sp := &Spinner{}
+	row := func() string {
+		c := completed
+		if active < 0 && !failed { // terminal: the eased completed count
+			c = int(tw.Step(float64(completed)) + 0.5)
+		}
+		return "  " + scepterStepperStr(c, active, failed, sp)
+	}
+	if UseAnim && IsTTY && !NonInteractive {
+		CurHide()
+		for i := 0; i < 5; i++ {
+			fmt.Fprintf(Stdout, "\r\x1b[K%s%s", row(), EL)
+			time.Sleep(140 * time.Millisecond)
+		}
+		CurShow()
+	}
+	fmt.Fprintf(Stdout, "\r\x1b[K%s\n", row())
+	if live {
+		Hint("the stepper stays: the channel returns via the latch — after the revival,")
+		Hint("Update status re-queries and the stepper eases to the terminal phase.")
+	}
 }
 
 // ---- update.run ----
@@ -571,12 +700,14 @@ func scepterUpdateRun(pair string, cl ScepterClient, caps ScepterCaps) {
 	if b, _ := res.Params["already_running"].(bool); b {
 		run, _ := res.Params["run"].(string)
 		Warn("A job already owns the swap (run " + orStr(run, "?") + ") — Update status shows its progress.")
+		scepterStepperShow(orStr(run, "running"), "started", true)
 		return
 	}
 	run, _ := res.Params["run"].(string)
 	toN, _ := res.Params["to"].(string)
 	grace := int(scepterU64(res.Params["grace_s"]))
 	Ok(fmt.Sprintf("Update accepted — run %s, target %s.", orStr(run, "?"), orStr(toN, "latest")))
+	scepterStepperShow(orStr(run, "running"), "started", true)
 	Hint(fmt.Sprintf("Nothing moves for %d s; then the channel drops as Kharej's units restart.", grace))
 	Hint("Come back via Update status — the mailbox reveals the outcome.")
 }
@@ -597,12 +728,67 @@ func scepterDoctorView(pair string, cl ScepterClient) {
 		Warn("doctor.fetch answered nothing.")
 		return
 	}
-	for _, row := range rows {
-		if i := strings.Index(row, ": "); i > 0 {
-			Say("  " + GRY + row[:i+1] + RST + " " + row[i+2:])
+	scepterPrintDoctorRows(Stdout, res.Params, rows)
+}
+
+// scepterLatchDot renders the doctor's latch fragment as a status dot:
+// breathing (green/grey on a ~1.6 s sine — the only live dot on the screen,
+// a latch revival is the thing that can happen while you read) while a latch
+// refresh is plausible (the fragment says enabled), a static grey dot when
+// not. Anim off reads the sine at frame 0, so the dot is static green —
+// byte-stable across prints.
+func scepterLatchDot(latch map[string]any) string {
+	enabled, _ := latch["enabled"].(bool)
+	if !enabled {
+		return GRY + "●" + RST + " off — no automatic revival from this Kharej"
+	}
+	dot := GRN + "●" + RST
+	if UseAnim {
+		// breathing: the sine's sign alternates the brightness every ~800 ms
+		if math.Sin(float64(animNow().UnixNano())/float64(800*time.Millisecond)) < 0 {
+			dot = GRY + "●" + RST
+		}
+	}
+	return dot + " enabled — a latch refresh can revive the channel"
+}
+
+// scepterRowGroup is a row's group key: the path's first segment (the
+// document's top-level fragment — latch, recent, update, …); a scalar row
+// groups under its own key.
+func scepterRowGroup(row string) string {
+	if i := strings.IndexAny(row, ".[: "); i > 0 {
+		return row[:i]
+	}
+	return row
+}
+
+// scepterPrintDoctorRows prints the flattened rows one group per frame
+// (staggered ~80 ms under anim; the document lands as a cascade instead of one
+// dump — the groups are the fragments the reader scans by). The latch
+// fragment's status dot rides above them. Rows keep their exact flattened
+// text; only the pacing and the group label lines are new.
+func scepterPrintDoctorRows(w io.Writer, params map[string]any, rows []string) {
+	if latch, ok := params["latch"].(map[string]any); ok {
+		fmt.Fprintln(w, "  "+KV(11, "Latch", scepterLatchDot(latch)))
+	}
+	last := ""
+	for i, row := range rows {
+		g := scepterRowGroup(row)
+		if g != last {
+			if i > 0 && UseAnim && IsTTY && !NonInteractive {
+				time.Sleep(80 * time.Millisecond) // the cascade's frame gap
+			}
+			if last != "" {
+				fmt.Fprintln(w)
+			}
+			fmt.Fprintf(w, "  %s%s%s\n", BOLD, g, RST)
+			last = g
+		}
+		if j := strings.Index(row, ": "); j > 0 {
+			fmt.Fprintf(w, "  %s%s%s %s\n", GRY, row[:j+1], RST, row[j+2:])
 			continue
 		}
-		Say("  " + row)
+		fmt.Fprintf(w, "  %s\n", row)
 	}
 }
 
@@ -653,7 +839,19 @@ func scepterBackupExport(pair string, cl ScepterClient) {
 		Warn(fmt.Sprintf("backup.export answered %d document(s), want exactly 1.", len(docs)))
 		return
 	}
-	d, raw, err := scepterParseBackupDoc(docs[0])
+	// The chunk counter and its GradBar fill are honest: n is the number of
+	// transport chunks the reassembly actually delivered (the answer's own
+	// `chunks` when the engine states it, the delivered document count
+	// otherwise), and the fill eases to full as those chunks are counted in.
+	chunks := int(scepterU64(res.Params["chunks"]))
+	if chunks <= 0 {
+		chunks = len(docs)
+	}
+	scepterChunkMeter(chunks)
+	var d scepterBackupDoc
+	var raw []byte
+	var err error
+	scepterShimmer("verifying sha256", func() { d, raw, err = scepterParseBackupDoc(docs[0]) })
 	if err != nil {
 		Err(err.Error())
 		return
@@ -669,6 +867,25 @@ func scepterBackupExport(pair string, cl ScepterClient) {
 		return
 	}
 	Ok(fmt.Sprintf("Backup saved: %s (%s tar, %d file(s), sha256 verified).", path, Human(float64(len(raw))), d.Files))
+}
+
+// scepterChunkMeter tweens the reassembled-chunk counter to n with a GradBar
+// fill (n/of): ~0.45 s of settling under anim, nothing at all without it —
+// anim-off output keeps its exact byte shape.
+func scepterChunkMeter(n int) {
+	if !UseAnim || !IsTTY || NonInteractive || n <= 0 {
+		return
+	}
+	f := NewFill(0)
+	CurHide()
+	for i := 0; i < 5; i++ {
+		f.Step(1)
+		fmt.Fprintf(Stdout, "\r\x1b[K  %schunks %d/%d%s %s%s", GRY, int(f.Val()*float64(n)+0.5), n, RST,
+			GradBar(f.Val(), 1, 24), EL)
+		time.Sleep(90 * time.Millisecond)
+	}
+	CurShow()
+	fmt.Fprint(Stdout, "\r\x1b[K")
 }
 
 // ---- audit.tail ----

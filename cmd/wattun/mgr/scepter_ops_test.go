@@ -538,6 +538,225 @@ func slicesContain(ss []string, want string) bool {
 	return false
 }
 
+// TestScepterStepperMailbox pins the stepper's phase mapping from the mailbox
+// record: started pins Download active with nothing claimed complete, applied
+// completes every phase, failed/rolled_back mark the run red at the recorded
+// start without inventing intermediate progress (the mailbox only records the
+// start and the terminal phase).
+func TestScepterStepperMailbox(t *testing.T) {
+	InitColor(false, 8)
+	if c, a, f := scepterMailStepper("started"); c != 0 || a != 0 || f {
+		t.Errorf("started = %d/%d/%v", c, a, f)
+	}
+	if c, a, f := scepterMailStepper("applied"); c != len(scepterStepperPhases) || a != -1 || f {
+		t.Errorf("applied = %d/%d/%v", c, a, f)
+	}
+	for _, ph := range []string{"failed", "rolled_back"} {
+		if c, a, f := scepterMailStepper(ph); c != 0 || a != 0 || !f {
+			t.Errorf("%s = %d/%d/%v", ph, c, a, f)
+		}
+	}
+	// the static row carries every phase; anim off is byte-stable across calls
+	sp := &Spinner{}
+	r1 := scepterStepperStr(0, 0, false, sp)
+	r2 := scepterStepperStr(0, 0, false, sp)
+	if r1 != r2 {
+		t.Errorf("anim-off stepper jitters:\n%q\n%q", r1, r2)
+	}
+	for _, ph := range scepterStepperPhases {
+		if !strings.Contains(r1, ph) {
+			t.Errorf("stepper missing phase %q: %q", ph, r1)
+		}
+	}
+	// a failed run shows its red mark at the recorded start
+	if r := scepterStepperStr(0, 0, true, sp); !strings.Contains(r, "✗ Download") {
+		t.Errorf("failed stepper missing the red mark: %q", r)
+	}
+	// completed phases render, future phases stay grey
+	if r := scepterStepperStr(3, 3, false, sp); !strings.Contains(r, GRY+"Restart"+RST) {
+		t.Errorf("future phase not grey: %q", r)
+	}
+}
+
+// TestScepterUpdateStatusStepper pins the status view's stepper row against a
+// terminal mailbox record: the phases land on screen, once per run id, and the
+// run's key keeps the tween so a re-read does not replay the settle.
+func TestScepterUpdateStatusStepper(t *testing.T) {
+	InitColor(false, 8)
+	st := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"ver": "3.5.0",
+		"update": map[string]any{"phase": "applied", "run": "upd-9", "from": "3.4.9", "to": "v3.5.0",
+			"ts": float64(1763999999)},
+	}}
+	out := capture(t, func() { scepterUpdateStatusView(stubClient{st}) })
+	for _, ph := range scepterStepperPhases {
+		if !strings.Contains(out, ph) {
+			t.Errorf("update status stepper missing %q:\n%s", ph, out)
+		}
+	}
+	// a started record carries the live-start shape instead
+	st.Params["update"] = map[string]any{"phase": "started", "run": "upd-10"}
+	out = capture(t, func() { scepterUpdateStatusView(stubClient{st}) })
+	if !strings.Contains(out, "Download") || strings.Contains(out, "✗") {
+		t.Errorf("started stepper shape wrong:\n%s", out)
+	}
+}
+
+// TestScepterUpdateRunStepperCaption pins update.run's post-accept display:
+// the stepper stays with the latch caption (the channel returns via the
+// latch; the revival re-queries and eases to the terminal phase).
+func TestScepterUpdateRunStepperCaption(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	oldP := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = oldP }()
+	started := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"run": "upd-1", "to": "v3.6.0", "phase": "started", "grace_s": float64(3)}}
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"update.run": {{r: started}},
+	}}
+	defer feed("u\nyx0")()
+	out := capture(t, func() { scepterOpsScreen("ir", cl, CapTunnel|CapCreate|CapManage|CapFull) })
+	if !strings.Contains(out, "channel returns via the latch") || !strings.Contains(out, "Download") {
+		t.Errorf("update.run stepper caption missing:\n%s", out)
+	}
+}
+
+// TestScepterDoctorCascade pins the doctor view's grouping and latch dot: rows
+// keep their exact flattened text, group labels head each fragment, and the
+// latch fragment renders the enabled dot line.
+func TestScepterDoctorCascade(t *testing.T) {
+	InitColor(false, 8)
+	res := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+		"ver":    "3.5.0",
+		"latch":  map[string]any{"armed": false, "enabled": true, "port": float64(20443)},
+		"recent": []any{map[string]any{"cmd": "state.get", "code": float64(0)}},
+	}}
+	rows := scepterRenderRows(res.Params)
+	var buf bytes.Buffer
+	scepterPrintDoctorRows(&buf, res.Params, rows)
+	out := buf.String()
+	for _, want := range []string{"latch.armed: false", "recent[0].cmd: state.get", "ver: 3.5.0",
+		"latch refresh can revive", "recent"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor cascade missing %q:\n%s", want, out)
+		}
+	}
+	// the latch dot's disabled shape is static grey with the honest why
+	var buf2 bytes.Buffer
+	scepterPrintDoctorRows(&buf2, map[string]any{"latch": map[string]any{"enabled": false}},
+		[]string{"ver: 3.5.0"})
+	if !strings.Contains(buf2.String(), "no automatic revival") {
+		t.Errorf("disabled latch dot missing its why:\n%s", buf2.String())
+	}
+	// a row's group key is its first path segment
+	for row, want := range map[string]string{"latch.port: 1": "latch", "recent[0].cmd: x": "recent", "ver: 1": "ver"} {
+		if got := scepterRowGroup(row); got != want {
+			t.Errorf("scepterRowGroup(%q) = %q, want %q", row, got, want)
+		}
+	}
+}
+
+// TestScepterChunkMeterStatic pins the backup meter's anim-off contract: no
+// anim, no output at all (byte-stable), and the shimmer variant runs fn bare.
+func TestScepterChunkMeterStatic(t *testing.T) {
+	InitColor(false, 8)
+	var buf bytes.Buffer
+	old := Stdout
+	Stdout = &buf
+	defer func() { Stdout = old }()
+	scepterChunkMeter(4)
+	ran := false
+	scepterShimmer("verifying sha256", func() { ran = true })
+	if buf.Len() != 0 {
+		t.Errorf("anim-off chunk meter printed %q", buf.String())
+	}
+	if !ran {
+		t.Error("anim-off shimmer skipped fn")
+	}
+}
+
+// TestScepterEvTimeline pins the timeline's ordering, colors and honesty: rows
+// render newest first, node colors follow the pinned palette, and the static
+// (anim off / NI) list is byte-stable.
+func TestScepterEvTimeline(t *testing.T) {
+	InitColor(false, 8)
+	for typ, want := range map[string]string{
+		"tunnel_up": GRN, "scepter_up": GRN,
+		"tunnel_down": RED, "tunnel_deleted": RED, "scepter_down": RED,
+		"carrier_switched": SAF,
+		"update_applied":   CYN, "update_started": CYN,
+		"heal_action": GRY,
+	} {
+		if got := scepterEvColor(typ); got != want {
+			t.Errorf("scepterEvColor(%q) = %q, want %q", typ, got, want)
+		}
+	}
+	rows := []scepterEvRow{
+		{seq: 3, typ: "tunnel_up", ts: 1763999999, detail: "name=web"},
+		{seq: 4, typ: "carrier_switched", ts: 1764000000, detail: "carrier=tls"},
+		{seq: 5, typ: "tunnel_down", ts: 1764000001, detail: "name=web"},
+	}
+	// newest first: the caller reverses the engine's oldest-first ring
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	var b1, b2 bytes.Buffer
+	scepterTimeline(&b1, rows)
+	scepterTimeline(&b2, rows)
+	if b1.String() != b2.String() {
+		t.Errorf("static timeline jitters:\n%q\n%q", b1.String(), b2.String())
+	}
+	out := b1.String()
+	if strings.Index(out, "tunnel_down") > strings.Index(out, "tunnel_up") {
+		t.Errorf("timeline not newest-first:\n%s", out)
+	}
+	for _, want := range []string{"▎", "●", "carrier=tls"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("timeline missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestScepterMiniChart pins the mini chart's honesty: zero or one sample
+// prints the placeholder (never an invented shape), two real samples render
+// the two braille rows and the honest now/avg footer.
+func TestScepterMiniChart(t *testing.T) {
+	InitColor(false, 8)
+	var buf bytes.Buffer
+	scepterMiniChart(&buf, "web-none")
+	if !strings.Contains(buf.String(), "no rate history yet (0/2") {
+		t.Errorf("empty history must show the placeholder:\n%s", buf.String())
+	}
+	delete(scepterStatHist, "web-none")
+	scepterStatPush("web", time.Now(), 1e6, 20)
+	buf.Reset()
+	scepterMiniChart(&buf, "web")
+	if !strings.Contains(buf.String(), "no rate history yet (1/2") {
+		t.Errorf("one sample must still be the placeholder:\n%s", buf.String())
+	}
+	scepterStatPush("web", time.Now(), 2e6, 25)
+	buf.Reset()
+	scepterMiniChart(&buf, "web")
+	out := buf.String()
+	if strings.Contains(out, "no rate history") || !strings.Contains(out, "rate ") || !strings.Contains(out, "rtt") {
+		t.Errorf("two samples must render the chart:\n%s", out)
+	}
+	if !strings.Contains(out, "avg") || !strings.Contains(out, "2 view(s)") {
+		t.Errorf("mini chart footer missing honest counters:\n%s", out)
+	}
+	// the ring cap holds
+	for i := 0; i < scepterStatCap+10; i++ {
+		scepterStatPush("web", time.Now(), 1e6, 20)
+	}
+	if len(scepterStatHist["web"]) != scepterStatCap {
+		t.Errorf("ring cap = %d, want %d", len(scepterStatHist["web"]), scepterStatCap)
+	}
+	delete(scepterStatHist, "web")
+}
+
 // TestScepterOpsReachableFromPairScreen pins the E.4 completeness rule: the
 // ops item rides the pair screen's action list with manage, and every phase
 // A-C view still has its key on that screen.
