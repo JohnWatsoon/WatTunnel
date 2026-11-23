@@ -1043,7 +1043,7 @@ func TestFileScepterOpsUpdateStatus(t *testing.T) {
 	if code != wat.CodeOK || p["ver"] != wat.Version {
 		t.Fatalf("update.status: %v %v", code, p)
 	}
-	if p["systemd"] != false { // Windows checkout: no systemd, and that is exactly what the field reports
+	if p["systemd"] != systemdAvailable() { // the field reports the host: false on Windows, true on a systemd CI runner
 		t.Fatalf("systemd on %s: %v", runtime.GOOS, p["systemd"])
 	}
 	prev := p["prev"].(map[string]any)
