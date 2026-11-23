@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -1060,6 +1061,7 @@ func runDelete(n string) bool {
 		}
 	}
 	Ok("Tunnel '" + n + "' deleted.")
+	pruneTunnelCaches(n) // the home-side caches must not keep a ghost (round 3)
 	if !kreplyUsersLeft() {
 		kreplyRestore()
 	}
@@ -1344,6 +1346,9 @@ func tunnelMenuKeys(n string, d *deck) {
 		}
 	}
 	fmt.Fprintf(Stdout, "  %s %-14s %s%s%s\n", KeyLabel("x"), "Delete", GRY, "Remove tunnel and all files (confirms first)", RST)
+	if tunnelKharejKeyWanted(n) { // the K row exists in the menu, so it belongs here too (round 3)
+		fmt.Fprintf(Stdout, "  %s %-14s %s%s%s\n", KeyLabel("K"), "Kharej view", GRY, "the remote side of this tunnel (Scepter)", RST)
+	}
 	fmt.Fprintf(Stdout, "  %s %-14s %s%s%s\n", KeyLabel("s"), "Spoofing & shaping", GRY, "How each anti-censor option behaves", RST)
 	fmt.Fprintln(Stdout)
 	Hint("Press any key to go back")
@@ -1380,14 +1385,60 @@ func p2TunnelHeader(n, r string) {
 	fmt.Fprintln(Stdout)
 }
 
+// tunnelPairKick refreshes one tunnel's cached pair status in the background
+// (home.go's pairKick discipline: one in-flight fetch per tunnel, never in the
+// render path — the synchronous ScepterPairStatus dial blocked the tunnel
+// page's 1 s tick for minutes on a dead pair, round 3 HIGH).
+var (
+	tunnelPairMu     sync.Mutex
+	tunnelPairFlying = map[string]bool{}
+)
+
+func tunnelPairKick(name string) {
+	tunnelPairMu.Lock()
+	if tunnelPairFlying[name] {
+		tunnelPairMu.Unlock()
+		return
+	}
+	tunnelPairFlying[name] = true
+	tunnelPairMu.Unlock()
+	go func() {
+		txt := scepterStatusFetch(name)
+		scepterStatusMu.Lock()
+		scepterStatusBy[name] = scepterStatusEntry{txt: txt, at: time.Now()}
+		scepterStatusMu.Unlock()
+		tunnelPairMu.Lock()
+		delete(tunnelPairFlying, name)
+		tunnelPairMu.Unlock()
+	}()
+}
+
+// tunnelPairStatus writes the tunnel page's pair status line (the cockpit
+// lane's cache, scepterStatusBy) and kicks one background refresh when stale.
+// A render callback must never dial — Choose redraws this head every second.
+// Lives beside its caller (tunnelHead) until the cockpit lane absorbs it into
+// scepter_cockpit.go; it touches only that file's own cache and seams.
+func tunnelPairStatus(w io.Writer, name string) {
+	if !IsPaired(name) {
+		return
+	}
+	scepterStatusMu.Lock()
+	e, ok := scepterStatusBy[name]
+	scepterStatusMu.Unlock()
+	if !ok || time.Since(e.at) >= scepterStatusTTL {
+		tunnelPairKick(name)
+	}
+	if ok {
+		hintLine(w, e.txt+scepterRotSuffix(name))
+	}
+}
+
 // tunnelHead: the top of the tunnel page — name and state, a traffic graph,
 // then only the /stats numbers this tunnel really reports.
 func tunnelHead(w io.Writer, n, r, car string, ti *tunnelInfo) {
 	col, dot, txt := stateCell(r, ti.State)
 	Title(w, n, r+" · "+car+PairedBadge(n)+"  "+col+dot+" "+txt+RST)
-	if ps := ScepterPairStatus(n); ps != "" { // paired Iran tunnels: the Kharej side at a glance
-		hintLine(w, ps)
-	}
+	tunnelPairStatus(w, n) // paired Iran tunnels: the Kharej side at a glance, from the cache only
 	if ti.State == "stopped" {
 		hintLine(w, "Not running. Start it below, or read its logs.")
 		fmt.Fprintln(w)
@@ -1431,6 +1482,15 @@ func tunnelHead(w io.Writer, n, r, car string, ti *tunnelInfo) {
 	fmt.Fprintln(w)
 }
 
+// tunnelKharejKeyWanted gates the tunnel page's K row ("Kharej view") and its
+// ?-keys entry: exactly IsPaired, which already weighs pairing:false over the
+// token's bootstrap credential. The old `|| tokenPairCaps(n) != 0` re-added a
+// pair the explicit off-switch had disabled, and pressing K then did nothing
+// silently (ScepterKharejView refuses an unpaired tunnel, round 3).
+func tunnelKharejKeyWanted(n string) bool {
+	return IsPaired(n)
+}
+
 // deckItems flattens the deck into one Choose list (section order kept) plus Delete.
 func deckItems(d *deck) []Item {
 	var items []Item
@@ -1464,7 +1524,7 @@ func tunnelPage(n string) {
 		car := Cfg(n, "carrier")
 		d := buildDeck(n, r, run, car)
 		items := deckItems(d)
-		if r == "Iran" && (IsPaired(n) || tokenPairCaps(n) != 0) { // the paired Kharej side, one key away
+		if tunnelKharejKeyWanted(n) { // the paired Kharej side, one key away
 			items = append(items, Item{Key: "K", Label: "Kharej view", Desc: "the remote side of this tunnel (Scepter)"})
 		}
 		ti := tinfo(n)

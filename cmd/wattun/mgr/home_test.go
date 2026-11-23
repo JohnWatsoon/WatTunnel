@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -317,5 +318,173 @@ func TestHeadRateAndTweens(t *testing.T) {
 	// a new sample snaps when anim is off (byte-stable refreshes)
 	if got := num.Step(3e6); StripANSI(Rate(got)) != StripANSI(Rate(3e6)) {
 		t.Errorf("anim off must snap to the target: %v", got)
+	}
+}
+
+// The tunnel page's pair status line renders ONLY from the cockpit cache: with
+// an expired cache and a dead pair it must still draw instantly (last known
+// line), the fetch running on the kick goroutine — the round-3 HIGH (the old
+// synchronous ScepterPairStatus froze the page's 1 s tick for minutes).
+func TestTunnelHeadPairStatusFromCache(t *testing.T) {
+	homeTestHost(t)
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "80")
+	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	entered := make(chan struct{})
+	var once sync.Once
+	rel := make(chan struct{})
+	release := func() { once.Do(func() { close(rel) }) }
+	oldFetch, oldBy := scepterStatusFetch, scepterStatusBy
+	t.Cleanup(func() {
+		release() // unblock a stuck fetch first, then give the kick goroutine its write-back moment
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			tunnelPairMu.Lock()
+			flying := tunnelPairFlying["ir"]
+			tunnelPairMu.Unlock()
+			if !flying {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		scepterStatusFetch, scepterStatusBy = oldFetch, oldBy
+	})
+	scepterStatusFetch = func(string) string {
+		close(entered)
+		<-rel
+		return "fresh fetch"
+	}
+	scepterStatusBy = map[string]scepterStatusEntry{
+		"ir": {txt: "cached pair line", at: time.Now().Add(-time.Hour)}, // expired: stale but renderable
+	}
+	var buf strings.Builder
+	tunnelHead(&buf, "ir", "Iran", "udp", &tunnelInfo{State: "stopped"})
+	if out := buf.String(); !strings.Contains(out, "cached pair line") {
+		t.Errorf("the head must render the cached line, got:\n%s", out)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stale cache never kicked a background fetch")
+	}
+	if out := buf.String(); strings.Contains(out, "fresh fetch") {
+		t.Error("the head must not wait for (or show) the kick's fetch result")
+	}
+	release()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		scepterStatusMu.Lock()
+		txt, at := scepterStatusBy["ir"].txt, scepterStatusBy["ir"].at
+		scepterStatusMu.Unlock()
+		if txt == "fresh fetch" && time.Since(at) < time.Hour {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the kick goroutine never wrote the fetched status back to the cache")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The tunnel page's K row (and its ?-keys entry) is gated by exactly IsPaired:
+// pairing:false beats the token's bootstrap credential — the off-switch must
+// win, otherwise pressing K does nothing silently (round 3).
+func TestTunnelKharejKeyGate(t *testing.T) {
+	homeTestHost(t)
+	InitColor(false, 8)
+	NonInteractive = false // the keys page ends on a key read; feed() must drive it
+	defer func() { NonInteractive = false }()
+	t.Setenv("COLUMNS", "80")
+	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: false\n"), 0o600)
+	tok := MakeToken("udp", "198.51.100.7:4443", "k", "", "", "", "", "", "", "pair=full")
+	os.WriteFile(filepath.Join(P.Conf, "ir.token"), []byte(tok+"\n"), 0o600)
+	if tokenPairCaps("ir") == 0 {
+		t.Fatal("the fixture token must carry a pair credential for this pin")
+	}
+	if tunnelKharejKeyWanted("ir") {
+		t.Error("pairing:false must disable the K row even with a token-bootstrap pair")
+	}
+	keys := func() string {
+		defer feed("x")() // the keys page ends on a key read
+		return capture(t, func() { tunnelMenuKeys("ir", &deck{}) })
+	}
+	if out := keys(); strings.Contains(out, "Kharej view") {
+		t.Errorf("the ?-keys page must hide the K row when the item is hidden:\n%s", out)
+	}
+	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	if !tunnelKharejKeyWanted("ir") {
+		t.Error("pairing:true must show the K row")
+	}
+	if out := keys(); !strings.Contains(out, "Kharej view") {
+		t.Errorf("the ?-keys page must list the K row exactly when the menu shows it:\n%s", out)
+	}
+}
+
+// Delete drops the name's home-side caches: rate history and the pair's last
+// document/error must not survive as ghosts, and a recreated tunnel of the
+// same name starts with an empty graph (round 3).
+func TestDeletePrunesTunnelCaches(t *testing.T) {
+	dir := homeTestHost(t)
+	InitColor(false, 8)
+	os.WriteFile(filepath.Join(dir, "a.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	resetPairCache()
+	defer resetPairCache()
+	pairDocs["a"] = &scepterDoc{Ver: "3.5.0", StateSeq: 7}
+	pairFail["a"] = "no answer within 65s"
+	samples["a"] = &sample{in: 1, out: 2}
+	oldSys := p2Systemctl
+	p2Systemctl = func(...string) error { return nil }
+	defer func() { p2Systemctl = oldSys }()
+	oldPrefix, oldRun, oldNon := P.Prefix, P.Run, NonInteractive
+	P.Prefix, P.Run, NonInteractive = "wattun", t.TempDir(), true
+	defer func() { P.Prefix, P.Run, NonInteractive = oldPrefix, oldRun, oldNon }()
+	var ok bool
+	capture(t, func() { ok = runDelete("a") }) // the prompts and the Ok line stay out of the log
+	if !ok {
+		t.Fatal("runDelete returned false")
+	}
+	pairMu.Lock()
+	doc, fail := pairDocs["a"], pairFail["a"]
+	pairMu.Unlock()
+	if doc != nil || fail != "" {
+		t.Errorf("a deleted tunnel's pair cache survived: doc %v fail %q", doc, fail)
+	}
+	if samples["a"] != nil {
+		t.Error("a deleted tunnel's rate history survived")
+	}
+}
+
+// An audit-append failure must not look like success: pair/rotate say the
+// store change IS live and that the audit line was NOT recorded (the revoke
+// path aborts instead — the same contract, adapted to an already-applied
+// change, round 3).
+func TestPairRotateAuditHonesty(t *testing.T) {
+	homeTestHost(t)
+	InitColor(false, 8)
+	NonInteractive = true // the asks take their defaults: generate a fresh pairing
+	defer func() { NonInteractive = false }()
+	auditDir := pairAuditPath()
+	os.Mkdir(auditDir, 0o700) // a directory: every append fails
+
+	out := capture(t, func() { scepterPair() })
+	if !strings.Contains(out, "Pairing stored") || !strings.Contains(out, "The audit line was NOT recorded.") {
+		t.Errorf("pair must state the store change and the missing audit line:\n%s", out)
+	}
+	if strings.Contains(out, "✓ Pairing stored") {
+		t.Errorf("an unaudited pair must not print the success mark:\n%s", out)
+	}
+
+	out = capture(t, func() { scepterRotate() })
+	if !strings.Contains(out, "Pairing key rotated") || !strings.Contains(out, "The audit line was NOT recorded.") {
+		t.Errorf("rotate must state the key swap and the missing audit line:\n%s", out)
+	}
+	if strings.Contains(out, "✓ Pairing key rotated") {
+		t.Errorf("an unaudited rotate must not print the success mark:\n%s", out)
+	}
+
+	os.Remove(auditDir) // writable again: the success branch keeps its Ok
+	out = capture(t, func() { scepterRotate() })
+	if !strings.Contains(out, "✓ Pairing key rotated") || strings.Contains(out, "NOT recorded") {
+		t.Errorf("an audited rotate must keep the plain success line:\n%s", out)
 	}
 }

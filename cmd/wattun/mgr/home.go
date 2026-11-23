@@ -544,6 +544,18 @@ func pairKick() {
 	}()
 }
 
+// pruneTunnelCaches drops a gone tunnel's entries from the home-side caches —
+// the rate history, the pair's last state document and its last fetch error —
+// so delete/rename leaves no ghost rows and a recreated tunnel of the same
+// name starts with an empty graph (round 3). UI-goroutine only, like samples.
+func pruneTunnelCaches(n string) {
+	pairMu.Lock()
+	delete(pairDocs, n)
+	delete(pairFail, n)
+	pairMu.Unlock()
+	delete(samples, n)
+}
+
 // scepterFetchDocOr fetches one pair's state document, dial failure and RPC
 // failure collapsed into one error each (the row must say why, not which layer).
 func scepterFetchDocOr(n string) (scepterDoc, error) {
@@ -1491,8 +1503,14 @@ func scepterPair() {
 		Err("Could not write " + pairStorePath() + ".")
 		return
 	}
-	pairAudit("pair_created", p.UUID+" caps="+capTier(p.Caps))
-	Ok(fmt.Sprintf("Pairing stored (%s, caps %s).", p.UUID, capTier(p.Caps)))
+	stored := fmt.Sprintf("Pairing stored (%s, caps %s).", p.UUID, capTier(p.Caps))
+	if pairAudit("pair_created", p.UUID+" caps="+capTier(p.Caps)) {
+		Ok(stored)
+	} else {
+		// the store change is live either way — an unaudited change must not
+		// look like plain success (the revoke path aborts instead, round 3)
+		Warn(stored + " The audit line was NOT recorded.")
+	}
 	fmt.Fprintln(Stdout)
 	fmt.Fprintf(Stdout, "  %s%s%s\n\n", BOLD+YEL, MakePairingLine(p.Version, p.UUID, p.Key, p.Caps), RST)
 	Hint("Give this watp1: line to Iran (pairs the cockpit; wattun 3.5.0 on both ends).")
@@ -1526,8 +1544,12 @@ func scepterRotate() {
 		Err("Could not write " + pairStorePath() + ".")
 		return
 	}
-	pairAudit("pair_rotated", p.UUID+" window="+strconv.Itoa(win)+"s")
-	Ok("Pairing key rotated; the engine switches to the new key within its poll interval.")
+	rotated := "Pairing key rotated; the engine switches to the new key within its poll interval."
+	if pairAudit("pair_rotated", p.UUID+" window="+strconv.Itoa(win)+"s") {
+		Ok(rotated)
+	} else {
+		Warn(rotated + " The audit line was NOT recorded.") // the key swap is live either way
+	}
 	fmt.Fprintln(Stdout)
 	fmt.Fprintf(Stdout, "  %s%s%s\n\n", BOLD+YEL, MakePairingLine(p.Version, p.UUID, p.Key, p.Caps), RST)
 	Hint("Attach this new watp1: line on Iran NOW (rotation takes effect at the next store poll).")
