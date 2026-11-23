@@ -1370,3 +1370,16 @@ DISABLED by the owner — no further remote work) found what no review could:
 Deliberately left: usage_text role wording could mention the banners; VPS re-test with the new build
 whenever the owner re-enables hosts; wat/version stays 3.5.0 (unreleased; owner releases on request).
 Commit: 504c6b8, 820608f
+
+## 2026-11-23 · supervisor · Animation/UI advantage pass dispatched — 3 lanes
+Owner directive: cash in the Go manager's advantage everywhere bash couldn't — richer layouts, more
+animations (owner loves them), graphs. Lanes (disjoint files, deliver uncommitted): A boot+home
+(staggered intro cascade: badge→rows→gradient band sweep; state-change row flash; pair-refresh
+breathing dot; traffic count-up), B measurement screens (speed test live panel w/ growing chart or
+honest counter; carrier test live status board per shape — pending pulse/testing spinner/pass rate
+meter/fail why — winner sweep; matrix staggered grid + pass-rate bar), C ops+cockpit (update phase
+stepper w/ active shimmer + drop/revival handling; doctor staggered cascade; backup chunk-counter
+tween; events timeline with gradient spine + typed nodes; remote tunnel mini-chart; cap-gate pulse).
+All UseAnim/NonInteractive gated (static byte-stable otherwise), animNow-seamed, no new goroutines,
+honest data only. Design law kept: animations present data/work, never loop as decoration.
+Commit: none (dispatch record)
