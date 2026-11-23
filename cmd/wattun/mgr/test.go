@@ -24,6 +24,126 @@ func speedtestURLStreams(metricsAddr, dir string, mb, streams int) string {
 	return fmt.Sprintf("http://%s/speedtest?dir=%s&mb=%d&streams=%d", metricsAddr, dir, mb, streams)
 }
 
+// stAnim: the speed test animates only on the real interactive screen — UseAnim
+// already implies a tty, and w must be Stdout so a buffer-backed caller (tests,
+// the doctor's captured output) keeps the static, byte-stable rendering.
+// speedRow is one direction's measurement (down first, then up).
+type speedRow struct {
+	dir       string
+	ok        bool
+	mbs, mbit float64
+	secs      float64
+	err       string
+}
+
+func stAnim(w io.Writer) bool { return UseAnim && w == Stdout }
+
+// stExpected: the pacing floor for the live progress bar. The engine answers
+// one JSON blob when the transfer ends, so per-interval samples do not exist;
+// elapsed time and the requested size are the only real signals (an honest
+// elapsed/expected bar, never an invented byte counter). Planning floor is
+// 1 MB/s: mb MB takes at least mb seconds, capped so a slow link does not pin
+// the bar at zero for minutes.
+func stExpected(mb int) float64 {
+	e := float64(mb)
+	if e < 3 {
+		e = 3
+	}
+	return e
+}
+
+// stLive runs fn while a live panel advances: spinner frame, the direction and
+// size, the real elapsed seconds and a gradient bar paced by elapsed/expected.
+// Anim off (or a non-Stdout writer) calls straight through and prints nothing,
+// so the static path is byte-identical. Same shape as spin()/scepterCall: one
+// worker goroutine, 100 ms ticks, cursor restored on exit.
+func stLive(w io.Writer, dir string, mb int, fn func() (*speedtestResult, error)) (*speedtestResult, error) {
+	if !stAnim(w) {
+		return fn()
+	}
+	type ans struct {
+		r   *speedtestResult
+		err error
+	}
+	done := make(chan ans, 1)
+	go func() {
+		r, err := fn()
+		done <- ans{r, err}
+	}()
+	sp := &Spinner{}
+	fill := NewFill(0)
+	exp := stExpected(mb)
+	start := animNow()
+	CurHide()
+	defer CurShow()
+	for i := 0; ; i++ {
+		select {
+		case a := <-done:
+			fmt.Fprint(Stdout, "\r\x1b[K")
+			return a.r, a.err
+		case <-time.After(100 * time.Millisecond):
+			el := animNow().Sub(start).Seconds()
+			bar := GradBar(fill.Step(el/exp), 1, 14)
+			fmt.Fprintf(Stdout, "\r\x1b[K  %s%s%s %-9s %2d MB  %s%5.1f s%s  %s",
+				CYN, sp.Frame(), RST, label(dir), mb, GRY, el, RST, bar)
+		}
+	}
+}
+
+// stLandLine renders one landing row: the arrow and label, the rate, and the
+// side-by-side GradBar meter (val against the better of the two directions, so
+// down and up share one scale). v is the value currently presented — the tween
+// feeds it during the count-up, the final frame passes the exact measurement.
+func stLandLine(r speedRow, v, maxv float64) string {
+	arr, col := "↓", CYN
+	if r.dir == "up" {
+		arr, col = "↑", SAF
+	}
+	if ColorTier > 0 {
+		arr = col + arr + RST
+	}
+	if !r.ok {
+		return fmt.Sprintf("  %s %s%-9s%s %sfailed%s  %s", arr, RED, label(r.dir), RST, RED, RST, r.err)
+	}
+	return fmt.Sprintf("  %s %s%-9s%s %s%6.1f MB/s%s  %s", arr, BOLD, label(r.dir), RST, BOLD, v, RST, GradBar(v, maxv, 12))
+}
+
+// stLand: on completion the two results land with a count-up tween of each
+// rate and one side-by-side down/up GradBar — this screen's ramp moment. The
+// tween only presents the final numbers over ~0.8 s; every figure is the real
+// measurement and the last frame is exact. Anim-only (guarded by stAnim).
+func stLand(w io.Writer, rows []speedRow) {
+	maxv := 0.0
+	for _, r := range rows {
+		if r.ok && r.mbs > maxv {
+			maxv = r.mbs
+		}
+	}
+	if maxv <= 0 {
+		return
+	}
+	var dn, up *Tween = NewTween(0), NewTween(0)
+	for i := 0; i < 10; i++ {
+		if i > 0 {
+			fmt.Fprint(w, "\x1b[2A")
+		}
+		for _, r := range rows {
+			v := 0.0
+			if r.dir == "down" {
+				v = dn.Step(r.mbs)
+			} else {
+				v = up.Step(r.mbs)
+			}
+			fmt.Fprintf(w, "\r\x1b[K%s\n", stLandLine(r, v, maxv))
+		}
+		sleepMS(80)
+	}
+	fmt.Fprint(w, "\x1b[2A")
+	for _, r := range rows {
+		fmt.Fprintf(w, "\r\x1b[K%s\n", stLandLine(r, r.mbs, maxv))
+	}
+}
+
 // speedtestResult is the engine's JSON answer (cmd/wattun/speedtest.go Result).
 type speedtestResult struct {
 	OK       bool    `json:"ok"`
@@ -71,17 +191,10 @@ func SpeedTest(name string, mb int, w io.Writer) {
 		return
 	}
 	secHdr(w, "Speed test", fmt.Sprintf("%d MB", mb))
-	type row struct {
-		dir       string
-		ok        bool
-		mbs, mbit float64
-		secs      float64
-		err       string
-	}
-	var rows []row
+	var rows []speedRow
 	peak := 200.0
 	for _, d := range []string{"down", "up"} {
-		r, err := fetchSpeedtest(m, d, mb)
+		r, err := stLive(w, d, mb, func() (*speedtestResult, error) { return fetchSpeedtest(m, d, mb) })
 		if err != nil || r == nil {
 			s, _ := statsOf(name)
 			if s == nil {
@@ -93,7 +206,7 @@ func SpeedTest(name string, mb int, w io.Writer) {
 			return
 		}
 		if r.OK {
-			rows = append(rows, row{dir: d, ok: true, mbs: r.MBPerS, mbit: r.MbitPerS, secs: r.Seconds})
+			rows = append(rows, speedRow{dir: d, ok: true, mbs: r.MBPerS, mbit: r.MbitPerS, secs: r.Seconds})
 			if r.MBPerS > peak {
 				peak = r.MBPerS
 			}
@@ -102,7 +215,7 @@ func SpeedTest(name string, mb int, w io.Writer) {
 			if e == "" {
 				e = "unknown error"
 			}
-			rows = append(rows, row{dir: d, err: e})
+			rows = append(rows, speedRow{dir: d, err: e})
 		}
 	}
 	cols := p1TermCols()
@@ -123,6 +236,7 @@ func SpeedTest(name string, mb int, w io.Writer) {
 			}
 		}
 	}
+	stLand(w, rows)
 }
 
 func label(dir string) string {

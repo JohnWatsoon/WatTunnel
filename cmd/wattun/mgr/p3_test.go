@@ -569,3 +569,78 @@ func TestVerGE(t *testing.T) {
 		t.Error("verGE broken")
 	}
 }
+
+// ---- Lane B anim pins (measurement screens): every render is pure, every
+// number comes from the fixture; only the presentation moves. ----
+
+func TestStLandLine(t *testing.T) {
+	ok := speedRow{dir: "down", ok: true, mbs: 4.87}
+	s := StripANSI(stLandLine(ok, 4.87, 4.87))
+	for _, want := range []string{"↓", "Download", "4.9 MB/s", "▰▰▰▰▰▰▰▰▰▰▰▰"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("landing line missing %q: %s", want, s)
+		}
+	}
+	// a half-final tween value shows a half bar and the tweened figure, not the target
+	s = StripANSI(stLandLine(ok, 2.4, 4.87))
+	if !strings.Contains(s, "2.4 MB/s") || strings.Count(s, "▰") != 6 {
+		t.Errorf("tweened landing line wrong: %s", s)
+	}
+	fail := speedRow{dir: "up", ok: false, err: "no link in 8 s"}
+	if s := StripANSI(stLandLine(fail, 0, 1)); !strings.Contains(s, "failed") || !strings.Contains(s, "no link in 8 s") {
+		t.Errorf("failed landing line wrong: %s", s)
+	}
+}
+
+func TestProbeBoardRowStates(t *testing.T) {
+	vs := []variant{{Label: "base"}, {Label: "desync mci.ir → rst"}, {Label: "udp"}}
+	rs := []result{{OK: true, Down: 4, Up: 2, RTT: 40}, {OK: false, Why: "no link in 8 s"}, {}}
+	passed := StripANSI(boardRow(0, vs, rs, 4, 2, "", 0, false))
+	for _, want := range []string{"✓", "base", "4.0", "2.0", "40 ms"} {
+		if !strings.Contains(passed, want) {
+			t.Errorf("passed row missing %q: %s", want, passed)
+		}
+	}
+	failed := StripANSI(boardRow(1, vs, rs, 4, 3, "", 0, false))
+	for _, want := range []string{"✗", "no link in 8 s"} {
+		if !strings.Contains(failed, want) {
+			t.Errorf("failed row missing %q: %s", want, failed)
+		}
+	}
+	testingRow := StripANSI(boardRow(0, vs, rs, 4, 1, "⠋", 1.5, false))
+	for _, want := range []string{"base", "testing", "1.5 s"} {
+		if !strings.Contains(testingRow, want) {
+			t.Errorf("testing row missing %q: %s", want, testingRow)
+		}
+	}
+	off := StripANSI(boardRow(2, vs, rs, 4, 0, "", 0, false))
+	on := StripANSI(boardRow(2, vs, rs, 4, 0, "", 0, true))
+	if !strings.Contains(off, "pending") || !strings.Contains(on, "pending") || off == on {
+		t.Errorf("pending breath must differ per frame:\noff: %s\non:  %s", off, on)
+	}
+}
+
+func TestProbeBoardFrameOrder(t *testing.T) {
+	vs := []variant{{Label: "base"}, {Label: "mid"}, {Label: "last"}}
+	rs := make([]result, 3)
+	rs[0] = result{OK: true, Down: 4, Up: 2, RTT: 40}
+	var b bytes.Buffer
+	bd := newProbeBoard(&b, 3, vs, rs)
+	bd.result(0, vs, rs)
+	lines := strings.Split(strings.ReplaceAll(b.String(), "\x1b[K", ""), "\n")
+	// frame 1: row0 testing, rows 1-2 pending; frame 2: row0 passed, row1 testing, row2 pending
+	f2 := lines[3:6]
+	if !strings.Contains(StripANSI(f2[0]), "✓") || !strings.Contains(StripANSI(f2[1]), "testing") || !strings.Contains(StripANSI(f2[2]), "pending") {
+		t.Errorf("board frame order wrong:\n%s", strings.Join(f2, "\n"))
+	}
+	if bd.lines != 3 || bd.peak <= 0 {
+		t.Errorf("board state wrong: lines=%d peak=%f", bd.lines, bd.peak)
+	}
+}
+
+func TestPassRateLine(t *testing.T) {
+	s := StripANSI(passRateLine(0.5, 9, 18))
+	if !strings.Contains(s, "50% of 18 variants") || strings.Count(s, "▰") != 12 || strings.Count(s, "▱") != 12 {
+		t.Errorf("pass rate line wrong: %s", s)
+	}
+}

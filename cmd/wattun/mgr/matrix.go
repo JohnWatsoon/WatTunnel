@@ -483,6 +483,99 @@ func max20(v int) int {
 	return 20
 }
 
+// ---- live probe board (the matrix's live status board) ----
+//
+// One row per variant, redrawn in place at probe boundaries only — the probes
+// are sequential and blocking, so one boundary is one frame and no goroutines
+// are added. Row states: pending (a grey dot breathing on a 2-frame cycle),
+// testing (spinner frame + real elapsed seconds), passed (green ✓ + the
+// measured rate in a GradBar meter scaled by the best rate seen so far),
+// failed (red ✗ + the why). Every number comes from the probe itself; the
+// board only presents it.
+
+type probeBoard struct {
+	w     io.Writer
+	n     int
+	peak  float64
+	lines int
+	sp    Spinner
+	bre   int // breath phase: one flip per frame
+	cur   int // rows < cur are done, row cur is under test, rows > cur pend
+	curAt time.Time
+}
+
+// boardRow renders row j in its current state. Pure (everything it shows is
+// passed in), so tests pin the pending/testing/passed/failed rendering order.
+func boardRow(j int, vs []variant, rs []result, peak float64, state int, frame string, el float64, breathe bool) string {
+	lbl := atLbl(vs[j].Label, 24)
+	switch state {
+	case 1: // testing
+		return fmt.Sprintf("  %s%s%s %-24s %stesting%s · %4.1f s", CYN, frame, RST, lbl, GRY, RST, el)
+	case 2: // passed
+		return fmt.Sprintf("  %s✓%s %-24s %s%6.1f%s ↓ %6.1f ↑ %4.0f ms  %s",
+			GRN, RST, lbl, BOLD, rs[j].Down, RST, rs[j].Up, rs[j].RTT, GradBar(maxF(rs[j].Down, rs[j].Up), peak, 10))
+	case 3: // failed
+		return fmt.Sprintf("  %s✗%s %-24s %s%s%s", RED, RST, lbl, GRY, rs[j].Why, RST)
+	default: // pending
+		dot := "·"
+		if breathe {
+			dot = "•"
+		}
+		return fmt.Sprintf("  %s%s%s %-24s %spending%s", GRY, dot, RST, lbl, GRY, RST)
+	}
+}
+
+// draw repaints the whole board where it stands (cursor up, one \x1b[K line
+// per row). Called only from testing/result, i.e. at probe boundaries.
+func (b *probeBoard) draw(vs []variant, rs []result) {
+	if b.lines > 0 {
+		fmt.Fprintf(b.w, "\x1b[%dA", b.lines)
+	}
+	for j := 0; j < b.n; j++ {
+		st, line := 0, ""
+		switch {
+		case j < b.cur:
+			if rs[j].OK {
+				st = 2
+			} else {
+				st = 3
+			}
+			line = boardRow(j, vs, rs, b.peak, st, "", 0, false)
+		case j == b.cur:
+			line = boardRow(j, vs, rs, b.peak, 1, b.sp.Frame(), animNow().Sub(b.curAt).Seconds(), false)
+		default:
+			line = boardRow(j, vs, rs, b.peak, 0, "", 0, b.bre%2 == 1)
+		}
+		fmt.Fprintf(b.w, "%s\x1b[K\n", line)
+	}
+	b.lines = b.n
+	b.bre++
+}
+
+// testing marks row i as under test and draws the frame before the probe runs.
+func (b *probeBoard) testing(i int, vs []variant, rs []result) {
+	b.cur, b.curAt = i, animNow()
+	b.draw(vs, rs)
+}
+
+// result records row i's outcome (raising the meter scale if it is the new
+// best) and draws the frame with it finalized. The board stays on screen with
+// every row finalized until the ranked table prints below it.
+func (b *probeBoard) result(i int, vs []variant, rs []result) {
+	if pk := maxF(rs[i].Down, rs[i].Up); pk > b.peak {
+		b.peak = pk
+	}
+	b.cur = i + 1
+	b.draw(vs, rs)
+}
+
+// newProbeBoard opens the board with row 0 under test.
+func newProbeBoard(w io.Writer, n int, vs []variant, rs []result) *probeBoard {
+	b := &probeBoard{w: w, n: n, cur: 0, curAt: animNow()}
+	b.draw(vs, rs)
+	return b
+}
+
 // ---- the screen: ac_matrix_cmd ----
 
 // MatrixCmd: port of ac_matrix_cmd(). Probes are real only when startProbes is true;
@@ -548,10 +641,21 @@ func MatrixCmd(name string, w io.Writer, startProbes bool) bool {
 		}
 		defer m.cleanup()
 		secHdr(w, "Matrix", fmt.Sprintf("%d combinations", len(vs)))
+		var board *probeBoard
+		if stAnim(w) {
+			board = newProbeBoard(w, len(vs), vs, rs)
+		}
 		for i := range vs {
+			if board != nil && board.cur != i {
+				board.testing(i, vs, rs)
+			}
 			r, _ := m.probeOne(i, vs, atMB, tPath, tIcmp)
 			rs[i] = r
-			atPrint(w, i, vs, rs, atMB)
+			if board != nil {
+				board.result(i, vs, rs)
+			} else {
+				atPrint(w, i, vs, rs, atMB)
+			}
 		}
 		// auto_refine: re-measure the top 3 with 16 streams and a sustained run
 		rank := atRank(vs, rs, "speed")
@@ -686,14 +790,33 @@ func atTable(w io.Writer, vs []variant, rs []result, rank []int, mb, secs int) {
 	if len(rank) > 0 {
 		hdr := fmt.Sprintf("%s %2s  %-22s %6s %6s %6s%s", GRY, "#", "Carrier", "Down", "Up", "RTT", RST)
 		boxRow(w, hdr)
+		live := stAnim(w)
 		for k, i := range rank {
 			pk := maxF(rs[i].Down, rs[i].Up)
 			bar := "  " + tbarC(pk, peak, 10)
 			line := fmt.Sprintf("%2d  %-22s %6.1f %6.1f %4.0fms", k+1, atLbl(vs[i].Label, 22), rs[i].Down, rs[i].Up, rs[i].RTT)
 			if k == 0 {
-				boxRow(w, BOLD+CYN+"▸"+line+RST+bar+"  "+CYN+"★"+RST)
+				mark := BOLD + CYN + "▸" + line + RST
+				if live {
+					// the winner's single gradient sweep: the ramp runs across
+					// the winning row once, as the table settles (anim-only)
+					mark = Grad("▸"+line, rlen(line)+1)
+				}
+				boxRow(w, mark+bar+"  "+CYN+"★"+RST)
 			} else {
-				boxRow(w, " "+line+bar)
+				if live {
+					// pop-in, staggered by column: the figures land first,
+					// the meter column lands one frame later (anim-only)
+					boxRow(w, " "+line)
+					sleepMS(40)
+					fmt.Fprint(w, "\x1b[1A")
+					boxRow(w, " "+line+bar)
+				} else {
+					boxRow(w, " "+line+bar)
+				}
+			}
+			if live {
+				sleepMS(40)
 			}
 		}
 	}
@@ -716,7 +839,35 @@ func atTable(w io.Writer, vs []variant, rs []result, rank []int, mb, secs int) {
 		}
 	}
 	boxBot(w)
+	if stAnim(w) {
+		passRateBar(w, len(rank), len(vs))
+	}
 	hintLine(w, fmt.Sprintf("%d MB/probe · %d s", mb, secs))
+}
+
+// passRateBar: the matrix's summary bar, tweening to the real pass rate over
+// ~0.5 s (Fill eases 0 → passed/total; anim-only, so the static table keeps its
+// exact bytes). The percent shown is the tweened presentation of the real rate.
+func passRateBar(w io.Writer, pass, total int) {
+	if total <= 0 {
+		return
+	}
+	target := float64(pass) / float64(total)
+	f := NewFill(0)
+	for i := 0; i < 8; i++ {
+		if i > 0 {
+			fmt.Fprint(w, "\x1b[1A")
+		}
+		fmt.Fprintf(w, "%s\n", passRateLine(f.Step(target), pass, total))
+		sleepMS(60)
+	}
+	fmt.Fprint(w, "\x1b[1A")
+	fmt.Fprintf(w, "%s\n", passRateLine(target, pass, total))
+}
+
+// passRateLine renders one frame of the summary bar (pure, pinned by test).
+func passRateLine(rate float64, pass, total int) string {
+	return fmt.Sprintf("  pass rate %s %s%3.0f%%%s of %d variants", GradBar(rate, 1, 24), GRN, rate*100, RST, total)
 }
 
 func maxF(a, b float64) float64 {
