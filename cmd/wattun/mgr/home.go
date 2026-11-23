@@ -50,6 +50,9 @@ type sample struct {
 	uNum    *Tween
 	dBar    *Fill // the head's meters ease toward the new level (ui_anim.go)
 	uBar    *Fill
+	tot     *Tween // the Kharej glance's served total counts up on entry
+	state   string // the tunnel's state as of the previous head render
+	flash   int    // renders left on the state-change amber flash (ui_anim.go)
 }
 
 var samples = map[string]*sample{}
@@ -130,10 +133,17 @@ func headRate(num *Tween, bar *Fill, live bool, rate float64, hist []float64) (t
 	return txt, meter
 }
 
-// initHeadTweens creates the head's display state at the tunnel's current
-// rates (first paint shows the real values; nothing eases in from zero).
+// initHeadTweens creates the head's display state. With anim on, the first
+// paint counts up from zero (owner directive 2026-11-23: live values settle
+// in, and the boot intro's fast ticks carry the count-up); anim off keeps the
+// old snap-to-current first paint so refreshes stay byte-stable.
 func initHeadTweens(s *sample, down, up float64) {
 	if s.dNum != nil {
+		return
+	}
+	if UseAnim && !NonInteractive {
+		s.dNum, s.dBar = NewTween(0), NewFill(0)
+		s.uNum, s.uBar = NewTween(0), NewFill(0)
 		return
 	}
 	ds := histMax(s.down, down)
@@ -146,6 +156,41 @@ func initHeadTweens(s *sample, down, up float64) {
 	}
 	s.dNum, s.dBar = NewTween(down), NewFill(down/ds)
 	s.uNum, s.uBar = NewTween(up), NewFill(up/us)
+}
+
+// stateFlash tracks a tunnel's state between head renders: a change arms a
+// 3-render amber flash on the state cell (odd renders amber, even ones the new
+// colour), so a tunnel going up or down catches the eye. Zero-cost when
+// nothing changed, and entirely skipped with anim off — refreshes stay
+// byte-stable.
+func stateFlash(s *sample, ti *tunnelInfo) bool {
+	if !UseAnim || NonInteractive {
+		return false
+	}
+	if s.state != "" && s.state != ti.State {
+		s.flash = 3
+	}
+	s.state = ti.State
+	if s.flash > 0 {
+		amber := s.flash%2 == 1
+		s.flash--
+		return amber
+	}
+	return false
+}
+
+// servedTotal steps the Kharej glance's served figure: it counts up from zero
+// on the tunnel's first live render (anim on) and snaps to the counter
+// otherwise, so the anim-off render is byte-identical to the old static text.
+func servedTotal(s *sample, ti *tunnelInfo) float64 {
+	if s.tot == nil {
+		if UseAnim && !NonInteractive {
+			s.tot = NewTween(0)
+		} else {
+			s.tot = NewTween(ti.Out)
+		}
+	}
+	return s.tot.Step(ti.Out)
 }
 
 // ---- host line: hostname · public IP · role · counts ----
@@ -366,12 +411,23 @@ func scepterRoute() string {
 func MainMenu() int {
 	autoMigrateAll(true)
 	sel := 0
-	if len(listedTunnels()) == 0 {
+	names0 := listedTunnels()
+	if len(names0) == 0 {
 		sel = 1 // nothing to manage yet: start on New tunnel
 	}
-	anim := UseAnim && !introDone
+	// The boot intro cascades the whole composition in once per run; introDone
+	// gates re-entry for every later full page (banner.go) and this cascade.
+	intro := UseAnim && !introDone && IsTTY && !NonInteractive
 	introDone = true
 	ClearScreen()
+	if intro {
+		infos0 := map[string]*tunnelInfo{}
+		for _, n := range names0 {
+			infos0[n] = tinfo(n)
+		}
+		introCascade(names0, infos0)
+		introUntil = animNow().Add(introTail)
+	}
 	for {
 		names := listedTunnels()
 		infos := map[string]*tunnelInfo{}
@@ -380,11 +436,14 @@ func MainMenu() int {
 		}
 		stale := staleTunnels()
 		head := func(w io.Writer) {
-			homeHead(w, names, infos, stale, anim)
-			anim = false
+			homeHead(w, names, infos, stale, false)
 		}
 		items := mainMenuItems(len(names))
-		i, k := Choose(head, items, &sel, []string{"↑↓", "move", "⏎", "open", "1-8", "jump", "q", "quit"}, 2*time.Second)
+		tick := 2 * time.Second
+		if animNow().Before(introUntil) {
+			tick = 250 * time.Millisecond // intro tail: the entry count-up needs sub-second frames, then the cadence returns to normal
+		}
+		i, k := Choose(head, items, &sel, []string{"↑↓", "move", "⏎", "open", "1-8", "jump", "q", "quit"}, tick)
 		switch k {
 		case "eof":
 			return 0
@@ -428,28 +487,15 @@ func MainMenu() int {
 }
 
 func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale []string, anim bool) {
+	_ = anim // retired 2026-11-23: the boot intro (introCascade) owns the one animated entry
 	fmt.Fprintln(w)
-	if anim {
-		// the reveal animates straight to the terminal once; later frames draw the still mark
-		Banner(true)
-	} else {
-		old := Stdout
-		Stdout = w
-		Banner(false)
-		Stdout = old
-	}
+	old := Stdout
+	Stdout = w
+	Banner(false)
+	Stdout = old
 	fmt.Fprintln(w)
-	// The role badge leads the head (owner feedback 2026-11-23: "which side am
-	// I on" must be unmissable at a glance), the tagline follows it.
-	left := roleBadge() + "  " + BOLD + Tagline + RST
-	if Ver != "" {
-		left = Badge(Ver) + "  " + left
-	}
-	right := GRY + hostLine(names, infos) + RST
-	if pad := uiW() - rlen(left) - rlen(right); pad >= 3 {
-		fmt.Fprintf(w, "  %s%s%s\n", left, rep(" ", pad), right)
-	} else {
-		fmt.Fprintf(w, "  %s\n  %s\n", left, right)
+	for _, l := range homeBadgeLine(names, infos) {
+		fmt.Fprintln(w, l)
 	}
 	// The header band is the screen's one bright moment (ui_grad.go); colour
 	// off keeps the old grey rule byte-for-byte (GradLine's tier-0 contract).
@@ -468,49 +514,8 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 		gap(w, SecGap)
 		return
 	}
-	max := 6
-	for i, n := range names {
-		if i == max {
-			fmt.Fprintf(w, "  %s+%d more in Tunnels%s\n", GRY, len(names)-max, RST)
-			break
-		}
-		ti := infos[n]
-		col, dot, _ := stateCell(roleName(n), ti.State)
-		down, up := sampleTunnel(n, ti)
-		line := fmt.Sprintf("  %s%s%s %s %s", col, dot, RST, padR(BOLD+trunc(n, 12)+RST, 13), padR(GRY+trunc(carrierText(n), 16)+RST, 17))
-		switch ti.State {
-		case "up", "degraded":
-			if serverSide() == "kharej" {
-				// The server-side glance: clients served, the ports this tunnel
-				// answers on, total served — the rate meters and RTT are the
-				// client's view (owner feedback 2026-11-23: role-aware head).
-				line += fmt.Sprintf("%d clients · ports %s · served %s", ti.Sess, portsSummary(n, 24), Human(ti.Out))
-			} else if TermCols() >= 96 {
-				// Wide: the rates get tweened meters (U1's GradBar+Fill). The
-				// spark gives way below 96; from 112 it returns next to them.
-				if s := samples[n]; s != nil {
-					initHeadTweens(s, down, up)
-					dt, dm := headRate(s.dNum, s.dBar, true, down, s.down)
-					ut, um := headRate(s.uNum, s.uBar, true, up, s.up)
-					line += fmt.Sprintf("%s↓%s %s %s  %s↑%s %s %s  %s", CYN, RST, padL(dt, 10), dm, SAF, RST, padL(ut, 10), um, padL(fmt.Sprintf("%.0f ms", ti.RTT), 6))
-					if TermCols() >= 112 {
-						line += "  " + Spark(s.down, 10)
-					}
-				}
-			} else {
-				line += fmt.Sprintf("%s↓%s %s  %s↑%s %s  %s", CYN, RST, padL(Rate(down), 10), SAF, RST, padL(Rate(up), 10), padL(fmt.Sprintf("%.0f ms", ti.RTT), 6))
-			}
-			if ti.Why != "" {
-				line += "  " + YEL + ti.Why + RST
-			}
-		default:
-			_, _, txt := stateCell(roleName(n), ti.State)
-			if ti.Why != "" {
-				txt += " · " + ti.Why
-			}
-			line += GRY + txt + RST
-		}
-		fmt.Fprintln(w, line)
+	for _, l := range homeGlanceLines(names, infos, -1) {
+		fmt.Fprintln(w, l)
 	}
 	gap(w, SecGap)
 	pairLines(w)
@@ -529,6 +534,205 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 	fmt.Fprintln(w)
 }
 
+// homeBadgeLine is the head's badge row: the role badge leads it (owner
+// feedback 2026-11-23: "which side am I on" must be unmissable at a glance),
+// the tagline follows it, the host line sits right-aligned. One or two lines
+// depending on width; the boot intro re-renders it per frame.
+func homeBadgeLine(names []string, infos map[string]*tunnelInfo) []string {
+	left := roleBadge() + "  " + BOLD + Tagline + RST
+	if Ver != "" {
+		left = Badge(Ver) + "  " + left
+	}
+	right := GRY + hostLine(names, infos) + RST
+	if pad := uiW() - rlen(left) - rlen(right); pad >= 3 {
+		return []string{fmt.Sprintf("  %s%s%s", left, rep(" ", pad), right)}
+	}
+	return []string{"  " + left, "  " + right}
+}
+
+// homeRowLine is one tunnel's glance row (the head's live list). The state
+// cell carries the state-change flash; the Kharej glance counts its served
+// total up on entry; the wide Iran glance keeps the tweened rate meters (U1).
+func homeRowLine(n string, ti *tunnelInfo) string {
+	col, dot, _ := stateCell(roleName(n), ti.State)
+	down, up := sampleTunnel(n, ti)
+	s := samples[n]
+	if stateFlash(s, ti) {
+		col = YEL
+	}
+	line := fmt.Sprintf("  %s%s%s %s %s", col, dot, RST, padR(BOLD+trunc(n, 12)+RST, 13), padR(GRY+trunc(carrierText(n), 16)+RST, 17))
+	switch ti.State {
+	case "up", "degraded":
+		if serverSide() == "kharej" {
+			// The server-side glance: clients served, the ports this tunnel
+			// answers on, total served — the rate meters and RTT are the
+			// client's view (owner feedback 2026-11-23: role-aware head).
+			line += fmt.Sprintf("%d clients · ports %s · served %s", ti.Sess, portsSummary(n, 24), Human(servedTotal(s, ti)))
+		} else if TermCols() >= 96 {
+			// Wide: the rates get tweened meters (U1's GradBar+Fill). The
+			// spark gives way below 96; from 112 it returns next to them.
+			if s != nil {
+				initHeadTweens(s, down, up)
+				dt, dm := headRate(s.dNum, s.dBar, true, down, s.down)
+				ut, um := headRate(s.uNum, s.uBar, true, up, s.up)
+				line += fmt.Sprintf("%s↓%s %s %s  %s↑%s %s %s  %s", CYN, RST, padL(dt, 10), dm, SAF, RST, padL(ut, 10), um, padL(fmt.Sprintf("%.0f ms", ti.RTT), 6))
+				if TermCols() >= 112 {
+					line += "  " + Spark(s.down, 10)
+				}
+			}
+		} else {
+			line += fmt.Sprintf("%s↓%s %s  %s↑%s %s  %s", CYN, RST, padL(Rate(down), 10), SAF, RST, padL(Rate(up), 10), padL(fmt.Sprintf("%.0f ms", ti.RTT), 6))
+		}
+		if ti.Why != "" {
+			line += "  " + YEL + ti.Why + RST
+		}
+	default:
+		_, _, txt := stateCell(roleName(n), ti.State)
+		if ti.Why != "" {
+			txt += " · " + ti.Why
+		}
+		line += GRY + txt + RST
+	}
+	return line
+}
+
+// glanceMax is how many rows the head's glance list shows before the "+N more"
+// line (bash main_menu parity).
+const glanceMax = 6
+
+// glanceHeight is the glance region's constant line count: the boot intro
+// holds blank lines for rows that have not risen yet, so its cursor-return
+// repaint stays aligned frame after frame.
+func glanceHeight(n int) int {
+	h := n
+	if h > glanceMax {
+		h = glanceMax + 1 // the "+N more" line rides the cascade too
+	}
+	return h
+}
+
+// homeGlanceLines renders the head's glance rows, at most vis of them (-1 =
+// all): the boot intro passes a growing vis so the rows rise one beat apart.
+func homeGlanceLines(names []string, infos map[string]*tunnelInfo, vis int) []string {
+	var out []string
+	for i, n := range names {
+		if vis >= 0 && len(out) >= vis {
+			break
+		}
+		if i == glanceMax {
+			out = append(out, fmt.Sprintf("  %s+%d more in Tunnels%s", GRY, len(names)-glanceMax, RST))
+			break
+		}
+		out = append(out, homeRowLine(n, infos[n]))
+	}
+	return out
+}
+
+// ---- boot intro: the head cascades in after the wordmark reveal ----
+
+// Owner directive 2026-11-23: purposeful motion everywhere, so the first home
+// entry plays one composition cascade — badge, one row per beat, then the
+// gradient band sweeps left to right and lands on its static self — all under
+// 1.2 s, skippable with any key, never again in the run (introDone gates it).
+const (
+	introBadgeMS = 90 * time.Millisecond  // the badge appears one beat after the mark
+	introRowMS   = 75 * time.Millisecond  // each glance row rises one beat later
+	introSweepMS = 480 * time.Millisecond // the band's left-to-right sweep
+	introFrameMS = 60 * time.Millisecond  // the cascade's repaint cadence
+	introTail    = time.Second            // fast-tick window after the cascade (count-up)
+)
+
+// introUntil holds the animNow instant until which MainMenu keeps Choose on a
+// fast tick so the entry count-up has sub-second frames (the zero value is
+// always in the past: no fast ticks without an intro).
+var introUntil time.Time
+
+// introTotal is when the cascade settles for a tunnel count: badge + one beat
+// per glance line (rows and the "+N more" line) + the sweep. At most 7 glance
+// lines, so the ceiling is 90+8·75+480 ≈ 1.17 s.
+func introTotal(n int) time.Duration {
+	return introBadgeMS + time.Duration(glanceHeight(n)+1)*introRowMS + introSweepMS
+}
+
+// introRowVis is how many glance lines have risen at elapsed e.
+func introRowVis(e time.Duration, h int) int {
+	if e < introBadgeMS {
+		return 0
+	}
+	v := int((e - introBadgeMS) / introRowMS)
+	if v > h {
+		v = h
+	}
+	return v
+}
+
+// introSweepPhase is the band's sweep phase at elapsed e (0 before the last
+// row has risen, 1 = settled on the static GradBand).
+func introSweepPhase(e time.Duration, h int) float64 {
+	start := introBadgeMS + time.Duration(h+1)*introRowMS
+	if e <= start {
+		return 0
+	}
+	return clamp01(float64(e-start) / float64(introSweepMS))
+}
+
+// introBlockLines is one boot-cascade frame of the head below the wordmark:
+// the badge line, the band and the glance rows each appear on their beat and
+// hold blank lines until then, so the block's height never changes. e is the
+// elapsed time the frame shows — tests step e through the animNow seam.
+func introBlockLines(names []string, infos map[string]*tunnelInfo, e time.Duration) []string {
+	badge := homeBadgeLine(names, infos)
+	if e < introBadgeMS {
+		badge = make([]string, len(badge))
+	}
+	h := glanceHeight(len(names))
+	lines := append([]string{""}, badge...)
+	lines = append(lines, "  "+GradSweep(uiW(), introSweepPhase(e, h)), "")
+	drawn := homeGlanceLines(names, infos, introRowVis(e, h))
+	for i := 0; i < h; i++ {
+		if i < len(drawn) {
+			lines = append(lines, drawn[i])
+		} else {
+			lines = append(lines, "")
+		}
+	}
+	return lines
+}
+
+// introCascade plays the boot intro straight to the terminal on the banner
+// reveal's own mechanism: the wordmark reveal first, then each frame repainting
+// the head block via one cursor-return, frames advancing on the animNow clock.
+// A pressed key skips to the settled frame instantly (the key is spent on the
+// skip); no goroutine is involved — this runs inside the render, like
+// Banner(true).
+func introCascade(names []string, infos map[string]*tunnelInfo) {
+	CurHide()
+	defer CurShow()
+	Banner(true)
+	start := animNow()
+	total := introTotal(len(names))
+	skip := false
+	for {
+		e := animNow().Sub(start)
+		if skip {
+			e = total
+		}
+		lines := introBlockLines(names, infos, e)
+		for _, l := range lines {
+			fmt.Fprintf(Stdout, "%s%s\n", l, EL)
+		}
+		if e >= total {
+			return
+		}
+		if _, ok, _ := keyByteTimeout(0); ok {
+			skip = true
+		} else {
+			time.Sleep(introFrameMS)
+		}
+		fmt.Fprintf(Stdout, "\r\x1b[%dA", len(lines))
+	}
+}
+
 // gap writes n blank rows — the spacing rhythm is whole blank rows only
 // (ui_panel.go RowH/SecGap/PanelGap), so sections read at one cadence.
 func gap(w io.Writer, n int) {
@@ -545,6 +749,9 @@ func gap(w io.Writer, n int) {
 // cache at most every pairRefreshEvery — a stalled Kharej costs one pending
 // dial in the background, never the render loop.
 const pairRefreshEvery = 10 * time.Second
+
+// pairBreathMS is the pair dot's breath flip interval (ui_anim.go Breath).
+const pairBreathMS = 600 * time.Millisecond
 
 var (
 	pairMu     sync.Mutex
@@ -637,8 +844,14 @@ func pairLines(w io.Writer) {
 		case fail != "":
 			fmt.Fprintf(w, "  %s!%s %sScepter %s%s  %sunreachable: %s%s\n", YEL, RST, BOLD, trunc(n, 16), RST, YEL, fail, RST)
 		case doc != nil:
-			fmt.Fprintf(w, "  %s◆%s %sScepter %s%s  %sseq %d · %d remote tunnel(s) · up %s%s\n",
-				GRN, RST, BOLD, trunc(n, 16), RST, GRY, doc.StateSeq, len(doc.Tunnels), scepterUp(doc.UptimeS), RST)
+			// The status dot breathes (◆↔◇) only while a refresh is in flight
+			// — a live "working" tell; a settled pair holds the solid diamond.
+			dot := "◆"
+			if pairFlying && !Breath(pairBreathMS) {
+				dot = "◇"
+			}
+			fmt.Fprintf(w, "  %s%s%s %sScepter %s%s  %sseq %d · %d remote tunnel(s) · up %s%s\n",
+				GRN, dot, RST, BOLD, trunc(n, 16), RST, GRY, doc.StateSeq, len(doc.Tunnels), scepterUp(doc.UptimeS), RST)
 		default:
 			fmt.Fprintf(w, "  %s%s%s %sScepter %s%s  %schecking the pair…%s\n",
 				GRY, homeSpin.Frame(), RST, BOLD, trunc(n, 16), RST, GRY, RST)

@@ -2,6 +2,7 @@ package mgr
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -170,5 +171,58 @@ func TestFillClampsAndSnaps(t *testing.T) {
 	at = at.Add(tweenTau)
 	if v := g.Step(1); v <= 0 || v >= 1 {
 		t.Errorf("mid-flight fill = %v, want between 0 and 1", v)
+	}
+}
+
+// The band sweep (boot intro): phase 0 is the plain grey rule, phase 1 lands
+// byte-identically on the static GradLine, mid-flight differs from both ends,
+// and colour off degenerates to the static band at every phase.
+func TestGradSweepPhases(t *testing.T) {
+	const w = 10
+	InitColor(true, 8)
+	if got := GradSweep(w, 0); got != GRY+Rep("━", w)+RST {
+		t.Errorf("phase 0 = %q, want the plain grey rule", got)
+	}
+	if got := GradSweep(w, 1); got != GradLine(w) {
+		t.Errorf("phase 1 must land on the static band:\n%q\nwant\n%q", got, GradLine(w))
+	}
+	mid := GradSweep(w, 0.5)
+	if mid == GradLine(w) || mid == GradSweep(w, 0) {
+		t.Errorf("mid sweep must differ from both ends: %q", mid)
+	}
+	if !strings.Contains(mid, CYN) || !strings.Contains(mid, GRY) {
+		t.Errorf("mid sweep must carry the revealed half and the grey half: %q", mid)
+	}
+	if got := StripANSI(mid); got != Rep("━", w) {
+		t.Errorf("mid sweep glyphs = %q, want a full-width band", got)
+	}
+	InitColor(false, 8)
+	if got := GradSweep(w, 0.3); got != GradLine(w) {
+		t.Errorf("colour off must degenerate to the static band: %q", got)
+	}
+}
+
+// Breath flips each flip interval on the animNow clock and is parked bright
+// when anim is off.
+func TestBreath(t *testing.T) {
+	UseAnim = false
+	if !Breath(600 * time.Millisecond) {
+		t.Error("anim off: breath must park bright")
+	}
+	UseAnim = true
+	defer func() { UseAnim = false }()
+	at := time.Unix(0, 0)
+	animNow = func() time.Time { return at }
+	defer func() { animNow = time.Now }()
+	if !Breath(600 * time.Millisecond) {
+		t.Error("first interval is bright")
+	}
+	at = at.Add(700 * time.Millisecond)
+	if Breath(600 * time.Millisecond) {
+		t.Error("second interval is dim")
+	}
+	at = at.Add(600 * time.Millisecond)
+	if !Breath(600 * time.Millisecond) {
+		t.Error("third interval is bright again")
 	}
 }

@@ -7,6 +7,7 @@ package mgr
 
 import (
 	"math"
+	"strings"
 	"time"
 )
 
@@ -108,3 +109,53 @@ func NewFill(v float64) *Fill { return &Fill{*NewTween(clamp01(v))} }
 
 // Step eases the fill toward target (clamped to 0..1) and returns it.
 func (f *Fill) Step(target float64) float64 { return f.Tween.Step(clamp01(target)) }
+
+// Breath is the slow two-state pulse for a live "working" tell (the pair
+// line's dot while a refresh is in flight): it flips each flip interval on the
+// animNow clock, so a 2 s redraw cadence still alternates and tests can step
+// it. Static bright when anim is off — nothing loops for no reason.
+func Breath(flip time.Duration) bool {
+	if !UseAnim {
+		return true
+	}
+	if flip <= 0 {
+		flip = time.Second
+	}
+	return animNow().UnixNano()/int64(flip)%2 == 0
+}
+
+// GradSweep is the header band mid-boot-sweep: the ramp is revealed left to
+// right over the quiet grey rule, phase 0 being the plain rule and phase 1
+// byte-identical to GradLine, so the sweep lands exactly on the static band
+// (ui_grad.go). Colour off degenerates to GradLine at every phase — nothing
+// moves when colour cannot show it.
+func GradSweep(w int, phase float64) string {
+	phase = clamp01(phase)
+	if ColorTier == 0 || phase >= 1 {
+		return GradLine(w)
+	}
+	cut := int(float64(w)*phase + 0.5)
+	var b strings.Builder
+	last := ""
+	for i := 0; i < w; i++ {
+		if i >= cut {
+			if last != GRY {
+				b.WriteString(GRY)
+				last = GRY
+			}
+			b.WriteRune('━')
+			continue
+		}
+		t := 0.0
+		if w > 1 {
+			t = float64(i) / float64(w-1)
+		}
+		if e := GradRGB(t); e != last {
+			b.WriteString(e)
+			last = e
+		}
+		b.WriteRune('━')
+	}
+	b.WriteString(RST)
+	return b.String()
+}

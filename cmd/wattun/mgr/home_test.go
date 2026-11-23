@@ -8,6 +8,7 @@ package mgr
 
 import (
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -567,5 +568,230 @@ func TestPairRotateAuditHonesty(t *testing.T) {
 	out = capture(t, func() { scepterRotate() })
 	if !strings.Contains(out, "✓ Pairing key rotated") || strings.Contains(out, "NOT recorded") {
 		t.Errorf("an audited rotate must keep the plain success line:\n%s", out)
+	}
+}
+
+// ---- boot intro + entry animations (Lane A animation pass, 2026-11-23) ----
+// Owner directive: purposeful motion only — the cascade plays once per run,
+// the flash is tied to a state change, the count-up carries the entry, and
+// every anim-off / non-interactive render stays byte-identical to the static
+// head.
+
+// introFixture stands up two client tunnels the cascade can glance at.
+func introFixture(t *testing.T) ([]string, map[string]*tunnelInfo) {
+	t.Helper()
+	homeTestHost(t)
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "100")
+	for _, n := range []string{"alpha", "beta"} {
+		os.WriteFile(filepath.Join(P.Conf, n+".yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	}
+	return []string{"alpha", "beta"}, map[string]*tunnelInfo{
+		"alpha": {State: "up", RTT: 24},
+		"beta":  {State: "stopped"},
+	}
+}
+
+func renderIntro(names []string, infos map[string]*tunnelInfo, e time.Duration) string {
+	var b strings.Builder
+	for _, l := range introBlockLines(names, infos, e) {
+		fmt.Fprintln(&b, l)
+	}
+	return b.String()
+}
+
+// The cascade renders the rows in order, then settles: frame sequence stepped
+// through the elapsed-time seam, and the settled frame is stable (a much later
+// elapsed time draws the same block).
+func TestIntroCascadeSequence(t *testing.T) {
+	names, infos := introFixture(t)
+	UseAnim = false // introBlockLines is a pure function of e; no flash, no count-up
+	defer func() { UseAnim = false }()
+	// frame 0: the mark just landed — no badge, no rows yet
+	if out := renderIntro(names, infos, 0); strings.Contains(out, "alpha") || strings.Contains(out, Tagline) {
+		t.Errorf("the first frame must be empty below the mark:\n%s", out)
+	}
+	// badge beat: the badge line is in, rows still rising
+	out := renderIntro(names, infos, introBadgeMS)
+	if !strings.Contains(out, Tagline) || strings.Contains(out, "alpha") {
+		t.Errorf("badge beat must show the badge and no rows yet:\n%s", out)
+	}
+	// one row per beat: alpha risen, beta still waiting (half a beat later)
+	out = renderIntro(names, infos, introBadgeMS+3*introRowMS/2)
+	if !strings.Contains(out, "alpha") || strings.Contains(out, "beta") {
+		t.Errorf("second beat must show only the first row:\n%s", out)
+	}
+	// settled: everything in, and a much later frame is identical
+	total := introTotal(len(names))
+	settled := renderIntro(names, infos, total)
+	if !strings.Contains(settled, "alpha") || !strings.Contains(settled, "beta") {
+		t.Errorf("settled frame must show every row:\n%s", settled)
+	}
+	if later := renderIntro(names, infos, 10*total); later != settled {
+		t.Errorf("the cascade must settle (a later frame differs):\n%s\n---\n%s", settled, later)
+	}
+	if total > 1200*time.Millisecond {
+		t.Errorf("intro total %v exceeds the 1.2 s ceiling", total)
+	}
+	// the settled glance region is exactly the static head's glance
+	static := homeGlanceLines(names, infos, -1)
+	block := introBlockLines(names, infos, total)
+	tail := block[len(block)-glanceHeight(len(names)):]
+	for i := range static {
+		if tail[i] != static[i] {
+			t.Errorf("settled glance row %d = %q, want the static %q", i, tail[i], static[i])
+		}
+	}
+}
+
+// Any pressed key during the cascade skips to the settled frame instantly (the
+// key is spent on the skip), and the settled rows still land on screen.
+func TestIntroCascadeKeySkips(t *testing.T) {
+	names, infos := introFixture(t)
+	UseAnim, IsTTY, EL = true, true, "\x1b[K"
+	defer func() { UseAnim, IsTTY, EL = false, false, "" }()
+	defer feed("\x1b")()
+	t0 := time.Now()
+	out := capture(t, func() { introCascade(names, infos) })
+	if d := time.Since(t0); d > 800*time.Millisecond {
+		t.Errorf("esc skip took %v, want the banner reveal plus one frame", d)
+	}
+	if !strings.Contains(out, "alpha") || !strings.Contains(out, "beta") {
+		t.Errorf("the skip must still paint the settled frame:\n%s", out)
+	}
+}
+
+// The state-change flash: three alternating renders (amber, new colour,
+// amber), then it expires and never returns without another change; anim off
+// never flashes and never even tracks state (zero cost, byte-stable).
+func TestStateFlashCountsDownAndExpires(t *testing.T) {
+	InitColor(true, 8)
+	NonInteractive = false
+	UseAnim = true
+	defer func() { UseAnim = false }()
+	s := &sample{}
+	if stateFlash(s, &tunnelInfo{State: "up"}) {
+		t.Error("the first sight of a tunnel must not flash")
+	}
+	want := []bool{true, false, true}
+	for i, w := range want {
+		if got := stateFlash(s, &tunnelInfo{State: "down"}); got != w {
+			t.Errorf("flash render %d = %v, want %v", i, got, w)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if stateFlash(s, &tunnelInfo{State: "down"}) {
+			t.Error("the flash must expire after its three renders")
+		}
+	}
+	UseAnim = false
+	s2 := &sample{}
+	stateFlash(s2, &tunnelInfo{State: "up"})
+	if stateFlash(s2, &tunnelInfo{State: "down"}) {
+		t.Error("anim off must never flash")
+	}
+	if s2.state != "" {
+		t.Errorf("anim off must not even track state, got %q", s2.state)
+	}
+}
+
+// The Kharej glance's served total counts up from zero on entry (anim on, the
+// animNow seam drives the tween); the anim-off half is the existing Kharej
+// glance pin, which must keep passing byte-identically.
+func TestServedCountUpOnEntry(t *testing.T) {
+	homeTestHost(t)
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "100")
+	_ = ConfSet("side", "kharej")
+	os.WriteFile(filepath.Join(P.Conf, "kh.yml"), []byte("mode: server\ncarrier: udp\nports:\n  - 443\n"), 0o600)
+	UseAnim = true
+	defer func() { UseAnim = false }()
+	at := time.Unix(0, 0)
+	animNow = func() time.Time { return at }
+	defer func() { animNow = time.Now }()
+	ti := &tunnelInfo{State: "up", Sess: 3, Out: 15e6}
+	samples["kh"] = &sample{in: 0, out: 0, at: time.Now()}
+	defer delete(samples, "kh")
+	render := func() string {
+		var b strings.Builder
+		homeHead(&b, []string{"kh"}, map[string]*tunnelInfo{"kh": ti}, nil, false)
+		return b.String()
+	}
+	if first := render(); !strings.Contains(first, "served "+Human(0)) {
+		t.Errorf("entry render must count up from zero:\n%s", first)
+	}
+	at = at.Add(600 * time.Millisecond)
+	mid := render()
+	if strings.Contains(mid, Human(15e6)) || !strings.Contains(mid, "served ") {
+		t.Errorf("mid count-up must be between the ends:\n%s", mid)
+	}
+	at = at.Add(30 * time.Second)
+	if fin := render(); !strings.Contains(fin, "served "+Human(15e6)) {
+		t.Errorf("the count-up must land on the real total:\n%s", fin)
+	}
+}
+
+// The pair status dot breathes (◆↔◇) only while a refresh is in flight; an
+// idle pair holds the solid diamond.
+func TestPairDotBreathesOnlyInFlight(t *testing.T) {
+	homeTestHost(t)
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "80")
+	os.WriteFile(filepath.Join(P.Conf, "irp.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	resetPairCache()
+	defer resetPairCache()
+	pairMu.Lock()
+	pairDocs["irp"] = &scepterDoc{Ver: "3.5.0", StateSeq: 1}
+	pairAt = time.Now()
+	pairMu.Unlock()
+	UseAnim = true
+	defer func() { UseAnim = false }()
+	at := time.Unix(0, 0)
+	animNow = func() time.Time { return at }
+	defer func() { animNow = time.Now }()
+	render := func() string {
+		var b strings.Builder
+		pairLines(&b)
+		return b.String()
+	}
+	setFlying := func(f bool) {
+		pairMu.Lock()
+		pairFlying = f
+		pairMu.Unlock()
+	}
+	setFlying(false)
+	if out := render(); strings.Contains(out, "◇") {
+		t.Errorf("an idle pair must not breathe:\n%s", out)
+	}
+	setFlying(true)
+	bright := render()
+	at = at.Add(pairBreathMS + 100*time.Millisecond)
+	dim := render()
+	if n1, n2 := strings.Count(bright+dim, "◇"), strings.Count(bright+dim, "◆"); n1 != 1 || n2 != 1 {
+		t.Errorf("in flight the dot must alternate exactly (◇=%d ◆=%d):\nbright:\n%s\ndim:\n%s", n1, n2, bright, dim)
+	}
+}
+
+// The non-interactive head is byte-identical across renders: no cascade, no
+// flash, no count-up may leak into it.
+func TestHomeHeadStaticWhenNonInteractive(t *testing.T) {
+	homeTestHost(t)
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "100")
+	NonInteractive = true
+	defer func() { NonInteractive = false }()
+	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	ti := &tunnelInfo{State: "up", RTT: 20}
+	render := func() string {
+		var b strings.Builder
+		homeHead(&b, []string{"ir"}, map[string]*tunnelInfo{"ir": ti}, nil, false)
+		return b.String()
+	}
+	first, second := render(), render()
+	if first != second {
+		t.Errorf("non-interactive head must be byte-stable:\n%s\n---\n%s", first, second)
+	}
+	if strings.Contains(first, "\x1b") {
+		t.Errorf("non-interactive head must carry no escapes:\n%q", first)
 	}
 }
