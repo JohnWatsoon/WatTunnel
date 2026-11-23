@@ -1412,3 +1412,35 @@ become a first-class `shaped` preset in the auto-test menu (Go + bash + NI), the
 --extended worked), and the cockpit's remote auto.test gains the shaped mode. Lane dispatched; the
 pending wizard/UI audit will surface any remaining flag-only gaps for the same treatment.
 Commit: none (directive record)
+
+## 2026-11-23 · reviewer · Review of 999ef51..978adda (84 commits, 3.5.0) — verdict + fixes
+Checked: every commit authored JohnWatsoon, no AI mention; gofmt empty; build+vet both GOOS; mgr suite
+ok; Scepter update path verified (tag via ValidScepterTag, binary checked against RSA-signed SHA256SUMS,
+fail-closed, downgrade floor 3.5.0, update.run CapFull only). CI on the branch was RED in four places —
+none of them was ever run locally because -race and raw-socket tests only run on Ubuntu CI. Fixed:
+- 7463344 test: TestFileScepterOpsUpdateStatus hard-coded the Windows host's systemd=false.
+- 978adda race (cmd): openProbe set pr.timer after unlocking probeMu while test.close reads it; latch
+  cadence test seams were plain vars swapped under goroutines a prior test leaked → atomic durVar.
+- 2139aa9 race (wat): ScepterState.watchTunnels read watchStop/watchDone from the struct unlocked while
+  Stop nils them → channels are passed as arguments.
+- 2139aa9 PHANTOM WAS BROKEN: the client packs the flow's first datagram right after the ClientHello in
+  the same segment, but the server discarded the whole first data segment as "the hello". Every flow
+  (every hop!) lost its first datagram; TestPTCPLoopback hung CI for 15 min. Server now strips exactly
+  the TLS record (5 + len) and delivers the rest. Also: client read f.established unlocked; the codec
+  test's option offsets did not match the real layout (MSS,SACKP,TS,NOP,WS — TS at 26, WS at 36,
+  data-segment TSecr at seg[28:]); loopback waits are now bounded (recvWithin) so a lost datagram fails
+  instead of hanging the suite.
+- 8d3cbf8 PHANTOM, second bug: readRawTCP returned the payload as a slice of the reader's shared buffer;
+  the next read overwrote datagrams still queued in rx (loopback: 2/30 distinct). On a real path that is
+  corrupt ciphertext → AEAD drop under any load. Payload is now copied. SYN-ACK sets established under p.mu.
+Lessons for the implementer (apply going forward):
+1. A test you did not see pass on Linux has not passed. Raw-socket (TestPTCP/TestSpray/TestICMP) and
+   -race results come only from CI: push to a review branch and read the run before logging "done".
+2. Tests that read a carrier must never block forever — wrap Recv in a deadline.
+3. A goroutine never reads struct fields another method mutates under a lock; pass them in.
+4. Test seams that goroutines read must be atomic, or the test must join the goroutine before swapping.
+5. Never hand a slice of a reused read buffer across a channel; copy it.
+Remaining risks (not blockers, owner to weigh): Phantom has zero field time and only now passes a
+loopback; repair v2 and -fast-rtx show no measured p99/throughput gain so far; the Go manager is the
+default in 3.5.0 but unreleased — first real installs are its first field test.
+Commit: 7463344, 978adda, 2139aa9, 8d3cbf8, (this entry)
