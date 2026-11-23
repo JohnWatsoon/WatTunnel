@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112213   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112214   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -3170,8 +3170,10 @@ wizard_kharej() {
   # Owner directive (2026-11-22): zero extra manual steps. The first mint embeds the
   # token-bootstrap pairing (field 10, pair=full unless an expert row preset a tier) and the
   # server config carries latch-port — no ask for either; the engine derives the pairing from
-  # the token, a stored .pairing overrides it, `pairing: false` disables.
-  T_PAIR=${T_PAIR:-$SCEPTER_DEFAULT_TIER}
+  # the token, a stored .pairing overrides it, `pairing: false` disables. FIELD 10 IS
+  # `pair=<tier>` verbatim (wat.ParsePairingTokenField is L5-strict: a bare tier word is a
+  # lookalike and silently arms NOTHING — found live on the first real pair, 2026-11-23).
+  T_PAIR=${T_PAIR:-pair=$SCEPTER_DEFAULT_TIER}
   latch=$(pick_latch_port "$listen" "$m")
   write_server() {
     local old; old=$(umask); umask 077
@@ -3219,7 +3221,7 @@ wizard_kharej() {
   echo
   say "  Next on Iran: run ${CYN}${SELF}${RST} → $(key_label n) → paste token"
   hint "Token contains secret key — share privately ($SELF token $name)"
-  hint "Pairing rides this token (field 10, pair=$T_PAIR): Iran's wizard picks it up, no watp1: line needed."
+  hint "Pairing rides this token (field 10, $T_PAIR): Iran's wizard picks it up, no watp1: line needed."
   [ "$NONINTERACTIVE" = 1 ] && printf 'TUNNEL=%s\nTOKEN=%s\n' "$name" "$(cat "$CONF/$name.token")"
   if [ "$fecb" = 1 ] && [ "$NONINTERACTIVE" != 1 ]; then
     echo; adv_menu "$name"
@@ -4029,6 +4031,9 @@ wizard_iran() {
       echo "key-file: $CONF/$name.key"
       echo "carrier: $T_CARRIER"
       echo "peer: $T_PEER"
+      # The pasted token is stored beside the config (0600): the Go cockpit's paired
+      # detection reads NAME.token's field 10 (owner directive 2026-11-23).
+      [ -n "$tok" ] && { umask 077; printf '%s\n' "$tok" >"$CONF/$name.token"; }
       local _bl # M1: a bond token's per-leg endpoints (empty for a single carrier); each leg dials its own.
                 # A directional leg (:up/:down, 3.3.9) dials the same address as its base carrier, and the
                 # engine registers per-carrier flags under the base name, so the key loses the suffix.
@@ -4480,8 +4485,9 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   # Owner directive (2026-11-22): the first mint embeds the token-bootstrap pairing
   # (field 10, pair=full unless an expert row preset a tier) and latch-port rides the
   # server config — no ask for either; collision-checked against every port this
-  # wizard picked (plan, reverse plan, metrics).
-  T_PAIR=${T_PAIR:-$SCEPTER_DEFAULT_TIER}
+  # wizard picked (plan, reverse plan, metrics). Field 10 is pair=<tier> verbatim
+  # (ParsePairingTokenField is L5-strict; a bare tier arms nothing).
+  T_PAIR=${T_PAIR:-pair=$SCEPTER_DEFAULT_TIER}
   local latch='' re ex
   ex=" $m "
   for re in $AUTO_USED_PORTS; do ex+="$re "; done
@@ -4544,7 +4550,7 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   echo
   say "  Next on Iran: run ${CYN}${SELF}${RST} → $(key_label n) → paste token"
   hint "Token contains secret key — share privately ($SELF token $name)"
-  hint "Pairing rides this token (field 10, pair=$T_PAIR): Iran's wizard picks it up, no watp1: line needed."
+  hint "Pairing rides this token (field 10, $T_PAIR): Iran's wizard picks it up, no watp1: line needed."
   [ "$NONINTERACTIVE" = 1 ] && printf 'TUNNEL=%s\nTOKEN=%s\n' "$name" "$(cat "$CONF/$name.token")"
   return 0
 }

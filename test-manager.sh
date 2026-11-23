@@ -2295,7 +2295,7 @@ EOF
   VER=3.5.0; bin_ver() { echo "$VER"; }; bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
   ( NONINTERACTIVE=1 NI_CARRIER=tcp NI_NAME=t_pair NI_ADDR=203.0.113.5 NI_LISTEN=26443 wizard_kharej ) >/dev/null 2>&1
   read_token "$(cat "$WAT_CONF/t_pair.token")"
-  chk "pair wizard: the first mint embeds pair=full (field 10)" "$T_CARRIER/$T_PAIR" "tcp/full"
+  chk "pair wizard: the first mint embeds pair=full (field 10, L5-strict form)" "$T_CARRIER/$T_PAIR" "tcp/pair=full"
   chk "pair wizard: the minted token has exactly 10 pipe fields" "$(sed 's/^wat1://' <<<"$(cat "$WAT_CONF/t_pair.token")" | base64 -d | tr -cd '|' | wc -c | tr -d ' ')" "9"
   chk "pair wizard: the server config carries latch-port" "$(grep -c '^latch-port: 20443$' "$WAT_CONF/t_pair.yml")" "1"
   # collision-checked: a tunnel that picked the default latch port itself moves it off
@@ -2304,7 +2304,7 @@ EOF
   ( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_paira NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
   read_token "$(cat "$WAT_CONF/t_paira.token")"
   chk "auto wizard: the mint keeps the plan in field 9" "$T_CARRIER/$(plan_part "$T_AUTO" d | grep -cE '^udp:[0-9]+,tcp:[0-9]+')" "auto/1"
-  chk "auto wizard: the mint embeds pair=full beside the plan" "$T_PAIR" "full"
+  chk "auto wizard: the mint embeds pair=full beside the plan" "$T_PAIR" "pair=full"
   chk "auto wizard: the server config carries latch-port too" "$(grep -c '^latch-port: 20443$' "$WAT_CONF/t_paira.yml")" "1"
   ( wait_link() { return 1; }; test_tunnel() { :; }
     NI_PRESET='' NI_FAKESNI='' NI_FAKEMODE='' NI_FAKETTL='' NI_POOLROT='' NI_POOLBYTES='' NI_ECH=''
@@ -2312,6 +2312,7 @@ EOF
   chk "iran wizard: pasting the token is the only step (no pairing key)" "$(grep -c '^pairing:' "$WAT_CONF/t_iran_pair.yml")" "0"
   chk "iran wizard: no watp1 ask anywhere in the wizard" "$(sed -n '/^wizard_iran() {/,/^}$/p' wattun-manager | grep -vE '^[[:space:]]*(#.*)?$' | grep -c 'watp1')" "0"
   chk "iran wizard: the client config carries the latch default (auto revival)" "$(grep -c '^latch-port: 20443$' "$WAT_CONF/t_iran_pair.yml")" "1"
+  chk "iran wizard: the pasted token is stored for the cockpit paired detection" "$(grep -c '^wat1:' "$WAT_CONF/t_iran_pair.token")" "1"
   rm -f "$WAT_CONF"/t_pair* "$WAT_CONF"/t_iran_pair*
   eval "$_bt_sctl"; eval "$_bt_fmp"; eval "$_bt_lb"; eval "$_bt_su"; eval "$_bt_cf"
   eval "$_bt_bv"; eval "$_bt_bvok"; VER=$_bt_ver
@@ -2468,17 +2469,17 @@ EOF
   chk "conflict: a normal tunnel keeps its name" \
     "$(eval "$_tul"; listen_conflict_desc tcp 26443)" "tunnel 'probe-12345'"
   rm -f "$WAT_CONF/hidden2.yml" "$WAT_CONF/probe-$_ts.yml" "$WAT_CONF/probe-$_ts-2.yml" "$WAT_CONF/probe-12345.yml"
-  chk "mgr: MGR_VERSION bumped with the token-bootstrap wizard (owner directive 2026-11-22)" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112213"
+  chk "mgr: MGR_VERSION bumped with the token-bootstrap wizard (owner directive 2026-11-22)" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112214"
 
   # refresh_token keeps field 10 when the allowed ports change
   role() { echo Kharej; }
   printf 'mode: server\ncarrier: tcp\nports:\n  - 443\n' >"$WAT_CONF/t_pk.yml"
-  ( umask 077; make_token tcp '198.51.100.3:443' kpk1234567890 '' '' '' '443' '' '' full >"$WAT_CONF/t_pk.token" )
+  ( umask 077; make_token tcp '198.51.100.3:443' kpk1234567890 '' '' '' '443' '' '' pair=full >"$WAT_CONF/t_pk.token" )
   printf 'mode: server\ncarrier: tcp\nports:\n  - 443\n  - 8443\n' >"$WAT_CONF/t_pk.yml"
   refresh_token t_pk
   read_token "$(cat "$WAT_CONF/t_pk.token")"
   chk "refresh: the allow list follows the config" "$T_PORTS" "443,8443"
-  chk "refresh: field 10 survives a token refresh" "$T_PAIR" "full"
+  chk "refresh: field 10 survives a token refresh" "$T_PAIR" "pair=full"
   rm -f "$WAT_CONF"/t_pk.yml "$WAT_CONF"/t_pk.token
   rm -f "$PAIR_STORE" "$PAIR_AUDIT"
 
