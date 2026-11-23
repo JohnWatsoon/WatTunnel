@@ -672,3 +672,35 @@ func writeTestYml(t *testing.T, dir, name, body string) {
 		t.Fatalf("write %s.yml: %v", name, err)
 	}
 }
+
+// TestChangeTypePairedRoutesRemote (owner live-test feedback 2026-11-23): on a
+// PAIRED Iran tunnel the local [c] Carrier row runs the remote carrier change —
+// the "Kharej fixed this type" dead-end appears only when the tunnel is unpaired.
+func TestChangeTypePairedRoutesRemote(t *testing.T) {
+	dir := scepterCarrierTestConf(t)
+	writeTestYml(t, dir, "ir", "mode: client\ncarrier: tcp\npeer: 198.51.100.7:4443\npairing: true\n")
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"scepter.hello":  {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"ver": "3.5.0", "caps": "manage", "state_seq": float64(7)}}}},
+		"state.get":      {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"ver": "3.5.0", "state_seq": float64(7), "tunnels": []any{}}}}},
+		"carrier.change": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "ir", "carrier": "tls"}}}},
+	}}
+	oldDial := scepterDial
+	scepterDial = func(string) (ScepterClient, error) { return cl, nil }
+	defer func() { scepterDial = oldDial }()
+	scepterStubLocalMachine(t, true)
+	NonInteractive = false
+	defer feed("4\n\ny")() // pick tls (quick pick 4), listen default, confirm
+	out := capture(t, func() { changeType("ir") })
+	if len(cl.cmds["carrier.change"]) != 1 {
+		t.Fatalf("paired [c] must send carrier.change, got %v (%s)", cl.cmds, out)
+	}
+	if strings.Contains(out, "Kharej fixed this type") {
+		t.Error("the dead-end message must not appear on a paired tunnel")
+	}
+	// unpaired twin: the honest dead-end stays
+	writeTestYml(t, dir, "plain", "mode: client\ncarrier: tcp\npeer: 198.51.100.7:4443\n")
+	out2 := capture(t, func() { changeType("plain") })
+	if !strings.Contains(out2, "Kharej fixed this type") {
+		t.Errorf("unpaired [c] keeps the honest dead-end:\n%s", out2)
+	}
+}

@@ -727,6 +727,14 @@ func changeType(n string) {
 			Err(err.Error())
 		}
 	case Role(n) == "Iran":
+		// Paired (owner live-test feedback, 2026-11-23): the pairing is the licence to
+		// change it remotely — one keypress runs the cockpit flow (Kharej patches its
+		// side, link-checks, rolls back; this tunnel follows locally). The dead-end
+		// "Kharej fixed this" text stays only for unpaired tunnels, where it is true.
+		if IsPaired(n) {
+			scepterCarrierFromLocal(n)
+			return
+		}
 		Say("  In use: " + c + ". Kharej fixed this type when it made the token.")
 		Hint("To choose freely: on Kharej make a new tunnel, then paste the new token here (tunnel page, t).")
 	case IsAutoKharej(n):

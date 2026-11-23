@@ -937,3 +937,34 @@ func scepterAutoApplyRow(pair string, cl ScepterClient, doc scepterDoc, r scepte
 	Ok(fmt.Sprintf("Row %d applied on Kharej: '%s' is on %s (its link check passed).", r.Rank, name, carrier))
 	scepterFollowLocal(pair, name, carrier, nil, lp)
 }
+
+// scepterCarrierFromLocal is the local tunnel page's [c] Carrier row on a PAIRED
+// Iran tunnel (owner live-test feedback, 2026-11-23): the old flow dead-ended with
+// "Kharej fixed this type when it made the token" — but the pairing is exactly the
+// licence to change it remotely. One keypress now opens the remote carrier change
+// (Kharej patches its side, link-checks, rolls back on failure, then the local
+// follow rewrites this tunnel and re-checks the link). False when nothing ran
+// (unreachable pair, missing capability, or the user cancelled the prompts).
+func scepterCarrierFromLocal(n string) bool {
+	cl, err := scepterDial(n)
+	if err != nil {
+		Warn(err.Error())
+		Hint("Until the pair answers, the old way works: on Kharej make a new tunnel, paste its token here (tunnel page, t).")
+		return false
+	}
+	helloErr := ""
+	var hello map[string]any
+	if h, e := cl.Call("scepter.hello", nil); e != nil {
+		helloErr = e.Error()
+	} else if h.Code != scepterCodeOK {
+		helloErr = scepterCodeHint(h.Code, h.Params)
+	} else {
+		hello = h.Params
+	}
+	caps := scepterPairCaps(n, hello, helloErr)
+	var seq uint64
+	if doc, derr := scepterFetchDoc(cl); derr == nil {
+		seq = doc.StateSeq
+	}
+	return scepterRemoteCarrierChange(n, cl, caps, n, seq)
+}
