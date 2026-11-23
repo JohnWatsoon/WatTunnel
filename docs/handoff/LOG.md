@@ -1383,3 +1383,23 @@ tween; events timeline with gradient spine + typed nodes; remote tunnel mini-cha
 All UseAnim/NonInteractive gated (static byte-stable otherwise), animNow-seamed, no new goroutines,
 honest data only. Design law kept: animations present data/work, never loop as decoration.
 Commit: none (dispatch record)
+
+## 2026-11-23 · supervisor · Animation/UI advantage pass closed — 3 lanes, all committed
+Owner directive: use the Go manager's freedom for richer layouts, more animation, graphs. Lanes:
+- a3a6cf9 (A, boot+home): staggered intro cascade (banner→badge→rows→gradient sweep ~1.17 s, any-key
+  skip), state-change amber flash on the state cell, breathing pair dot while a refresh flies,
+  count-up tweens on entry; shared homeBadgeLine/homeGlanceLines refactor; GradSweep+Breath
+  primitives. 8 pins.
+- 7ed4e02 (B, measurement): speed-test live panel (elapsed-paced GradBar, honest signals only) +
+  count-up landing with shared-scale down/up bars; carrier-test probe board (pending breath/testing
+  spinner/pass meter/fail why, in-place redraw, zero goroutines); ranked-table stagger + winner
+  gradient sweep + pass-rate bar. 4 pin groups; static paths byte-stable.
+- 5962844 (C, ops+cockpit): update phase stepper (gradient complete/spinner+shimmer active/red-x
+  failed; mailbox-mapped; latch caption on the drop); doctor group cascade + breathing latch dot;
+  backup chunk-meter tween + verify shimmer; events timeline (gradient spine, typed nodes, newest
+  first); remote-tunnel mini-chart from an honest rate ring; disabled-row settle pulse. 7 pins.
+Design law held: every animation presents real data or real work, lands static ≤~1.2 s, is
+UseAnim/IsTTY/NonInteractive gated (NONINTERACTIVE byte-stable), animNow-seamed, no decoration loops.
+Final combined gates: gofmt empty; build+vet + GOOS=linux clean; mgr suite ok; cmd suite ok (3/3 incl.
+the two env-flaky tests this run). Deliberately left: the empty-tunnels hint gets badge+sweep only.
+Commit: a3a6cf9, 7ed4e02, 5962844, (this entry)
