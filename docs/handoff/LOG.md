@@ -1444,3 +1444,18 @@ Remaining risks (not blockers, owner to weigh): Phantom has zero field time and 
 loopback; repair v2 and -fast-rtx show no measured p99/throughput gain so far; the Go manager is the
 default in 3.5.0 but unreleased — first real installs are its first field test.
 Commit: 7463344, 978adda, 2139aa9, 8d3cbf8, (this entry)
+
+## 2026-11-24 · reviewer · Handoff 4 plan written — Scepter, made real (PLAN-scepter-fix.md)
+Design review of Scepter against the owner's route found seven issues, four serious and code-confirmed:
+F1 the cockpit cannot work on reverse tunnels (the -scepter-call one-shot binds the live unit's listen
+port; production is reverse tcp); F2 revoke is a no-op in the default token-derived setup and a deleted
+store is re-derived from the token on restart; F3 the token is full root over Kharej (pairing key = PSK,
+pair=full default, any localhost port reachable via tunnel.create, backup.export leaks every key,
+pair.rotate locks the owner out); F4 remote create still hands the user a token to paste. Also F5 latch
+useless where direct Iran→Kharej is cut + unjittered 30 s re-dial beacon, F6 a new session per click,
+F7 developer jargon and duplicate places in the UI. Plan (local, gitignored): R1 cockpit via a 0600 unix
+socket into the LIVE unit; R2 token = one-time bootstrap, claim on first contact mints a separate pairing
+credential; R3 revoke = tombstone; R4 remote create writes the local half; R5 Kharej port guard +
+backup.export CapFull; R6 no latch for reverse, jitter+backoff otherwise; R7 UI in user words, one place
+per tunnel. Four phases A-D. No pushes by the implementer; the reviewer runs CI once at the end.
+Commit: (this entry)
