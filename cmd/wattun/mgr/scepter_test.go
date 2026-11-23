@@ -1252,10 +1252,18 @@ func TestScepterRemoteKeyrotateTwin(t *testing.T) {
 	if !strings.Contains(out, "now to dial with the new key") {
 		t.Errorf("the restart offer is missing:\n%s", out)
 	}
+	// the carry claim is honest: the old token DID carry pair=manage and the
+	// rewrite merged it in, so and only so the line says "carried over"
+	// (round-3 finding)
+	if !strings.Contains(out, "pair capability carried over") {
+		t.Errorf("the carried-over claim is missing:\n%s", out)
+	}
 }
 
-// A non-twin remote tunnel: the token is shown and may be saved to a file.
-func TestScepterRemoteKeyrotateSavePath(t *testing.T) {
+// The twin rewrite without an old token: the success line must NOT claim the
+// pair capability was carried over (there was none to carry — round-3
+// finding), and the new key still lands.
+func TestScepterRemoteKeyrotateTwinNoOldToken(t *testing.T) {
 	InitColor(false, 8)
 	NonInteractive = false
 	dir := t.TempDir()
@@ -1263,21 +1271,102 @@ func TestScepterRemoteKeyrotateSavePath(t *testing.T) {
 	P.Conf = dir
 	defer func() { P.Conf = old }()
 	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.key"), []byte("old-key\n"), 0o600)
 	newTok := MakeToken("udp", "198.51.100.7:4443", "brand-new-key-42", "", "", "", "", "", "")
 	cl := &scriptClient{byCmd: map[string][]scriptAns{
-		"tunnel.keyrotate": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "web", "token": newTok}}}},
+		"tunnel.keyrotate": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "ir", "token": newTok}}}},
 	}}
-	save := filepath.Join(dir, "saved-token.txt")
-	defer feed("y" + save + "\n")() // y rotates, then the save path line
-	out := capture(t, func() { scepterRemoteKeyrotate("ir", cl, "web", 6) })
+	defer feed("yn")() // y rotates, n skips the twin restart
+	out := capture(t, func() { scepterRemoteKeyrotate("ir", cl, "ir", 6) })
+	if key := mustRead(filepath.Join(dir, "ir.key")); !strings.Contains(key, "brand-new-key-42") {
+		t.Errorf("the twin's key file was not rewritten: %q", key)
+	}
+	if strings.Contains(out, "carried over") {
+		t.Errorf("no old token existed — the line must not claim a carry:\n%s", out)
+	}
+	if !strings.Contains(out, "rewritten: new key and token") {
+		t.Errorf("the honest success line is missing:\n%s", out)
+	}
+}
+
+// The peerless-pair twin (round-3 finding): the remote name matches the local
+// tunnel, but the pair's config has no resolvable host — a same-named local
+// tunnel proves nothing, so nothing is rewritten and the token goes out by
+// hand. A bare save-file name lands in the conf dir, not the CWD (the old
+// dead `filepath.Dir(s) == ""` check never ran and the CWD got the file).
+func TestScepterRemoteKeyrotateSavePath(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	// peerless pair: the local "ir" IS the same-named twin shape the old code
+	// rewrote on sight (host == "" passed the old twin check)
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\nreverse: true\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.key"), []byte("old-key\n"), 0o600)
+	newTok := MakeToken("udp", "198.51.100.7:4443", "brand-new-key-42", "", "", "", "", "", "")
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.keyrotate": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "ir", "token": newTok}}}},
+	}}
+	defer feed("y0tok.txt\n0")() // y rotates, 0 past the empty pick screen, bare save name, pause
+	out := capture(t, func() { scepterRemoteKeyrotate("ir", cl, "ir", 6) })
 	if len(cl.cmds["tunnel.keyrotate"]) != 1 {
 		t.Fatalf("keyrotate not sent:\n%s", out)
+	}
+	if key := mustRead(filepath.Join(dir, "ir.key")); key != "old-key\n" {
+		t.Errorf("the peerless twin's key was rewritten: %q", key)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ir.token")); err == nil {
+		t.Error("the peerless twin's token must not be written")
 	}
 	if !strings.Contains(out, "New token for this tunnel's Iran side") {
 		t.Errorf("the token is not shown:\n%s", out)
 	}
-	if got := mustRead(save); got != newTok+"\n" {
-		t.Errorf("the saved token = %q, want the rotated token", got)
+	// the bare name resolved into the conf dir next to the tunnel's files
+	if got := mustRead(filepath.Join(dir, "tok.txt")); got != newTok+"\n" {
+		t.Errorf("the saved token = %q, want the rotated token in the conf dir", got)
+	}
+	if !strings.Contains(out, "Token saved") {
+		t.Errorf("the save is not reported:\n%s", out)
+	}
+}
+
+// The wrong-peer twin (round-3 finding): a local tunnel with the remote's name
+// but dialing another host is never silently rewritten — the pick screen lists
+// only tunnels dialing the pair's host, and a declined pick hands the token
+// out instead of rewriting anything.
+func TestScepterRemoteKeyrotateWrongPeerTwin(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	// pk is the pair (dials 198.51.100.7); ir shares the remote's name but
+	// dials a DIFFERENT Kharej (198.51.100.9); pk2 also dials the pair's host
+	// so the pick screen has two candidates to decline
+	os.WriteFile(filepath.Join(dir, "pk.yml"), []byte("mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npeer: 198.51.100.9:4443\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "pk2.yml"), []byte("mode: client\ncarrier: tcp\npeer: 198.51.100.7:5543\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.key"), []byte("wrong-peer-key\n"), 0o600)
+	newTok := MakeToken("udp", "198.51.100.7:4443", "brand-new-key-42", "", "", "", "", "", "")
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.keyrotate": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "ir", "token": newTok}}}},
+	}}
+	defer feed("yq\n0")() // y rotates, q declines the pick screen, no save line, pause
+	out := capture(t, func() { scepterRemoteKeyrotate("pk", cl, "ir", 6) })
+	if key := mustRead(filepath.Join(dir, "ir.key")); key != "wrong-peer-key\n" {
+		t.Errorf("the wrong-peer twin's key was rewritten: %q", key)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pk.key")); err == nil {
+		t.Error("a declined pick must not rewrite any key file")
+	}
+	if !strings.Contains(out, "Which local tunnel is 'ir's Iran side?") {
+		t.Errorf("the pick screen did not open:\n%s", out)
+	}
+	if !strings.Contains(out, "New token for this tunnel's Iran side") {
+		t.Errorf("the declined pick must hand the token out:\n%s", out)
 	}
 }
 
@@ -1426,5 +1515,284 @@ func TestScepterFleetEntryRegistered(t *testing.T) {
 	}
 	if rc := dispatch("scepter_fleet"); rc != 0 {
 		t.Errorf("dispatch rc = %d, want 0", rc)
+	}
+}
+
+// ---- round-3 fix pins (fix-cluster FX-A) ----
+
+// An answered rejection must never reach a success line: scepterRun prints
+// the code error and returns the answer, so every "… applied on Kharej" /
+// "created" line is gated on the answer's Code == scepterCodeOK (round-3
+// finding: the old code printed Ok for ANY answered code).
+func TestScepterAppliedGateOnCode(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	denied := ScepterResult{Code: scepterCodeDenied, Params: map[string]any{"need": "manage"}}
+	internal := ScepterResult{Code: scepterCodeInternal, Params: map[string]any{"rolled_back": true}}
+	for _, c := range []struct {
+		name   string
+		run    func(cl ScepterClient)
+		script map[string][]scriptAns
+		feed   string
+		noLine string // the success phrase that must stay absent
+	}{
+		{
+			"ports", func(cl ScepterClient) { scepterRemotePorts(cl, "web", "443", 6) },
+			map[string][]scriptAns{"tunnel.edit": {{r: denied}}},
+			"443\n0", "applied on Kharej",
+		},
+		{
+			"preset catalog", func(cl ScepterClient) { scepterRemotePreset(cl, "web", 6) },
+			map[string][]scriptAns{
+				"preset.list": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{
+					"presets": []any{map[string]any{"name": "stealth", "desc": "pad"}}}}}},
+				"preset.apply": {{r: denied}},
+			},
+			"\ry0", "applied on Kharej",
+		},
+		{
+			"preset plain", func(cl ScepterClient) { scepterRemotePreset(cl, "web", 6) },
+			map[string][]scriptAns{
+				"preset.list":  {{r: ScepterResult{Code: scepterCodeUnknownCmd}}},
+				"preset.apply": {{r: denied}},
+			},
+			"s0", "applied on Kharej",
+		},
+		{
+			"keyrotate", func(cl ScepterClient) { scepterRemoteKeyrotate("ir", cl, "web", 6) },
+			map[string][]scriptAns{"tunnel.keyrotate": {{r: denied}}},
+			"y0\n0", "rewritten",
+		},
+		{
+			"wizard create", func(cl ScepterClient) { scepterWizardCreate("ir", cl, scepterDoc{StateSeq: 7}) },
+			map[string][]scriptAns{"tunnel.create": {{r: internal}}},
+			"\n2\n\n443\ny", "created on Kharej",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cl := &scriptClient{byCmd: c.script}
+			defer feed(c.feed)()
+			out := capture(t, func() { c.run(cl) })
+			if !strings.Contains(out, "answered code") {
+				t.Errorf("the rejection was not printed:\n%s", out)
+			}
+			if strings.Contains(out, c.noLine) {
+				t.Errorf("a rejected intent must not print %q:\n%s", c.noLine, out)
+			}
+		})
+	}
+}
+
+// The remote state-save row treats "0" as the real value it is (save on
+// shutdown only), not an unset word — the local Advanced page excludes it the
+// same way (advanced.go's state-save row; round-3 finding: the old
+// scepterKeyAskSet path dropped the key instead of setting 0).
+func TestScepterStateSaveZero(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	rows := scepterKeyRows("udp", false)
+	var row *scepterKeyRow
+	for i := range rows {
+		if rows[i].key == "state-save" {
+			row = &rows[i]
+		}
+	}
+	if row == nil {
+		t.Fatal("no state-save row")
+	}
+	rest := feed("0\n")
+	patch, ok := row.ask("udp")
+	rest()
+	if !ok || len(patch.drop) != 0 || patch.set["state-save"] != "0" {
+		t.Errorf("state-save 0 = %+v (ok %v), want set {state-save: 0}, no drop", patch, ok)
+	}
+	rest = feed("-\n")
+	patch, ok = row.ask("udp")
+	rest()
+	if !ok || len(patch.set) != 0 || len(patch.drop) != 1 || patch.drop[0] != "state-save" {
+		t.Errorf("state-save - = %+v (ok %v), want a drop", patch, ok)
+	}
+}
+
+// The remote rows know the tunnel's direction (from the local twin): sessions
+// > 1 is refused on a reverse tunnel with the engine's reason, and the
+// fake-mode picker omits sum/seqsum there (the engine refuses both — offering
+// them only bought an apply-rollback; round-3 finding).
+func TestScepterKeyRowsReverse(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	rowOf := func(key string, rev bool) *scepterKeyRow {
+		rows := scepterKeyRows("udp", rev)
+		for i := range rows {
+			if rows[i].key == key {
+				return &rows[i]
+			}
+		}
+		return nil
+	}
+	// sessions with rev=true: 8 is refused (the validator re-asks), "-" unsets
+	s := rowOf("sessions", true)
+	if s == nil {
+		t.Fatal("no sessions row")
+	}
+	rest := feed("8\n-\n")
+	patch, ok := s.ask("udp")
+	rest()
+	if !ok || len(patch.set) != 0 || len(patch.drop) != 1 || patch.drop[0] != "sessions" {
+		t.Errorf("reverse sessions ask = %+v (ok %v), want 8 refused then a drop", patch, ok)
+	}
+	// with rev=false the same answer sets the key (the flag reached the validator)
+	s = rowOf("sessions", false)
+	rest = feed("8\n")
+	patch, ok = s.ask("udp")
+	rest()
+	if !ok || patch.set["sessions"] != "8" {
+		t.Errorf("direct sessions ask = %+v (ok %v), want sessions 8 set", patch, ok)
+	}
+	// the fake-mode list: sum/seqsum only off-reverse
+	opts := scepterFakeModes(true)
+	for _, o := range opts {
+		if o.v == "sum" || o.v == "seqsum" {
+			t.Errorf("reverse fake-mode picker offers %q (the engine refuses it)", o.v)
+		}
+	}
+	have := map[string]bool{}
+	for _, o := range opts {
+		have[o.v] = true
+	}
+	if !have["rst"] || !have["seq"] || !have["ttl"] {
+		t.Error("the reverse fake-mode picker lost its usable modes")
+	}
+	opts = scepterFakeModes(false)
+	have = map[string]bool{}
+	for _, o := range opts {
+		have[o.v] = true
+	}
+	if !have["sum"] || !have["seqsum"] {
+		t.Error("the direct fake-mode picker must still offer sum/seqsum")
+	}
+}
+
+// The port-offset row is a plain flag like the "Other key" row always
+// admitted: the standard prompt sets it, the row no longer claims it needs a
+// future engine command (round-3 finding).
+func TestScepterPortOffsetRow(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	rows := scepterKeyRows("udp", false)
+	var row *scepterKeyRow
+	for i := range rows {
+		if rows[i].key == "port-offset" {
+			row = &rows[i]
+		}
+	}
+	if row == nil {
+		t.Fatal("no port-offset row")
+	}
+	if row.ask == nil {
+		t.Fatal("port-offset must be settable (the grey row lied)")
+	}
+	rest := feed("99999\n500\n")
+	patch, ok := row.ask("udp")
+	rest()
+	if !ok || patch.set["port-offset"] != "500" {
+		t.Errorf("port-offset ask = %+v (ok %v), want 99999 refused then 500 set", patch, ok)
+	}
+	rest = feed("0\n")
+	patch, ok = row.ask("udp")
+	rest()
+	if !ok || len(patch.drop) != 1 || patch.drop[0] != "port-offset" {
+		t.Errorf("port-offset 0 = %+v (ok %v), want a drop (0 is the engine default)", patch, ok)
+	}
+}
+
+// The command id carries the process id (seamed): two manager processes
+// minting on the same coarse Windows clock tick would collide and the
+// engine's journal would replay the wrong outcome into the other process
+// (round-3 finding).
+func TestScepterNewIDPidSeam(t *testing.T) {
+	old := scepterPID
+	defer func() { scepterPID = old }()
+	scepterPID = 111
+	a := scepterNewID()
+	scepterPID = 222
+	b := scepterNewID()
+	if a == b {
+		t.Errorf("ids from different pid seams collided: %q", a)
+	}
+	if !strings.HasPrefix(a, "mgr111-") || !strings.HasPrefix(b, "mgr222-") {
+		t.Errorf("id shape = %q / %q, want mgr<pid>-<nano>-<seq>", a, b)
+	}
+}
+
+// The in-memory caches (pair statuses, rotation markers) drop entries older
+// than 24 h: a renamed or deleted tunnel's entry must not live forever in a
+// long-running manager (round-3 finding).
+func TestScepterCachePruned(t *testing.T) {
+	InitColor(false, 8)
+	dir := t.TempDir()
+	old := P.Conf
+	P.Conf = dir
+	defer func() { P.Conf = old }()
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
+	oldFetch, oldBy := scepterStatusFetch, scepterStatusBy
+	fetches := 0
+	scepterStatusFetch = func(string) string { fetches++; return "Kharej 3.5.0" }
+	scepterStatusBy = map[string]scepterStatusEntry{
+		"gone": {txt: "stale", at: time.Now().Add(-25 * time.Hour)},
+	}
+	defer func() { scepterStatusFetch, scepterStatusBy = oldFetch, oldBy }()
+	ScepterPairStatus("ir")
+	scepterStatusMu.Lock()
+	_, live := scepterStatusBy["gone"]
+	n := len(scepterStatusBy)
+	scepterStatusMu.Unlock()
+	if live {
+		t.Error("the stale status entry survived the prune")
+	}
+	if n != 1 || fetches != 1 {
+		t.Errorf("status cache = %d entries after %d fetch(es), want only the fresh one", n, fetches)
+	}
+	// the rotation markers prune the same way
+	oldRot := scepterRotBy
+	scepterRotBy = map[string]time.Time{"gone": time.Now().Add(-25 * time.Hour)}
+	defer func() { scepterRotBy = oldRot }()
+	scepterRotMark("ir")
+	scepterRotMu.Lock()
+	_, live = scepterRotBy["gone"]
+	scepterRotMu.Unlock()
+	if live {
+		t.Error("the stale rotation marker survived the prune")
+	}
+	if scepterRotSuffix("ir") == "" {
+		t.Error("the fresh rotation marker is missing")
+	}
+	if scepterRotSuffix("gone") != "" {
+		t.Error("a pruned marker must not render")
+	}
+}
+
+// The delete screen carries the band like every other screen (round-3
+// cosmetic), and the delete still works end to end.
+func TestScepterRemoteDeleteBand(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	cl := &scriptClient{byCmd: map[string][]scriptAns{
+		"tunnel.delete": {{r: ScepterResult{Code: scepterCodeOK, Params: map[string]any{"backup": "web.yml.bak"}}}},
+	}}
+	defer feed("web\n0")() // type the name, pause
+	out := capture(t, func() { scepterRemoteDelete(cl, "web") })
+	if len(cl.cmds["tunnel.delete"]) != 1 || cl.cmds["tunnel.delete"][0]["confirm"] != "web" {
+		t.Errorf("delete args = %v", cl.cmds["tunnel.delete"])
+	}
+	if !strings.Contains(out, "Deleted. Backup on Kharej") {
+		t.Errorf("the outcome is missing:\n%s", out)
+	}
+	if !strings.Contains(out, strings.Repeat("─", uiW())) {
+		t.Errorf("the delete screen lacks the GradBand rule:\n%s", out)
 	}
 }

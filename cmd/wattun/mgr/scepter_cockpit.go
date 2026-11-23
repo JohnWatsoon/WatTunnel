@@ -217,10 +217,16 @@ const scepterTTLDefault = 600
 // repeat on some Windows clocks — the engine's scepterCallSeq lesson).
 var scepterIDSeq atomic.Uint64
 
+// scepterPID seams the process id into every command id: two manager
+// processes on Windows coarse clocks can mint the same nanosecond, and the
+// engine's journal keys outcomes by id — a collision would replay the WRONG
+// outcome into the other process. Var so tests can pin the seam.
+var scepterPID = os.Getpid()
+
 // scepterNewID mints one command id; retries of the SAME intent reuse it (the
 // server journal answers at-most-once), a rebuilt intent gets a fresh one.
 func scepterNewID() string {
-	return fmt.Sprintf("mgr%d-%d", time.Now().UnixNano(), scepterIDSeq.Add(1))
+	return fmt.Sprintf("mgr%d-%d-%d", scepterPID, time.Now().UnixNano(), scepterIDSeq.Add(1))
 }
 
 // scepterCall runs one RPC under the spinner (design-motion: motion only while
@@ -867,6 +873,13 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 			}
 			return // a refused param key: the hint already said which
 		}
+		// an answered code the wizard does not recover from (denied, rate,
+		// internal…) was printed by scepterRun with its code and hint — it
+		// must never fall through to the "created" line (round-3 finding:
+		// the same gate the key menu, ports and preset paths got)
+		if res.Code != scepterCodeOK {
+			return
+		}
 		scepterShowCreated(res.Params)
 		return
 	}
@@ -966,7 +979,7 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 			// every event, so a cursor-built intent answered stale each time)
 			ran = scepterRemotePorts(cl, name, row.Ports, stateSeq)
 		case "k":
-			ran = scepterRemoteKeyMenu(cl, name, row, stateSeq)
+			ran = scepterRemoteKeyMenu(pair, cl, name, row, stateSeq)
 		case "z":
 			ran = scepterRemotePreset(cl, name, stateSeq)
 		case "q":
@@ -1178,11 +1191,13 @@ func scepterRemotePorts(cl ScepterClient, name, cur string, baseSeq uint64) bool
 	}
 	pstr := ReplyV
 	fmt.Fprintln(Stdout)
-	_, ok := scepterRun(cl, "tunnel.edit", func(seq uint64, id string) map[string]any {
+	res, ok := scepterRun(cl, "tunnel.edit", func(seq uint64, id string) map[string]any {
 		return map[string]any{"id": id, "name": name, "ports": pstr,
 			"base_seq": seq, "ttl_s": scepterTTLDefault}
 	}, baseSeq)
-	if ok {
+	// only an OK gets the success line — an answered rejection was printed by
+	// scepterRun with its code and hint (round-3 finding)
+	if ok && res.Code == scepterCodeOK {
 		Ok("Ports applied on Kharej.")
 	}
 	Pause()
@@ -1236,17 +1251,49 @@ func scepterKeyAskOnOff(key, label, sub string) (scepterKeyPatch, bool) {
 	return scepterKeyPatch{set: map[string]string{key: "true"}}, true
 }
 
+// scepterTwinReverse reports whether the remote tunnel's local twin runs
+// reverse. The state document's row carries no direction flag, so reverse is
+// detected from the local twin (the scepterFollowLocal identification: same
+// name, this server, dialing the pair's host); with no twin the direct
+// validators run — Kharej's own re-check is the real gate. The validators
+// need it because the engine refuses sessions > 1 and the sum/seqsum fake
+// modes on a reverse tunnel: offering them only buys an apply-rollback.
+func scepterTwinReverse(pair, name string) bool {
+	host := scepterPeerHost(pair)
+	if host == "" || !fileExists(filepath.Join(P.Conf, name+".yml")) || Role(name) != "Iran" ||
+		scepterPeerHost(name) != host {
+		return false
+	}
+	return IsReverse(name)
+}
+
+// scepterFakeModes is the remote desync-mode picker's list. On a reverse
+// tunnel the engine refuses sum and seqsum (checksum markers can kill the
+// flow — the local page's rule, anticensor.go), so they are omitted instead
+// of offered as a guaranteed rollback.
+func scepterFakeModes(rev bool) []acOpt {
+	var opts []acOpt
+	for _, m := range strings.Fields(acAllModes) {
+		if rev && (m == "sum" || m == "seqsum") {
+			continue
+		}
+		opts = append(opts, acOpt{m, fakeModeDesc(m)})
+	}
+	return opts
+}
+
 // scepterKeyRows: the menu, grouped Performance, Shaping & DPI, Safety, State —
 // the Advanced page's groups. The fake-* and dialer keys act when the remote
-// tunnel dials (reverse); allow-clients/bind when it listens.
-func scepterKeyRows(car string) []scepterKeyRow {
+// tunnel dials (reverse); allow-clients/bind when it listens. rev is the local
+// twin's direction (scepterTwinReverse).
+func scepterKeyRows(car string, rev bool) []scepterKeyRow {
 	return []scepterKeyRow{
 		{"m", "max-mbps", "Speed limit", "MB/s per direction, per session", func(string) (scepterKeyPatch, bool) {
 			return scepterKeyAskSet("max-mbps", "Speed ceiling in MB/s", vMbpsAdv)
 		}},
 		{"s", "sessions", "Sessions", "1-16 (one udp/tcp/tls/ws/h2/h2c/grpc carrier, no reverse)", func(string) (scepterKeyPatch, bool) {
 			return scepterKeyAskSet("sessions", fmt.Sprintf("Sessions 1-%d", engMaxSessions),
-				func(s string) bool { return vSessions(s, car, false) })
+				func(s string) bool { return vSessions(s, car, rev) })
 		}},
 		{"c", "conns", "Conns", "1-64 per pool", func(string) (scepterKeyPatch, bool) {
 			return scepterKeyAskSet("conns", fmt.Sprintf("Conns 1-%d", engMaxConns), vConns)
@@ -1331,7 +1378,11 @@ func scepterKeyRows(car string) []scepterKeyRow {
 			return scepterKeyPatch{set: map[string]string{"fake-sni": v}}, true
 		}},
 		{"2", "fake-mode", "Desync mode", "how the decoy hello is made unusable (sum/seqsum never on reverse)", func(string) (scepterKeyPatch, bool) {
-			v := pickFakeMode("seq")
+			v := pickValue("Desync mode", "how the decoy hello is made unusable for the real server",
+				scepterFakeModes(rev), "seq", "NI_FAKEMODE", "", nil)
+			if v != "" && !vFakeMode(v) {
+				return scepterKeyPatch{}, false
+			}
 			if v == "" {
 				return scepterKeyPatch{}, false
 			}
@@ -1393,10 +1444,31 @@ func scepterKeyRows(car string) []scepterKeyRow {
 			return scepterKeyPatch{set: map[string]string{"bind": ReplyV}}, true
 		}},
 		{"v", "state-save", "State save", "seconds between quota/total saves (0 = shutdown only)", func(string) (scepterKeyPatch, bool) {
-			return scepterKeyAskSet("state-save", "State save interval in seconds", vStateSave)
+			// "0" is a real value here (save on shutdown only), not an unset
+			// word — the local Advanced page excludes it from the unset words
+			// the same way (advanced.go's state-save row, round-3 finding:
+			// scepterKeyAskSet's unsetWord would drop it instead)
+			if !AskOK("State save interval in seconds (0 = shutdown only)", "", vStateSave) {
+				return scepterKeyPatch{}, false
+			}
+			if ReplyV == "" || ReplyV == "-" || ReplyV == "default" {
+				return scepterKeyPatch{drop: []string{"state-save"}}, true
+			}
+			return scepterKeyPatch{set: map[string]string{"state-save": ReplyV}}, true
 		}},
 		{"7", "state-dir", "State dir", "where the remote unit keeps its state files", nil},
-		{"8", "port-offset", "Port offset", "adds to every client listen port", nil},
+		{"8", "port-offset", "Port offset", "adds to every client listen port (0 = off)", func(string) (scepterKeyPatch, bool) {
+			// a plain flag: the standard prompt sets it, like "Other key" could
+			// already — the row only lied about needing a future command
+			// (round-3 finding)
+			return scepterKeyAskSet("port-offset", "Port offset in whole ports (0 = off)", func(s string) bool {
+				if unsetWord(s) || intIn(s, 0, 65535) {
+					return true
+				}
+				Err("Enter the port offset as a whole number, at most 65535 (0 = off).")
+				return false
+			})
+		}},
 		{"*", "", "Other key", "set or drop any one config key the menu does not list", func(string) (scepterKeyPatch, bool) {
 			if !AskOK("Config key (a flag name, e.g. tcp-mimic)", "", vScepterKey) {
 				return scepterKeyPatch{}, false
@@ -1434,11 +1506,12 @@ func scepterEditArgs(name string, patch scepterKeyPatch, baseSeq uint64, id stri
 // (the tunnel page's "k"). One edit per pick; the menu stays open, and a
 // successful edit refetches the state so the next intent is built on the new
 // seq instead of answering stale.
-func scepterRemoteKeyMenu(cl ScepterClient, name string, row scepterTunRow, baseSeq uint64) bool {
+func scepterRemoteKeyMenu(pair string, cl ScepterClient, name string, row scepterTunRow, baseSeq uint64) bool {
 	sel := 0
 	changed := false
+	rev := scepterTwinReverse(pair, name)
 	for {
-		rows := scepterKeyRows(row.Carrier)
+		rows := scepterKeyRows(row.Carrier, rev)
 		items := make([]Item, len(rows))
 		for i, r := range rows {
 			desc := r.hint
@@ -1574,11 +1647,13 @@ func scepterRemotePresetCatalog(cl ScepterClient, name string, baseSeq uint64, r
 			return false
 		}
 		fmt.Fprintln(Stdout)
-		_, ok := scepterRun(cl, "preset.apply", func(seq uint64, id string) map[string]any {
+		res, ok := scepterRun(cl, "preset.apply", func(seq uint64, id string) map[string]any {
 			return map[string]any{"id": id, "name": name, "preset": rows[i].Name,
 				"base_seq": seq, "ttl_s": scepterTTLDefault}
 		}, baseSeq)
-		if ok {
+		// only an OK gets the success line — an answered rejection was printed
+		// by scepterRun with its code and hint (round-3 finding)
+		if ok && res.Code == scepterCodeOK {
 			Ok("Preset '" + rows[i].Name + "' applied on Kharej.")
 		}
 		Pause()
@@ -1613,11 +1688,13 @@ func scepterRemotePresetPlain(cl ScepterClient, name string, baseSeq uint64) boo
 		return false
 	}
 	fmt.Fprintln(Stdout)
-	_, ok = scepterRun(cl, "preset.apply", func(seq uint64, id string) map[string]any {
+	res, ok := scepterRun(cl, "preset.apply", func(seq uint64, id string) map[string]any {
 		return map[string]any{"id": id, "name": name, "preset": preset,
 			"base_seq": seq, "ttl_s": scepterTTLDefault}
 	}, baseSeq)
-	if ok {
+	// only an OK gets the success line — an answered rejection was printed by
+	// scepterRun with its code and hint (round-3 finding)
+	if ok && res.Code == scepterCodeOK {
 		Ok("Preset '" + preset + "' applied on Kharej.")
 	}
 	Pause()
@@ -1738,12 +1815,22 @@ func scepterRemoteMute(cl ScepterClient, name string, row scepterTunRow) bool {
 
 // scepterRemoteKeyrotate rotates the remote tunnel's PSK (tunnel.keyrotate).
 // The answer carries the new token for the tunnel's Iran side: when the twin
-// is the local tunnel (same name, dialing this pair's Kharej — the follow
-// rule scepterFollowLocal uses), its key and token files are rewritten at
-// once, with the old field-10 pair capability carried over (F7: the field
-// must survive byte-for-byte, or a token-bootstrap pairing silently drops).
-// Otherwise the token is shown and may be saved to a file. The unit restarts
-// on Kharej; the twin needs a restart to dial with the new key.
+// is the local tunnel, its key and token files are rewritten at once, with
+// the old field-10 pair capability carried over (F7: the field must survive
+// byte-for-byte, or a token-bootstrap pairing silently drops). Otherwise the
+// token is shown and may be saved to a file. The unit restarts on Kharej;
+// the twin needs a restart to dial with the new key.
+//
+// The twin is identified by the wave-2 follow rule (scepterFollowLocal): a
+// same-named local tunnel alone proves nothing — two paired Kharej can both
+// have a remote of this name, and a key rewrite of the wrong tunnel breaks it
+// with no link check to catch it (a carrier change at least reverts on a dead
+// link; a rewritten key does not). So the name match counts only when the
+// local yml dials the pair's own host; anything else goes through the pick
+// screen of tunnels that do, and when nothing matches (or the pick is
+// declined — a peerless pair has no verifiable candidate at all) the token is
+// handed out instead of rewriting anything (round-3 finding: the old
+// `host == ""` arm rewrote any same-named tunnel silently).
 func scepterRemoteKeyrotate(pair string, cl ScepterClient, name string, baseSeq uint64) bool {
 	Page("Rotate key", name+" · on Kharej "+pair)
 	GradBand(Stdout, uiW())
@@ -1761,6 +1848,9 @@ func scepterRemoteKeyrotate(pair string, cl ScepterClient, name string, baseSeq 
 	if !ok {
 		return false
 	}
+	if res.Code != scepterCodeOK {
+		return false // the rejection was printed by scepterRun; nothing was rotated
+	}
 	tok, _ := res.Params["token"].(string)
 	if tok == "" {
 		Warn("Kharej answered OK but carried no token — read it on Kharej's console and paste it on the Iran side.")
@@ -1769,75 +1859,104 @@ func scepterRemoteKeyrotate(pair string, cl ScepterClient, name string, baseSeq 
 	}
 	host := scepterPeerHost(pair)
 	local := name
-	twin := fileExists(filepath.Join(P.Conf, local+".yml")) && Role(local) == "Iran" &&
-		(host == "" || scepterPeerHost(local) == host)
-	if twin {
-		if err := scepterRotateLocalToken(local, tok); err != nil {
-			Err("Rewriting " + local + " failed: " + err.Error())
-			scepterShowToken(tok)
-		} else {
-			Ok("Local twin '" + local + "' rewritten: new key and token, pair capability carried over.")
-			scepterRotMark(local)
-			if Confirm("Restart "+Unit(local)+" now to dial with the new key?", true) {
-				if scepterRestartAndCheck(local) {
-					Ok(local + " links on the new key.")
-				} else {
-					Hint("Kharej is on the new key; " + local + " must come up with it — check the tunnel page for why.")
-				}
-			} else {
-				Hint("Restart " + Unit(local) + " when ready; it dials with the old key until then.")
-			}
-		}
-		Pause()
-		return true
-	}
-	scepterShowToken(tok)
-	Hint("This server is not '" + name + "'s Iran side (or its name differs there): the token")
-	Hint("goes to the tunnel's Iran side — paste it, or rewrite its key file with the token's key.")
-	fmt.Fprintln(Stdout)
-	if !AskOK("Save the token to a file (empty = don't save)", "", func(s string) bool {
-		if s == "" {
+	if !fileExists(filepath.Join(P.Conf, local+".yml")) || Role(local) != "Iran" ||
+		host == "" || scepterPeerHost(local) != host {
+		local = pickTunnel("Which local tunnel is '"+name+"'s Iran side?",
+			"it dials "+orStr(host, "this pair's Kharej")+" — its key and token are rewritten",
+			func(n string) bool { return Role(n) == "Iran" && host != "" && scepterPeerHost(n) == host })
+		if local == "" {
+			scepterTokenHandoff(name, tok)
 			return true
 		}
-		if strings.ContainsAny(s, "\n\r") || filepath.Dir(s) == "" {
-			Err("Give a one-line file path.")
-			return false
-		}
-		return true
-	}) {
-		Pause()
-		return true
 	}
-	if ReplyV != "" {
-		if err := atomicWrite(ReplyV, []byte(tok+"\n"), 0o600); err != nil {
-			Err("Writing the token failed: " + err.Error())
+	carried, err := scepterRotateLocalToken(local, tok)
+	if err != nil {
+		Err("Rewriting " + local + " failed: " + err.Error())
+		scepterShowToken(tok)
+	} else {
+		// honest about the carry: the pair field is only "carried over" when
+		// the rewrite merged the old token's field in (round-3 finding — the
+		// old line claimed it even with no old token at all)
+		if carried {
+			Ok("Local twin '" + local + "' rewritten: new key and token, pair capability carried over.")
 		} else {
-			Ok("Token saved: " + ReplyV + " (0600).")
+			Ok("Local twin '" + local + "' rewritten: new key and token.")
+		}
+		scepterRotMark(local)
+		if Confirm("Restart "+Unit(local)+" now to dial with the new key?", true) {
+			if scepterRestartAndCheck(local) {
+				Ok(local + " links on the new key.")
+			} else {
+				Hint("Kharej is on the new key; " + local + " must come up with it — check the tunnel page for why.")
+			}
+		} else {
+			Hint("Restart " + Unit(local) + " when ready; it dials with the old key until then.")
 		}
 	}
 	Pause()
 	return true
 }
 
+// scepterTokenHandoff shows a rotated token that was NOT rewritten into a
+// local twin: the honest why, then the optional save. A bare file name lands
+// in the conf dir next to the tunnel's files, not in whatever the CWD is
+// (round-3 finding: the dead `filepath.Dir(s) == ""` check never ran, and a
+// bare name wrote into the process's working directory).
+func scepterTokenHandoff(name, tok string) {
+	scepterShowToken(tok)
+	Hint("No local tunnel here serves '" + name + "' (matched by name AND the pair's")
+	Hint("host, or picked from the ones that do): the token goes to the tunnel's")
+	Hint("Iran side — paste it, or rewrite its key file with the token's key.")
+	fmt.Fprintln(Stdout)
+	if !AskOK("Save the token to a file (empty = don't save)", "", func(s string) bool {
+		if s == "" {
+			return true
+		}
+		if strings.ContainsAny(s, "\n\r") {
+			Err("Give a one-line file path.")
+			return false
+		}
+		return true
+	}) {
+		Pause()
+		return
+	}
+	if ReplyV != "" {
+		path := ReplyV
+		if filepath.Dir(path) == "." {
+			path = filepath.Join(P.Conf, path)
+		}
+		if err := atomicWrite(path, []byte(tok+"\n"), 0o600); err != nil {
+			Err("Writing the token failed: " + err.Error())
+		} else {
+			Ok("Token saved: " + path + " (0600).")
+		}
+	}
+	Pause()
+}
+
 // scepterRotateLocalToken rewrites the local twin's key and token with the
 // rotated token's contents. The twin dials with the KEY file, so that is the
 // load-bearing write; the token rides for a future re-paste. The old field-10
 // pair capability is carried into the new token when the rotation dropped it
-// (F7, 2026-11-22): losing the field would silently unpair the twin.
-func scepterRotateLocalToken(local, tok string) error {
+// (F7, 2026-11-22): losing the field would silently unpair the twin. carried
+// says the merge happened — the success line only claims the carry then.
+func scepterRotateLocalToken(local, tok string) (bool, error) {
 	nt, err := ReadToken(tok)
 	if err != nil {
-		return fmt.Errorf("the rotated token does not parse: %v", err)
+		return false, fmt.Errorf("the rotated token does not parse: %v", err)
 	}
+	carried := false
 	if raw, rerr := os.ReadFile(filepath.Join(P.Conf, local+".token")); rerr == nil {
 		if t, terr := ReadToken(strings.TrimSpace(string(raw))); terr == nil && t.Pair != "" && nt.Pair == "" {
 			tok = MakeToken(nt.Carrier, nt.Peer, nt.Key, nt.Path, nt.SNI, nt.Icmp, nt.Ports, nt.Rev, nt.Auto, t.Pair)
+			carried = true
 		}
 	}
 	if err := atomicWrite(filepath.Join(P.Conf, local+".key"), []byte(nt.Key+"\n"), 0o600); err != nil {
-		return err
+		return false, err
 	}
-	return atomicWrite(filepath.Join(P.Conf, local+".token"), []byte(tok+"\n"), 0o600)
+	return carried, atomicWrite(filepath.Join(P.Conf, local+".token"), []byte(tok+"\n"), 0o600)
 }
 
 // scepterShowToken prints a token the way p2ShowToken does (secret, one line).
@@ -1855,8 +1974,19 @@ var (
 	scepterRotBy = map[string]time.Time{}
 )
 
+// scepterCacheMaxAge bounds the in-memory per-tunnel caches (rotations, pair
+// statuses): renamed or deleted tunnels would otherwise keep their entries
+// forever in a long-running manager. 24 h past an entry's write it is dropped
+// — far past the 30 min marker window and the 60 s status TTL it serves.
+const scepterCacheMaxAge = 24 * time.Hour
+
 func scepterRotMark(local string) {
 	scepterRotMu.Lock()
+	for n, at := range scepterRotBy {
+		if time.Since(at) > scepterCacheMaxAge {
+			delete(scepterRotBy, n)
+		}
+	}
 	scepterRotBy[local] = time.Now()
 	scepterRotMu.Unlock()
 }
@@ -1906,6 +2036,11 @@ func ScepterPairStatus(name string) string {
 	}
 	txt := scepterStatusFetch(name)
 	scepterStatusMu.Lock()
+	for n, e := range scepterStatusBy {
+		if time.Since(e.at) > scepterCacheMaxAge {
+			delete(scepterStatusBy, n) // a renamed/deleted tunnel's entry must not live forever
+		}
+	}
 	scepterStatusBy[name] = scepterStatusEntry{txt: txt, at: time.Now()}
 	scepterStatusMu.Unlock()
 	return txt + scepterRotSuffix(name)
@@ -2009,6 +2144,7 @@ func scepterRemoteUnit(cl ScepterClient, name, action string) bool {
 // confirm:"name"); Kharej keeps everything as .bak, reversible there.
 func scepterRemoteDelete(cl ScepterClient, name string) bool {
 	Page("Delete remote tunnel", name)
+	GradBand(Stdout, uiW()) // every screen carries the band (round-3 cosmetic)
 	fmt.Fprintln(Stdout)
 	Warn("The tunnel stops and its files move to .bak on Kharej (reversible there).")
 	fmt.Fprintln(Stdout)
