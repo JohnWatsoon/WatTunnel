@@ -812,7 +812,7 @@ func NewScepterState(pair *PairingConfig, src ScepterSource, journalPath string)
 	}
 	if src != nil { // the tunnel liveness watcher needs a source to watch (F8-state, 2026-11-22)
 		ss.watchStop, ss.watchDone = make(chan struct{}), make(chan struct{})
-		go ss.watchTunnels()
+		go ss.watchTunnels(ss.watchStop, ss.watchDone)
 	}
 	return ss, nil
 }
@@ -887,10 +887,9 @@ func (ss *ScepterState) watchGone(name string) {
 // one-poll listing hiccup must not re-baseline it — reappearing after one miss keeps its history and diffs
 // normally — and the second miss fires tunnel_down why:"gone" when it was last known up, unless the scepter
 // path announced the tunnel's end within the window (a stop or the delete's watchGone: already news).
-func (ss *ScepterState) watchTunnels() {
-	// both channels captured once: Stop nils the struct fields under the lock, and the goroutine must not
-	// read them back (a field read here would race the nil-out under -race)
-	ws, wd := ss.watchStop, ss.watchDone
+func (ss *ScepterState) watchTunnels(ws, wd chan struct{}) {
+	// both channels are passed in, never read from ss: Stop nils the struct fields under the lock, and an
+	// unlocked field read here raced that nil-out under -race
 	defer close(wd)
 	for {
 		select {

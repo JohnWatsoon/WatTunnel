@@ -44,17 +44,17 @@ func TestPTCPSegmentCodec(t *testing.T) {
 	if syn[12]>>4 != 10 { // 20 + 20 B options
 		t.Fatalf("SYN header length = %d words", syn[12]>>4)
 	}
-	// MSS 1460 at option offset 2, SACK-permitted (4,2), timestamps (8,10), wscale (1,3,3,7)
-	if syn[22] != 2 || syn[23] != 4 || binary.BigEndian.Uint16(syn[24:]) != 1460 {
+	// Linux's SYN order from byte 20: MSS 1460 (2,4), SACK-permitted (4,2), timestamps (8,10), NOP, wscale (3,3,7)
+	if syn[20] != 2 || syn[21] != 4 || binary.BigEndian.Uint16(syn[22:]) != 1460 {
 		t.Errorf("SYN MSS option malformed: % x", syn[20:40])
 	}
-	if syn[28] != 4 || syn[29] != 2 {
+	if syn[24] != 4 || syn[25] != 2 {
 		t.Errorf("SYN SACK-permitted option missing")
 	}
-	if syn[30] != 8 || syn[31] != 10 {
+	if syn[26] != 8 || syn[27] != 10 {
 		t.Errorf("SYN timestamp option missing")
 	}
-	if syn[38] != 1 || syn[39] != 3 || syn[40] != 3 || syn[41] != 7 {
+	if syn[36] != 1 || syn[37] != 3 || syn[38] != 3 || syn[39] != 7 {
 		t.Errorf("SYN wscale option malformed")
 	}
 	sport, dport, seq, ack, flags, data, ok := ptcpParse(syn)
@@ -74,13 +74,32 @@ func TestPTCPSegmentCodec(t *testing.T) {
 	if seg[12]>>4 != 8 { // 20 + 12 B timestamp options on every non-SYN segment
 		t.Fatalf("data header length = %d words", seg[12]>>4)
 	}
-	if binary.BigEndian.Uint32(seg[24:]) != 77 { // TSecr echoes the peer's TSval
-		t.Errorf("TSecr = %d, want 77", binary.BigEndian.Uint32(seg[24:]))
+	if binary.BigEndian.Uint32(seg[28:]) != 77 { // NOP NOP TS: TSecr (echo of the peer's TSval) at 28
+		t.Errorf("TSecr = %d, want 77", binary.BigEndian.Uint32(seg[28:]))
 	}
 }
 
 // A full exchange on loopback with real raw sockets (root only): the handshake rides, datagrams flow both
 // ways, and with hop=4 thirty packets spread over several flows, every flow under the ~30-packet cut.
+// recvWithin is Recv with a deadline (the carriers' Recv blocks until a datagram or Close).
+func recvWithin(r interface {
+	Recv() ([]byte, int, net.Addr, error)
+}, d time.Duration) ([]byte, net.Addr, error) {
+	type res struct {
+		p   []byte
+		a   net.Addr
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() { p, _, a, err := r.Recv(); ch <- res{p, a, err} }()
+	select {
+	case x := <-ch:
+		return x.p, x.a, x.err
+	case <-time.After(d):
+		return nil, nil, errTimeout
+	}
+}
+
 func TestPTCPLoopback(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("raw sockets need root")
@@ -106,9 +125,9 @@ func TestPTCPLoopback(t *testing.T) {
 	var dst net.Addr
 	deadline := time.Now().Add(5 * time.Second)
 	for len(got) < 30 && time.Now().Before(deadline) {
-		p, _, src, err := srv.Recv()
+		p, src, err := recvWithin(srv, time.Until(deadline)) // Recv blocks; a lost datagram must fail, not hang the suite
 		if err != nil {
-			t.Fatal(err)
+			break
 		}
 		if dst == nil {
 			dst = src // the newest flow's address is where the downlink goes
@@ -130,9 +149,9 @@ func TestPTCPLoopback(t *testing.T) {
 	dg := 0
 	deadline = time.Now().Add(5 * time.Second)
 	for dg < 10 && time.Now().Before(deadline) {
-		p, _, _, err := cli.Recv()
+		p, _, err := recvWithin(cli, time.Until(deadline))
 		if err != nil {
-			continue
+			break
 		}
 		if len(p) == 1 && p[0] >= 200 {
 			dg++

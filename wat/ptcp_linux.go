@@ -420,16 +420,14 @@ func (p *PTCPClient) Send(dat []byte, _ int) error {
 		}
 		f = p.newFlow()
 		deadline := time.Now().Add(250 * time.Millisecond) // ~the path RTT: the SYN-ACK normally lands first
-		for !f.established && time.Now().Before(deadline) {
+		es := false                                        // f.established is written by readLoop under p.mu
+		for !es && time.Now().Before(deadline) {
 			time.Sleep(2 * time.Millisecond)
 			p.mu.Lock()
-			es := f.established
+			es = f.established
 			p.mu.Unlock()
-			if es {
-				break
-			}
 		}
-		if f.established {
+		if es {
 			// complete the handshake, then the camouflage first flight
 			_ = sendRawTCP(p.raw, p.peer, ptcpBuild(p.local, p.peer, f.sport, p.port, f.seq, f.ack, ptcpACK, 0, nil))
 		}
@@ -549,9 +547,19 @@ func (s *PTCPServer) readLoop() {
 			if e := seg.seq + uint32(len(seg.data)); int32(e-f.cseq) > 0 {
 				f.cseq = e
 			}
+			data := seg.data
 			if !f.hello {
-				f.hello = true // the ClientHello first flight: camouflage, never an engine datagram
-			} else {
+				// the ClientHello first flight is camouflage; the client may put the flow's first datagram right
+				// after it in the same segment, so strip exactly the TLS record and keep the rest
+				f.hello = true
+				if len(data) >= 5 && data[0] == 0x16 {
+					if n := 5 + int(binary.BigEndian.Uint16(data[3:5])); n <= len(data) {
+						data = data[n:]
+					}
+				}
+			}
+			if len(data) > 0 {
+				seg.data = data
 				f.segs++
 				select {
 				case s.rx <- seg:
