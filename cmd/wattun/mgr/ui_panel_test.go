@@ -34,6 +34,34 @@ func TestPanelPlainPinned(t *testing.T) {
 	}
 }
 
+// A long title is cut with … like a long line, so both borders stay equal
+// width (debug round 3, 2026-11-23 — the top border used to widen past the
+// bottom).
+func TestPanelTitleClamped(t *testing.T) {
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "100") // uiW() = 76, inner = 74, borders = 78 columns
+	out := capture(t, func() { Panel(Stdout, rep("T", 80), "x") })
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("panel = %d rows, want 3:\n%s", len(lines), out)
+	}
+	if top, bottom := rlen(lines[0]), rlen(lines[2]); top != bottom || top != 78 {
+		t.Errorf("borders unequal: top %d, bottom %d (want 78):\n%s", top, bottom, out)
+	}
+	if !strings.Contains(lines[0], rep("T", 69)+"…") {
+		t.Errorf("title not cut at the panel width:\n%s", lines[0])
+	}
+	// a title exactly at the clamp limit passes through uncut
+	out = capture(t, func() { Panel(Stdout, rep("T", 70), "x") })
+	lines = strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if top, bottom := rlen(lines[0]), rlen(lines[2]); top != bottom || top != 78 {
+		t.Errorf("limit title borders unequal: top %d, bottom %d:\n%s", top, bottom, out)
+	}
+	if !strings.Contains(lines[0], rep("T", 70)) || strings.Contains(lines[0], "…") {
+		t.Errorf("at-limit title must not be cut:\n%s", lines[0])
+	}
+}
+
 func TestKVAligned(t *testing.T) {
 	InitColor(false, 8)
 	a := KV(11, "carrier", "icmp")

@@ -23,12 +23,18 @@ const (
 // Panel draws a full-width rounded panel with an optional title rule, then
 // lines padded to the inner width. Quiet chrome: grey rules (Box stays the
 // cyan accent for highlight moments). A line longer than the panel is cut
-// with … so the right border never moves (boxRow's rule); an empty line is
-// one blank row inside the panel.
+// with … so the right border never moves (boxRow's rule); the title is cut
+// the same way so both borders stay equal width; an empty line is one blank
+// row inside the panel.
 func Panel(w io.Writer, title string, lines ...string) {
 	inner := uiW() - 2
 	top := "╭" + rep("─", inner) + "╮"
 	if title != "" {
+		// debug round 3 (2026-11-23): an unclamped title widened the top border
+		// past the bottom; the clamp keeps rem >= 1 instead of forcing it.
+		if n := inner - 4; rlen(title) > n {
+			title = panelFit(title, max(n, 1))
+		}
 		rem := inner - rlen(title) - 3
 		if rem < 1 {
 			rem = 1

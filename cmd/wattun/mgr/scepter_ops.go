@@ -338,10 +338,17 @@ func scepterSpin(what string, fn func()) {
 			}
 		}
 	}()
+	// debug round 3 (2026-11-23): the stop handshake runs in a defer, so a
+	// panicking fn also stops the spinner (a bare close(done) after fn was
+	// skipped on the panic path and the goroutine spun forever). The order is
+	// unchanged: close, wait for the goroutine, then the erase — no frame can
+	// follow it, panic or not.
+	defer func() {
+		close(done)
+		<-stopped // the spinner line is quiescent before the outcome prints over it
+		fmt.Fprint(Stdout, "\r\x1b[K")
+	}()
 	fn()
-	close(done)
-	<-stopped // the spinner line is quiescent before the outcome prints over it
-	fmt.Fprint(Stdout, "\r\x1b[K")
 }
 
 // scepterActSpin is scepterAct with the channel call itself covered by the

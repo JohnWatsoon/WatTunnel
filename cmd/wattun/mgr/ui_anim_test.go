@@ -87,6 +87,64 @@ func TestTweenFrameRateIndependent(t *testing.T) {
 	}
 }
 
+// NaN/±Inf are garbage: clamp01 reads them 0 and Tween reads a non-finite
+// target 0, so a poisoned value can never wedge cur forever (debug round 3,
+// 2026-11-23 — the old clamp01(NaN) returned NaN and every later Step kept
+// it; a +Inf target became NaN on the next step via Inf-Inf).
+func TestTweenFillRejectNonFinite(t *testing.T) {
+	UseAnim = false
+	defer func() { UseAnim = false }()
+	if clamp01(math.NaN()) != 0 || clamp01(math.Inf(1)) != 0 || clamp01(math.Inf(-1)) != 0 {
+		t.Error("clamp01 must read garbage as 0")
+	}
+	f := NewFill(0)
+	if got := f.Step(math.NaN()); got != 0 {
+		t.Errorf("anim-off Fill.Step(NaN) = %v, want 0", got)
+	}
+	if got := f.Step(0.5); got != 0.5 {
+		t.Errorf("after NaN, Step(0.5) = %v, want 0.5 (no poison)", got)
+	}
+	// anim on: the garbage eases the value back toward 0 and recovery works
+	UseAnim = true
+	at := time.Unix(0, 0)
+	animNow = func() time.Time { return at }
+	defer func() { animNow = time.Now }()
+	g := NewFill(0.8)
+	at = at.Add(tweenTau)
+	if v := g.Step(math.NaN()); math.IsNaN(v) || v >= 0.8 {
+		t.Errorf("Step(NaN) = %v, want the fill easing back to 0 (alive)", v)
+	}
+	at = at.Add(tweenTau)
+	if v := g.Step(0.5); v <= 0 || v >= 0.5 {
+		t.Errorf("after NaN, Step(0.5) = %v, want easing toward 0.5", v)
+	}
+	for i := 0; i < 40; i++ {
+		at = at.Add(tweenTau)
+		g.Step(0.5)
+	}
+	if g.Val() != 0.5 {
+		t.Errorf("fill must converge exactly after the NaN, got %v", g.Val())
+	}
+	tw := NewTween(100)
+	at = at.Add(tweenTau)
+	tw.Step(math.Inf(1)) // target reads 0: cur eases down, never Inf
+	if v := tw.Val(); math.IsInf(v, 0) || math.IsNaN(v) {
+		t.Errorf("Step(+Inf) = %v, want a finite value easing toward 0", v)
+	}
+	at = at.Add(tweenTau)
+	for i := 0; i < 40; i++ {
+		at = at.Add(tweenTau)
+		tw.Step(0.5)
+	}
+	if tw.Val() != 0.5 {
+		t.Errorf("tween must converge exactly after the Inf, got %v", tw.Val())
+	}
+	// GradBar of a garbage level renders the empty-but-alive bar (no panic)
+	if got := StripANSI(GradBar(math.NaN(), 10, 4)); got != "▱▱▱▱" {
+		t.Errorf("GradBar(NaN) = %q, want the empty bar", got)
+	}
+}
+
 func TestFillClampsAndSnaps(t *testing.T) {
 	UseAnim = false
 	f := NewFill(0)

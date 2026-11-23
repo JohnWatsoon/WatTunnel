@@ -58,6 +58,13 @@ func (t *Tween) Val() float64 { return t.cur }
 
 // Step records the new target and returns the value to display now.
 func (t *Tween) Step(target float64) float64 {
+	// debug round 3 (2026-11-23): a non-finite target is garbage (a bad parse,
+	// a 0 division) and the old math poisoned cur forever — NaN stayed NaN, and
+	// +Inf turned into NaN on the next step (Inf-Inf). Garbage reads 0, so the
+	// value settles back honestly instead of wedging.
+	if math.IsNaN(target) || math.IsInf(target, 0) {
+		target = 0
+	}
 	if !UseAnim {
 		t.cur = target
 		return t.cur
@@ -74,8 +81,13 @@ func (t *Tween) Step(target float64) float64 {
 	return t.cur
 }
 
-// clamp01 clamps v into 0..1.
+// clamp01 clamps v into 0..1; NaN/±Inf are garbage and read 0 (the same rule
+// as Tween.Step, debug round 3 (2026-11-23): the old comparisons let NaN
+// through and a poisoned Fill never recovered).
 func clamp01(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
 	if v < 0 {
 		return 0
 	}

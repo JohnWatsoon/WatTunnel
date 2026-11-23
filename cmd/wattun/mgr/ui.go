@@ -35,14 +35,18 @@ const (
 	MarkAsk  = "?"
 )
 
-// colorTierFromEnv: truecolor from COLORTERM, 256 from TERM, else 8.
+// colorTierFromEnv: WAT_COLORS is the explicit knob (24/256/8, beats
+// detection), then truecolor from COLORTERM, 256 from TERM, else 8.
 func colorTierFromEnv() int {
+	// debug round 3 (2026-11-23): WAT_COLORS is the user's explicit choice, so
+	// it wins — checking COLORTERM first made WAT_COLORS=8 useless on a
+	// truecolor terminal.
+	if v := os.Getenv("WAT_COLORS"); v == "24" || v == "256" || v == "8" {
+		return atoi(v)
+	}
 	ct := strings.ToLower(os.Getenv("COLORTERM"))
 	if ct == "truecolor" || ct == "24bit" {
 		return 24
-	}
-	if v := os.Getenv("WAT_COLORS"); v == "24" || v == "256" || v == "8" {
-		return atoi(v)
 	}
 	// SSH drops COLORTERM, and PuTTY/Termius send plain TERM=xterm yet draw 256 colours;
 	// only the Linux console and unknown terminals stay on 8.
@@ -201,17 +205,27 @@ type Item struct {
 	Off              bool // drawn dim (Exit, unavailable rows)
 }
 
-// Choose draws head, then items with *sel highlighted, then the key line, and
-// waits for one key. It returns the picked index (Enter, a number, or an item
-// hotkey), or -1 with the key for anything else: "esc", "q", "tick" when tick
-// passed without a key, "eof" at end of input. The caller loops.
+// Choose draws head, then items with *sel highlighted (or the empty state
+// when there are no items), then the key line, and waits for one key. It
+// returns the picked index (Enter, a number, or an item hotkey), or -1 with
+// the key for anything else: "esc", "q", "tick" when tick passed without a
+// key, "eof" at end of input. The caller loops.
 func Choose(head func(w io.Writer), items []Item, sel *int, keys []string, tick time.Duration) (int, string) {
 	if *sel < 0 || *sel >= len(items) {
 		*sel = 0
 	}
 	var buf bytes.Buffer
 	head(&buf)
-	drawItems(&buf, items, *sel)
+	if len(items) == 0 {
+		// debug round 3 (2026-11-23): a screen can render zero items (an empty
+		// view, an ops menu gated out by the credential) and the movement math
+		// below is %len(items) — a modulo by zero panic on the first up/down.
+		// The empty state renders instead; up/down return without touching sel.
+		empty := "Nothing here yet"
+		fmt.Fprintf(&buf, "\n  %s%s%s\n", GRY, padL(empty, (uiW()+rlen(empty))/2), RST)
+	} else {
+		drawItems(&buf, items, *sel)
+	}
 	if len(keys) > 0 {
 		Keys(&buf, keys...)
 	}
@@ -229,6 +243,14 @@ func Choose(head func(w io.Writer), items []Item, sel *int, keys []string, tick 
 	case timedOut:
 		return -1, "tick"
 	}
+	if len(items) == 0 {
+		// debug round 3 (2026-11-23): nothing to pick and nothing to move —
+		// any key returns to the caller, up/down without touching sel.
+		if k == "up" || k == "k" || k == "down" || k == "j" {
+			return -1, "move" // the caller redraws the same frame
+		}
+		return -1, k
+	}
 	claimed := false // vi keys j/k move, unless an item uses the letter as its hotkey
 	for _, it := range items {
 		if it.Key != "" && strings.EqualFold(it.Key, k) {
@@ -245,9 +267,6 @@ func Choose(head func(w io.Writer), items []Item, sel *int, keys []string, tick 
 		return -1, "move"
 	}
 	if k == "enter" {
-		if len(items) == 0 {
-			return -1, k
-		}
 		return *sel, k
 	}
 	if len(k) == 1 && k[0] >= '1' && k[0] <= '9' {

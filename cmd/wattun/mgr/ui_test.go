@@ -2,6 +2,7 @@ package mgr
 
 import (
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -120,5 +121,63 @@ func TestChooseViKeysYieldToHotkeys(t *testing.T) {
 		if idx != c.idx || sel != c.sel {
 			t.Errorf("%q: got idx=%d sel=%d, want %d %d", c.in, idx, sel, c.idx, c.sel)
 		}
+	}
+}
+
+// A screen can render zero items (an empty view, an ops menu gated out by the
+// credential): the movement math used to be %len(items) — a modulo by zero
+// panic on the first up/down (debug round 3, 2026-11-23). The empty state
+// renders, up/down return without touching sel, and any key returns.
+func TestChooseZeroItems(t *testing.T) {
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "100")
+	for _, c := range []struct{ in, key string }{
+		{"\x1b[B", "move"}, // down must not panic
+		{"\x1b[A", "move"},
+		{"j", "move"},
+		{"k", "move"},
+		{"\r", "enter"},
+		{"q", "q"},
+		{"1", "1"}, // a number with no row to pick
+		{"", "eof"},
+	} {
+		restore := feed(c.in)
+		sel := 0
+		var idx int
+		var key string
+		out := capture(t, func() { idx, key = Choose(func(io.Writer) {}, nil, &sel, nil, 0) })
+		restore()
+		if idx != -1 || key != c.key || sel != 0 {
+			t.Errorf("%q: got idx=%d key=%q sel=%d, want -1 %q 0", c.in, idx, key, sel, c.key)
+		}
+		if !strings.Contains(out, "Nothing here yet") {
+			t.Errorf("%q: empty state not drawn:\n%s", c.in, out)
+		}
+	}
+}
+
+// WAT_COLORS is the explicit knob: it beats detection (debug round 3,
+// 2026-11-23 — COLORTERM was checked first, so WAT_COLORS=8 could not
+// downforce a truecolor terminal).
+func TestColorTierFromEnv(t *testing.T) {
+	t.Setenv("TERM", "dumb")
+	t.Setenv("COLORTERM", "truecolor")
+	t.Setenv("WAT_COLORS", "8")
+	if got := colorTierFromEnv(); got != 8 {
+		t.Errorf("WAT_COLORS=8 under COLORTERM=truecolor = %d, want 8", got)
+	}
+	t.Setenv("WAT_COLORS", "24")
+	if got := colorTierFromEnv(); got != 24 {
+		t.Errorf("WAT_COLORS=24 = %d, want 24", got)
+	}
+	if err := os.Unsetenv("WAT_COLORS"); err != nil {
+		t.Fatal(err)
+	}
+	if got := colorTierFromEnv(); got != 24 {
+		t.Errorf("COLORTERM=truecolor alone = %d, want 24 (detection still works)", got)
+	}
+	t.Setenv("WAT_COLORS", "16") // not one of the tiers: falls through to detection
+	if got := colorTierFromEnv(); got != 24 {
+		t.Errorf("WAT_COLORS=16 must fall through to COLORTERM = %d, want 24", got)
 	}
 }

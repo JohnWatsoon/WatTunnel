@@ -12,12 +12,39 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The phase D ops surfaces (plan D; docs/TECHNICAL.md "Phase D commands:
 // operations"): arg shapes, the parsers, the capability gates, the screen
 // flows — all against the stubbed ScepterClient seam, like the phase A-C
 // scepter tests. Nothing here dials a real channel.
+
+// scepterSpin's stop handshake runs in a defer, so a panicking fn stops the
+// spinner instead of leaking a goroutine that prints frames forever (debug
+// round 3, 2026-11-23). The test recovers the panic — scepterSpin itself must
+// not swallow it — and the final erase still lands last.
+func TestScepterSpinPanicStopsSpinner(t *testing.T) {
+	InitColor(false, 8)
+	oldAnim, oldTTY, oldStdout := UseAnim, IsTTY, Stdout
+	UseAnim, IsTTY = true, true
+	var buf bytes.Buffer
+	Stdout = &buf
+	defer func() { UseAnim, IsTTY, Stdout = oldAnim, oldTTY, oldStdout }()
+	func() {
+		defer func() { _ = recover() }()
+		scepterSpin("working", func() { panic("boom") })
+	}()
+	if !strings.HasSuffix(buf.String(), "\r\x1b[K") {
+		t.Errorf("panic path skipped the final erase:\n%q", buf.String())
+	}
+	// a leaked spinner prints a frame every 120 ms; the stream must be quiet now
+	n := buf.Len()
+	time.Sleep(300 * time.Millisecond)
+	if buf.Len() != n {
+		t.Errorf("spinner leaked past the panic: %d extra bytes", buf.Len()-n)
+	}
+}
 
 func TestScepterUpdateRunArgs(t *testing.T) {
 	// a target rides as `to`; empty means latest and stays absent
