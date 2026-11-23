@@ -92,9 +92,9 @@ func TestLatchRevokeBlocksArm(t *testing.T) {
 // spawn stays inert (it only stands down, never arms); the settle flips it so the loop cannot stand down
 // what the settle arm installed.
 func TestLatchArmCredentialHammer(t *testing.T) {
-	oldPoll := latchPoll
-	latchPoll = 10 * time.Millisecond
-	t.Cleanup(func() { latchPoll = oldPoll })
+	oldPoll := latchPoll.get()
+	latchPoll.set(10 * time.Millisecond)
+	t.Cleanup(func() { latchPoll.set(oldPoll) })
 	pair := testLatchPairing()
 	pair2, err := wat.ParsePairingLine(testPairingLine("full"))
 	if err != nil {
@@ -154,9 +154,10 @@ func TestLatchArmCredentialHammer(t *testing.T) {
 // until a process restart with no hint. rePair must clear the revocation and bring the loop back up: the
 // monitor arms again on liveness. Driven by the shrunk poll/arm seams (latchPoll, latchArmAfter).
 func TestLatchRePairRevivesAfterRevoke(t *testing.T) {
-	oldPoll, oldArm := latchPoll, latchArmAfter
-	latchPoll, latchArmAfter = 10*time.Millisecond, 20*time.Millisecond
-	t.Cleanup(func() { latchPoll, latchArmAfter = oldPoll, oldArm })
+	oldPoll, oldArm := latchPoll.get(), latchArmAfter.get()
+	latchPoll.set(10 * time.Millisecond)
+	latchArmAfter.set(20 * time.Millisecond)
+	t.Cleanup(func() { latchPoll.set(oldPoll); latchArmAfter.set(oldArm) })
 	pair := testLatchPairing()
 	state, err := wat.NewScepterState(pair, nil, "")
 	if err != nil {
@@ -218,9 +219,9 @@ func TestLatchRePairRevivesAfterRevoke(t *testing.T) {
 // leaked goroutine per stand-down. Pinned by goroutine-stack scan: after the stand-down no arm goroutine
 // may remain parked.
 func TestLatchConsumerExitsOnStandDown(t *testing.T) {
-	oldPoll := latchPoll
-	latchPoll = 10 * time.Millisecond
-	t.Cleanup(func() { latchPoll = oldPoll })
+	oldPoll := latchPoll.get()
+	latchPoll.set(10 * time.Millisecond)
+	t.Cleanup(func() { latchPoll.set(oldPoll) })
 	pair := testLatchPairing()
 	state, err := wat.NewScepterState(pair, nil, "")
 	if err != nil {
@@ -337,13 +338,17 @@ func TestContactLatchDrill(t *testing.T) {
 // monitor's re-arm hands the latch over and a second contact succeeds, still rate-limited. Driven by the
 // shrunk cadence seams (latchRevivePoll, latchRetryEvery, latchPoll, latchArmAfter), ticks called directly.
 func TestLatchAutoRevive(t *testing.T) {
-	oldPoll, oldRetry, oldRvPoll := latchPoll, latchRetryEvery, latchRevivePoll
-	oldArm := latchArmAfter
-	latchPoll, latchArmAfter = 10*time.Millisecond, 20*time.Millisecond
-	latchRevivePoll, latchRetryEvery = 10*time.Millisecond, 20*time.Millisecond
+	oldPoll, oldRetry, oldRvPoll := latchPoll.get(), latchRetryEvery.get(), latchRevivePoll.get()
+	oldArm := latchArmAfter.get()
+	latchPoll.set(10 * time.Millisecond)
+	latchArmAfter.set(20 * time.Millisecond)
+	latchRevivePoll.set(10 * time.Millisecond)
+	latchRetryEvery.set(20 * time.Millisecond)
 	t.Cleanup(func() {
-		latchPoll, latchArmAfter = oldPoll, oldArm
-		latchRevivePoll, latchRetryEvery = oldRvPoll, oldRetry
+		latchPoll.set(oldPoll)
+		latchArmAfter.set(oldArm)
+		latchRevivePoll.set(oldRvPoll)
+		latchRetryEvery.set(oldRetry)
 	})
 
 	pair := testLatchPairing()

@@ -30,11 +30,20 @@ import (
 )
 
 // Var, not const (the pairingPollInterval precedent): the tests shrink the cadences to drive the run loop
-// and the contact consumer without sleeping seconds.
+// and the contact consumer without sleeping seconds. Atomic because a test's swap races goroutines an
+// earlier test left running (go test -race).
 var (
-	latchPoll     = 5 * time.Second  // monitor cadence
-	latchArmAfter = 30 * time.Second // quiet time before arming: must outlive the 10 s alive window flaps
+	latchPoll     = newDur(5 * time.Second)  // monitor cadence
+	latchArmAfter = newDur(30 * time.Second) // quiet time before arming: must outlive the 10 s alive window flaps
 )
+
+// durVar is a time.Duration safe to swap while goroutines read it.
+type durVar struct{ ns atomic.Int64 }
+
+func newDur(d time.Duration) *durVar  { v := &durVar{}; v.set(d); return v }
+func (v *durVar) get() time.Duration  { return time.Duration(v.ns.Load()) }
+func (v *durVar) set(d time.Duration) { v.ns.Store(int64(d)) }
+func (v *durVar) String() string      { return v.get().String() }
 
 // latchMonitor watches unit liveness and arms/disarms the latch listener. The "unit" of this process is what
 // alive() reports (server: a client heard recently; the systemd template runs one wattun per tunnel config, so
@@ -77,7 +86,7 @@ func (m *latchMonitor) run() {
 	m.loopUp = true
 	m.mu.Unlock()
 	var inactiveSince time.Time
-	for range time.Tick(latchPoll) {
+	for range time.Tick(latchPoll.get()) {
 		m.mu.Lock()
 		if m.revoked.Load() { // the pairing poller disarmed the channel: no listener for a revoked pair
 			m.loopUp = false // cleared under mu BEFORE the return so rePair's revival check is exact: if
@@ -97,7 +106,7 @@ func (m *latchMonitor) run() {
 		m.mu.Lock()
 		busy := m.srv != nil && m.srv.Sessions() > 0
 		m.mu.Unlock()
-		if busy || time.Since(inactiveSince) < latchArmAfter {
+		if busy || time.Since(inactiveSince) < latchArmAfter.get() {
 			continue
 		}
 		m.arm()
@@ -152,7 +161,7 @@ func (m *latchMonitor) arm() {
 			// Management only: no serveDgrams here — the latch carries the scepter stream, not UDP forwarding.
 			go serveLatch(s, m.lo, m.hi, m.al, m.scepter, wat.LatchKey(pair), m)
 			go func() { // reap when the contact session ends, so the monitor can re-arm if still inactive
-				for range time.Tick(latchPoll) {
+				for range time.Tick(latchPoll.get()) {
 					if srv.Sessions() == 0 {
 						srv.Close()
 						m.mu.Lock()
@@ -165,7 +174,7 @@ func (m *latchMonitor) arm() {
 				}
 			}()
 		}
-		tk := time.NewTicker(latchPoll)
+		tk := time.NewTicker(latchPoll.get())
 		defer tk.Stop()
 		for {
 			select {
@@ -356,9 +365,9 @@ func dialLatchSession(addr string, pair *wat.PairingConfig) (*wat.Session, *wat.
 
 // Var, not const (the latchPoll precedent): the tests shrink the cadences.
 var (
-	latchRevivePoll = 5 * time.Second  // revival loop cadence
-	latchRetryEvery = 30 * time.Second // rate limit: at most one latch attempt per 30 s while the tunnel is down
-	latchWarmEvery  = 30 * time.Second // ping cadence of a revived channel
+	latchRevivePoll = newDur(5 * time.Second)  // revival loop cadence
+	latchRetryEvery = newDur(30 * time.Second) // rate limit: at most one latch attempt per 30 s while the tunnel is down
+	latchWarmEvery  = newDur(30 * time.Second) // ping cadence of a revived channel
 )
 
 // latchPeerHost is the host half of the tunnel's peer address (the first endpoint of a bond/pool list,
@@ -397,7 +406,7 @@ type latchRevive struct {
 func startLatchRevive(r *latchRevive) { go r.run() }
 
 func (r *latchRevive) run() {
-	for range time.Tick(latchRevivePoll) {
+	for range time.Tick(latchRevivePoll.get()) {
 		r.tick()
 	}
 }
@@ -409,7 +418,7 @@ func (r *latchRevive) tick() {
 		return
 	}
 	r.mu.Lock()
-	due := r.sess == nil && time.Since(r.lastTry) >= latchRetryEvery
+	due := r.sess == nil && time.Since(r.lastTry) >= latchRetryEvery.get()
 	if due {
 		r.lastTry = time.Now()
 	}
@@ -436,7 +445,7 @@ func (r *latchRevive) tick() {
 // or the contact is no longer ours (closed by resume or superseded) or a ping fails (the retry loop takes
 // over, still rate-limited by lastTry).
 func (r *latchRevive) keepWarm(sess *wat.Session, c *wat.ScepterClient) {
-	for range time.Tick(latchWarmEvery) {
+	for range time.Tick(latchWarmEvery.get()) {
 		r.mu.Lock()
 		mine := r.sess == sess
 		r.mu.Unlock()

@@ -1021,8 +1021,9 @@ func (o *fileScepterOps) openProbe(carrier string, ttlS int) (*scepterProbe, int
 		o.probes = map[string]*scepterProbe{}
 	}
 	o.probes[name] = pr
-	o.probeMu.Unlock()
+	// under probeMu: a concurrent test.close reads pr.timer once it finds pr in the map
 	pr.timer = time.AfterFunc(time.Duration(ttlS)*time.Second, func() { o.expireProbe(name, "ttl") })
+	o.probeMu.Unlock()
 	return pr, wat.CodeOK, ""
 }
 
