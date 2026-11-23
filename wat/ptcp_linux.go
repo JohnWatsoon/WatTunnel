@@ -242,7 +242,10 @@ func readRawTCP(r *ptcpSock, buf []byte) (ptcpSeg, error) {
 		if !ok {
 			continue
 		}
-		return ptcpSeg{src: src, dst: dst, sport: sport, dport: dport, seq: seq, ack: ack, flags: flags, data: data}, nil
+		// data is copied: it would alias the reader's buffer, and the next read overwrites it while the segment
+		// still waits in the rx channel
+		return ptcpSeg{src: src, dst: dst, sport: sport, dport: dport, seq: seq, ack: ack, flags: flags,
+			data: append([]byte(nil), data...)}, nil
 	}
 }
 
@@ -358,8 +361,12 @@ func (p *PTCPClient) readLoop() {
 		if f == nil {
 			continue
 		}
-		if seg.flags&ptcpSYN != 0 && seg.flags&ptcpACK != 0 && !f.established {
-			f.established, f.ack = true, seg.seq+1
+		if seg.flags&ptcpSYN != 0 && seg.flags&ptcpACK != 0 {
+			p.mu.Lock() // Send polls established under p.mu
+			if !f.established {
+				f.established, f.ack = true, seg.seq+1
+			}
+			p.mu.Unlock()
 		}
 		if len(seg.data) == 0 {
 			continue
