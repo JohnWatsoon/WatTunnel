@@ -1662,8 +1662,8 @@ func sameScepterPatch(got, want ScepterPatch) bool {
 func bashAntiCensorPresets(t *testing.T) map[string]ScepterPatch {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "wattun-manager"))
-	if err != nil {
-		t.Fatalf("wattun-manager not readable: %v", err)
+	if err != nil { // the shaped-tables precedent: a released binary tree has no repo checkout; checked in CI
+		t.Skipf("no repo checkout (%v); catalog consistency is checked in CI", err)
 	}
 	inCase, cur := false, ""
 	vars := map[string]string{}

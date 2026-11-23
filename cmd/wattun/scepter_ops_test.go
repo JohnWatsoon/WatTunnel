@@ -1585,6 +1585,51 @@ func TestFileScepterOpsKeyRotateRollback(t *testing.T) {
 	}
 }
 
+// The stale-token refusal (fix round 3, 2026-11-23): a token file that cannot be parsed and a yml
+// without a peer (nothing to compose a token from) would otherwise survive the rotate holding the DEAD
+// key — the rotate refuses BEFORE any file moves: no .bak set, yml + key + token untouched, no restart.
+func TestFileScepterOpsKeyRotateStaleToken(t *testing.T) {
+	o, fu, _ := testOps2(t)
+	spec := wat.ScepterTunnelSpec{Name: "st", Carrier: "udp", Ports: "20031",
+		Params: map[string]string{"peer": "198.51.100.7"}, Key: "k1234567890123456789012345678901234567890"}
+	if p, code := o.Create(spec); code != wat.CodeOK {
+		t.Fatalf("create: %d %v", code, p)
+	}
+	// strip the peer (bare yml: no compose source) and corrupt the token file
+	y := strings.ReplaceAll(mustReadExisting(t, filepath.Join(o.conf, "st.yml")), "peer: 198.51.100.7\n", "")
+	if err := o.writeAtomic(filepath.Join(o.conf, "st.yml"), y); err != nil {
+		t.Fatalf("strip peer: %v", err)
+	}
+	stale := "not a wat1: token at all"
+	if err := o.writeAtomic(filepath.Join(o.conf, "st.token"), stale+"\n"); err != nil {
+		t.Fatalf("corrupt token: %v", err)
+	}
+	p, code := o.KeyRotate("st")
+	if code != wat.CodeInternal {
+		t.Fatalf("stale-token rotate: %d %v", code, p)
+	}
+	why, _ := p["why"].(string)
+	if !strings.Contains(why, "unparsable") || !strings.Contains(why, "st.token") {
+		t.Fatalf("refusal names the file: %d %v", code, p)
+	}
+	// all files untouched
+	if kf := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "st.key"))); kf != spec.Key {
+		t.Fatalf("key file moved: %q", kf)
+	}
+	if !strings.Contains(mustReadExisting(t, filepath.Join(o.conf, "st.yml")), "key: "+spec.Key) {
+		t.Fatal("yml was moved")
+	}
+	if tf := strings.TrimSpace(mustReadExisting(t, filepath.Join(o.conf, "st.token"))); tf != stale {
+		t.Fatalf("token file was moved: %q", tf)
+	}
+	if _, err := os.Stat(filepath.Join(o.conf, "st.key.bak")); err == nil {
+		t.Fatal("the backup set was created")
+	}
+	if fu.did("st:restart") {
+		t.Fatal("the unit was restarted")
+	}
+}
+
 // PairRotate (U0 audit): the store is rewritten in the manager's pairing_store_write shape — the watp1:
 // credential line first, then the # created / # oldkey / # oldkey_expires comments; same UUID+caps, new
 // 32-byte key; the original creation time survives; a missing or broken store refuses.

@@ -81,10 +81,10 @@ jobs:
       # FEC gate/ring) must be race-checked too (audit M5).
       # A renamed test must not turn this subset into a silent no-op (audit L18/F32): check every alternative.
       - run: |
-          for re in TestKex TestWinMax TestLateAck TestFairQueue TestDgram TestBondLoopback TestShape TestNoise TestFecGate TestFecRx TestShapedUDP TestSourceAllowed TestServerClientAllowlist TestPad2; do
+          for re in TestKex TestWinMax TestLateAck TestFairQueue TestDgram TestBondLoopback TestShape TestNoise TestFecGate TestFecRx TestShapedUDP TestSourceAllowed TestServerClientAllowlist TestPad2 TestScepterKeyRotate TestScepterKeyRotateRollback TestScepterPairRotate TestScepterMuteAndLimitsReset TestScepterPresetApply TestScepterPresetCatalog; do
             go test -list "$re" ./wat/ | grep -q '^Test' || { echo "::error::$re matched no test"; exit 1; }
           done
-      - run: go test -race -count=1 -run 'TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback|TestShape|TestNoise|TestFecGate|TestFecRx|TestShapedUDP|TestSourceAllowed|TestServerClientAllowlist|TestPad2' ./wat/
+      - run: go test -race -count=1 -run 'TestKex|TestWinMax|TestLateAck|TestFairQueue|TestDgram|TestBondLoopback|TestShape|TestNoise|TestFecGate|TestFecRx|TestShapedUDP|TestSourceAllowed|TestServerClientAllowlist|TestPad2|TestScepterKeyRotate|TestScepterKeyRotateRollback|TestScepterPairRotate|TestScepterMuteAndLimitsReset|TestScepterPresetApply|TestScepterPresetCatalog' ./wat/
   gomgr:
     # The Go manager sign-off gate (docs/handoff/PLAN-go-manager task 7): the auto
     # round trip Kharej -> token -> Iran test must run end to end on Linux under an

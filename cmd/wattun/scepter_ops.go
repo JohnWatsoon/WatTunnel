@@ -1562,6 +1562,14 @@ func (o *fileScepterOps) KeyRotate(name string) (map[string]any, int) {
 	// rebuild the token FIRST, from the old artifacts: nothing has moved yet, and whether a token is
 	// derivable decides the response shape before any file changes
 	newTok := o.rotateToken(name, cfg, newKey)
+	if _, err := os.Stat(o.path(name, "token")); err == nil && newTok == "" {
+		// fix round 3 (2026-11-23): a token file that exists but cannot be rebuilt (unparsable, and the
+		// yml has no carrier/peer to compose from) would survive the drill holding the DEAD key — the
+		// success path skips the token rewrite when newTok is empty and the response omits it. Refuse
+		// BEFORE any file moves (the edit path's rollback discipline); a human removes the stale file
+		// or repairs the token.
+		return map[string]any{"why": "existing token is unparsable; remove " + name + ".token and retry"}, wat.CodeInternal
+	}
 	newYml, err := scepterPatchYML(string(oldYml), wat.ScepterPatch{Set: map[string]string{"key": newKey}})
 	if err != nil { // a single-key patch cannot fail the ports parse; kept for the never-trust-caller shape
 		return map[string]any{"detail": err.Error()}, wat.CodeBadRequest
