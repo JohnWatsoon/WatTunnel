@@ -154,6 +154,23 @@ func serveScepterConn(conn net.Conn, h *scepterHub) {
 	io.WriteString(conn, out.String())
 }
 
+// keepClaim stores the credential a hello handed out (the claim of the token bootstrap).
+func keepClaim(path string, c *wat.ScepterClient, logf func(string, ...any)) {
+	line, _ := c.Hello["claim"].(string)
+	if line == "" {
+		return
+	}
+	if path == "" {
+		logf("scepter: claimed the pairing, but this run has no config dir to keep it in; the next start cannot prove it")
+		return
+	}
+	if err := addClaim(path, line); err != nil {
+		logf("scepter: claimed the pairing but storing it in %s failed: %v", path, err)
+		return
+	}
+	logf("scepter: paired — this Iran now holds its own credential (%s); the token alone no longer manages Kharej", path)
+}
+
 // errNoSock: no unit listens on the socket (not running, or an older binary without one).
 var errNoSock = errors.New("no running unit socket")
 
@@ -187,8 +204,15 @@ func scepterCallSock(path, cmd string, args map[string]any, id string, w io.Writ
 }
 
 // startScepterClient wires a paired client unit: the hub, its keep-alive and (with a config file) the socket.
-func startScepterClient(tun *tunnel, cfgPath string, onNew func(*wat.ScepterClient)) *scepterHub {
-	h := &scepterHub{dial: func() (*wat.ScepterClient, error) { return wat.DialScepter(tun.pick()) }, logf: log.Printf, onNew: onNew}
+// Every dial proves the token bootstrap AND every credential this box claimed before; a claim answered in the
+// hello is stored for the next dial (Handoff 4 R2).
+func startScepterClient(tun *tunnel, cfgPath string) *scepterHub {
+	cp := claimsPath(cfgPath)
+	h := &scepterHub{
+		dial:  func() (*wat.ScepterClient, error) { return wat.DialScepter(tun.pick(), readClaims(cp)...) },
+		logf:  log.Printf,
+		onNew: func(c *wat.ScepterClient) { keepClaim(cp, c, log.Printf) },
+	}
 	go h.keepAlive(nil)
 	if cfgPath != "" {
 		p := scepterSockPath(cfgPath)

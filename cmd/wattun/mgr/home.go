@@ -1485,7 +1485,7 @@ type pairCred struct {
 }
 
 // pairLoad parses the store: 0 = parsed, 1 = exists but unreadable, 2 = no
-// store (bash pairing_load's rc contract). Deliberately stricter than the bash
+// store (bash pairing_load's rc contract), 3 = a revoke tombstone (Handoff 4 R3). Deliberately stricter than the bash
 // on the credential line: ReadPairingLine refuses a version the manager does
 // not know, and an unparsable store must not be rewritten — it may be a newer
 // engine's format holding the only copy of the credential (F1-B, 2026-11-22).
@@ -1515,6 +1515,9 @@ func pairLoad() (*pairCred, int) {
 		}
 		if c.line.Version != "" {
 			continue // a later credential line never wins: the engine reads the first
+		}
+		if strings.HasPrefix(l, "revoked") {
+			return nil, 3
 		}
 		p, perr := ReadPairingLine(l)
 		if perr != nil {
@@ -1583,12 +1586,18 @@ func pairStatus() []string {
 	c, st := pairLoad()
 	switch st {
 	case 2:
-		return []string{KV(11, "pairing", GRY+"off"+RST+GRY+" (no credential; this server cannot be paired)"+RST)}
+		return []string{KV(11, "pairing", GRY+"waiting"+RST+GRY+" (the first Iran that connects with a pairing token pairs itself)"+RST)}
+	case 3:
+		return []string{KV(11, "pairing", RED+"revoked"+RST+GRY+" (no Iran can manage this server — allow a new Iran to pair)"+RST)}
 	case 1:
 		return []string{KV(11, "pairing", YEL+"unreadable"+RST+GRY+" ("+pairStorePath()+" is not a format this manager reads)"+RST)}
 	}
+	state := GRN + "on" + RST
+	if b, _ := os.ReadFile(pairStorePath()); strings.Contains(string(b), "\n# claimed") {
+		state = GRN + "paired with an Iran" + RST
+	}
 	rows := []string{
-		KV(11, "pairing", GRN+"on"+RST),
+		KV(11, "pairing", state),
 		KV(11, "uuid", c.line.UUID),
 		KV(11, "caps", capTier(c.line.Caps)),
 	}
@@ -1668,10 +1677,10 @@ func scepterConsole() {
 		sel := 0
 		for {
 			head := func(w io.Writer) {
-				Title(w, "Scepter", "Iran · read-only")
+				Title(w, "Pairing", "Iran · read-only")
 				Panel(w, "Pairing", pairStatus()...)
 				gap(w, SecGap)
-				Hint("Pairing is managed on Kharej. On Iran run: wattun -pair-to <watp1: line> (Go cockpit).")
+				Hint("This Iran pairs itself with Kharej the first time a tunnel made from a pairing token connects.")
 				gap(w, SecGap)
 			}
 			i, k := Choose(head, []Item{{Key: "a", Label: "Audit tail", Desc: "the last entries of .pairing.audit"}},
@@ -1693,15 +1702,16 @@ func scepterConsole() {
 	for {
 		_, st := pairLoad()
 		head := func(w io.Writer) {
-			Title(w, "Scepter", "Kharej pairing console")
+			Title(w, "Pairing", "which Iran manages this server")
 			Panel(w, "Pairing", pairStatus()...)
 			gap(w, SecGap)
 		}
 		items := []Item{
-			{Key: "p", Label: "Pair", Desc: "generate or adopt a watp1: line, store it"},
-			{Key: "r", Label: "Rotate", Desc: "new key, 24 h window to re-attach on Iran"},
-			{Key: "x", Label: "Revoke", Desc: "unpair: drop the credential, tunnels keep running", Off: st != 0},
-			{Key: "a", Label: "Audit tail", Desc: "the last entries of .pairing.audit"},
+			{Key: "o", Label: "Allow a new Iran", Desc: "end the current pairing; the next Iran that connects takes over", Off: st == 2},
+			{Key: "x", Label: "Revoke", Desc: "no Iran manages this server; tunnels keep running", Off: st == 3},
+			{Key: "r", Label: "Rotate", Desc: "new key; give the new line to Iran", Off: st != 0},
+			{Key: "p", Label: "Pair by hand", Desc: "generate or adopt a watp1: line"},
+			{Key: "a", Label: "Audit log", Desc: "the last pairing changes"},
 		}
 		i, k := Choose(head, items, &sel, []string{"⏎", "run", "esc", "back"}, 0)
 		if k == "esc" || k == "q" || k == "eof" || k == "0" {
@@ -1713,12 +1723,14 @@ func scepterConsole() {
 		ClearScreen()
 		switch i {
 		case 0:
-			scepterPair()
+			scepterReopen()
 		case 1:
-			scepterRotate()
-		case 2:
 			scepterRevoke()
+		case 2:
+			scepterRotate()
 		case 3:
+			scepterPair()
+		case 4:
 			gap(Stdout, SecGap)
 			pairAuditTail(20)
 		}
@@ -1822,22 +1834,60 @@ func scepterRevoke() {
 		return
 	}
 	c, st := pairLoad()
-	if st == 2 {
-		Err("No pairing to revoke.")
+	switch st {
+	case 3:
+		Err("The pairing is already revoked (allow a new Iran to pair again).")
 		return
-	}
-	if st == 1 {
+	case 1:
 		pairReadable()
 		return
 	}
-	if !Confirm(fmt.Sprintf("Revoke the pairing (%s)? The cockpit channel dies on its next tick; tunnels keep running.", c.line.UUID), false) {
+	id := "token" // no store: the token bootstrap is the pairing, the tombstone revokes it too
+	if c != nil {
+		id = c.line.UUID
+	}
+	if !Confirm("Revoke the pairing? No Iran can manage this server until you allow a new one; tunnels keep running.", false) {
 		return
 	}
-	if !pairAudit("pair_revoked", c.line.UUID) {
+	if !pairAudit("pair_revoked", id) {
+		return
+	}
+	// Handoff 4 R3: a tombstone, not a delete — a deleted store lets a token-paired unit re-derive the
+	// pairing at its next start
+	tomb := fmt.Sprintf("revoked %s %s\n", id, time.Now().UTC().Format("2006-01-02T15:04:05Z"))
+	if err := atomicWrite(pairStorePath(), []byte(tomb), 0o600); err != nil {
+		Err("Writing " + pairStorePath() + " failed: " + err.Error())
+		return
+	}
+	Ok("Pairing revoked. The audit log is kept in " + pairAuditPath() + ".")
+}
+
+// scepterReopen deletes the store (Handoff 4 R2): the next Iran that connects with a pairing token pairs
+// itself. The running units fall back to the token bootstrap within their poll interval.
+func scepterReopen() {
+	if !pairKharejOnly() {
+		return
+	}
+	c, st := pairLoad()
+	if st == 2 {
+		Hint("Nothing to do: no Iran is paired yet; the next one to connect pairs itself.")
+		return
+	}
+	if st == 1 && !pairReadable() {
+		return
+	}
+	if !Confirm("Allow a new Iran to pair? The current pairing ends; the next Iran that connects with a pairing token takes over.", false) {
+		return
+	}
+	id := "revoked"
+	if c != nil {
+		id = c.line.UUID
+	}
+	if !pairAudit("pair_reopened", id) {
 		return
 	}
 	_ = os.Remove(pairStorePath())
-	Ok("Pairing revoked. The audit log is kept in " + pairAuditPath() + ".")
+	Ok("Pairing open: the next Iran that connects with this server's pairing token pairs itself.")
 }
 
 // ---- auto-heal timer (bash heal_enable / heal_disable / ensure_heal_timer) ----

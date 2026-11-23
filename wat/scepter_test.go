@@ -459,10 +459,13 @@ func TestScepterJSONRobustness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	hello, _ := json.Marshal(ScepterRequest{ID: "h", V: scepterV, Cmd: "scepter.hello", TS: time.Now().Unix(),
+		Args: map[string]any{"proofs": []string{ScepterProof(pair, cli.cfg.SID)}}}) // Handoff 4: the stream opens with a proven hello
 	lines := []string{
+		string(hello),
 		"not json at all",
-		`{"id":"a","v":2,"cmd":"scepter.ping"}`,                 // wrong protocol version
-		`{"id":"b","v":1}`,                                      // no command
+		`{"id":"a","v":2,"cmd":"scepter.ping"}`, // wrong protocol version
+		`{"id":"b","v":1}`,                      // no command
 		`{"id":"c","v":1,"cmd":"state.get","args":{"x":[1,,]}}`, // malformed args JSON
 		strings.Repeat("x", scepterMaxLine+1024),                // oversized
 	}
@@ -478,7 +481,7 @@ func TestScepterJSONRobustness(t *testing.T) {
 		w.Flush()
 	}()
 	rd := bufio.NewReader(st)
-	want := []int{CodeBadRequest, CodeBadRequest, CodeUnknownCmd, CodeBadRequest, CodeTooLarge, CodeOK}
+	want := []int{CodeOK, CodeBadRequest, CodeBadRequest, CodeUnknownCmd, CodeBadRequest, CodeTooLarge, CodeOK}
 	type res struct {
 		resp ScepterResponse
 		err  error

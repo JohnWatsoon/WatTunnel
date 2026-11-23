@@ -359,6 +359,7 @@ const (
 	scepterCodeNameTaken    = 10 // params {"name"}
 	scepterCodePortBusy     = 11 // params {"port","user"}
 	scepterCodeCarrierNeeds = 12 // params {"carrier","ver","need"}
+	scepterCodePortDenied   = 13 // params {"port","why"}
 )
 
 // scepterCodeHint maps a code (with its params) to the short human hint the
@@ -382,7 +383,13 @@ func scepterCodeHint(code int, p map[string]any) string {
 		}
 		return "Kharej refused the command (bad arguments)"
 	case scepterCodeDenied:
-		return "needs the '" + orStr(str("need"), "higher") + "' capability on the pairing line"
+		switch str("need") {
+		case "proof":
+			return "Kharej is paired with another Iran (or its pairing was reset) — on Kharej: Pairing, then allow a new Iran"
+		case "hello":
+			return "the channel opened without a hello — update wattun on this Iran"
+		}
+		return "needs the '" + orStr(str("need"), "higher") + "' permission on the pairing"
 	case scepterCodeStale:
 		return "the intent was built on an outdated state — retry on the fresh one"
 	case scepterCodeRate:
@@ -411,6 +418,12 @@ func scepterCodeHint(code int, p map[string]any) string {
 		return "port " + orStr(port, "?") + " is already bound by " + orStr(str("user"), "another listener")
 	case scepterCodeCarrierNeeds:
 		return "carrier '" + orStr(str("carrier"), "?") + "' needs " + orStr(str("need"), "a different platform") + " on Kharej"
+	case scepterCodePortDenied:
+		port := ""
+		if f, ok := p["port"].(float64); ok {
+			port = strconv.FormatInt(int64(f), 10)
+		}
+		return "Kharej never forwards to port " + orStr(port, "?") + " (" + orStr(str("why"), "guarded") + ")"
 	case scepterCodeTooLarge:
 		if s := str("why"); s != "" {
 			return "too large for the channel: " + s

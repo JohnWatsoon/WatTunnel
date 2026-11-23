@@ -189,6 +189,7 @@ func main() {
 	pairingKey := flag.String("pairing", "", "config-file key: `pairing: true` opens the management stream with the pairing stored by -pair-to; the value may also be a full watp1: line (3.5.0)")
 	latchPort := flag.Int("latch-port", 0, "server, Scepter (3.5.0): port of the scepter latch — a shaped wss listener (key-derived path) that arms while every unit of the pairing is inactive, so the cockpit can revive the pair; the first contact must prove the pairing key and the listener stands down on it. 0 = off (the default; the latch never exists without a pairing). Client, 3.5.0 (owner directive 2026-11-22): the latch is at peerhost:N — while the tunnel is down the client contacts it automatically (one attempt per 30 s) to revive the cockpit channel; -latch-dial stays the manual one-shot drill")
 	latchDial := flag.String("latch-dial", "", "client, standalone: contact the scepter latch on Kharej at host:port with the pairing from -pair-to (or the stored pairing file), prove the key, run the pairing hello and one ping, then exit — the cockpit revival primitive and the drill tool (3.5.0)")
+	scepterDenyPorts := flag.String("scepter-deny-ports", "", "server (3.5.0, Handoff 4): extra local ports, comma-separated, that a remote tunnel.create/edit may never forward to (sshd, every tunnel's metrics and latch port and the probe range are always refused); Kharej-local, the cockpit cannot set it")
 	scepterCall := flag.String("scepter-call", "", "client, standalone one-shot (3.5.0 phase B): run ONE Scepter command on the paired Kharej through this tunnel's reserved stream (same -config/-pair-to context as the run itself), print every response line as JSONL on stdout (chunk pieces included) and exit; exit 0 once answered — the machine code rides the JSON — exit 1 on a transport failure. This is what the Go manager shells out to (its scepterDial seam)")
 	scepterArgs := flag.String("scepter-args", "", "with -scepter-call: the command's args as a JSON object (e.g. '{\"name\":\"t1\",\"carrier\":\"udp\",\"ports\":\"20030\"}'); a top-level \"id\" is lifted as the command id, so a retried call reuses it and the server journal answers at-most-once (3.5.0)")
 	updateJob := flag.String("update-job", "", "internal, standalone (3.5.0 phase D): run one Scepter update job from a staged dir (job.json) — backup the running binary to wattun.prev, install the staged one, restart the recorded units, watch them stay up and roll back to wattun.prev when the new engine does not; the scepter update.run launches this through systemd-run so the watchdog outlives the engine restart it performs. Not a human entry point")
@@ -1141,7 +1142,7 @@ func main() {
 			os.Exit(runScepterCall(tun, *scepterCall, *scepterArgs))
 		}
 		if cfg.Pairing != nil {
-			hub := startScepterClient(tun, *cfgPath, nil)
+			hub := startScepterClient(tun, *cfgPath)
 			// The latch's client side (owner directive 2026-11-22): `latch-port: N` on a client run means
 			// "the peer's latch is at peerhost:N" — while the tunnel is down, contact it automatically
 			// (proof + hello + ping, one attempt per latchRetryEvery) and keep the revived channel warm;
@@ -1471,7 +1472,9 @@ func main() {
 			// name; the ops refuse to edit it — the cockpit channel rides this very unit. known is the same
 			// config-key closure the cfgWatcher uses, so a remote create accepts exactly the keys this binary
 			// parses (and the standalone action flags stay out of created tunnels).
-			scepter.SetOps(newFileScepterOps(filepath.Dir(pairPath), unitName, known, log.Printf))
+			ops := newFileScepterOps(filepath.Dir(pairPath), unitName, known, log.Printf)
+			ops.denyExtra = *scepterDenyPorts
+			scepter.SetOps(ops)
 			scepterNow.Store(scepter) // the /scepter handler reads this (it registered before arming)
 			// The scepter latch (3.5.0, phase A item 4): opt-in with -latch-port next to the attached pairing.
 			var mon *latchMonitor
@@ -1491,8 +1494,12 @@ func main() {
 				startPairingPoller(&pairingPoller{path: pairPath, scepter: scepter, latch: mon, logf: log.Printf,
 					interval: pairingPollInterval, seedMt: pairSeedMt, seedSz: pairSeedSz, seeded: pairSeeded})
 			} else if pairingOrigin == scepterFromToken {
+				// Handoff 4 R2: the token bootstrap is claimable — the first Iran that proves it gets a fresh
+				// credential, stored as .pairing; from then on the token alone opens nothing.
+				claim := func(p *wat.PairingConfig) error { return storePairingClaim(pairPath, p) }
+				scepter.SetClaimer(claim)
 				startPairingPoller(&pairingPoller{path: pairPath, scepter: scepter, latch: mon, logf: log.Printf,
-					interval: pairingPollInterval, derived: pairing})
+					interval: pairingPollInterval, derived: pairing, reclaim: func() { scepter.SetClaimer(claim) }})
 			}
 		}
 		go func() {

@@ -18,6 +18,7 @@ package wat
 
 import (
 	"bufio"
+	"crypto/hmac"
 	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -207,6 +208,7 @@ const (
 	CodeNameTaken    = 10 // tunnel.create: the name already exists on Kharej; params {"name"}
 	CodePortBusy     = 11 // a listen port collides with another tunnel or a local listener; params {"port","user"}
 	CodeCarrierNeeds = 12 // the carrier cannot run on this Kharej; params {"carrier","ver","need"}
+	CodePortDenied   = 13 // Handoff 4 R5: the target is guarded on Kharej (sshd, metrics, latch, probes, owner list); params {"port","why"}
 )
 
 const (
@@ -327,6 +329,7 @@ const (
 	EvUpdateAvailable = "update_available"
 	EvPairRotated     = "pair_rotated"
 	EvPairRevoked     = "pair_revoked"
+	EvPairClaimed     = "pair_claimed" // Handoff 4 R2: the first Iran traded the token bootstrap for its own credential
 	EvScepterUp       = "scepter_up"
 	EvScepterDown     = "scepter_down"
 	// Phase C (remote carrier work), appended like EvTunnelEdited: data, not commands.
@@ -766,9 +769,13 @@ type ScepterState struct {
 	watchDone chan struct{}
 	watchSnap map[string]scepterWatchEnt
 	lives     map[*Stream]struct{}
-	qmu       sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
-	recent    []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
-	nowf      func() time.Time // tests shrink the clock
+	// claimer (Handoff 4 R2) is set while the credential is the token bootstrap: the first hello that proves
+	// it trades it for a fresh credential, which claimer stores; nil once claimed (or for a stored credential).
+	claimer func(*PairingConfig) error
+	claimMu sync.Mutex       // serializes claims: two Iran racing the same token, one wins
+	qmu     sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
+	recent  []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
+	nowf    func() time.Time // tests shrink the clock
 }
 
 // ScepterRec is one handled command for the doctor's "last commands" line (Recent).
@@ -979,6 +986,7 @@ func (ss *ScepterState) ReloadPairing(p *PairingConfig) {
 	ss.mu.Lock()
 	old := ss.pair
 	ss.pair = p
+	ss.claimer = nil // a reloaded credential is a stored one; the bootstrap re-arms only via SetClaimer
 	var lives []*Stream
 	for st := range ss.lives {
 		lives = append(lives, st)
@@ -1001,6 +1009,14 @@ func (ss *ScepterState) ReloadPairing(p *PairingConfig) {
 		ss.audit.record(ss.nowf(), u.UUIDString(), why, "reload", CodeOK)
 	}
 	ss.AddEvent(why, map[string]any{"uuid": uuidOf(u)})
+}
+
+// Holds reports whether p is the credential in force (same uuid and key): the pairing poller skips reloading
+// the file this process just wrote itself (the claim), which would fire a spurious pair_rotated.
+func (ss *ScepterState) Holds(p *PairingConfig) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.pair != nil && p != nil && *ss.pair == *p
 }
 
 func uuidOf(p *PairingConfig) string {
@@ -1167,7 +1183,7 @@ var scepterCmds = map[string]scepterCmd{
 	"update.status": {minCap: CapManage, fn: cmdUpdateStatus, needsOps: true},
 	"update.run":    {minCap: CapFull, fn: cmdUpdateRun, needsOps: true}, // the one CapFull command (plan D4)
 	"doctor.fetch":  {minCap: CapManage, fn: cmdDoctorFetch},
-	"backup.export": {minCap: CapManage, fn: cmdBackupExport, needsOps: true},
+	"backup.export": {minCap: CapFull, fn: cmdBackupExport, needsOps: true}, // Handoff 4 R5: every tunnel key rides it
 	"audit.tail":    {minCap: CapManage, fn: cmdAuditTail, needsOps: true},
 }
 
@@ -2312,12 +2328,14 @@ func (ss *ScepterState) watchUpdateStatus() {
 // ServeScepter runs the server side of one scepter stream: read a line, answer (possibly chunked), repeat until
 // the stream ends. The events scepter_up/scepter_down bracket the stream's lifetime for the event log.
 func ServeScepter(st *Stream, ss *ScepterState) {
-	serveScepterLoop(st, newScepterDecoder(st), ss)
+	serveScepterLoop(st, newScepterDecoder(st), ss, false)
 }
 
 // serveScepterLoop is the command loop with a caller-supplied decoder: ServeScepterLatch (latch.go) has already
 // consumed the proof line from the same buffer, so it must not build a fresh one.
-func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState) {
+// proven: the latch already checked a keyed proof; the in-band channel must prove the pairing key in its
+// hello first (Handoff 4 R2: the tunnel PSK alone no longer opens the management plane).
+func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState, proven bool) {
 	ss.mu.Lock()
 	if ss.pair == nil { // disarmed by ReloadPairing(nil) (or a pairing-less state): the reserved stream serves
 		// nothing — refused contacts get a reset, never a command answer (F8-revoke, 2026-11-22)
@@ -2358,11 +2376,103 @@ func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState) {
 			writeRespLine(st, &wmu, ScepterResponse{ID: req.ID, Code: code})
 			continue
 		}
+		if !proven {
+			resp := ss.helloProven(req, st.s.cfg.SID)
+			proven = resp.Code == CodeOK
+			resp.Seq = ss.StateSeq()
+			writeResp(st, &wmu, resp)
+			continue
+		}
 		_, caps := ss.cred() // re-read per command: ReloadPairing (rotate) changes the caps mid-stream
 		resp := ss.Handle(req, caps)
 		resp.Seq = ss.StateSeq() // the response tail: every answer carries the state it was built on
 		writeResp(st, &wmu, resp)
 	}
+}
+
+// SetClaimer arms the token bootstrap claim (Handoff 4 R2): store persists the minted credential before it is
+// handed out. Call after NewScepterState when the credential came from the tunnel token; nil disarms.
+func (ss *ScepterState) SetClaimer(store func(*PairingConfig) error) {
+	ss.mu.Lock()
+	ss.claimer = store
+	ss.mu.Unlock()
+}
+
+// ScepterProof binds the pairing key to one session (Handoff 4 R2): a token holder knows the session PSK but
+// not a claimed pairing key, and a proof seen on one session is worthless on another.
+func ScepterProof(p *PairingConfig, sid uint64) string {
+	m := hmac.New(sha256.New, p.Key[:])
+	fmt.Fprintf(m, "wat-scepter-proof:%s:%d", p.UUIDString(), sid)
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// scepterMaxProofs bounds the hello's proof list (a client offers one per credential it holds).
+const scepterMaxProofs = 16
+
+// helloProven is the first exchange of an in-band scepter stream: only scepter.hello is served, and only with a
+// proof of the current pairing key. While the credential is the token bootstrap (claimer set) a proven hello
+// claims it: a fresh credential is minted, stored, made current and returned once in "claim"; from then on the
+// token alone opens nothing.
+func (ss *ScepterState) helloProven(req ScepterRequest, sid uint64) ScepterResponse {
+	if req.Cmd != "scepter.hello" || req.ID == "" {
+		ss.audit.record(ss.nowf(), "", orDash(req.Cmd), req.ID, CodeDenied)
+		return ScepterResponse{ID: req.ID, Code: CodeDenied, Params: map[string]any{"need": "hello"}}
+	}
+	proofs, _ := argStringSlice(req.Args, "proofs")
+	if len(proofs) > scepterMaxProofs {
+		proofs = proofs[:scepterMaxProofs]
+	}
+	ss.claimMu.Lock()
+	defer ss.claimMu.Unlock()
+	ss.mu.Lock()
+	p, claim := ss.pair, ss.claimer
+	ss.mu.Unlock()
+	if p == nil {
+		return ScepterResponse{ID: req.ID, Code: CodeUnpaired}
+	}
+	want := ScepterProof(p, sid)
+	ok := false
+	for _, x := range proofs {
+		if hmac.Equal([]byte(x), []byte(want)) {
+			ok = true
+		}
+	}
+	if !ok {
+		ss.audit.record(ss.nowf(), p.UUIDString(), req.Cmd, req.ID, CodeDenied)
+		return ScepterResponse{ID: req.ID, Code: CodeDenied, Params: map[string]any{"need": "proof"}}
+	}
+	line := ""
+	if claim != nil {
+		np := &PairingConfig{Ver: p.Ver, Caps: p.Caps}
+		if _, err := crand.Read(np.Key[:]); err != nil {
+			return ScepterResponse{ID: req.ID, Code: CodeInternal}
+		}
+		if _, err := crand.Read(np.UUID[:]); err != nil {
+			return ScepterResponse{ID: req.ID, Code: CodeInternal}
+		}
+		if err := claim(np); err != nil {
+			return ScepterResponse{ID: req.ID, Code: CodeInternal, Params: map[string]any{"detail": "claim store: " + err.Error()}}
+		}
+		ss.mu.Lock()
+		ss.pair, ss.claimer = np, nil
+		ss.mu.Unlock()
+		ss.audit.record(ss.nowf(), np.UUIDString(), EvPairClaimed, req.ID, CodeOK)
+		ss.AddEvent(EvPairClaimed, map[string]any{"uuid": np.UUIDString()})
+		line = np.Line()
+	}
+	_, caps := ss.cred()
+	resp := ss.Handle(req, caps)
+	if line != "" && resp.Code == CodeOK {
+		resp.Params["claim"] = line
+	}
+	return resp
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "?"
+	}
+	return s
 }
 
 // writeResp writes one response, chunking a large params payload (phase A: tunnel.logs) into scepterChunk-byte
@@ -2413,7 +2523,9 @@ type ScepterClient struct {
 // DialScepter opens the reserved stream, runs the pairing hello and returns the client. A peer that answers
 // with a version below 3.5.0 (or resets the stream — an old peer without a pairing) fails the dial; the caller
 // treats that as "pairing needs 3.5.0 on Kharej" and never retries within the process (mixed-version rule).
-func DialScepter(sess *Session) (*ScepterClient, error) {
+// extra are further credentials the client holds (its claimed ones): the hello proves each, and the server
+// accepts whichever is its current pairing key.
+func DialScepter(sess *Session, extra ...*PairingConfig) (*ScepterClient, error) {
 	if !sess.Paired() {
 		return nil, ErrNoPairing
 	}
@@ -2422,7 +2534,7 @@ func DialScepter(sess *Session) (*ScepterClient, error) {
 		return nil, err
 	}
 	c := &ScepterClient{st: st, d: newScepterDecoder(st)}
-	if err := c.helloExchange(sess); err != nil {
+	if err := c.helloExchange(sess, extra...); err != nil {
 		return c, err
 	}
 	return c, nil
@@ -2438,8 +2550,14 @@ func scepterPeerVerOK(ver string) bool {
 
 // helloExchange runs the pairing hello and version check shared by DialScepter and the latch dial
 // (latch.go). On failure the stream is reset and the error says why (mixed-version rule: old peer = no retry).
-func (c *ScepterClient) helloExchange(sess *Session) error {
-	hello, code := c.call("scepter.hello", map[string]any{"ver": Version, "caps": CapName(sess.cfg.Pairing.Caps)}, "hello", 0, 30*time.Second)
+func (c *ScepterClient) helloExchange(sess *Session, extra ...*PairingConfig) error {
+	var proofs []string
+	for _, p := range append([]*PairingConfig{sess.cfg.Pairing}, extra...) {
+		if p != nil && len(proofs) < scepterMaxProofs {
+			proofs = append(proofs, ScepterProof(p, sess.cfg.SID))
+		}
+	}
+	hello, code := c.call("scepter.hello", map[string]any{"ver": Version, "caps": CapName(sess.cfg.Pairing.Caps), "proofs": proofs}, "hello", 0, 30*time.Second)
 	if code != CodeOK {
 		c.st.Reset()
 		return fmt.Errorf("scepter: hello rejected (code %d)", code)

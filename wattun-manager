@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112214   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112401   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -1200,10 +1200,14 @@ pairing_get() { # field -> value ('' when absent, or there is no store, or it ca
   esac
   return 0
 }
-pairing_active() { [ -f "$PAIR_STORE" ]; }
+pairing_revoked() { # Handoff 4 R3: the store is a revoke tombstone (first non-comment line "revoked ...")
+  [ -f "$PAIR_STORE" ] && grep -v '^#' "$PAIR_STORE" | grep -m1 . | grep -q '^revoked'
+}
+pairing_active() { [ -f "$PAIR_STORE" ] && ! pairing_revoked; }
 pairing_check_readable() { # refuse to touch a store this manager cannot parse: it may be a newer engine's
   # format holding the only copy of the credential, and pair/rotate/revoke would destroy it (F1-B, 2026-11-22)
   [ -f "$PAIR_STORE" ] || return 0
+  pairing_revoked && return 0
   pairing_load && return 0
   err "$PAIR_STORE exists but this manager cannot read it; nothing was changed."
   hint "Pair or rotate with the engine (wattun -pair) or delete the file by hand, then try again."
@@ -1247,8 +1251,12 @@ pairing_audit_tail() { # [n=20]
 }
 pairing_status() {
   local caps created exp left
+  if pairing_revoked; then
+    say "  $(kv pairing "${RED}revoked${RST} ${GRY}(no Iran can manage this server; o = allow a new Iran)${RST}")"
+    return 0
+  fi
   if ! pairing_active; then
-    say "  $(kv pairing "${GRY}off${RST} ${GRY}(no credential; this server cannot be paired)${RST}")"
+    say "  $(kv pairing "${GRY}waiting${RST} ${GRY}(the first Iran that connects with a pairing token pairs itself)${RST}")"
     return 0
   fi
   if ! pairing_load; then
@@ -1256,7 +1264,8 @@ pairing_status() {
     return 0
   fi
   caps=$P_CAPS
-  say "  $(kv pairing "${GRN}on${RST}")"
+  if grep -q '^# claimed' "$PAIR_STORE"; then say "  $(kv pairing "${GRN}paired with an Iran${RST}")"
+  else say "  $(kv pairing "${GRN}on${RST}")"; fi
   say "  $(kv uuid "$P_UUID")"
   say "  $(kv caps "$caps")"
   created=$P_CREATED
@@ -1323,18 +1332,40 @@ scepter_rotate() { # [window_secs=86400] : new key; the window (default 24 h) is
   hint "Attach this new watp1: line on Iran NOW (rotation takes effect at the next store poll)."
   return 0
 }
-scepter_revoke() { # revoke = unpair: drop the credential locally; tunnels keep running (plan D3)
+scepter_revoke() { # revoke = a tombstone (Handoff 4 R3): a deleted store would let a token-paired unit
+  # re-derive the pairing at its next start; the tombstone keeps every unit unpaired, token or not.
+  # Tunnels keep running (plan D3).
+  local id tmp old
   scepter_kharej_only || return 1
-  pairing_active || { err "No pairing to revoke."; return 1; }
+  pairing_revoked && { err "The pairing is already revoked (o = allow a new Iran)."; return 1; }
   pairing_check_readable || return 1
+  id=$(pairing_get uuid); [ -n "$id" ] || id=token
   if [ "$NONINTERACTIVE" = 1 ]; then
     [ "${NI_YES:-0}" = 1 ] || { err "scepter revoke without a terminal needs --yes"; return 1; }
   else
-    confirm "Revoke the pairing ($(pairing_get uuid))? The cockpit channel dies on its next tick; tunnels keep running." n || return 0
+    confirm "Revoke the pairing? No Iran can manage this server until you allow a new one; tunnels keep running." n || return 0
   fi
-  pairing_audit pair_revoked "$(pairing_get uuid)"
-  rm -f "$PAIR_STORE"
+  pairing_audit pair_revoked "$id" || return 1
+  mkdir -p "$CONF"
+  old=$(umask); umask 077
+  tmp=$(mktemp "$CONF/.tmp.XXXXXX") || { umask "$old"; return 1; }
+  printf 'revoked %s %s\n' "$id" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$PAIR_STORE"
+  umask "$old"
   ok "Pairing revoked. The audit log is kept in $PAIR_AUDIT."
+  return 0
+}
+scepter_reopen() { # Handoff 4 R2: delete the store - the next Iran that connects with a pairing token pairs itself
+  scepter_kharej_only || return 1
+  [ -f "$PAIR_STORE" ] || { hint "Nothing to do: no Iran is paired yet, the next one to connect pairs itself."; return 0; }
+  pairing_check_readable || return 1
+  if [ "$NONINTERACTIVE" = 1 ]; then
+    [ "${NI_YES:-0}" = 1 ] || { err "scepter reopen without a terminal needs --yes"; return 1; }
+  else
+    confirm "Allow a new Iran to pair? The current pairing ends; the next Iran that connects with a pairing token takes over." n || return 0
+  fi
+  pairing_audit pair_reopened "$(pairing_get uuid)" || return 1
+  rm -f "$PAIR_STORE"
+  ok "Pairing open: the next Iran that connects with this server's pairing token pairs itself."
   return 0
 }
 scepter_menu() { # Kharej's local Scepter console: status, pair, rotate, revoke, audit tail.
@@ -1356,15 +1387,16 @@ scepter_menu() { # Kharej's local Scepter console: status, pair, rotate, revoke,
     done
   fi
   while :; do
-    page "Scepter" "Kharej pairing console"
+    page "Pairing" "which Iran manages this server"
     pairing_status
     echo
-    menu_line p pair r rotate x 'revoke (unpair)' a 'audit tail' 0 back
+    menu_line o 'allow a new Iran' x 'revoke' r rotate p 'pair by hand' a 'audit tail' 0 back
     key_read
     case "$KEY" in
       p|P) echo; scepter_pair; pause ;;
       r|R) echo; scepter_rotate; pause ;;
       x|X) echo; scepter_revoke; pause ;;
+      o|O) echo; scepter_reopen; pause ;;
       a|A) echo; pairing_audit_tail 20; pause ;;
       b|0|q|enter|esc) return 0 ;;
     esac
@@ -1376,8 +1408,9 @@ scepter_cmd() { # status|pair|rotate [secs]|revoke|audit [n]
     pair) scepter_pair ;;
     rotate) scepter_rotate "${2:-86400}" ;;
     revoke|unpair) scepter_revoke ;;
+    reopen|allow) scepter_reopen ;;
     audit) pairing_audit_tail "${2:-20}" ;;
-    *) err "scepter: use status, pair, rotate, revoke or audit."; return 1 ;;
+    *) err "scepter: use status, pair, rotate, revoke, reopen or audit."; return 1 ;;
   esac
 }
 
@@ -1546,7 +1579,7 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   pair/pair-to: the one-shot bootstrap forms of the same (engine flags; the manager writes .pairing itself)
 #   latch-port/latch-dial: the scepter latch listener and its one-shot contact/drill form (3.5.0, Kharej side; opt-in with a stored pairing)
 #   scepter-call/scepter-args: the one-shot write-intent/RPC call form (3.5.0, Iran side; the Go manager shells out to it)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial scepter-call scepter-args update-job'
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial scepter-call scepter-args update-job scepter-deny-ports'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'

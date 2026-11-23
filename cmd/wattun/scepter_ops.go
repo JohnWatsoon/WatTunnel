@@ -76,6 +76,8 @@ type fileScepterOps struct {
 	unit       func(name, action string) error // systemd action: start | stop | restart | disable
 	active     func(name string) bool          // unit liveness (systemctl is-active equivalent)
 	known      func(key string) bool           // is key a config key this binary accepts (nil = accept all)
+	sshdConf   string                          // the port guard's sshd_config ("" = /etc/ssh/sshd_config; tests point it elsewhere)
+	denyExtra  string                          // -scepter-deny-ports: the owner's own guarded targets (Kharej-local)
 	logf       func(string, ...any)
 
 	probeMu     sync.Mutex               // guards probes and autoRun: timers and the auto-test goroutine run outside the command queue
@@ -233,6 +235,9 @@ func (o *fileScepterOps) Create(spec wat.ScepterTunnelSpec) (map[string]any, int
 	ports, err := parseScepterPortItems(spec.Ports)
 	if err != nil {
 		return map[string]any{"ports": err.Error()}, wat.CodeBadRequest
+	}
+	if p, code := o.checkTargets(ports); code != wat.CodeOK {
+		return p, code
 	}
 	if code, p := o.checkCarrier(spec.Carrier); code != wat.CodeOK {
 		return p, code
@@ -439,9 +444,10 @@ var scepterParamDeny = map[string]bool{
 	"mode": true, "key": true, "carrier": true, "ports": true, "limits": true, "header": true,
 	"config": true, "version": true, "pair": true, "pair-to": true, "pairing": true, "update-job": true,
 	"latch-port": true, "latch-dial": true, "scepter-call": true, "scepter-args": true,
-	"metrics":   true, // round-2 F4 (2026-11-22): the ops write metrics themselves (pickMetricsPort); a param
-	"key-file":  true, // one would double the key, and a key-file one would shadow the ops-written key
-	"state-dir": true, // M8: a unit's CWD is /, a hand-set relative state-dir would scatter state files
+	"metrics":            true, // round-2 F4 (2026-11-22): the ops write metrics themselves (pickMetricsPort); a param
+	"key-file":           true, // one would double the key, and a key-file one would shadow the ops-written key
+	"scepter-deny-ports": true, // Handoff 4 R5: the port guard's owner list is Kharej-local, never set remotely
+	"state-dir":          true, // M8: a unit's CWD is /, a hand-set relative state-dir would scatter state files
 }
 
 // checkCreateParams: every param key must be one the unit's own config parser accepts (the `known` set, the
@@ -698,6 +704,15 @@ func (o *fileScepterOps) applyEdit(name string, patch wat.ScepterPatch, linkVeri
 	}
 	if code, p := o.checkEditParams(patch); code != wat.CodeOK {
 		return p, code
+	}
+	if patch.Ports != "" {
+		ports, err := parseScepterPortItems(patch.Ports)
+		if err != nil {
+			return map[string]any{"ports": err.Error()}, wat.CodeBadRequest
+		}
+		if p, code := o.checkTargets(ports); code != wat.CodeOK {
+			return p, code
+		}
 	}
 	newText, err := scepterPatchYML(string(old), patch)
 	if err != nil {

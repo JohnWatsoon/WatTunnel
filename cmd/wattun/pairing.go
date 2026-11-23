@@ -45,6 +45,9 @@ func readPairingFile(path string) (*wat.PairingConfig, error) {
 		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
+		if strings.HasPrefix(t, "revoked") { // the revoke tombstone (Handoff 4 R3): beats the token bootstrap
+			return nil, fmt.Errorf("%s: %w", path, errPairingRevoked)
+		}
 		p, perr := wat.ParsePairingLine(t)
 		if perr == nil {
 			return p, nil
@@ -55,6 +58,61 @@ func readPairingFile(path string) (*wat.PairingConfig, error) {
 		return nil, fmt.Errorf("%s: %v", path, perr)
 	}
 	return nil, fmt.Errorf("%s: no watp1: credential line in the pairing store", path)
+}
+
+// errPairingRevoked marks a revoke tombstone: a .pairing whose first line is "revoked <uuid> <time>". Its
+// presence keeps the unit unpaired — unlike a deleted store, which a token-derived unit would re-derive.
+var errPairingRevoked = errors.New("pairing revoked on this server")
+
+// storePairingClaim writes the credential the first Iran claimed (Handoff 4 R2) as the server's .pairing
+// store: from now on it, not the token, is the pairing, and every other unit's poller adopts it.
+func storePairingClaim(path string, p *wat.PairingConfig) error {
+	body := p.Line() + "\n# claimed by the first paired Iran over the token bootstrap, " + time.Now().UTC().Format(time.RFC3339) + "\n" +
+		"# revoke: replace this file with a 'revoked' line; allow a new Iran to pair: delete this file\n"
+	return atomicWriteFile(path, []byte(body), 0o600)
+}
+
+// claimsPath is a client's store of the credentials it claimed (one watp1: line each). It is separate from
+// .pairing, which on a box that also runs a server tunnel is that server's own credential.
+func claimsPath(cfgPath string) string {
+	if cfgPath == "" {
+		return ""
+	}
+	return dirOf(cfgPath) + "/.pairing.claims"
+}
+
+// readClaims returns every credential in the claims store; unreadable lines are skipped.
+func readClaims(path string) []*wat.PairingConfig {
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []*wat.PairingConfig
+	for _, line := range strings.Split(string(b), "\n") {
+		if p, err := wat.ParsePairingLine(strings.TrimSpace(line)); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// addClaim appends a claimed credential (deduplicated by uuid) to the claims store, atomically, 0600.
+func addClaim(path, line string) error {
+	np, err := wat.ParsePairingLine(line)
+	if err != nil {
+		return err
+	}
+	var lines []string
+	for _, p := range readClaims(path) {
+		if p.UUID != np.UUID {
+			lines = append(lines, p.Line())
+		}
+	}
+	lines = append(lines, np.Line())
+	return atomicWriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
 
 func dirOf(path string) string {
@@ -77,7 +135,9 @@ func attachStoredPairing(path string, logf func(string, ...any)) (*wat.PairingCo
 	if err == nil {
 		return p, nil
 	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, errPairingRevoked) {
+		logf("scepter: the pairing was revoked here (%s); running without the cockpit channel", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		logf("scepter: stored pairing %s unusable (%v); running without the cockpit channel", path, err)
 	}
 	return nil, err
@@ -270,6 +330,9 @@ type pairingPoller struct {
 
 	// Derived-mode base: the token-bootstrap credential the channel was armed with. nil = file-backed.
 	derived *wat.PairingConfig
+	// reclaim re-arms the token bootstrap claim (Handoff 4 R2) when a derived-mode store is deleted: deleting
+	// the store is the console's "allow a new Iran to pair"; revoking writes a tombstone instead.
+	reclaim func()
 
 	// round-2 F13 (2026-11-22): the optional seed. main stats the store right after the attach read and
 	// passes that state here, so a rotation in the startup gap between the read and the poller's own first
@@ -310,6 +373,17 @@ func (p *pairingPoller) check() {
 	defer p.mu.Unlock()
 	st, err := os.Stat(p.path)
 	if err != nil {
+		if p.fileSeen && p.derived != nil && p.reclaim != nil {
+			p.scepter.ReloadPairing(p.derived)
+			p.reclaim()
+			if p.latch != nil {
+				p.latch.rePair(p.derived)
+			}
+			p.armed, p.fileSeen = true, false
+			p.logf("scepter: pairing file %s removed — the token bootstrap is claimable again (the next Iran to connect pairs)", p.path)
+			p.mt, p.sz = time.Time{}, -1
+			return
+		}
 		if p.armed && p.fileSeen {
 			// Derived-mode runs with no store on disk keep the token-derived credential: the file is the
 			// override store, not a requirement (owner directive 2026-11-22). Only a store that existed at
@@ -341,6 +415,10 @@ func (p *pairingPoller) check() {
 			p.fileSeen = true // a broken override store counts as seen: its removal revokes, never falls back
 			p.logf("scepter: pairing file %s unusable (%v) — management channel disarmed, the tunnel keeps running", p.path, perr)
 		}
+		return
+	}
+	if p.armed && p.scepter.Holds(pair) {
+		p.fileSeen = true // this process wrote it (the claim): nothing to reload
 		return
 	}
 	if p.armed {

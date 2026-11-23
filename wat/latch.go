@@ -102,7 +102,7 @@ func ServeScepterLatch(st *Stream, ss *ScepterState, key []byte) bool {
 	}
 	var mu sync.Mutex
 	writeRespLine(st, &mu, ScepterResponse{ID: req.ID, Code: CodeOK})
-	serveScepterLoop(st, d, ss)
+	serveScepterLoop(st, d, ss, true) // the latch proof above already proved the key
 	return true
 }
 

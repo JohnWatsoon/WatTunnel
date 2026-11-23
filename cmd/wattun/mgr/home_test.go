@@ -238,8 +238,12 @@ func TestPairStoreRoundTrip(t *testing.T) {
 func TestPairStatusRows(t *testing.T) {
 	InitColor(false, 8)
 	homeTestHost(t)
-	if rows := pairStatus(); len(rows) != 1 || !strings.Contains(rows[0], "off") {
-		t.Errorf("no store: %v, want one off row", pairStatus())
+	if rows := pairStatus(); len(rows) != 1 || !strings.Contains(rows[0], "waiting") {
+		t.Errorf("no store: %v, want one waiting row", pairStatus())
+	}
+	os.WriteFile(pairStorePath(), []byte("revoked u1 2026-11-24T00:00:00Z\n"), 0o600)
+	if rows := pairStatus(); len(rows) != 1 || !strings.Contains(rows[0], "revoked") {
+		t.Errorf("tombstone: %v, want one revoked row", pairStatus())
 	}
 	os.WriteFile(pairStorePath(), []byte("not a store\n"), 0o600)
 	if rows := pairStatus(); len(rows) != 1 || !strings.Contains(rows[0], "unreadable") {
