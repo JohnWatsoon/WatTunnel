@@ -1478,17 +1478,8 @@ func icmpPathReport(n, host string, d *DoctorIO) {
 }
 
 // =====================================================================================
-//  live_monitor / mon_frame / spark / hist_push (2 s refresh, any key exits)
+//  live_monitor / mon_frame / spark (2 s refresh; digits pick the chart, q quits)
 // =====================================================================================
-
-var hist = map[string][]int{}
-
-func histPush(name string, v float64) {
-	hist[name] = append(hist[name], int(v))
-	if len(hist[name]) > 16 {
-		hist[name] = hist[name][1:]
-	}
-}
 
 // spark(): "····▁▂▃▅▇" of the last values, cyan bars on grey pad when colored.
 func spark(vals []int, w int) string {
@@ -1520,31 +1511,49 @@ func spark(vals []int, w int) string {
 	return rep("·", pad) + res
 }
 
-func monFrame(w io.Writer, at time.Time) {
+// monFrame (owner request 2026-11-23): one row per tunnel with a GradBar rate
+// meter (all meters share the fleet max, so they compare), then the live rate
+// chart for the selected tunnel, redrawn from the sampling ring each tick —
+// history data, not animated guesses.
+func monFrame(w io.Writer, at time.Time, sel int) {
 	cols := p1TermCols()
 	spw := 16
 	if cols < 78 {
 		spw = 10
 	}
 	left := fmt.Sprintf("%sWatTunnel ·%s %sLive monitor%s", GRY, RST, BOLD, RST)
-	right := fmt.Sprintf("%s%s · 2 s · any key%s", GRY, at.Format("15:04:05"), RST)
+	right := fmt.Sprintf("%s%s · 2 s · [1-9] chart · q quit%s", GRY, at.Format("15:04:05"), RST)
 	pad := uiW() - rlen(left) - rlen(right)
 	if pad < 2 {
 		pad = 2
 	}
 	fmt.Fprintf(w, "\n  %s%s%s\n", left, rep(" ", pad), right)
 	fmt.Fprintf(w, "  %s%s%s\n\n", GRY, rep("─", uiW()), RST)
+	names := p1Tunnels()
+	// sample every tunnel each tick (the shared sampler keeps the head's rate
+	// histories; the chart ring adds the per-step RTT beside them)
+	tis := make([]*tunnelInfo, len(names))
+	fleetMax := 1.0
+	for i, n := range names {
+		tis[i] = tinfo(n)
+		down, up := sampleTunnel(n, tis[i])
+		chartPush(n, at, down, up, tis[i].RTT)
+		if tis[i].Rate > fleetMax {
+			fleetMax = tis[i].Rate
+		}
+	}
+	if sel < 0 || sel >= len(names) {
+		sel = 0
+	}
 	if cols < 68 {
 		fmt.Fprintf(w, "  %s%-12s %-10s %6s  %s%s\n", GRY, "NAME", "STATE", "RTT", "RATE", RST)
 	} else {
-		fmt.Fprintf(w, "  %s%-13s %-10s %6s  %-10s %-"+strconv.Itoa(spw)+"s  %s%s\n", GRY, "NAME", "STATE", "RTT", "RATE", "HISTORY", "LOAD", RST)
+		fmt.Fprintf(w, "  %s%-13s %-10s %6s  %-10s %-"+strconv.Itoa(spw)+"s  %s%s\n", GRY, "NAME", "STATE", "RTT", "RATE", "METER", "LOAD", RST)
 	}
-	for _, n := range p1Tunnels() {
+	for i, n := range names {
 		r := roleName(n)
-		ti := tinfo(n)
+		ti := tis[i]
 		col, dot, txt := stateCell(r, ti.State)
-		histPush(n, ti.Rate)
-		sp := spark(hist[n], spw)
 		rttStr := "-"
 		if ti.State == "up" || ti.State == "degraded" {
 			rttStr = fmt.Sprintf("%.0f ms", ti.RTT)
@@ -1561,26 +1570,44 @@ func monFrame(w io.Writer, at time.Time) {
 				loadStr = fmt.Sprintf("%ds", ti.Streams)
 			}
 		}
-		if cols < 68 {
-			fmt.Fprintf(w, "  %-12s %s%s %-8s%s %6s  %s\n", trunc(n, 12), col, dot, txt, RST, rttStr, rate)
-		} else {
-			fmt.Fprintf(w, "  %-13s %s%s %-8s%s %6s  %-10s %s  %s\n", trunc(n, 13), col, dot, txt, RST, rttStr, rate, sp, loadStr)
+		mark := " "
+		if i == sel && len(names) > 1 {
+			mark = "▸"
 		}
+		if cols < 68 {
+			fmt.Fprintf(w, " %s%-12s %s%s %-8s%s %6s  %s\n", mark, trunc(n, 12), col, dot, txt, RST, rttStr, rate)
+		} else {
+			fmt.Fprintf(w, " %s%-13s %s%s %-8s%s %6s  %-10s %s  %s\n",
+				mark, trunc(n, 13), col, dot, txt, RST, rttStr, rate, GradBar(ti.Rate, fleetMax, spw), loadStr)
+		}
+	}
+	if len(names) > 0 {
+		RateChart(w, names[sel]+" · live rate", chartHist[names[sel]], uiW())
 	}
 	fmt.Fprintln(w)
 }
 
-// LiveMonitor: full-screen 2 s redraw loop; any key ends it.
+// LiveMonitor: full-screen 2 s redraw loop; a digit selects the tunnel whose
+// chart is drawn, anything else ends it.
 func LiveMonitor(out io.Writer) {
 	if !p1IsTTY() {
-		monFrame(out, time.Now())
+		monFrame(out, time.Now(), 0)
 		return
 	}
+	sel := 0
 	p1Clear()
 	for {
 		p1Clear()
-		monFrame(out, time.Now())
-		if k, err := p1ReadKey(); err == nil && k != "" {
+		monFrame(out, time.Now(), sel)
+		k, err := p1ReadKey()
+		if err != nil {
+			return
+		}
+		if k != "" {
+			if num, err := strconv.Atoi(k); err == nil && num >= 1 && num <= len(p1Tunnels()) {
+				sel = num - 1
+				continue // redraw at once with the newly selected tunnel
+			}
 			return
 		}
 		time.Sleep(2 * time.Second) // the bash's read -t 2 cadence

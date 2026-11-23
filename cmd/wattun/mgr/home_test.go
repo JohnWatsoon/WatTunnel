@@ -37,6 +37,7 @@ func resetPairCache() {
 }
 
 func TestMainMenuItemsScepterPromoted(t *testing.T) {
+	homeTestHost(t) // no tunnels, side unset: the union menu keeps all 8 slots
 	items := mainMenuItems(3)
 	want := []string{"Tunnels", "New tunnel", "Scepter", "Find a carrier", "Blackout kit", "Tools", "Settings", "Exit"}
 	if len(items) != len(want) {
@@ -50,6 +51,86 @@ func TestMainMenuItemsScepterPromoted(t *testing.T) {
 	if !items[len(items)-1].Off {
 		t.Error("Exit must stay the dim last row")
 	}
+}
+
+// Role-aware home (owner feedback 2026-11-23): the banner names the side, the
+// Scepter slot swaps per role, and dispatch follows the role.
+func TestRoleAwareHome(t *testing.T) {
+	homeTestHost(t)
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "80")
+	if got := scepterRoute(); got != "scepter_menu" {
+		t.Errorf("unset role routes %q, want scepter_menu (the console's own gate sorts it out)", got)
+	}
+
+	// Iran: the cockpit
+	_ = ConfSet("side", "iran")
+	if got := scepterRoute(); got != "scepter_fleet" {
+		t.Errorf("iran routes %q, want scepter_fleet", got)
+	}
+	items := mainMenuItems(1)
+	if items[2].Label != "Scepter" || !strings.Contains(items[2].Desc, "cockpit") {
+		t.Errorf("iran scepter row = %q %q, want the cockpit", items[2].Label, items[2].Desc)
+	}
+	var b strings.Builder
+	homeHead(&b, nil, map[string]*tunnelInfo{}, nil, false)
+	if out := b.String(); !strings.Contains(out, "IRAN — the cockpit") {
+		t.Errorf("iran head missing the role banner:\n%s", out)
+	}
+
+	// Kharej: the local console — no cockpit anywhere in the menu
+	_ = ConfSet("side", "kharej")
+	if got := scepterRoute(); got != "scepter_menu" {
+		t.Errorf("kharej routes %q, want scepter_menu", got)
+	}
+	items = mainMenuItems(1)
+	if items[2].Label != "Scepter console" || strings.Contains(items[2].Label, "cockpit") {
+		t.Errorf("kharej scepter row = %q, want the local console label", items[2].Label)
+	}
+	for _, it := range items {
+		if strings.Contains(it.Label+it.Desc, "cockpit") {
+			t.Errorf("kharej menu must not offer the cockpit: %q %q", it.Label, it.Desc)
+		}
+	}
+	b.Reset()
+	homeHead(&b, nil, map[string]*tunnelInfo{}, nil, false)
+	if out := b.String(); !strings.Contains(out, "KHAREJ — the server") {
+		t.Errorf("kharej head missing the role banner:\n%s", out)
+	}
+
+	// Mixed: one host running both roles says so instead of guessing
+	_ = confUnset("side")
+	os.WriteFile(filepath.Join(P.Conf, "kh.yml"), []byte("mode: server\ncarrier: udp\n"), 0o600)
+	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	if serverSide() != "mixed" {
+		t.Errorf("both roles present: serverSide() = %q, want mixed", serverSide())
+	}
+	b.Reset()
+	homeHead(&b, nil, map[string]*tunnelInfo{}, nil, false)
+	if out := b.String(); !strings.Contains(out, "Kharej + Iran — this host does both") {
+		t.Errorf("mixed head missing the both-roles banner:\n%s", out)
+	}
+}
+
+// The Kharej head's live glance is server-side: clients and ports, not the
+// client's rate meters (owner feedback 2026-11-23).
+func TestKharejHeadServerSideGlance(t *testing.T) {
+	homeTestHost(t)
+	InitColor(false, 8)
+	t.Setenv("COLUMNS", "100")
+	_ = ConfSet("side", "kharej")
+	os.WriteFile(filepath.Join(P.Conf, "kh.yml"), []byte("mode: server\ncarrier: udp\nports:\n  - 443\n"), 0o600)
+	ti := &tunnelInfo{State: "up", Sess: 3, Out: 15e6}
+	samples["kh"] = &sample{in: 0, out: 0, at: time.Now()}
+	var b strings.Builder
+	homeHead(&b, []string{"kh"}, map[string]*tunnelInfo{"kh": ti}, nil, false)
+	out := b.String()
+	for _, want := range []string{"3 clients", "443", Human(15e6)} {
+		if !strings.Contains(out, want) {
+			t.Errorf("kharej glance missing %q:\n%s", want, out)
+		}
+	}
+	delete(samples, "kh")
 }
 
 func TestSettingsItemsBoostAndScepterGate(t *testing.T) {

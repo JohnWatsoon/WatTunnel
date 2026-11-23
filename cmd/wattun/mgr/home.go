@@ -191,8 +191,25 @@ func serverSide() string {
 		return "kharej"
 	case i && !k:
 		return "iran"
+	case k && i:
+		return "mixed" // both roles on one host (owner feedback 2026-11-23: say so, never guess)
 	}
 	return ""
+}
+
+// roleBadge is the home head's role line: which side this host is, in its
+// side colour. Text colour only — the GradBand stays the head's one bright
+// moment (U1), so the badge never gets Badge()'s background.
+func roleBadge() string {
+	switch serverSide() {
+	case "iran":
+		return CYN + "IRAN — the cockpit" + RST
+	case "kharej":
+		return SAF + "KHAREJ — the server" + RST
+	case "mixed":
+		return YEL + "Kharej + Iran — this host does both" + RST
+	}
+	return GRY + "role not set" + RST
 }
 
 // listedTunnels: what a status list shows (hidden auto helpers never appear).
@@ -217,6 +234,8 @@ func hostLine(names []string, infos map[string]*tunnelInfo) string {
 		parts = append(parts, "Kharej side")
 	case "iran":
 		parts = append(parts, "Iran side")
+	case "mixed":
+		parts = append(parts, "both sides")
 	}
 	up := 0
 	for _, n := range names {
@@ -307,19 +326,39 @@ func wideTable() bool { return TermCols() >= 112 }
 // ---- home ----
 
 // mainMenuItems builds the home menu's rows; n is the live tunnel count for
-// the Tunnels row. Scepter sits at the top level: the cockpit is the product's
-// headline surface (U0 coverage pass), not a settings sub-entry.
+// the Tunnels row. The menu is role-aware (owner feedback 2026-11-23: the two
+// dashboards must not be identical): on Kharej the Scepter slot is the local
+// pairing console — the fleet cockpit is Iran's tool and never appears there;
+// on Iran it is the cockpit. An unset role shows Iran's row with a hint to set
+// the role, so the first pair stays reachable.
 func mainMenuItems(n int) []Item {
+	scepter := Item{Label: "Scepter", Desc: "the paired Kharej cockpit: remote tunnels and state"}
+	switch serverSide() {
+	case "kharej":
+		scepter = Item{Label: "Scepter console", Desc: "LOCAL: this server's pairing: rotate, revoke, audit"}
+	case "":
+		scepter.Desc = "the paired Kharej cockpit — set this server's role in Settings to focus this menu"
+	}
 	return []Item{
 		{Label: "Tunnels", Desc: fmt.Sprintf("watch traffic, restart, edit or delete (%d)", n)},
 		{Label: "New tunnel", Desc: "set one up step by step, or paste a token"},
-		{Label: "Scepter", Desc: "the paired Kharej cockpit: remote tunnels and state"},
+		scepter,
 		{Label: "Find a carrier", Desc: "test which carriers pass on this route"},
 		{Label: "Blackout kit", Desc: "emergency bond and token for a shutdown"},
 		{Label: "Tools", Desc: "update, monitor, backup, firewall, kernel boost"},
 		{Label: "Settings", Desc: "auto-heal, animations, boost, update proxy, role"},
 		{Label: "Exit", Off: true},
 	}
+}
+
+// scepterRoute is the Scepter slot's dispatch target per role: Kharej (and an
+// unset role, whose console gate sorts itself out) gets the local pairing
+// console; Iran gets the fleet cockpit.
+func scepterRoute() string {
+	if serverSide() == "iran" {
+		return "scepter_fleet"
+	}
+	return "scepter_menu"
 }
 
 // MainMenu is the manager's home screen: wordmark, host line, a live glance at
@@ -362,10 +401,11 @@ func MainMenu() int {
 		case 1:
 			dispatch("new_tunnel")
 		case 2:
-			// The cockpit's fleet entry (ScepterFleetEntry, lane U3): wired via
-			// the Register lookup "scepter_fleet" — the scepter_cockpit.go
-			// contract names this exact route for the home lane's nav.
-			dispatch("scepter_fleet")
+			// The Scepter slot is role-aware: the fleet cockpit entry
+			// (ScepterFleetEntry, lane U3) on Iran, registered under
+			// "scepter_fleet" by scepter_cockpit.go; the local pairing console
+			// ("scepter_menu") on Kharej or an unset role.
+			dispatch(scepterRoute())
 		case 3:
 			findCarrier()
 		case 4:
@@ -399,7 +439,9 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 		Stdout = old
 	}
 	fmt.Fprintln(w)
-	left := BOLD + Tagline + RST
+	// The role badge leads the head (owner feedback 2026-11-23: "which side am
+	// I on" must be unmissable at a glance), the tagline follows it.
+	left := roleBadge() + "  " + BOLD + Tagline + RST
 	if Ver != "" {
 		left = Badge(Ver) + "  " + left
 	}
@@ -438,7 +480,12 @@ func homeHead(w io.Writer, names []string, infos map[string]*tunnelInfo, stale [
 		line := fmt.Sprintf("  %s%s%s %s %s", col, dot, RST, padR(BOLD+trunc(n, 12)+RST, 13), padR(GRY+trunc(carrierText(n), 16)+RST, 17))
 		switch ti.State {
 		case "up", "degraded":
-			if TermCols() >= 96 {
+			if serverSide() == "kharej" {
+				// The server-side glance: clients served, the ports this tunnel
+				// answers on, total served — the rate meters and RTT are the
+				// client's view (owner feedback 2026-11-23: role-aware head).
+				line += fmt.Sprintf("%d clients · ports %s · served %s", ti.Sess, portsSummary(n, 24), Human(ti.Out))
+			} else if TermCols() >= 96 {
 				// Wide: the rates get tweened meters (U1's GradBar+Fill). The
 				// spark gives way below 96; from 112 it returns next to them.
 				if s := samples[n]; s != nil {
