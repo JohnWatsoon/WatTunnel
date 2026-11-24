@@ -391,7 +391,7 @@ func scepterACVerdict(n string) {
 	if port == "" {
 		return
 	}
-	key := strings.TrimSpace(mustRead(filepath.Join(P.Conf, n+".key")))
+	key := pskOf(mustRead(filepath.Join(P.Conf, n+".key")))
 	if key == "" {
 		return
 	}
@@ -406,14 +406,14 @@ func scepterACVerdict(n string) {
 			savedPreset, savedQuiet, savedSkip, savedAct, savedStop, savedGSkip
 	}()
 	atPreset, atQuiet, atSkip, atAct, atStop, atGSkip = "fast", false, "", "", false, ""
-	autoTest(Token{
+	defer autoTest(Token{
 		Peer: peer,
 		Key:  key,
 		Path: orStr(Cfg(n, "path"), "/wat"),
 		SNI:  Cfg(n, "sni"),
 		Icmp: Cfg(n, "icmp-type"),
 		Auto: "d=" + cr + ":" + port,
-	})
+	})()
 	plain := -1
 	for i := range av {
 		if av[i].Kind == "d" && av[i].Car == cr && !avAnti(av[i]) {

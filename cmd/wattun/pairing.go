@@ -6,9 +6,15 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -461,6 +467,7 @@ func (p *pairingPoller) check() {
 // the config file's base name, so the cockpit sees the same names `wattun-manager` shows on Kharej.
 type unitSource struct {
 	name, carrier, metrics string
+	dir                    string // the config dir; a pairing link lists the tunnels in it (3.6.1)
 	statsf                 func() wat.Stats
 	alivef                 func() bool
 	hist                   *statsHistory
@@ -468,6 +475,9 @@ type unitSource struct {
 }
 
 func (u *unitSource) Tunnels() []wat.ScepterTunnelInfo {
+	if u.isLink() {
+		return u.siblings()
+	}
 	state, health := "inactive", "down"
 	if u.alivef() {
 		state, health = "active", "ok"
@@ -479,7 +489,7 @@ func (u *unitSource) Tunnels() []wat.ScepterTunnelInfo {
 
 func (u *unitSource) TunnelStats(name string) (map[string]any, bool) {
 	if name != u.name {
-		return nil, false
+		return u.siblingStats(name)
 	}
 	st := u.statsf()
 	return map[string]any{
@@ -492,13 +502,16 @@ func (u *unitSource) TunnelStats(name string) (map[string]any, bool) {
 
 func (u *unitSource) TunnelLogs(name string, tail int) ([]string, bool) {
 	if name != u.name {
-		return nil, false
+		return u.siblingLogs(name, tail)
 	}
 	return u.logs.tail(tail), true
 }
 
 func (u *unitSource) History(name string) ([]map[string]any, bool) {
 	if name != u.name {
+		if _, ok := u.sibling(name); ok {
+			return []map[string]any{}, true // other units keep their own history; none over the link
+		}
 		return nil, false
 	}
 	out := []map[string]any{}
@@ -545,4 +558,133 @@ func (r *logRing) tail(n int) []string {
 	out := make([]string, n)
 	copy(out, r.lines[len(r.lines)-n:])
 	return out
+}
+
+// ---- a pairing link answers for the whole server (3.6.1) ----
+//
+// A pairing link (NAME.link next to its config, see mgr/link.go) carries only the management channel, so the
+// tunnels Iran wants to see are the other units in the same config dir. They are listed the way the manager
+// lists them: hidden helpers (-e-* listeners, -r companions, links) left out, state from systemd, stats from
+// each unit's own metrics address. A plain paired tunnel keeps answering for itself only.
+
+func (u *unitSource) isLink() bool {
+	if u.dir == "" {
+		return false
+	}
+	for _, n := range []string{u.name, strings.TrimSuffix(u.name, "-r")} {
+		if _, err := os.Stat(filepath.Join(u.dir, n+".link")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// visible: NAME is a tunnel the manager shows (not a helper or a link).
+func (u *unitSource) visible(n string) bool {
+	for _, ext := range []string{".autoext", ".link"} {
+		if _, err := os.Stat(filepath.Join(u.dir, n+ext)); err == nil {
+			return false
+		}
+	}
+	if p := strings.TrimSuffix(n, "-r"); p != n {
+		if _, err := os.Stat(filepath.Join(u.dir, p+".yml")); err == nil {
+			return false // the reverse companion of an auto tunnel
+		}
+	}
+	return true
+}
+
+// sibling reads one visible tunnel's carrier, ports and metrics address from its config.
+func (u *unitSource) sibling(n string) (wat.ScepterTunnelInfo, bool) {
+	if !u.isLink() || n == "" || strings.ContainsAny(n, "/\\") || !u.visible(n) {
+		return wat.ScepterTunnelInfo{}, false
+	}
+	raw, err := os.ReadFile(filepath.Join(u.dir, n+".yml"))
+	if err != nil {
+		return wat.ScepterTunnelInfo{}, false
+	}
+	t := wat.ScepterTunnelInfo{Name: n, State: "inactive", Health: "down"}
+	var ports []string
+	inPorts := false
+	for _, l := range strings.Split(string(raw), "\n") {
+		k, v, _ := strings.Cut(l, ":")
+		v = strings.Trim(strings.TrimSpace(v), `"'`)
+		switch {
+		case inPorts && strings.HasPrefix(strings.TrimSpace(l), "- "):
+			ports = append(ports, strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), "- ")), `"'`))
+			continue
+		case k == "carrier":
+			t.Carrier = v
+		case k == "metrics":
+			t.Metrics = v
+		}
+		inPorts = k == "ports"
+	}
+	t.Ports = strings.Join(ports, ",")
+	if exec.Command("systemctl", "is-active", "--quiet", unitPrefix()+"@"+n).Run() == nil {
+		t.State, t.Health = "active", "ok"
+	}
+	return t, true
+}
+
+func (u *unitSource) siblings() []wat.ScepterTunnelInfo {
+	out := []wat.ScepterTunnelInfo{}
+	ents, _ := os.ReadDir(u.dir)
+	for _, e := range ents {
+		n := strings.TrimSuffix(e.Name(), ".yml")
+		if n == e.Name() {
+			continue
+		}
+		if t, ok := u.sibling(n); ok {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func (u *unitSource) siblingStats(n string) (map[string]any, bool) {
+	t, ok := u.sibling(n)
+	if !ok {
+		return nil, false
+	}
+	m := map[string]any{"name": n, "alive": false}
+	if t.Metrics == "" || t.State != "active" {
+		return m, true
+	}
+	cl := http.Client{Timeout: 3 * time.Second}
+	r, err := cl.Get("http://" + t.Metrics + "/stats")
+	if err != nil {
+		return m, true
+	}
+	defer r.Body.Close()
+	var st map[string]any
+	if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&st) == nil {
+		for k, v := range st {
+			m[k] = v
+		}
+		m["name"] = n
+	}
+	return m, true
+}
+
+func (u *unitSource) siblingLogs(n string, tail int) ([]string, bool) {
+	if _, ok := u.sibling(n); !ok {
+		return nil, false
+	}
+	out, _ := exec.Command("journalctl", "-u", unitPrefix()+"@"+n, "-n", strconv.Itoa(tail), "--no-pager", "-o", "cat").Output()
+	lines := []string{}
+	for _, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines, true
+}
+
+// unitPrefix is the systemd unit prefix (WAT_PREFIX, wattun by default), as the manager uses it.
+func unitPrefix() string {
+	if p := os.Getenv("WAT_PREFIX"); p != "" {
+		return p
+	}
+	return "wattun"
 }

@@ -33,7 +33,7 @@ func runPanel(file string) error {
 type mgrBackend struct{}
 
 func (mgrBackend) Host() panel.Host {
-	h := panel.Host{Version: wat.Version, CPUs: runtime.NumCPU()}
+	h := panel.Host{Version: wat.Version, CPUs: runtime.NumCPU(), IP: mgr.PublicIPCached(), Role: mgr.ServerSide()}
 	h.Name, _ = os.Hostname()
 	if b, err := os.ReadFile("/proc/uptime"); err == nil {
 		f, _ := strconv.ParseFloat(strings.Fields(string(b) + " 0")[0], 64)
@@ -138,11 +138,11 @@ func (mgrBackend) Logs(name string, n int) []string {
 func (mgrBackend) Kharej() []panel.Kharej {
 	byHost := map[string]*panel.Kharej{}
 	var order []string
-	for _, n := range mgr.Tunnels() {
+	for _, n := range mgr.ManagedTunnels() {
 		if mgr.Role(n) != "Iran" || !mgr.IsPaired(n) {
 			continue
 		}
-		host, _ := mgr.SplitHP(mgr.Cfg(n, "peer"))
+		host := mgr.PairHost(n)
 		if host == "" {
 			host = n
 		}
@@ -152,7 +152,12 @@ func (mgrBackend) Kharej() []panel.Kharej {
 			byHost[host] = k
 			order = append(order, host)
 		}
-		k.Via = append(k.Via, n)
+		if mgr.IsLinkTunnel(n) { // the link is up whenever the pair is: ask through it first
+			k.Link = n
+			k.Via = append([]string{n}, k.Via...)
+		} else {
+			k.Via = append(k.Via, n)
+		}
 	}
 	out := []panel.Kharej{}
 	for _, h := range order {
@@ -330,6 +335,8 @@ func (mgrBackend) Paths(name string) (string, []panel.Path) {
 	}
 	return mode, out
 }
+
+func (mgrBackend) Pairing() (string, string) { return mgr.PairingTokenNow(), mgr.PairingState() }
 
 func (mgrBackend) Geo(addr string) (panel.Geo, error) {
 	lat, lon, cc, city, err := mgr.GeoLookup(addr)

@@ -18,6 +18,14 @@ Usage: $SELF [command]
   logs NAME             follow the log
   token NAME            print the Kharej token again
   panel [on|off|url|reset|2fa|2fa-reset]   web panel: turn on/off, show its address, new password, 2FA
+  pair-token [--rotate] Kharej: show this server's pairing token (made on first use: a hidden
+                        link tunnel); --rotate makes a new one, the old one stops working
+                        (the dashboard's t on Kharej). Both servers need wattun 3.6.1
+  add-kharej --token T [--test fast|normal|anti]
+                        Iran: pair with one more Kharej from its pairing token (the
+                        dashboard's t on Iran, or a in Kharej servers); tests the carriers
+                        and makes the hidden link, then waits for the pairing
+  remove-kharej HOST    Iran: drop the link to that Kharej; its tunnels keep running
   scepter [NAME]        pairing cockpit (Iran; also on the main menu). Setup: paste the
                         Kharej token once — the token carries the pairing credential, so
                         the pair and the cockpit open together (attach with a watp1: line

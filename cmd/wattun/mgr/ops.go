@@ -803,7 +803,7 @@ func slaVal(f, key string) int {
 func heal() {
 	_ = os.MkdirAll(P.Run, 0o755)
 	healPanel()
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if Role(n) != "Iran" || !IsEnabled(Unit(n)) {
 			continue
 		}
@@ -848,7 +848,7 @@ func heal() {
 		}
 	}
 	autoMigrateAll(false)
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if Role(n) == "Kharej" && IsAutoKharej(n) {
 			autoSyncCompanion(n)
 			healAutoHelpers(n)

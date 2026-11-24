@@ -454,9 +454,13 @@ func (s *Server) apiNew(c *call) {
 			c.fail(http.StatusBadRequest, "Pick a carrier.")
 			return
 		}
-		via, ok := s.tunnel(in.Via)
-		if !ok || !via.Paired || !via.Active {
-			c.fail(http.StatusBadRequest, "Pick a running paired tunnel to reach Kharej through.")
+		// via is a Kharej host (the page's choice since 3.6.1) or, from older pages, a paired tunnel here
+		viaName := ""
+		if t, ok := s.tunnel(in.Via); ok && t.Paired && t.Active {
+			viaName = t.Name
+		} else if v, ok := s.via(c, in.Via); ok {
+			viaName = v
+		} else {
 			return
 		}
 		var kports []string
@@ -468,7 +472,7 @@ func (s *Server) apiNew(c *call) {
 		}
 		id, err := s.jobs.do("create", "New tunnel on Kharej and here", c.sess.User, func(say func(string, ...any)) error {
 			say("Creating the tunnel on Kharej (%s, ports %s) ...", in.Carrier, strings.Join(kports, ","))
-			tok, err := s.be.KharejCreate(via.Name, in.Name, in.Carrier, strings.Join(kports, ","))
+			tok, err := s.be.KharejCreate(viaName, in.Name, in.Carrier, strings.Join(kports, ","))
 			if err != nil {
 				return err
 			}
@@ -509,6 +513,9 @@ func (s *Server) via(c *call, host string) (string, bool) {
 			continue
 		}
 		for _, v := range k.Via {
+			if v == k.Link && k.Online { // the pairing link is hidden from the tunnel list; it answered the last poll
+				return v, true
+			}
 			if t, ok := s.tunnel(v); ok && t.Active {
 				return v, true
 			}

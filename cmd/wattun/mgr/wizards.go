@@ -849,7 +849,9 @@ func wizardIranWith(tok, name string) bool {
 	// reverse needs its carrier ports free and unpublished (bash 3447-3462)
 	for _, it := range rports {
 		lv, lproto, _ := strings.Cut(it, "/")
-		if listenBlocked(lproto, atoi(lv)) {
+		// listeners only: the carrier test's reverse probe just closed on this port, and Kharej's dial-ins leave
+		// ownerless ESTAB/SYN-RECV/TIME-WAIT sockets there for a moment that never block our listener (3.6.1)
+		if portBusy(atoi(lv), lproto, false) || tunnelUsingListen(lv, "") != "" || tunnelUsingPublic(lv, lproto, "") != "" || tunnelUsingMisc(lv, "") != "" {
 			Err("Port " + lv + "/" + lproto + " is already in use here by " + listenConflictDesc(lproto, lv) + ". Reverse needs it free: pick another carrier port on Kharej and make a new token.")
 			return false
 		}
@@ -864,7 +866,8 @@ func wizardIranWith(tok, name string) bool {
 	// advanced (bash 3464-3475); a --max-mbps flag opens the block unattended
 	// (bash 3399: advdef=y when a flag is set)
 	wizStep("Iran", 2, iranSteps)
-	var bind, fec, sni, path, itype string
+	var fec, sni, path, itype string
+	bind := NI.Bind
 	mbps := NI.Mbps
 	if Confirm("Change advanced settings?", mbps != "") {
 		if !AskOK("Tunnel name", name, vName) {

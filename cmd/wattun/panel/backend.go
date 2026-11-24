@@ -36,6 +36,7 @@ type Backend interface {
 	PanelFirewall(open, close int)                 // firewall for a panel port change
 	Paths(name string) (mode string, paths []Path) // bond mode and live legs of a bonded tunnel
 	Geo(addr string) (Geo, error)                  // where an IP or host name is (an outside lookup service; slow, called by a poller)
+	Pairing() (token, state string)                // Kharej: the pairing token ("" = not made yet) and who is paired
 }
 
 // PortUse is one public port of a tunnel, from its /ports.
@@ -73,6 +74,7 @@ type Host struct {
 	MemPct   float64 `json:"mem_pct"`
 	DiskPct  float64 `json:"disk_pct"`
 	ClockNTP bool    `json:"clock_synced"`
+	Role     string  `json:"role"` // this server's side: kharej, iran, mixed, "" (not set, no tunnels)
 }
 
 // Path is one leg of a bonded tunnel.
@@ -112,7 +114,8 @@ type Counters struct {
 
 type Kharej struct {
 	Host    string         `json:"host"`
-	Via     []string       `json:"via"` // local tunnels paired with it
+	Via     []string       `json:"via"`            // local tunnels paired with it, the pairing link first
+	Link    string         `json:"link,omitempty"` // the pairing link to it (Add Kharej); "" = paired by an older tunnel
 	Online  bool           `json:"online"`
 	Version string         `json:"version,omitempty"`
 	Caps    string         `json:"caps,omitempty"`

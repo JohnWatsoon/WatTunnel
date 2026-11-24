@@ -36,6 +36,7 @@ func (fakeBE) Stats(string) (Counters, bool) { return Counters{Alive: true, Byte
 func (fakeBE) History(string) []byte         { return []byte(`[]`) }
 func (fakeBE) Logs(string, int) []string     { return []string{"a"} }
 func (fakeBE) Kharej() []Kharej              { return fakeKharej }
+func (fakeBE) Pairing() (string, string)     { return "", "" }
 
 // fake action state: what the actions called (the panel must only ever call these)
 var (

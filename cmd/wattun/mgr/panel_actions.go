@@ -106,8 +106,8 @@ func KharejKeyRotate(via, name string) (local, token string, err error) {
 
 func scepterSameHost(host string) []string {
 	var out []string
-	for _, n := range Tunnels() {
-		if Role(n) == "Iran" && scepterPeerHost(n) == host {
+	for _, n := range ManagedTunnels() {
+		if Role(n) == "Iran" && PairHost(n) == host {
 			out = append(out, n)
 		}
 	}
@@ -286,8 +286,6 @@ func LatestVersion() string {
 	return strings.TrimSpace(loc[i+len("/tag/v"):])
 }
 
-// GeoLookup asks a public IP-location service where ADDR (an IP or a host name) is, through the update proxy.
-// ipwho.is first, ipapi.co when it fails. Only the address is sent.
 // PathInfo is one leg of a bonded tunnel as its /stats reports it.
 type PathInfo struct {
 	Name, RTT, Loss, Share string
@@ -302,6 +300,8 @@ func BondPaths(n string) (mode string, out []PathInfo) {
 	return orStr(Cfg(n, "bond-mode"), "balanced"), out
 }
 
+// GeoLookup asks a public IP-location service where ADDR (an IP or a host name) is, through the update proxy.
+// ipwho.is first, ipapi.co when it fails. Only the address is sent.
 func GeoLookup(addr string) (lat, lon float64, cc, city string, err error) {
 	ip := addr
 	if net.ParseIP(addr) == nil {

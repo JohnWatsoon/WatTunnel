@@ -126,6 +126,17 @@ finalized tunnels reopen automatically on update.
 
 ## Scepter: pair once, manage from Iran
 
+**3.6.1: pairing in one step (both servers need 3.6.1).** The installer asks for the role. On Kharej it shows
+the **pairing token** right away; later, `wattun` and then `t` on the dashboard shows it again, with a Rotate
+button (the old token stops working, and the Iran server has to add this Kharej again). On Iran, `t` on the
+dashboard (or `a` in Kharej servers, or **Add Kharej** in the web panel) asks for that token, tests which
+carriers reach Kharej, and pairs. One Iran server can add several Kharej servers this way. Behind it sits a
+small **pairing link**: a tunnel of its own that carries only the management channel. It never shows in the
+tunnel lists, only as "pairing link" on the Kharej servers page; heal and start/restart all keep it running.
+Tunnels are then made from Iran with New tunnel, "On Kharej and here". The commands are `wattun pair-token
+[--rotate]` (Kharej), `wattun add-kharej --token wat1:...` and `wattun remove-kharej HOST` (Iran). Removing a
+Kharej keeps its tunnels running. Older pairs made with a tunnel token keep working as before.
+
 3.5.0 adds an optional pairing between the two servers (both ends need 3.5.0) and makes it automatic — the
 setup has no manual pairing steps: install on Kharej and let the wizard create tunnel 1 (the token it prints
 ONCE carries the pairing inside it, and the wizard writes the latch port for you), install on Iran and paste

@@ -657,7 +657,7 @@ func TestScepterFleetScreenEmpty(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
 	defer feed("0")()
 	out := capture(t, scepterFleet)
-	if !strings.Contains(out, "none paired") || !strings.Contains(out, "watp1:") {
+	if !strings.Contains(out, "none paired") || !strings.Contains(out, "press t") {
 		t.Errorf("empty fleet hint missing:\n%s", out)
 	}
 }

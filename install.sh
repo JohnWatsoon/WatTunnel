@@ -180,12 +180,12 @@ page() { # title [subtitle] : renders in-flow without wiping scrollback (\e[3J)
 step_diagram() {
   term_cols
   if [ "$TERM_COLS" -ge 68 ]; then
-    printf '  %s[1] Kharej%s %s(outside)  ─── wat1: token ───►%s  %s[2] Iran%s %s(inside)%s\n' \
+    printf '  %s[1] Kharej%s %s(outside)  ── pairing token ──►%s  %s[2] Iran%s %s(inside)%s\n' \
       "$CYN" "$RST" "$GRY" "$RST" "$BOLD" "$RST" "$GRY" "$RST"
     printf '      %sruns service                              users connect here%s\n' "$GRY" "$RST"
   else
     printf '  %s[1] Kharej%s %s(outside) · runs service%s\n' "$CYN" "$RST" "$GRY" "$RST"
-    printf '    %s─── wat1: token ───►%s  %s[2] Iran%s %s(inside) · users connect%s\n' "$GRY" "$RST" "$BOLD" "$RST" "$GRY" "$RST"
+    printf '    %s── pairing token ──►%s  %s[2] Iran%s %s(inside) · users connect%s\n' "$GRY" "$RST" "$BOLD" "$RST" "$GRY" "$RST"
   fi
 }
 
@@ -913,7 +913,7 @@ if [ -t 0 ] && [ -t 1 ]; then
     step_diagram
     echo
     printf '  %s Kharej  %soutside server, where the service runs%s\n' "$(key_label 1)" "$GRY" "$RST"
-    printf '  %s Iran    %sinside server users connect to (needs Kharej token)%s\n' "$(key_label 2)" "$GRY" "$RST"
+    printf '  %s Iran    %sinside server users connect to (needs the Kharej pairing token)%s\n' "$(key_label 2)" "$GRY" "$RST"
     printf '  %s later   %srun wattun when ready%s\n' "$(key_label 3)" "$GRY" "$RST"
     echo
     for t in 1 2 3; do
@@ -921,7 +921,10 @@ if [ -t 0 ] && [ -t 1 ]; then
       IFS= read -rsn1 side || { echo; side=3; }
       echo "$side"
       case "$side" in
-        1) save_side kharej; cleanup; exec "$MGR" kharej ;;
+        1) save_side kharej; echo
+           # 3.6.1: the pairing token right away; the Iran server adds this Kharej with it (wattun -> t)
+           "$BIN" pair-token || warn "No pairing token yet. Later: wattun, then t"
+           cleanup; exec "$BIN" ;;
         2) save_side iran
            if ! [ -f "$CONF/panel.conf" ]; then
              echo
@@ -934,7 +937,8 @@ if [ -t 0 ] && [ -t 1 ]; then
                   IFS= read -r _ || true; echo ;;
              esac
            fi
-           cleanup; exec "$MGR" iran ;;
+           "$BIN" add-kharej || true
+           cleanup; exec "$BIN" ;;
         3|''|q|Q) break ;;
         *) warn "Please press 1, 2 or 3." ;;
       esac

@@ -1943,18 +1943,21 @@ func parseScepterCallArgs(s string) (map[string]any, string, error) {
 // comes from the ordinary -config/-pair-to machinery, exactly like the run itself), run ONE command and print
 // every raw response line (chunks included) as JSONL on stdout. Exit code: 0 when the command was answered —
 // the machine code rides the JSON, the caller parses it — 1 on a transport failure (stderr).
-func runScepterCall(tun *tunnel, cmd, argsJSON string, claims []*wat.PairingConfig) int {
+func runScepterCall(tun *tunnel, cmd, argsJSON, claimsFile string) int {
 	args, id, err := parseScepterCallArgs(argsJSON)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "-scepter-args: %v\n", err)
 		return 1
 	}
-	c, err := wat.DialScepter(tun.pick(), claims...) // a claimed box proves its own credential (Handoff 4 R2)
+	c, err := wat.DialScepter(tun.pick(), readClaims(claimsFile)...) // a claimed box proves its own credential (Handoff 4 R2)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scepter-call: %v (pairing needs %s on both ends)\n", err, wat.Version)
 		return 1
 	}
 	defer c.Close()
+	// a one-shot call can be the first contact (add-kharej asks before the unit's own channel is up): keep the
+	// claim like the unit does, or every later dial proves the token's key, which Kharej no longer takes (3.6.1)
+	keepClaim(claimsFile, c, func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) })
 	if _, err := c.CallRaw(cmd, args, id, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "scepter-call: %v\n", err)
 		return 1

@@ -208,7 +208,7 @@ func tunnelUsingMisc(port, exclude string) string {
 
 // tunnelUsingPublic: another Iran tunnel already publishing port/proto.
 func tunnelUsingPublic(port, proto, exclude string) string {
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if n == exclude || Role(n) != "Iran" {
 			continue
 		}

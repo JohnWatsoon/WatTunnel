@@ -340,6 +340,10 @@ dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
 
 /* kharej */
 .kgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:12px}
+.k-bar{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.k-bar .grow{flex:1}
+.pairc{max-width:640px}
+.pairc .k-via,.pairc .k-acts{margin-top:12px}
 .ksrv{display:flex;flex-direction:column;gap:14px}
 .ksrv.off{opacity:.8}
 .k-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}

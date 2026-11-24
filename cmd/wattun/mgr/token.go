@@ -225,7 +225,7 @@ func rebuildKharejToken(n string) bool {
 	if fileExists(tf) {
 		return true
 	}
-	key := strings.TrimSpace(strings.SplitN(mustRead(filepath.Join(P.Conf, n+".key")), "\n", 2)[0])
+	key := pskOf(mustRead(filepath.Join(P.Conf, n+".key")))
 	if key == "" {
 		return false
 	}

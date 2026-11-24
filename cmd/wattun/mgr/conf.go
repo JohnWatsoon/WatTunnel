@@ -163,7 +163,30 @@ func IsAutoHelper(name string) bool {
 	if _, err := os.Stat(filepath.Join(P.Conf, name+".autoext")); err == nil {
 		return true
 	}
-	return CompanionOf(name) != ""
+	return IsLink(name) || CompanionOf(name) != ""
+}
+
+// IsLink: NAME is a pairing link (link.go), the hidden tunnel that carries only the management channel
+// between this server and one paired server. Marked by NAME.link.
+func IsLink(name string) bool { return fileExists(filepath.Join(P.Conf, name+".link")) }
+
+// Links: every pairing link on this server.
+func Links() []string {
+	var out []string
+	for _, n := range TunnelsAll() {
+		if IsLink(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// ManagedTunnels: the visible tunnels plus the pairing links, for the loops that keep units running (heal,
+// start/restart all, the pairing lookups). The links' own helpers (-r, -e-*) stay out, like every parent's.
+func ManagedTunnels() []string {
+	out := append(Tunnels(), Links()...)
+	sort.Strings(out)
+	return out
 }
 
 // CompanionOf mirrors companion_of(): parent name when NAME is an auto reverse

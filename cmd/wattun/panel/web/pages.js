@@ -163,7 +163,7 @@ async function openJob(id){
     let r=null;try{r=await api('jobs/'+id,{auth:true})}catch(e){}
     if(!r||!r.ok){misses++;v.st.lastChild.textContent=misses>3?'waiting for the panel to come back':'running';jobT=setTimeout(tick,2000);return}
     misses=0;const j=r.j;$('#dlgT').textContent=j.title;
-    const all=(j.log||[]).map(strip);const shown=all.filter(l=>!/^[A-Z_]+=/.test(l));
+    const all=(j.log||[]).map(strip).filter(l=>j.kind!=='pair'||!/^TUNNEL=/.test(l)); // a pairing link is hidden: no carrier switch on itconst shown=all.filter(l=>!/^[A-Z_]+=/.test(l));
     if(j.kind==='speedtest'){spd=spd||speedView(v.body);spd(shown,j.state)}
     else{car=car||carrierView(v.body);steps=steps||stepView(v.body);
       // the board takes over as soon as the manager reports carriers; until then the plain steps
@@ -273,11 +273,11 @@ async function bulk(a){
 const TESTF={k:'test',label:'Carrier test',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]};
 const PICK={k:'pick',label:'Then use, for auto',options:[['best','the fastest carrier'],['bond','a bond of every working carrier']],hint:'Either way, the results let you switch to any tested carrier or bond the ones you choose.'};
 async function newTunnel(){
-  const ov=S.ov||{tunnels:[]};const vias=ov.tunnels.filter(t=>t.paired&&t.active);
+  const ov=S.ov||{tunnels:[],kharej:[]};const vias=(ov.kharej||[]).filter(k=>k.online);
   const fields=[{k:'where',label:'Where',options:vias.length?[['both','On Kharej and here, in one go'],['here','Here only, from a token']]:[['here','Here only, from a token']],
       onchange:(v,inp)=>{const both=v==='both';['via','carrier'].forEach(k=>inp[k]&&(inp[k].parentNode.hidden=!both));inp.token&&(inp.token.parentNode.hidden=both)}},
     {k:'token',label:'Token from Kharej (wat1:...)',area:true,rows:3},
-    {k:'via',label:'Kharej server',options:[...new Map(vias.map(t=>[t.peer||t.name,t.name])).entries()].map(([h,n])=>[n,h])},
+    {k:'via',label:'Kharej server',options:vias.map(k=>[k.host,k.host])},
     {k:'carrier',label:'Carrier',options:[['auto','auto: test them all and keep the best'],['wss','wss: TLS websocket, the safe default'],['tls','tls'],['tcp','tcp'],['udp','udp'],['icmp','icmp (ping)'],['grpc','grpc'],['h2','h2'],['ws','ws'],['h2c','h2c']]},
     {k:'map',label:'Ports',ph:'39901:18999, 8443:443',hint:'public port here : port on Kharej, comma-separated'},
     {k:'name',label:'Name (empty = automatic)'},
@@ -346,7 +346,9 @@ async function deleteTunnel(name,t){
 const TIERS=['tunnel','create','manage','full'];
 function renderKharejPage(still){
   const v=$('#vKharej');if(!S.ov)return;v.textContent='';v.classList.toggle('still',!!still);const kh=S.ov.kharej;const latest=S.ov.latest;
-  if(!kh.length){const e=el('section','card empty-hero');e.append(el('div','eh-t','No Kharej server is paired with this one.'),el('p','note','Pair from the manager on this server: '+(S.cli||'wattun')+' scepter. A tunnel made from a pairing token pairs by itself.'));v.appendChild(e);return}
+  if(S.ov.host.role==='kharej'){pairingCard(v);return}
+  const bar=el('div','k-bar');bar.append(el('span','lab grow',kh.length?kh.length+' paired':''),btn('Add Kharej','pri',addKharej));v.appendChild(bar);
+  if(!kh.length){const e=el('section','card empty-hero');e.append(el('div','eh-t','No Kharej server is paired with this one.'),el('p','note','On the Kharej server run '+(S.cli||'wattun')+' and press t, or open its panel: it shows the pairing token. Then press Add Kharej here and paste it.'));v.appendChild(e);return}
   const g=el('div','kgrid');
   kh.forEach((k,i)=>{
     const c=el('section','card ksrv'+(k.online?'':' off'));c.style.animationDelay=(0.1+i*0.08)+'s';c.dataset.host=k.host;
@@ -359,7 +361,7 @@ function renderKharejPage(still){
     const link=el('div','k-link');const a1=el('div','kl-end');a1.append(el('span','kl-dot me'),el('span',null,S.ov.host.name||'this server'));
     const mid=el('div','kl-mid');const line=el('i','t-line wide'+(k.online?' on':''));line.appendChild(el('b'));const st=el('div','kl-st');st.dataset.k='kst';mid.append(line,st);
     const a2=el('div','kl-end r');a2.append(el('span',null,k.host),el('span','kl-dot '+(k.online?'ok':'bad')));link.append(a1,mid,a2);c.appendChild(link);
-    const via=el('div','k-via');via.appendChild(el('span','lab','through'));k.via.forEach(n=>{const b=el('button','pchip lnk',n);b.type='button';b.onclick=()=>P.openDrawer(n);via.appendChild(b)});
+    const via=el('div','k-via');via.appendChild(el('span','lab','through'));k.via.forEach(n=>{if(n===k.link){via.appendChild(el('span','pchip','pairing link'));return}const b=el('button','pchip lnk',n);b.type='button';b.onclick=()=>P.openDrawer(n);via.appendChild(b)});
     if(!k.online&&k.error)via.appendChild(el('span','lab bad',k.error));if(k.seen)via.appendChild(el('span','lab grow r','seen '+when(k.seen)));c.appendChild(via);
     const list=el('div','k-tuns');
     (k.tunnels||[]).forEach(rt=>{const row=el('div','ktr');const ok=rt.health==='ok',act2=rt.state==='active';
@@ -377,9 +379,25 @@ function renderKharejPage(still){
         btn('Audit','sec',async()=>{const r=await api('kharej/'+enc(k.host)+'/audit');const pre=el('pre','log',r.ok?(r.j.logs||[]).join('\n')||JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Audit of '+k.host,pre)}),
         btn('Rotate pairing','sec',()=>act('kharej/'+enc(k.host)+'/pair-rotate',{full:true,title:'New pairing credential for '+k.host,confirm:'Kharej makes a new pairing credential; '+k.via.join(', ')+' switch to it and restart. The old one keeps working for 5 minutes.'}).then(r=>r&&toast('Pairing rotated'))));
       c.appendChild(t)}
+    if(k.link){const t=el('div','k-acts');t.appendChild(btn('Remove','sec danger',()=>act('kharej/'+enc(k.host)+'/remove',{full:true,danger:true,title:'Remove Kharej '+k.host,confirm:'Deletes the pairing link to '+k.host+'. Your tunnels to it keep running; they are no longer managed from here. Add it again with its pairing token.'}).then(r=>{if(r)setTimeout(()=>P.loadOverview(),1500)})));c.appendChild(t)}
     g.appendChild(c);
   });
   v.appendChild(g);liveKharej();
+}
+// Iran: pair with one more Kharej from its pairing token (wattun add-kharej as a job; the carrier board shows the test)
+function addKharej(){return act('kharej-add',{full:true,title:'Add Kharej',ok:'Add',fields:[{k:'token',label:'Pairing token from Kharej (wat1:...)',area:true,rows:3,hint:'On the Kharej server: '+(S.cli||'wattun')+', then t. Or its panel: Kharej servers.'},
+  {k:'test',label:'Carrier test',options:[['fast','fast (a few minutes)'],['normal','normal'],['anti','anti-censor grid']]}]})}
+// Kharej: its pairing token and who is paired; made on first use, rotate makes a new one
+async function pairingCard(v){
+  const c=el('section','card pairc');v.appendChild(c);
+  c.append(el('div','eh-t','This is a Kharej server.'),el('p','note','The Iran server adds it with the pairing token below (Kharej servers, Add Kharej). Tunnels are then made from Iran, on both servers at once.'));
+  const st=el('div','k-via');c.appendChild(st);const acts=el('div','k-acts');c.appendChild(acts);
+  const r=await api('pairing').catch(()=>null);if(!r||!r.ok){st.appendChild(el('span','lab bad','The pairing state could not be read.'));return}
+  st.append(el('span','lab','pairing'),el('span',null,r.j.state));
+  if(!r.j.made){acts.appendChild(btn('Make the pairing token','pri',()=>act('pairing',{body:{action:'make'},title:'Make the pairing token',confirm:'Opens the hidden pairing link on this server (a minute at most). The token is shown here afterwards.'})));return}
+  acts.append(btn('Show the pairing token','pri',async()=>{const x=await act('pairing',{body:{action:'show'},full:true,title:'Show the pairing token'});if(!x)return;
+      const b=el('div');b.appendChild(el('p','note','It holds the link key. Paste it only into your own Iran server.'));b.appendChild(tokenBox(x.token));info('Pairing token',b)}),
+    btn('Rotate the token','sec danger',()=>act('pairing',{body:{action:'rotate'},full:true,danger:true,title:'New pairing token',confirm:'The old token stops working. The Iran server paired now loses its link and has to add this Kharej again with the new token.'})));
 }
 function liveKharej(){document.querySelectorAll('.ksrv').forEach(c=>{const k=S.ov.kharej.find(x=>x.host===c.dataset.host);if(!k)return;let d=0,rtt=0,n=0;k.via.forEach(v=>{const l=S.live[v];if(l&&l.metrics&&l.alive){d+=l.down;rtt+=l.rtt;n++}});
   const st=c.querySelector('[data-k=kst]');if(st)st.textContent=k.online?P.fmtRate(d)+' MB/s'+(n?' · '+(rtt/n).toFixed(0)+' ms':''):'no channel'})}

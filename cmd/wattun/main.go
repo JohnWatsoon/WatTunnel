@@ -1143,7 +1143,7 @@ func main() {
 		tun = newTunnel(list)
 		tunRef.Store(tun)       // -ech ladder's DoH hook (2.9.0)
 		if *scepterCall != "" { // one-shot cockpit command (3.5.0 phase B): dial, run, print, exit
-			os.Exit(runScepterCall(tun, *scepterCall, *scepterArgs, readClaims(claimsPath(*cfgPath))))
+			os.Exit(runScepterCall(tun, *scepterCall, *scepterArgs, claimsPath(*cfgPath)))
 		}
 		if cfg.Pairing != nil {
 			hub := startScepterClient(tun, *cfgPath)
@@ -1467,7 +1467,7 @@ func main() {
 			if *cfgPath != "" {
 				unitName = strings.TrimSuffix(filepath.Base(*cfgPath), ".yml")
 			}
-			src := &unitSource{name: unitName, carrier: *carrier, metrics: *metrics,
+			src := &unitSource{name: unitName, carrier: *carrier, metrics: *metrics, dir: filepath.Dir(*cfgPath),
 				statsf: stats, alivef: alive, hist: hist, logs: unitLogs}
 			jp := filepath.Join(filepath.Dir(pairPath), ".pairing.journal")
 			var serr error

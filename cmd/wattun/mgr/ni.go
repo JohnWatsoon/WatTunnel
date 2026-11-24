@@ -19,6 +19,7 @@ type niOpts struct {
 	FakeSNI, FakeMode, FakeTTL, PoolRot, PoolBytes, Preset   string
 	Test, ECH, Governor, DNSListen, SrcIP                    string
 	Token, Map, Pick, Policy                                 string
+	Bind                                                     string // no flag: the pairing link binds its dummy map to 127.0.0.1
 	Sessions, Conns, MTU                                     int
 	UDPDNS, Extended                                         bool
 }

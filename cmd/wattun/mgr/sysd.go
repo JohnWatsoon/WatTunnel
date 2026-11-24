@@ -118,7 +118,7 @@ func portUser(port int, proto string) string {
 	// no pid captured: fall back to the bare process name
 	out2, _ := exec.Command("ss", flag, filter).Output()
 	for _, l := range strings.Split(string(out2), "\n") {
-		if m := regexp.MustCompile(`users:\(("[^"]*"`).FindStringSubmatch(l); m != nil {
+		if m := regexp.MustCompile(`users:\(\("([^"]*)"`).FindStringSubmatch(l); m != nil {
 			return strings.Trim(m[1], `"`)
 		}
 	}

@@ -495,7 +495,7 @@ func cdnLoad(n string) (car, peer, sni, path, key string, ok bool) {
 	if !fileReadable(kf) {
 		kf = filepath.Join(P.Conf, n+".key")
 	}
-	key = strings.TrimSpace(strings.SplitN(mustRead(kf), "\n", 2)[0])
+	key = pskOf(mustRead(kf))
 	return Cfg(n, "carrier"), Cfg(n, "peer"), orStr(Cfg(n, "sni"), Cfg(n, "host")), Cfg(n, "path"), key, key != ""
 }
 

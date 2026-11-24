@@ -1448,6 +1448,14 @@ reverse tunnels to the same Iran server without port collisions (older `24431..2
 working). Tokens with 7 or 8 fields (older managers, non-auto tunnels) still work. An extended token appends `;e=1`,
 which older managers and `plan_part` ignore.
 
+The shaped carriers of an extended plan (`fou-gre`, `vxlan`, `sit`, ...) are direct listeners and belong in `d`.
+The Go manager of 3.3.9-3.6.0 appended them to `r` instead, which put them into the reverse companion's `+` bond;
+the engine refuses a shaped leg there, so `NAME-r` crash-looped and every reverse variant failed. Newer managers
+write them to `d` and move them out of `r` when they read an old token, so old tokens work; making a new token is
+still the clean fix. The same managers also kept the probe key only for the first screening pass, so the
+re-measure of the best variants and the tuning pass failed with `no link` and the slower first-pass winner was
+used; and they reported every RTT as 0.
+
 **Reverse side.** A transient unit `wattun-autowatch-NAME` (`systemd-run`, 1 hour at most) polls the Kharej tunnel's
 `/stats` `clients` list for fast initial discovery, and `heal()` (`auto_sync_companion`) keeps watching continuously
 every minute after that so late connections, reboots, and Iran IP changes are picked up automatically. When Iran's
@@ -2390,6 +2398,48 @@ tunnel pages, remote carrier tests, operations) — plus the scriptable one-shot
 
 **Version matrix: both ends need 3.5.0** for any Scepter feature. A 3.4.x Kharej paired by a 3.5 Iran degrades
 to today's behavior: no scepter traffic beyond at most one rejected hello, the tunnel itself is untouched.
+
+### One-step pairing: the pairing token and the hidden link (3.6.1)
+
+**Both servers need 3.6.1** for this flow; the older ways below keep working. Before 3.6.1 the pairing only
+existed when a Kharej tunnel was minted with the pair field, and only the bash wizard wrote it; a tunnel made
+by the Go manager never paired. 3.6.1 makes the pairing a thing of its own:
+
+- **Kharej, `wattun pair-token`** (the dashboard's `t`, the installer's role step, the panel's Kharej servers page
+  on a Kharej server). The first call makes a **pairing link**: an auto tunnel named `pair` (then `pair-2`, ...)
+  with allow-ports `1` and a latch port, marked hidden by `/etc/wattun/pair.link` (`kharej`). Its key file
+  holds the whole token, with field 10 `pair=full`, so the engine derives the pairing from it (claim on first
+  contact). The token is printed (`TOKEN=` and `PAIRING=` in non-interactive mode); later calls print the
+  same one. `--rotate` deletes the link, reopens the pairing (`pair_reopened` in the audit) and makes a new
+  one: the old token stops working and the Iran server has to add this Kharej again.
+- **Iran, `wattun add-kharej --token wat1:... [--test fast|normal|anti]`** (the dashboard's `t`, `a` in
+  Kharej servers, the panel's Add Kharej). It refuses a token without a pair field, runs the Iran auto wizard
+  non-interactively with one map `RANDOM:1` bound to 127.0.0.1, stores the token as the link's key and token
+  file, sets `latch-port: 20443` (learned later), restarts it and waits up to 45 s for the first scepter
+  answer. Adding a Kharej that already has a link here replaces that link. Prints `LINK=` and `KHAREJ=`.
+- **The link answers for the whole server.** A paired unit answers `state.get`, `tunnels.list`, `tunnel.stats`,
+  `tunnel.logs` and `history` for itself only. A link unit (`pair`, or its `pair-r` companion) answers for
+  every visible tunnel in its config dir instead: helpers and links left out, state from `systemctl is-active`,
+  stats from each unit's own metrics `/stats`, logs from `journalctl`, an empty history. So the cockpit and the
+  panel show Kharej's real tunnels, never the link. An older Kharej answers through the link for the link only.
+- A new Kharej cannot be added with `--test reverse`: reverse needs Kharej to know this server's address,
+  which it learns on the first direct contact. The old link to the same Kharej is deleted only after the new
+  one is up, so a failed re-add keeps it.
+- **Iran, `wattun remove-kharej HOST`** deletes the link. The tunnels to that Kharej keep running.
+- **Hidden.** `NAME.link` makes `Tunnels()` skip the link (like the auto helpers), so no list, chart or panel
+  card shows it. `ManagedTunnels()` (visible tunnels plus links) feeds heal, start/restart all, the heal timer
+  and the pairing lookups, so the link keeps running. Probes and token rebuilds that copy a key file read only
+  its key field (`pskOf`), so a throw-away probe never carries the pairing.
+- **Panel.** `GET /api/pairing` returns `{made, state, role}`; `POST /api/pairing` takes `action` `show`
+  (full tier), `make` or `rotate` (both run `pair-token` as a job). `POST /api/kharej-add` (`token`, `test`)
+  runs `add-kharej` as a job; `POST /api/kharej/HOST/remove` runs `remove-kharej`. The Kharej servers page
+  shows the token card on a Kharej server and Add Kharej on Iran; a link shows as "pairing link" in a Kharej
+  card's via list and gets a Remove button. `/api/overview` `host.role` is the server's side (`iran`, `kharej`,
+  `mixed`), and `host.ip` the cached public address. The map places this server by its public address; until
+  the lookup answers, a Kharej server is no longer drawn in Iran.
+- **Upgrading.** The role is read from `side` in `.manager.conf`, or inferred from the tunnels. A Kharej updated
+  from 3.6.0 makes its link the first time `t` is pressed. A Kharej whose pairing was claimed by an older
+  tunnel token keeps that pair; rotating the pairing token reopens it for the new link.
 
 ### The pairing credential: rides the token; watp1: is the explicit/rotate form
 

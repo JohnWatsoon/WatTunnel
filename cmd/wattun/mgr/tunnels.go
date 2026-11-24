@@ -1025,6 +1025,13 @@ func runDelete(n string) bool {
 		Warn("Not deleted.")
 		return false
 	}
+	deleteNow(n)
+	return true
+}
+
+// deleteNow stops NAME and its hidden helpers and removes their files, with no question (runDelete asks first;
+// the pairing links are removed by the manager itself).
+func deleteNow(n string) {
 	units := []string{n}
 	if cfgFileExists(n + "-r") {
 		units = append(units, n+"-r")
@@ -1049,7 +1056,7 @@ func runDelete(n string) bool {
 			os.Remove(filepath.Join(P.Conf, u+ext))
 		}
 	}
-	for _, ext := range []string{".bondretest", ".bondretest.tmp", ".bondfail", ".bondfail.tmp", ".keepopen", ".finalized", ".iranip", ".repaste"} {
+	for _, ext := range []string{".link", ".bondretest", ".bondretest.tmp", ".bondfail", ".bondfail.tmp", ".keepopen", ".finalized", ".iranip", ".repaste"} {
 		os.Remove(filepath.Join(P.Conf, n+ext))
 	}
 	for _, ext := range []string{".down", ".cycles", ".retest", ".sla_triggered", ".autoprune", ".autoprune.done", ".autowiden", ".autowiden.down", ".abandoned"} {
@@ -1065,7 +1072,6 @@ func runDelete(n string) bool {
 	if !kreplyUsersLeft() {
 		kreplyRestore()
 	}
-	return true
 }
 
 // the listen: ports of a config (firewall rules to consider closing).

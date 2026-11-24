@@ -261,7 +261,7 @@ func bondRetestJob(n string) bool {
 		log(fmt.Sprintf(": traffic budget %d MB, probing %d of %d carriers", budget, nfit, len(pairs)))
 	}
 	// probes are throw-away clients with this tunnel's key and settings: the live bond is untouched
-	key := strings.TrimSpace(mustRead(filepath.Join(P.Conf, n+".key")))
+	key := pskOf(mustRead(filepath.Join(P.Conf, n+".key")))
 	kd, err := atPrep(key)
 	if err != nil {
 		Err("Could not prepare the test directory.")
@@ -296,7 +296,7 @@ func bondRetestJob(n string) bool {
 			avAdd(c, c, "d", peer, "", "", "", "", "", "", "", "")
 		}
 		k := len(av) - 1
-		atProbe(k, 8)
+		atProbe(k, atWaitFor(av[k]))
 		tested = append(tested, c)
 		total += 2 * atMB
 		r := ar[k]

@@ -329,7 +329,7 @@ func scepterAct(cl ScepterClient, cmd string, args map[string]any) (ScepterResul
 // pairs (a companion carries no pairing line).
 func pairedTunnels() []string {
 	var out []string
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if IsPaired(n) {
 			out = append(out, n)
 		}
@@ -352,10 +352,18 @@ func scepterFleet() {
 			Page("Kharej servers", "none paired yet")
 			GradBand(Stdout, uiW())
 			fmt.Fprintln(Stdout)
-			Hint("A tunnel made from a Kharej token pairs this server by itself (New tunnel).")
-			Hint("Or attach a watp1: line from Kharej: " + P.Self + " scepter NAME, then a.")
+			Hint("On the Kharej server run wattun and press t: it shows the pairing token.")
+			if !Confirm("Add a Kharej now?", true) {
+				return
+			}
+			ClearScreen()
+			if !addKharejCmd() || len(pairedTunnels()) == 0 {
+				Pause()
+				return
+			}
 			Pause()
-			return
+			ClearScreen()
+			continue
 		}
 		live := map[string]bool{}
 		for _, n := range names {
@@ -404,7 +412,7 @@ func scepterFleet() {
 					desc = fmt.Sprintf("%s · seq %d · %d tunnel(s) · up %s", r.doc.Ver, seq,
 						len(r.doc.Tunnels), scepterUp(up))
 				}
-				items[i] = Item{Label: names[i], Desc: desc}
+				items[i] = Item{Label: pairLabel(names[i]), Desc: desc}
 			}
 		}
 		fetchAll() // fetched on entry and on r — never per tick (the loop used to
@@ -425,13 +433,27 @@ func scepterFleet() {
 			fmt.Fprintln(w)
 		}
 		for {
-			i, k := Choose(head, items, &sel, []string{"⏎", "open", "r", "refresh", "esc", "back"}, time.Second)
+			i, k := Choose(head, items, &sel, []string{"⏎", "open", "a", "add Kharej", "x", "remove", "r", "refresh", "esc", "back"}, time.Second)
 			switch {
 			case i >= 0:
 				scepterScreen(names[i])
 			case k == "r":
 				fetchAll()
 				build()
+			case k == "a":
+				ClearScreen()
+				addKharejCmd()
+				Pause()
+				ClearScreen()
+				i = 0 // rebuild the fleet
+			case k == "x" && IsLink(names[sel]):
+				ClearScreen()
+				removeKharejCmd(linkHost(names[sel]))
+				Pause()
+				ClearScreen()
+				i = 0
+			case k == "x":
+				Flash("This pair is a tunnel of its own: delete it in Tunnels.")
 			case k == "eof":
 				return
 			case k == "tick" || k == "move":
@@ -2521,12 +2543,19 @@ func pairedIranTunnels() []string {
 func scepterNewBoth(pairs []string) {
 	n := pairs[0]
 	if len(pairs) > 1 {
-		set := map[string]bool{}
-		for _, p := range pairs {
-			set[p] = true
+		items := make([]Item, len(pairs))
+		for i, p := range pairs {
+			items[i] = Item{Label: pairLabel(p)}
 		}
-		if n = pickTunnel("Which Kharej?", "picked by the tunnel already paired with it", func(s string) bool { return set[s] }); n == "" {
-			return
+		sel := 0
+		ClearScreen()
+		for n = ""; n == ""; {
+			i, k := Choose(func(w io.Writer) { Title(w, "Which Kharej?", "the tunnel is made there and here") }, items, &sel, []string{"⏎", "choose", "esc", "back"}, 0)
+			if i >= 0 {
+				n = pairs[i]
+			} else if k == "esc" || k == "q" || k == "eof" {
+				return
+			}
 		}
 	}
 	cl, err := scepterDial(n)
@@ -2560,7 +2589,9 @@ func scepterChannelFor(name string) string {
 	var revPairs []string
 	for _, p := range pairedIranTunnels() {
 		switch {
-		case Cfg(p, "reverse") == "true":
+		case IsLink(p) && !rev && linkHost(p) == host: // a link names its Kharej in its token, whatever carrier it uses
+			return p
+		case IsLink(p) || Cfg(p, "reverse") == "true":
 			revPairs = append(revPairs, p)
 		case !rev && scepterPeerHost(p) == host:
 			return p

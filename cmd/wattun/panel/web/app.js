@@ -54,14 +54,17 @@ function hash(a,b){const s=Math.sin(a*127.1+b*311.7)*43758.5453;return s-Math.fl
 
 /* ---------- places ---------- */
 // Positions come from the server's IP-location cache (overview.geo, keyed by address). An address it could not
-// place yet falls back: this server to Tehran, a Kharej server to a European anchor in pairing order.
+// place yet falls back: this server to Tehran (Iran side) or Europe (Kharej side), a Kharej server to a European
+// anchor in pairing order.
 const IRAN_LL=[51.4,35.7];
 const ANCHORS=[[8.7,50.1],[24.9,60.2],[4.9,52.4],[2.35,48.9],[13.4,52.5],[-0.1,51.5],[16.4,48.2],[18.1,59.3]];
 const C_OK='62,224,138',C_BAD='255,93,98',C_IR='154,140,255';
 function regionOf(lon,lat){return inPoly(lon,lat,IRAN)?1:0}
 function places(){
   const ov=S.ov;const geo=ov.geo||{};const g=geo[ov.host.ip];
-  const me={ll:g?[g.lon,g.lat]:IRAN_LL,city:g?(g.city||g.cc):'',cc:g?g.cc:'',known:!!g};
+  // not placed yet: an Iran server falls back to Tehran, a Kharej server to the first European anchor
+  const kx=ov.host.role==='kharej';
+  const me={ll:g?[g.lon,g.lat]:kx?ANCHORS[0]:IRAN_LL,city:g?(g.city||g.cc):'',cc:g?g.cc:(kx?'':'IR?'),known:!!g};
   const kh=ov.kharej.map((k,i)=>{const q=geo[k.host];return {k,ll:q?[q.lon,q.lat]:ANCHORS[i%ANCHORS.length],city:q?(q.city||q.cc):'',cc:q?q.cc:'',known:!!q}});
   return {me,kh};
 }
@@ -229,7 +232,8 @@ function statusOf(t){
 function render(){
   const ov=S.ov;if(!ov)return;
   $('#hName').textContent=ov.host.name||'server';
-  $('#hMeta').textContent=(ov.tunnels.some(t=>t.role==='Iran')?'Iran':'Kharej')+' · '+ov.host.version;
+  const side={iran:'Iran',kharej:'Kharej',mixed:'Iran and Kharej'}[ov.host.role]||(ov.tunnels.some(t=>t.role==='Iran')?'Iran':ov.tunnels.length?'Kharej':'');
+  $('#hMeta').textContent=(side?side+' · ':'')+ov.host.version;
   // headline: what is wrong, in words
   const f=$('#find');f.textContent='';
   const down=ov.tunnels.filter(t=>statusOf(t)[0]==='p-down');
@@ -303,7 +307,7 @@ function khCard(k){
   const top=el('div','khtop');const p=el('span','pill '+(k.online?'p-up':'p-down'));p.append(el('i'),k.online?'online':'unreachable');top.appendChild(p);
   top.appendChild(el('span','lab',k.online?(k.version?'v'+k.version:'')+(k.caps?' · '+k.caps:''):(k.error||'')));c.appendChild(top);
   const fl=el('div','flaps'+(k.host.length>11?' long':''));fl.setAttribute('aria-label',k.host);k.host.toUpperCase().split('').slice(0,20).forEach((ch,i)=>{const s=el('span','flap',ch);s.setAttribute('aria-hidden','true');s.style.animationDelay=(0.2+i*0.05).toFixed(2)+'s';fl.appendChild(s)});c.appendChild(fl);
-  c.appendChild(el('div','lab','through '+k.via.join(', ')));
+  c.appendChild(el('div','lab','through '+k.via.map(n=>n===k.link?'pairing link':n).join(', ')));
   const ul=el('ul','rtl');(k.tunnels||[]).forEach(t=>{const li=el('li');li.appendChild(el('span',null,t.name));const p=el('span','pill '+(t.health==='ok'?'p-up':t.state==='active'?'p-down':'p-off'));p.append(el('i'),t.health==='ok'?'up':t.state==='active'?'no link':'stopped');li.appendChild(p);ul.appendChild(li)});
   if(k.online&&!(k.tunnels||[]).length)ul.appendChild(el('li','empty','No tunnels listed.'));
   c.appendChild(ul);return c;
@@ -316,6 +320,7 @@ function renderKharej(){
 }
 
 /* routes: per Kharej host, the summed live rate of the local tunnels paired with it */
+function kTun(k){const n=k.via.filter(v=>v!==k.link).length;return n?n+' tunnel'+(n>1?'s':''):'paired'}
 function hostRate(k){let d=0;k.via.forEach(n=>{const l=S.live[n];if(l)d+=l.down});return d}
 function renderRoutes(){
   const ov=S.ov;const kh=ov.kharej;
@@ -325,7 +330,7 @@ function renderRoutes(){
   ch('var(--violet)','this server');if(kh.length)ch('var(--green)','Kharej, up');if(kh.some(k=>!k.online))ch('var(--red)','unreachable');
   const r=$('#routes');r.textContent='';
   const geo=ov.geo||{};const busy=kh.slice().sort((a,b)=>hostRate(b)-hostRate(a));
-  busy.slice(0,2).forEach(k=>{const g=geo[k.host];const b=el('div','rt');b.appendChild(el('div','lab','to '+(g&&g.city||k.host)+' · '+k.via.length+' tunnel'+(k.via.length>1?'s':'')));const v=el('div','mid n');v.dataset.host=k.host;v.append(fmtRate(hostRate(k)));v.appendChild(el('span','unit','MB/s'));b.appendChild(v);r.appendChild(b)});
+  busy.slice(0,2).forEach(k=>{const g=geo[k.host];const b=el('div','rt');b.appendChild(el('div','lab','to '+(g&&g.city||k.host)+' · '+kTun(k)));const v=el('div','mid n');v.dataset.host=k.host;v.append(fmtRate(hostRate(k)));v.appendChild(el('span','unit','MB/s'));b.appendChild(v);r.appendChild(b)});
   const mv=el('div','rt');mv.appendChild(el('div','lab','moved this visit'));const v=el('div','mid n');v.id='movedNum';v.textContent=fmtBytes(S.moved);mv.appendChild(v);r.appendChild(mv);
   if(S.mapStarted)mapPlaces();
 }
@@ -410,7 +415,7 @@ function projM(ll,w,h){return [(ll[0]-MAPB.L0)/(MAPB.L1-MAPB.L0)*w,(MAPB.A1-ll[1
 function buildMap(w,h){
   const pl=map.pl;MAPB=fitBounds([pl.me.ll,...pl.kh.map(x=>x.ll)],w,h);
   const span=MAPB.L1-MAPB.L0;const pitch=w<520?4.6:5.4,cols=Math.floor(w/pitch),rows=Math.floor(h/pitch),ox=(w-cols*pitch)/2+pitch/2,oy=(h-rows*pitch)/2+pitch/2;
-  const glow=Math.max(1.4,span*0.03);const iran=pl.me.cc==='IR'||!pl.me.known;
+  const glow=Math.max(1.4,span*0.03);const iran=pl.me.cc==='IR'||pl.me.cc==='IR?';
   const pts=[];const ir=projM(pl.me.ll,w,h);let md=1;
   for(let j=0;j<rows;j++)for(let i=0;i<cols;i++){const sx=ox+i*pitch,sy=oy+j*pitch;const lon=MAPB.L0+sx/w*(MAPB.L1-MAPB.L0),lat=MAPB.A1-sy/h*(MAPB.A1-MAPB.A0);
     const land=isLand(lon,lat);const d=Math.hypot(sx-ir[0],sy-ir[1]);if(d>md)md=d;
@@ -434,7 +439,7 @@ function placeTips(){
     if(hit(t.getBoundingClientRect()))t.className='tip '+cls+(S.mapShown?' on':'');put.push(t.getBoundingClientRect())};
   const put=[];
   const me=map.pl.me;tip(me.ll,'var(--violet)',me.city||(S.ov.host.name||'this server'),me.city?'this server':'this server · place unknown');
-  map.pl.kh.forEach(x=>tip(x.ll,x.k.online?'var(--green)':'var(--red)',x.city||x.k.host,(x.city?x.k.host+' · ':'')+(x.k.online?(x.k.via.length+' tunnel'+(x.k.via.length>1?'s':'')):'unreachable')));
+  map.pl.kh.forEach(x=>tip(x.ll,x.k.online?'var(--green)':'var(--red)',x.city||x.k.host,(x.city?x.k.host+' · ':'')+(x.k.online?kTun(x.k):'unreachable')));
 }
 function startMap(){
   S.mapStarted=true;const c=$('#map');map.g=fitCanvas(c);map.sig='';mapPlaces();

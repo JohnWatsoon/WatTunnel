@@ -614,7 +614,7 @@ func MatrixCmd(name string, w io.Writer, startProbes bool) bool {
 	}
 	tKey := ""
 	if b, err := os.ReadFile(kf); err == nil {
-		tKey = strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
+		tKey = pskOf(string(b))
 	}
 	if tKey == "" || tPeer == "" {
 		errLine(w, fmt.Sprintf("Cannot read the key/peer of '%s'.", n))

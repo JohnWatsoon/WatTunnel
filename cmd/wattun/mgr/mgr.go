@@ -56,7 +56,8 @@ func Run(args []string) int {
 		cmd = args[0]
 	}
 	switch cmd {
-	case "kharej", "iran", "cdn-tune", "auto-test", "auto-use", "bond-mode", "delete", "uninstall", "matrix", "auto-retest", "bond-retest", "auto-prune":
+	case "kharej", "iran", "cdn-tune", "auto-test", "auto-use", "bond-mode", "delete", "uninstall", "matrix", "auto-retest", "bond-retest", "auto-prune",
+		"pair-token", "add-kharej", "remove-kharej":
 		for _, a := range args {
 			if a == "--yes" {
 				NonInteractive = true
@@ -69,7 +70,7 @@ func Run(args []string) int {
 		NonInteractive = true
 	}
 	// unattended kharej/iran flags (bash 10201: ni_parse "${@:2}" || exit 1)
-	if cmd == "kharej" || cmd == "iran" {
+	if cmd == "kharej" || cmd == "iran" || cmd == "add-kharej" {
 		if err := niParse(args[1:]); err != nil {
 			return 1
 		}
@@ -175,6 +176,12 @@ func runCommand(cmd string, args []string) int {
 		return dispatch("new_tunnel", name)
 	case "kharej":
 		return runFlow("wizard_kharej")
+	case "pair-token":
+		return runFlow("pair_token_cmd", args[1:]...)
+	case "add-kharej":
+		return runFlow("add_kharej_cmd")
+	case "remove-kharej":
+		return runFlow("remove_kharej_cmd", pos(args, 0))
 	case "iran":
 		return runFlow("wizard_iran")
 	case "delete":

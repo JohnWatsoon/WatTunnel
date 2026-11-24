@@ -221,7 +221,7 @@ func serverSide() string {
 		return s
 	}
 	k, i := false, false
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if CompanionOf(n) != "" {
 			continue
 		}
@@ -443,7 +443,11 @@ func MainMenu() int {
 		if animNow().Before(introUntil) {
 			tick = 250 * time.Millisecond // intro tail: the entry count-up needs sub-second frames, then the cadence returns to normal
 		}
-		i, k := Choose(head, items, &sel, []string{"↑↓", "move", "⏎", "open", "1-8", "jump", "q", "quit"}, tick)
+		tkey := "add Kharej"
+		if serverSide() == "kharej" {
+			tkey = "pairing token"
+		}
+		i, k := Choose(head, items, &sel, []string{"↑↓", "move", "⏎", "open", "t", tkey, "1-8", "jump", "q", "quit"}, tick)
 		switch k {
 		case "eof":
 			return 0
@@ -451,6 +455,16 @@ func MainMenu() int {
 			i = 7
 		case "n", "N":
 			i = 1
+		case "t", "T":
+			ClearScreen()
+			if serverSide() == "kharej" {
+				dispatch("pair_token_cmd")
+			} else {
+				runFlow("add_kharej_cmd")
+				Pause()
+			}
+			ClearScreen()
+			continue
 		case "esc", "tick", "move":
 			continue
 		}
@@ -832,7 +846,7 @@ func pairLines(w io.Writer) {
 	pairKick()
 	pairs := pairedTunnels()
 	if len(pairs) == 0 {
-		fmt.Fprintf(w, "  %s◌%s %sKharej%s  %snot paired — a new Iran tunnel pairs by itself%s\n",
+		fmt.Fprintf(w, "  %s◌%s %sKharej%s  %snot paired — press t and paste the pairing token Kharej shows%s\n",
 			GRY, RST, BOLD, RST, GRY, RST)
 		return
 	}
@@ -842,7 +856,7 @@ func pairLines(w io.Writer) {
 		doc, fail := pairDocs[n], pairFail[n]
 		switch {
 		case fail != "":
-			fmt.Fprintf(w, "  %s!%s %sKharej %s%s  %sunreachable: %s%s\n", YEL, RST, BOLD, trunc(n, 16), RST, YEL, fail, RST)
+			fmt.Fprintf(w, "  %s!%s %sKharej %s%s  %sunreachable: %s%s\n", YEL, RST, BOLD, trunc(pairShort(n), 16), RST, YEL, fail, RST)
 		case doc != nil:
 			// The status dot breathes (◆↔◇) only while a refresh is in flight
 			// — a live "working" tell; a settled pair holds the solid diamond.
@@ -851,10 +865,10 @@ func pairLines(w io.Writer) {
 				dot = "◇"
 			}
 			fmt.Fprintf(w, "  %s%s%s %sKharej %s%s  %s%d tunnel(s) · up %s%s\n",
-				GRN, dot, RST, BOLD, trunc(n, 16), RST, GRY, len(doc.Tunnels), scepterUp(doc.UptimeS), RST)
+				GRN, dot, RST, BOLD, trunc(pairShort(n), 16), RST, GRY, len(doc.Tunnels), scepterUp(doc.UptimeS), RST)
 		default:
 			fmt.Fprintf(w, "  %s%s%s %sKharej %s%s  %schecking…%s\n",
-				GRY, homeSpin.Frame(), RST, BOLD, trunc(n, 16), RST, GRY, RST)
+				GRY, homeSpin.Frame(), RST, BOLD, trunc(pairShort(n), 16), RST, GRY, RST)
 		}
 	}
 }
@@ -1143,7 +1157,7 @@ func step(label string, fn func() bool) bool {
 
 func startAll() {
 	c := 0
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if !IsActive(Unit(n)) {
 			step("Starting "+Unit(n), func() bool { return autoForEachUnit(n, "start") })
 			c++
@@ -1177,7 +1191,7 @@ func stopAll() {
 
 func restartAll() {
 	c := 0
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if IsEnabled(Unit(n)) || IsActive(Unit(n)) {
 			step("Restarting "+Unit(n), func() bool { return autoForEachUnit(n, "restart") })
 			c++
@@ -1711,6 +1725,7 @@ func scepterConsole() {
 			gap(w, SecGap)
 		}
 		items := []Item{
+			{Key: "t", Label: "Pairing token", Desc: "the token the Iran server adds this Kharej with; rotate it"},
 			{Key: "o", Label: "Allow a new Iran", Desc: "end the current pairing; the next Iran that connects takes over", Off: st == 2},
 			{Key: "x", Label: "Revoke", Desc: "no Iran manages this server; tunnels keep running", Off: st == 3},
 			{Key: "r", Label: "Rotate", Desc: "new key; give the new line to Iran", Off: st != 0},
@@ -1727,14 +1742,18 @@ func scepterConsole() {
 		ClearScreen()
 		switch i {
 		case 0:
-			scepterReopen()
+			dispatch("pair_token_cmd")
+			ClearScreen()
+			continue
 		case 1:
-			scepterRevoke()
+			scepterReopen()
 		case 2:
-			scepterRotate()
+			scepterRevoke()
 		case 3:
-			scepterPair()
+			scepterRotate()
 		case 4:
+			scepterPair()
+		case 5:
 			gap(Stdout, SecGap)
 			pairAuditTail(20)
 		}
@@ -1946,7 +1965,7 @@ func healDisable() {
 // must exist even on a Kharej-only server.
 func ensureHealTimer() {
 	need := false
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if Role(n) == "Kharej" && IsAutoKharej(n) {
 			need = true
 			break

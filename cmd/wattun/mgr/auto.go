@@ -236,6 +236,35 @@ func planPort(list, carrier string) string {
 	return ""
 }
 
+// autoPlanString builds the token plan: the shaped carriers are direct listeners, so they join d= (bash
+// plan="d=$AUTO_D${AUTO_EXT_D:+,$AUTO_EXT_D};r=$rplan"). 3.3.9-3.6.0 appended them to r=, which put them into the
+// reverse companion's '+' bond; the engine refuses a shaped leg there and every reverse variant failed.
+func autoPlanString(d, extD, r string) string {
+	if extD != "" {
+		d += "," + extD
+	}
+	return "d=" + d + ";r=" + r
+}
+
+// planSplitShaped moves shaped entries that a 3.3.9-3.6.0 token put in r= back to d= (they are direct
+// listeners on Kharej; no reverse side exists for them).
+func planSplitShaped(d, r string) (string, string) {
+	var keep []string
+	for _, c := range strings.Split(r, ",") {
+		n := strings.SplitN(c, ":", 2)[0]
+		if c != "" && (isShapedRaw(n) || isShapedUDP(n)) {
+			if !strings.Contains(","+d+",", ","+c+",") {
+				d = joinNonEmpty(d, ",", c)
+			}
+			continue
+		}
+		if c != "" {
+			keep = append(keep, c)
+		}
+	}
+	return d, strings.Join(keep, ",")
+}
+
 // auto_plan_standard — its non-shaped carrier names in plan order.
 func autoPlanStandard(d string) string {
 	var out []string
@@ -689,6 +718,7 @@ type autoWizardOpts struct {
 	Addr     string // NI_ADDR
 	Ports    string // NI_PORTS
 	Extended bool   // NI_EXTENDED
+	Link     bool   // the pairing link (link.go): no shaped listeners, pair=full in the token, the token as key file
 }
 
 type autoWizardResult struct {
@@ -766,7 +796,7 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 	// owner decision 2026-11-24: every auto Kharej that can run the shaped carriers plans and runs them always
 	// (~10 MB per idle listener, ~130-200 MB for all); Iran picks them with the Extended test preset, not a prompt.
 	// --extended stays as the explicit form that fails loudly on an old engine.
-	extended := o.Extended || carrierOkHere("vxlan")
+	extended := !o.Link && (o.Extended || carrierOkHere("vxlan"))
 	if o.Extended && !carrierOkHere("vxlan") {
 		res.Error = fmt.Errorf("--extended needs wattun 3.3.0 on this server (found %s); both ends must run 3.3.0. Run: wattun-manager update", orOld(engineVer()))
 		return res
@@ -787,10 +817,7 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 			extended = false
 		}
 	}
-	plan := "d=" + pick.D + ";r=" + rplan
-	if extD != "" {
-		plan += "," + extD
-	}
+	plan := autoPlanString(pick.D, extD, rplan)
 	if extended {
 		plan += ";e=1"
 	}
@@ -803,8 +830,17 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 	for _, c := range strings.Split(pick.D, ",") {
 		cars += "+" + strings.SplitN(c, ":", 2)[0]
 	}
+	tok := MakeToken("auto", addr, key, apath, cdn, "", allow, "", plan)
+	keyText, latch := key, ""
+	if o.Link {
+		// the engine derives the pairing only from a key file that IS the token (cmd/wattun/pairing.go
+		// parseTokenKey), so the link's key file holds the whole token; its helpers read the same file
+		tok = MakeToken("auto", addr, key, apath, cdn, "", allow, "", plan, "pair=full")
+		keyText = tok
+		latch = pickLatchPort(append(excl, strconv.Itoa(m))...)
+	}
 	os.MkdirAll(P.Conf, 0o700)
-	os.WriteFile(filepath.Join(P.Conf, name+".key"), []byte(key+"\n"), 0o600)
+	os.WriteFile(filepath.Join(P.Conf, name+".key"), []byte(keyText+"\n"), 0o600)
 	var b strings.Builder
 	b.WriteString("# WatTunnel - Kharej (server), auto: every carrier at once. Created by wattun-manager.\n")
 	b.WriteString("mode: server\n")
@@ -816,6 +852,9 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 		}
 	}
 	b.WriteString("path: " + apath + "\n")
+	if latch != "" {
+		b.WriteString("latch-port: " + latch + "\n") // the scepter latch listener, picked collision-free
+	}
 	if m != 0 { // F25: free_metrics_port found no port; write no invalid line
 		fmt.Fprintf(&b, "metrics: 127.0.0.1:%d\n", m)
 	}
@@ -829,7 +868,6 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 		res.Error = err
 		return res
 	}
-	tok := MakeToken("auto", addr, key, apath, cdn, "", allow, "", plan)
 	os.WriteFile(filepath.Join(P.Conf, name+".token"), []byte(tok+"\n"), 0o600)
 
 	res.Name, res.Plan, res.Token = name, plan, tok
@@ -881,8 +919,8 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 // start_watcher — transient unit that waits for Iran's first connection, then writes NAME-r.
 func startWatcher(name string) {
 	u := P.Prefix + "-autowatch-" + name
-	_ = Systemctl("stop", u+".service")
-	_ = Systemctl("reset-failed", u+".service")
+	_ = systemctlQ("stop", u+".service")
+	_ = systemctlQ("reset-failed", u+".service")
 	_ = envSystemdRun(u, 3600, "auto-watch", name)
 }
 
@@ -904,7 +942,7 @@ func companionCreate(name, ip string, noStart bool) error {
 	if err != nil || tok.Auto == "" {
 		return fmt.Errorf("No auto token for '%s'.", name)
 	}
-	rp := planPart(tok.Auto, "r")
+	_, rp := planSplitShaped(planPart(tok.Auto, "d"), planPart(tok.Auto, "r"))
 	m := portOf(Cfg(r, "metrics"))
 	if m == "" {
 		m = strconv.Itoa(envFreeMetricsPort())
@@ -1003,8 +1041,8 @@ func autoSyncCompanion(name string) {
 	curIP := strings.SplitN(mustRead(filepath.Join(P.Conf, name+".iranip")), "\n", 2)[0]
 	if !fileExists(filepath.Join(P.Conf, name+"-r.yml")) || curIP != ip {
 		_ = companionCreate(name, ip, false)
-		_ = Systemctl("stop", P.Prefix+"-autowatch-"+name+".service")
-		_ = Systemctl("reset-failed", P.Prefix+"-autowatch-"+name+".service")
+		_ = systemctlQ("stop", P.Prefix+"-autowatch-"+name+".service")
+		_ = systemctlQ("reset-failed", P.Prefix+"-autowatch-"+name+".service")
 	}
 }
 
@@ -1020,7 +1058,7 @@ func autoIP(name, ip string) error {
 	if err := companionCreate(name, ip, false); err != nil {
 		return err
 	}
-	_ = Systemctl("stop", P.Prefix+"-autowatch-"+name+".service")
+	_ = systemctlQ("stop", P.Prefix+"-autowatch-"+name+".service")
 	ensureHealTimer()
 	Ok(fmt.Sprintf("Reverse side for '%s' is set for Iran %s. Run the test again on Iran.", name, ip))
 	return nil
@@ -1194,7 +1232,8 @@ func autoPlanLists(plan string) (apD, apR []string) {
 		}
 		apD = append(apD, n)
 	}
-	for _, c := range strings.Split(planPart(plan, "r"), ",") {
+	_, r := planSplitShaped(planPart(plan, "d"), planPart(plan, "r"))
+	for _, c := range strings.Split(r, ",") {
 		n := strings.SplitN(c, ":", 2)[0]
 		if n == "icmp" || n == "" {
 			continue
@@ -1427,7 +1466,7 @@ func isReopenDropKey(k string) bool {
 
 // auto_migrate_all — migrate any legacy narrowed/finalized auto Kharej tunnels.
 func autoMigrateAll(announce bool) {
-	for _, n := range Tunnels() {
+	for _, n := range ManagedTunnels() {
 		if Role(n) != "Kharej" {
 			continue
 		}
@@ -1537,7 +1576,7 @@ func autoVariants(tok Token) {
 		atPath = "/wat"
 	}
 	atScreenSkipped = ""
-	d, r := planPart(tok.Auto, "d"), planPart(tok.Auto, "r")
+	d, r := planSplitShaped(planPart(tok.Auto, "d"), planPart(tok.Auto, "r"))
 	// reverse preset: only the plan's r= variants — for routes where nothing but reverse passes
 	if atPreset != "reverse" {
 		if isIPv4(atAddr) {
@@ -1925,11 +1964,13 @@ func autoCurrentKey(name string) string {
 // auto_test — run the screening over all variants (duration-based 8-16 MB probes; the
 // 3.3.8+ always-open lifecycle: NO auto-narrow/prune). Probing goes through the
 // spawnClient adapter; ranking is P3's atRank.
-func autoTest(tok Token) {
+// It returns the cleanup of the probe key: callers defer it, since autoRefine and atTune probe again after the
+// screening (deleting the key on return made every re-measure fail "no link" and picked a slower carrier).
+func autoTest(tok Token) (done func()) {
+	done = func() {}
 	if kd, err := atPrep(tok.Key); err == nil { // the probes dial with the tunnel key
-		defer kd.cleanup()
 		atKeyFile, atTok = kd.dir+"/key", tok
-		defer func() { atKeyFile = "" }()
+		done = func() { atKeyFile = ""; kd.cleanup() }
 	}
 	csLast, ctSNI, ctFull = cdnScanRes{}, tok.SNI, false
 	if tok.SNI != "" && cdnOK() { // one scan for all CDN carriers with a Cloudflare-proxyable port
@@ -1964,10 +2005,7 @@ func autoTest(tok Token) {
 			ar[i] = result{Why: "skipped"}
 			continue
 		}
-		w := 8
-		if av[i].Kind == "r" && av[i].Car == "icmp" {
-			w = 30 // Kharej's companion needs a few seconds to start
-		}
+		w := atWaitFor(av[i])
 		atMB = atProbeMB(bestRate, 1.5, atScreenCapMB) // H3: duration-based size
 		atProbe(i, w)
 		atEmit(i)
@@ -1994,6 +2032,7 @@ func autoTest(tok Token) {
 		}
 		atAct = ""
 	}
+	return done
 }
 
 // atEmit writes one line per probe for the web panel's job view (non-interactive runs only):
@@ -2066,6 +2105,15 @@ func atProbe(i, waitSecs int) {
 	atMeasure(i, mp)
 }
 
+// atWaitFor: seconds a probe waits for its link. A reverse leg waits for Kharej's companion to dial in, and its
+// dialers back off up to 30 s (main.go SetMaxBackoff) while nothing listens, so 8 s missed every later variant.
+func atWaitFor(v variant) int {
+	if v.Kind == "r" {
+		return 32
+	}
+	return 8
+}
+
 // at_wait — wait for the link on the probe's metrics port.
 func atWaitAlive(mp, secs int) bool {
 	for t := 0; t < secs*2; t++ {
@@ -2111,7 +2159,7 @@ func atMeasure(i, mp int) {
 
 func statsRTTOf(mp int) float64 {
 	s := p1FetchStats("127.0.0.1:" + strconv.Itoa(mp))
-	if v := Jget("{"+s, "rtt_ms"); v != "" {
+	if v := Jget(s, "rtt_ms"); v != "" { // s is the raw JSON body; a "{" prefix broke the decode (RTT was always 0)
 		f, _ := strconv.ParseFloat(v, 64)
 		return f
 	}
@@ -2215,7 +2263,7 @@ func autoIranFront(tok Token) (atChoice, error) {
 	atQuiet = false
 	atMB = 8
 	atSkip = ""
-	autoTest(tok)
+	defer autoTest(tok)()
 	rank := autoRefine(atRank(av, ar, ""))
 	if len(rank) == 0 {
 		atNone()
@@ -2257,7 +2305,7 @@ func autoRefine(rank []int) []int {
 			mb = atFinalMBMin
 		}
 		atMB = mb
-		atProbe(i, 8)
+		atProbe(i, atWaitFor(av[i]))
 		atEmit(i)
 	}
 	atMB, atStreams = saved, savedStreams
@@ -2556,7 +2604,7 @@ func atTune(sel []int) (tune string, keys []string, mb int) {
 	// variant as its baseline.
 	savedSkip, savedMB := atSkip, atMB
 	atSkip, atMB = "", atTuneProbeMB
-	atProbe(target, 8)
+	atProbe(target, atWaitFor(av[target]))
 	mb += 2 * atMB
 	if !ar[target].OK { // no baseline, no comparison: keep engine auto values
 		Warn("Baseline did not come up — keeping engine auto values")
@@ -2575,7 +2623,7 @@ func atTune(sel []int) (tune string, keys []string, mb int) {
 				av[target].SNI, av[target].FP, av[target].ECH, av[target].Frag, av[target].FS, av[target].FM,
 				strings.Join(append(append([]string{}, extra...), "-"+k+"="+v), " "))
 			i := len(av) - 1
-			atProbe(i, 8)
+			atProbe(i, atWaitFor(av[i]))
 			mb += 2 * atMB
 			if ar[i].OK && atScore(i) > best*1.1 {
 				best = atScore(i)
@@ -2627,7 +2675,7 @@ func autoTestCmd(name string) error {
 		return nil
 	}
 	atPreset = preset
-	autoTest(tok)
+	defer autoTest(tok)()
 	atProbeLiveTunnel(name, 8)
 	rank := autoRefine(atRank(av, ar, ""))
 	if len(rank) == 0 {
@@ -2717,7 +2765,7 @@ func autoRetest(name string) error {
 	atMB = 1
 	atSkip = atSkipReverseKeys(name)
 	atPreset = "normal"
-	autoTest(tok)
+	defer autoTest(tok)()
 	atProbeLiveTunnel(name, atScreenMBStart)
 	rank := atRank(av, ar, "")
 	if len(rank) == 0 {
