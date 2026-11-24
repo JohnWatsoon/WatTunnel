@@ -2418,6 +2418,48 @@ Example: `watp1:1|0a0b0c0d-0e0f-1011-1213-141516171819|AAAA...=|manage`. Version
   Revocation and rotation remain Kharej-console actions (the trust boundary): the console rewrites
   `.pairing`, and the engine picks the change up live.
 
+### Claim on first contact, revoke, port guard (Handoff 4, 3.5.0)
+
+**The token is a one-time bootstrap.** Every hello on the in-band channel carries `proofs`: one
+`HMAC-SHA256(key, "wat-scepter-proof:<pairing uuid>:<session id>")` per credential the client holds (at most
+16). Kharej serves nothing before a hello whose proof matches its CURRENT credential; any other first command
+answers `denied {need:"hello"}`, a missing or wrong proof `denied {need:"proof"}`. When the current
+credential is still the token-derived one, the first proven hello CLAIMS it: Kharej mints a fresh random
+32-byte key and UUID with the same capability, stores it as `.pairing` (marked `# claimed`), switches to it,
+and returns it once in the hello answer as `claim` (a `watp1:` line, inside the session AEAD). Iran keeps
+every claim in `<config dir>/.pairing.claims` (0600, one line per pairing UUID) and proves them on every
+later dial. From then on the token alone opens nothing: a second Iran with the same token gets
+`denied {need:"proof"}`, and its manager says "Kharej is paired with another Iran". The token keeps working
+as a tunnel token. A Kharej that lost its Iran re-opens the claim in its Pairing console ("Allow a new Iran
+to pair"): that deletes `.pairing`, the running units fall back to the token-derived credential, and the
+next Iran that connects claims it. The server latch re-keys from the claimed credential too, and the
+client's latch revival tries its claims before the token's credential.
+
+**Revoke is a tombstone.** Revoking writes `.pairing` as one line `revoked <uuid> <timestamp>`. A tombstone
+keeps the unit unpaired even when its token carries field 10, so revoke works in token-derived mode with no
+file before it. Re-pairing after a revoke is "Allow a new Iran to pair".
+
+**The cockpit talks to the running unit.** A paired client unit serves `<config dir>/.<name>.scepter.sock`
+(unix socket, 0600) and relays `{"cmd","args","id"}` lines over the one sid-0 stream its session owns.
+`wattun -scepter-call` uses the socket first and starts a one-shot tunnel only when no unit is running;
+on a reverse tunnel it refuses instead (the one-shot would need the port the stopped unit binds). After a
+channel failure the session keeps sid 0 closed for about 2 minutes, so the cockpit is unavailable for that
+long after a reset.
+
+**Kharej port guard.** `tunnel.create` and `tunnel.edit` refuse a forwarded target port that is sshd's
+(every `Port` in `/etc/ssh/sshd_config` and `sshd_config.d/*.conf`, else 22), any tunnel's `metrics` or
+`latch-port`, the probe range 20500-20999, or listed in the Kharej-local key `scepter-deny-ports`
+(comma list; the cockpit can neither set nor clear it). The answer is code `13` (`port_denied`,
+`{port, why}`). `backup.export` needs the `full` capability (it carries every key).
+
+**Remote create writes both sides.** `tunnel.create` answers `listen_port` (the one carrier port Kharej
+bound; absent for icmp and bonds) and `allow`. The cockpit builds the Iran token from the pair's Kharej host
+and those fields, runs the Iran wizard with it and starts the unit; the token is printed only on request.
+A reverse pair cannot build it (its peer is Iran's own address): the manager says so and points to the
+token on Kharej. `tunnel.keyrotate` rewrites and restarts the matching Iran tunnel without asking.
+
+Both ends need 3.5.0 for all of the above (3.5.0 introduced Scepter, so there is no older peer to support).
+
 ### Wire format: JSON Lines on the reserved stream
 
 The channel rides IN BAND: stream id 0 of any live tunnel session (`sid 0` is reserved; engine streams start at
@@ -2430,7 +2472,7 @@ response {"id":"…","code":0,"params":{…},"seq":123}
 ```
 
 Codes are machine integers (`0` ok, `1` bad_request, `2` denied, `3` stale, `4` rate_limited, `5` unknown_cmd,
-`6` not_found, `7` internal, `8` too_large, `9` unpaired), never prose. Large payloads (log fetches) are
+`6` not_found, `7` internal, `8` too_large, `9` unpaired, `10` name_taken, `11` port_busy, `12` carrier_needs, `13` port_denied), never prose. Large payloads (log fetches) are
 chunked: consecutive responses with the same id and `{"chunk":i,"of":n,"data":"…"}`. Every response carries
 `seq`, the server's `state_seq` at answer time.
 
@@ -2738,10 +2780,10 @@ host:port` (with the pairing attached) is the contact primitive: it proves, runs
 
 Automatic revival (owner directive 2026-11-22): a client config that carries `latch-port: N` too means "the
 peer's latch is at peerhost:N" — while the tunnel is down the client repeats proof + hello + ping against it,
-one attempt per 30 s (`latchRetryEvery`), and restarts the in-band cockpit loop the moment the latch answers;
+first after 30 s and then backing off to 10 minutes, each wait jittered by +-50 % so units that lost the same Kharej do not dial in step (Handoff 4), and restarts the in-band cockpit loop the moment the latch answers;
 the tunnel keeps its own dial cadence in parallel. Without a peer address the client logs once and revival
 stays off; `-latch-dial` remains the manual one-shot drill. The manager writes the server-side `latch-port`
-into new Kharej configs by default (20443, collision-checked against the listen/metrics/probe picks); the
+into new direct Kharej configs by default (20443, collision-checked against the listen/metrics/probe picks). Reverse tunnels have no latch: the engine ignores `latch-port` there (Kharej re-dials Iran forever, which already revives the channel) and the wizards no longer write it; the
 in-band channel itself always revives on its own the moment the tunnel comes back.
 
 Hidden infrastructure: the latch listener and the scepter session appear in NO user-facing listing or dashboard

@@ -129,23 +129,28 @@ finalized tunnels reopen automatically on update.
 3.5.0 adds an optional pairing between the two servers (both ends need 3.5.0) and makes it automatic — the
 setup has no manual pairing steps: install on Kharej and let the wizard create tunnel 1 (the token it prints
 ONCE carries the pairing inside it, and the wizard writes the latch port for you), install on Iran and paste
-that token, and the cockpit is live. No SSH to Kharej after setup. The tunnel then carries a hidden, encrypted
+that token, and the cockpit is live. The token only starts the pairing: the first Iran that connects
+receives its own fresh key, and after that the token alone cannot manage Kharej (it still runs the tunnel).
+No SSH to Kharej after setup. The tunnel then carries a hidden, encrypted
 management channel — a reserved stream inside the session's encryption, with a capability tier on the
 credential (`tunnel` < `create` < `manage` < `full`) and every command checked, rate-limited and journaled on
 Kharej. If the tunnel dies, revival is automatic: it keeps dialing on its own, and a client config that also
 carries the latch port contacts Kharej's **scepter latch** — a shaped wss listener that arms while every unit
-of the pair is down — once every 30 seconds until the channel is back; a contact must prove the 32-byte
-pairing key before anything is served, and the listener closes again on first contact. The channel never
+of the pair is down — first after 30 seconds, then less often up to every 10 minutes, until the channel is
+back; a contact must prove the 32-byte pairing key before anything is served, and the listener closes again
+on first contact. Reverse tunnels need no latch: Kharej keeps dialing Iran by itself. The channel never
 appears on any dashboard; only the doctor sees it. Rotating the pairing key works from the cockpit or the
-Kharej console; revoking stays a Kharej-console action (`wattun-manager scepter`: revoke) — the channel
-must not be able to revoke itself, that is the trust boundary.
+Kharej console; revoking stays a Kharej-console action (Pairing: revoke) — the channel must not be able to
+revoke itself, that is the trust boundary. A revoked Kharej stays unpaired until its owner picks "Allow a new
+Iran to pair" there, which is also the way back after losing the Iran server. Kharej never forwards to its
+own SSH, metrics or latch ports, whatever the pairing asks.
 
 What Iran can do over the channel — all of it from the Go manager's `wattun scepter` cockpit (`wattun -scepter-call CMD` is the scriptable one-shot form):
 
 | Area | Commands |
 |---|---|
 | Read | live state, the tunnel list, per-tunnel stats, logs, events, history |
-| Write | create, edit and delete tunnels, start/stop/restart, per-port limits, presets — each is validate → backup → apply → verify, rolled back on failure |
+| Write | create, edit and delete tunnels, start/stop/restart, per-port limits, presets — each is validate → backup → apply → verify, rolled back on failure. A tunnel created from Iran is set up on both servers at once, with no token to copy |
 | Remote carrier work | open a probe listener on Kharej and speed-test it from Iran (`test.open`/`test.close`), switch a remote tunnel's carrier with an automatic rollback (`carrier.change`), run and apply the carrier ranking (`auto.test`/`auto.rows`/`auto.apply`) |
 | Operations | update Kharej's binary with a rollback watchdog (`update.run`), structured doctor output, a full config backup as a verified tarball, the audit trail |
 
