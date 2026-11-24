@@ -27,6 +27,7 @@ func runPanel(file string) error {
 	if err := mgr.InitPaths(); err != nil {
 		return err
 	}
+	mgr.WireSystem() // the real public-IP, port and firewall helpers (only the manager's Run wired them before)
 	return panel.Run(file, mgrBackend{})
 }
 

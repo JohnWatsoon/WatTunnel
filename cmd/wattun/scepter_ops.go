@@ -227,6 +227,37 @@ func (o *fileScepterOps) refuseSelf(name string) (map[string]any, int) {
 
 // ---- tunnel.create ----
 
+// createAuto: carrier "auto" is the manager's Kharej auto tunnel (every carrier at once plus the test plan in its
+// token), so Kharej runs its own manager unattended and hands back the token; Iran then tests and picks (3.6.1).
+func (o *fileScepterOps) createAuto(name, ports string) (map[string]any, int) {
+	if n := o.tunnelCount(); n >= o.maxTunnels {
+		return map[string]any{"resource": "tunnels", "cap": o.maxTunnels}, wat.CodeRateLimited
+	}
+	bin, err := os.Executable()
+	if err != nil {
+		return map[string]any{"detail": err.Error()}, wat.CodeInternal
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "kharej", "--carrier", "auto", "--name", name, "--ports", ports, "--yes")
+	cmd.Env = append(os.Environ(), "WAT_CONF="+o.conf, "NONINTERACTIVE=1", "NO_COLOR=1", "WAT_NO_ANIM=1")
+	out, err := cmd.CombinedOutput()
+	tok := ""
+	for _, l := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "TOKEN="); ok {
+			tok = v
+		}
+	}
+	if err != nil || tok == "" {
+		last := strings.TrimSpace(string(out))
+		if i := strings.LastIndex(last, "\n"); i >= 0 {
+			last = last[i+1:]
+		}
+		return map[string]any{"name": name, "detail": "the auto wizard failed: " + last}, wat.CodeInternal
+	}
+	return map[string]any{"name": name, "carrier": "auto", "allow": ports, "token": tok}, wat.CodeOK
+}
+
 func (o *fileScepterOps) Create(spec wat.ScepterTunnelSpec) (map[string]any, int) {
 	name := spec.Name
 	if name == "" {
@@ -245,6 +276,9 @@ func (o *fileScepterOps) Create(spec wat.ScepterTunnelSpec) (map[string]any, int
 	}
 	if p, code := o.checkTargets(ports); code != wat.CodeOK {
 		return p, code
+	}
+	if spec.Carrier == "auto" {
+		return o.createAuto(name, spec.Ports)
 	}
 	if code, p := o.checkCarrier(spec.Carrier); code != wat.CodeOK {
 		return p, code

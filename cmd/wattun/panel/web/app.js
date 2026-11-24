@@ -68,10 +68,52 @@ function places(){
   const kh=ov.kharej.map((k,i)=>{const q=geo[k.host];return {k,ll:q?[q.lon,q.lat]:ANCHORS[i%ANCHORS.length],city:q?(q.city||q.cc):'',cc:q?q.cc:'',known:!!q}});
   return {me,kh};
 }
+// split-flap board of a Kharej server: its city when the location cache knows it, else its address
+// (the dots of an address are narrow gaps, not tiles)
+function flaps(k,cls,max,step){const q=(S.ov.geo||{})[k.host];const city=q&&q.city?q.city.toUpperCase():'';const w=city||k.host;
+  const fl=el('div','flaps '+(cls||'')+(w.length>11?' long':''));fl.setAttribute('aria-label',city?city+', '+k.host:k.host);
+  w.split('').slice(0,max).forEach((ch,j)=>{const s=el('span','flap'+(ch==='.'?' sep':ch===' '?' sp':''),ch==='.'||ch===' '?'':ch);s.setAttribute('aria-hidden','true');s.style.animationDelay=(0.2+j*step).toFixed(2)+'s';fl.appendChild(s)});
+  fl.dataset.city=city;return fl}
 /* ---------- small helpers ---------- */
 const $=(s)=>document.querySelector(s);
 const RM=matchMedia('(prefers-reduced-motion: reduce)').matches;
 function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+/* ---------- icons: one line set (lucide geometry, 24 grid, 1.5 stroke), picked from the button's label ---------- */
+const ICO={play:['M7 4.5v15l12-7.5z'],stop:['M7 7h10v10H7z'],restart:['M20 12a8 8 0 1 1-2.34-5.66','M20 4v5h-5'],
+  rotate:['M4 12a8 8 0 1 0 2.34-5.66','M4 4v5h5'],key:['M2.5 15.5a5 5 0 1 0 10 0a5 5 0 1 0-10 0','m11 12 9.5-9.5','m16.5 6.5 3 3','m19 4 2 2'],
+  trash:['M4 7h16','M9 7V4.5h6V7','M6.5 7l1 13h9l1-13','M10 11v5.5','M14 11v5.5'],plus:['M12 5v14','M5 12h14'],
+  down:['M12 4v11','m7 10.5 5 5 5-5','M5 20h14'],up:['M12 20V9','m7 13.5 5-5 5 5','M5 4h14'],box:['M3.5 4.5h17v4h-17z','M5 8.5v11h14v-11','M10 12.5h4'],
+  pulse:['M3 12h4l3-7 4 14 3-7h4'],list:['M9 6h11','M9 12h11','M9 18h11','M4.5 6h.01','M4.5 12h.01','M4.5 18h.01'],
+  gauge:['M12 14.5l4.5-4.5','M3.8 18.5a9.5 9.5 0 1 1 16.4 0'],copy:['M9 9h11v11H9z','M5 15H4V4h11v1'],
+  eye:['M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z','M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0'],
+  x:['M18 6 6 18','M6 6l12 12'],check:['M20 6.5 9 17.5l-5-5'],arrow:['M5 12h14','m13 6 6 6-6 6'],
+  unlink:['M9 17H7a5 5 0 0 1 0-10h2','M15 7h2a5 5 0 0 1 3.9 8.1','M8 12h3','M3 3l18 18'],
+  power:['M12 3v9','M17.7 6.3a8 8 0 1 1-11.4 0'],pen:['M16.5 4.5a2.1 2.1 0 1 1 3 3L8 19l-4 1 1-4z'],
+  share:['M5 12v7.5h14V12','M12 3v12','m8 7 4-4 4 4'],link:['M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1','M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1'],
+  shield:['M12 21s7.5-3.5 7.5-9.5V5.5L12 3 4.5 5.5v6C4.5 17.5 12 21 12 21z'],refresh:['M20 12a8 8 0 0 1-14.3 4.9','M4 12a8 8 0 0 1 14.3-4.9','M18 3v4.5h-4.5','M6 21v-4.5h4.5']};
+function ico(n){const ns='http://www.w3.org/2000/svg',s=document.createElementNS(ns,'svg');s.setAttribute('viewBox','0 0 24 24');s.setAttribute('class','ico i-'+n);s.setAttribute('aria-hidden','true');
+  ICO[n].forEach(d=>{const p=document.createElementNS(ns,'path');p.setAttribute('d',d);s.appendChild(p)});return s}
+// first match wins: the specific labels before the generic verbs
+const ICO_BY=[[/^(run test|run again|speed|test)/i,'gauge'],[/^(start|resume|turn on)/i,'play'],[/^restart/i,'restart'],[/^(stop|turn off|pause)/i,'stop'],
+  [/key/i,'key'],[/^(rotate|new pairing)/i,'rotate'],[/^remove kharej|^remove$|^forget|^unpair/i,'unlink'],[/^(delete|remove|clear)/i,'trash'],
+  [/^(new|add|set up)/i,'plus'],[/^update status/i,'pulse'],[/^(update|install|download)/i,'down'],[/^(backup|export)/i,'box'],
+  [/^(restore|upload|import)/i,'up'],[/^(audit|log|journal|history)/i,'list'],[/^copy/i,'copy'],[/^(show|hide|reveal)/i,'eye'],
+  [/^(close|cancel|dismiss)/i,'x'],[/^(sign out)/i,'power'],[/token|qr/i,'share'],[/^(edit|change|rename|move)/i,'pen'],
+  [/^(bond|use|pick)/i,'link'],[/^(refresh|reload|retry|re-?measure)/i,'refresh'],[/cert|2fa|two-factor/i,'shield'],
+  [/^(save|apply|done|confirm|verify|ok|yes)/i,'check'],[/^(open|go|continue|next|details|why)/i,'arrow']];
+function decorate(b){if(b.querySelector(':scope>svg.ico'))return;const t=b.textContent.trim();if(!t)return;
+  const m=ICO_BY.find(([re])=>re.test(t));if(!m)return;b.prepend(ico(m[1]));
+  if(b.classList.contains('ic')){b.setAttribute('aria-label',t);b.title=t}}
+// every .btn, now and later (labels change after a run, rows re-render): decorate on any change
+new MutationObserver(ms=>{for(const m of ms){const t=m.target;if(t.nodeType===1&&t.classList.contains('btn'))decorate(t);
+  m.addedNodes.forEach(n=>{if(n.nodeType!==1)return;if(n.classList.contains('btn'))decorate(n);n.querySelectorAll&&n.querySelectorAll('.btn').forEach(decorate)})}})
+  .observe(document.documentElement,{childList:true,subtree:true});
+// press: the socket pops; a click handler that returns a promise keeps the ring turning until it settles
+document.addEventListener('pointerdown',e=>{const b=e.target.closest&&e.target.closest('.btn');if(!b||b.disabled)return;b.classList.remove('hit');void b.offsetWidth;b.classList.add('hit')});
+document.addEventListener('animationend',e=>{if(e.animationName==='pop'){const b=e.target.closest('.btn');if(b)b.classList.remove('hit')}});
+function busy(b,r){if(!r||typeof r.then!=='function')return r;b.classList.add('busy');b.setAttribute('aria-busy','true');
+  const done=()=>{b.classList.remove('busy');b.removeAttribute('aria-busy')};r.then(done,done);return r}
+document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('.btn').forEach(decorate);const o=document.getElementById('out');if(o)o.replaceChildren(ico('power'))});
 function mb(bps){return bps/1048576}
 function fmtRate(bps){const v=mb(bps);return v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2)}
 function fmtDur(s){if(!s)return '–';if(s<60)return s+' s';if(s<3600)return Math.round(s/60)+' m';if(s<86400)return (s/3600).toFixed(1)+' h';return (s/86400).toFixed(1)+' d'}
@@ -193,7 +235,7 @@ function setView(v){
   if(!VIEWS[v])v='overview';S.view=v;
   Object.entries(VIEWS).forEach(([k,[sel]])=>{$(sel).hidden=k!==v});
   document.querySelectorAll('.nav button').forEach(b=>{if(b.dataset.v===v)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
-  $('#vTitle').textContent=VIEWS[v][1];
+  $('#vTitle').textContent=VIEWS[v][1];$('#hAct').hidden=v!=='overview';
   if(v==='overview'&&S.ov&&!S.mapStarted)startMap();
   if(v==='settings')loadSettings();
   if(window.PANEL&&PANEL.onView)PANEL.onView(v);
@@ -240,18 +282,48 @@ function render(){
   const lossy=ov.tunnels.filter(t=>statusOf(t)[0]==='p-slow');
   const offK=ov.kharej.filter(k=>!k.online);
   const parts=[];
-  down.forEach(t=>{const b=el('b',null,t.name);parts.push([b,' is down'])});
-  lossy.forEach(t=>{const m=el('em',null,t.name);parts.push([m,' is losing '+S.live[t.name].loss.toFixed(1)+'%'])});
-  offK.forEach(k=>{const b=el('b',null,k.host);parts.push([b,' cannot be reached'])});
+  const go=(e,fn)=>{e.classList.add('fgo');e.tabIndex=0;e.setAttribute('role','link');e.onclick=fn;e.onkeydown=k=>{if(k.key==='Enter')fn()};return e};
+  down.forEach(t=>{const b=go(el('b',null,t.name),()=>openDrawer(t.name));parts.push([b,statusOf(t)[1]==='No link'?' has no link':' is down'])});
+  lossy.forEach(t=>{const m=go(el('em',null,t.name),()=>openDrawer(t.name));parts.push([m,' is losing '+S.live[t.name].loss.toFixed(1)+'%'])});
+  offK.forEach(k=>{const b=go(el('b',null,k.host),()=>setView('kharej'));parts.push([b,' cannot be reached'])});
   (ov.alerts||[]).filter(a=>a.kind!=='down'&&a.kind!=='kharej').forEach(a=>parts.push([el('em',null,a.text),'']));
-  if(!ov.twofa)parts.push([el('em',null,'Two-factor sign-in is off'),' · Settings']);
+  if(!ov.twofa)parts.push([go(el('em',null,'Two-factor sign-in is off'),()=>setView('settings')),'']);
   if(!parts.length)f.appendChild(el('span','ok',ov.tunnels.length?'Everything is up.':'No tunnels yet. Use New tunnel on the Tunnels page, or the manager: '+S.cli+' new'));
-  const more=parts.length>4?parts.splice(4).length:0;
+  const more=parts.length>3?parts.splice(3).length:0;
   parts.forEach((p,i)=>{if(i)f.append(' · ');f.append(...p)});
   if(more){f.append(' · ');const a=el('a','dim','+'+more+' more');a.href='#system';f.appendChild(a)}
+  heads(down,lossy);
   renderTables();renderWatchdog();renderServer();renderKharej();renderRoutes();
   if(window.PANEL&&PANEL.onRender)PANEL.onRender();
 }
+// the head's buttons fix the first problem in the headline; with none, the two things people come here to do
+function heads(down,lossy){
+  const h=$('#hAct');if(!h)return;const P=window.PANEL;const enc=encodeURIComponent;const w=[];
+  const d=down.find(t=>t.enabled||t.active),l=lossy[0];
+  if(l)w.push(['sec','Why is '+l.name+' slow?',()=>openDrawer(l.name)]);
+  if(d)w.push(['pri',(d.active?'Restart ':'Start ')+d.name,()=>P.act('tunnels/'+enc(d.name)+'/'+(d.active?'restart':'start')).then(r=>{if(r){P.toast(d.name+': done');loadOverview()}})]);
+  if(!w.length){const st=$('#stBtn');if(st&&st.dataset.name)w.push(['sec','Speed test',()=>st.click()])}
+  if(w.length<2&&P.newTunnel)w.push([w.some(x=>x[0]==='pri')?'sec':'pri','New tunnel',()=>P.newTunnel()]);
+  const key=w.map(x=>x[0]+x[1]).join('|');if(h.dataset.k===key)return;h.dataset.k=key;h.textContent='';
+  w.forEach(([c,t,fn])=>{const b=el('button','btn '+c,t);b.type='button';b.onclick=()=>busy(b,fn());h.appendChild(b)});
+}
+// the round button: the same few actions as big tiles, the first problem among them
+function quick(){
+  const P=window.PANEL,ov=S.ov;if(!ov)return [];const enc=encodeURIComponent;const st=$('#stBtn');
+  const down=ov.tunnels.find(t=>statusOf(t)[0]==='p-down'&&(t.enabled||t.active));
+  return [['plus','New tunnel','on Kharej and here',()=>P.newTunnel()],
+    st&&st.dataset.name&&['gauge','Speed test',st.dataset.name,()=>st.click()],
+    down?['restart',(down.active?'Restart ':'Start ')+down.name,statusOf(down)[1].toLowerCase(),()=>P.act('tunnels/'+enc(down.name)+'/'+(down.active?'restart':'start')).then(r=>{if(r)loadOverview()})]
+      :['link','Add Kharej','with its pairing token',()=>P.addKharej()],
+    ['list','Logs and health','System page',()=>setView('system')]].filter(Boolean);
+}
+function openQuick(){const qa=$('#qa'),box=$('#qaTiles');box.textContent='';
+  quick().forEach(([ic,t,sub,fn],i)=>{const b=el('button','qt');b.type='button';b.style.setProperty('--d',(i*0.05+0.03).toFixed(2)+'s');
+    const tx=el('span',null,t);tx.appendChild(el('span','lab',sub));b.append(ico(ic),tx);b.onclick=()=>{closeQuick();fn()};box.appendChild(b)});
+  qa.hidden=false;$('#fab').setAttribute('aria-expanded','true');const f=box.querySelector('.qt');if(f)f.focus()}
+function closeQuick(){const qa=$('#qa');if(!qa||qa.hidden)return;qa.hidden=true;$('#fab').setAttribute('aria-expanded','false');$('#fab').focus()}
+document.addEventListener('DOMContentLoaded',()=>{const f=$('#fab');if(!f)return;f.onclick=openQuick;$('#qaX').onclick=closeQuick;
+  $('#qa').addEventListener('click',e=>{if(e.target.id==='qa')closeQuick()});document.addEventListener('keydown',e=>{if(e.key==='Escape')closeQuick()})});
 function sparkCells(name){if(!S.ov)return el('div','spk');
   const w=(S.ov.watchdog||[]).find(x=>x.name===name);
   const sp=el('div','spk');(w?w.hours:new Array(24).fill(0)).forEach(v=>sp.appendChild(el('i','s'+v)));return sp;
@@ -265,7 +337,7 @@ function renderTables(){
       const l=S.live[t.name]||{};const [cls,word]=statusOf(t);const tr=el('tr');tr.dataset.name=t.name;tr.tabIndex=0;
       const td=(c,txt)=>{const d=el('td',c,txt);tr.appendChild(d);return d};
       td('id',t.name);
-      td(null,t.role==='Iran'?(t.paired?'Iran ⇄ Kharej':'Iran'):'Kharej');
+      tr.firstChild.appendChild(el('span','sub',t.role==='Iran'?(t.peer?'to '+t.peer:'Iran side'):'Kharej side'));
       const car=td(null,t.carrier||'–');if(t.reverse)car.appendChild(el('span','sub','reverse'));
       const st=td();const p=el('span','pill '+cls);p.append(el('i'),word);st.appendChild(p);
       td('r n',l.metrics?fmtRate(l.down)+' MB/s':'–').dataset.k='down';
@@ -273,7 +345,12 @@ function renderTables(){
       td('r n',l.metrics&&l.rtt?l.rtt.toFixed(0)+' ms':'–');
       const lo=td('r n',l.metrics?l.loss.toFixed(1)+'%':'–');if(cls==='p-slow')lo.classList.add('warnc');
       td().appendChild(sparkCells(t.name));
-      td('r ports',(t.ports||[]).join(', ')||'–');
+      td('ports n',(t.ports||[]).join(', ')||'–');
+      const ta=td('r ta');const P=window.PANEL,enc=encodeURIComponent;
+      const ib=(lab,fn)=>{const b=el('button','btn ic',lab);b.type='button';b.onclick=e=>{e.stopPropagation();busy(b,fn())};ta.appendChild(b)};
+      ib(t.active?'Restart':'Start',()=>P.act('tunnels/'+enc(t.name)+'/'+(t.active?'restart':'start')).then(r=>{if(r)loadOverview()}));
+      if(t.role==='Iran'&&t.active)ib('Speed test',()=>P.act('tunnels/'+enc(t.name)+'/speedtest',{body:{mb:10}}));
+      ib('Details',()=>openDrawer(t.name));
       tr.addEventListener('click',()=>openDrawer(t.name));tr.addEventListener('keydown',e=>{if(e.key==='Enter')openDrawer(t.name)});
       body.appendChild(tr);
     });
@@ -293,11 +370,15 @@ function renderWatchdog(){
   $('#wdN').textContent=outs;$('#wdL').textContent=fmtDur(longest);$('#wdO').textContent=ongoing;$('#wdO').classList.toggle('bad',ongoing>0);
 }
 function setBar(id,lab,text,pct){$(lab).textContent=text;const b=$(id);b.style.width=Math.max(0,Math.min(100,pct)).toFixed(0)+'%';b.classList.toggle('hi',pct>=85)}
+// a ring per resource: the arc is the share used, orange from 70 %, red from 85 %
+function ring(id,txt,pct,title){const r=$(id);if(!r)return;const f=Math.max(0,Math.min(100,pct))/100;const c=2*Math.PI*42;
+  const a=r.querySelector('.r1');a.style.setProperty('stroke-dasharray',(c*f).toFixed(1)+' '+c.toFixed(1));
+  r.classList.toggle('warn',pct>=70&&pct<85);r.classList.toggle('hi',pct>=85);r.querySelector('.rv .n').textContent=txt;if(title)r.title=title}
 function renderServer(){
   const h=S.ov.host;
-  setBar('#bCpu','#rCpu','load '+h.load1.toFixed(2),h.cpus?h.load1/h.cpus*100:0);
-  setBar('#bMem','#rMem','ram '+h.mem_pct.toFixed(0)+'%',h.mem_pct);
-  setBar('#bDisk','#rDisk','disk '+h.disk_pct.toFixed(0)+'%',h.disk_pct);
+  ring('#gCpu',h.load1.toFixed(2),h.cpus?h.load1/h.cpus*100:0,(h.cpus||'?')+' cores');
+  ring('#gMem',h.mem_pct.toFixed(0)+'%',h.mem_pct);
+  ring('#gDisk',h.disk_pct.toFixed(0)+'%',h.disk_pct);
   $('#srvUp').textContent=h.uptime_s?'up '+fmtDur(h.uptime_s):'';
   $('#srvClock').textContent=h.clock_synced?'synced':'not synced';$('#srvClock').className=h.clock_synced?'':'warnc';
   $('#srv2fa').textContent=S.ov.twofa?'on':'off';$('#srv2fa').className=S.ov.twofa?'':'warnc';
@@ -306,8 +387,8 @@ function khCard(k){
   const c=el('div','kh');
   const top=el('div','khtop');const p=el('span','pill '+(k.online?'p-up':'p-down'));p.append(el('i'),k.online?'online':'unreachable');top.appendChild(p);
   top.appendChild(el('span','lab',k.online?(k.version?'v'+k.version:'')+(k.caps?' · '+k.caps:''):(k.error||'')));c.appendChild(top);
-  const fl=el('div','flaps'+(k.host.length>11?' long':''));fl.setAttribute('aria-label',k.host);k.host.toUpperCase().split('').slice(0,20).forEach((ch,i)=>{const s=el('span','flap',ch);s.setAttribute('aria-hidden','true');s.style.animationDelay=(0.2+i*0.05).toFixed(2)+'s';fl.appendChild(s)});c.appendChild(fl);
-  c.appendChild(el('div','lab','through '+k.via.map(n=>n===k.link?'pairing link':n).join(', ')));
+  const fl=flaps(k,'',20,0.05);c.appendChild(fl);
+  c.appendChild(el('div','lab',(fl.dataset.city?k.host+' · ':'')+'through '+k.via.map(n=>n===k.link?'pairing link':n).join(', ')));
   const ul=el('ul','rtl');(k.tunnels||[]).forEach(t=>{const li=el('li');li.appendChild(el('span',null,t.name));const p=el('span','pill '+(t.health==='ok'?'p-up':t.state==='active'?'p-down':'p-off'));p.append(el('i'),t.health==='ok'?'up':t.state==='active'?'no link':'stopped');li.appendChild(p);ul.appendChild(li)});
   if(k.online&&!(k.tunnels||[]).length)ul.appendChild(el('li','empty','No tunnels listed.'));
   c.appendChild(ul);return c;
@@ -315,7 +396,7 @@ function khCard(k){
 function renderKharej(){
   const kh=S.ov.kharej;$('#khSub').textContent=kh.length?kh.length+' paired':'';
   const l=$('#khList');l.textContent='';
-  if(!kh.length){l.appendChild(el('div','empty','No Kharej server is paired with this one. Pair from the manager: '+S.cli+' scepter'));return}
+  if(!kh.length){l.appendChild(el('div','empty','No Kharej server is paired yet. Kharej servers, then Add Kharej, with the pairing token Kharej shows.'));return}
   kh.forEach(k=>l.appendChild(khCard(k)));
 }
 
@@ -368,6 +449,7 @@ function renderLive(down,up){
 function stripes(){
   const svg=$('#sbars');const last=S.series.slice(-30);const n=30,bw=300/n;const top=Math.max(1,...last.map(s=>s.down));
   let s='<defs><pattern id="hz" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.6" height="4" fill="#3a3a41"/></pattern></defs>';
+  for(let i=0;i<n-last.length;i++)s+=`<rect x="${(i*bw+1).toFixed(2)}" y="81" width="${(bw-2).toFixed(2)}" height="3" rx="1.5" fill="#232327"/>`;
   last.forEach((p,i)=>{const x=(n-last.length+i)*bw;const hh=Math.max(3,p.down/top*82);s+=`<rect x="${(x+1).toFixed(2)}" y="${(84-hh).toFixed(2)}" width="${(bw-2).toFixed(2)}" height="${hh.toFixed(2)}" rx="1.5" fill="${i===last.length-1?'#3ee08a':'url(#hz)'}"/>`});
   svg.innerHTML=s;
 }
@@ -381,11 +463,12 @@ function gauge(frac,ups,total){
   $('#gNum').textContent=total?ups+'/'+total:'–';$('#gLab').textContent=!total?'no tunnels':ups===total?'all up':(total-ups)+' need attention';
 }
 function chart(){
-  const W=640,H=200,L=40,T=14,B=26;const d=S.series.slice(-300);const n=d.length;const svg=$('#tsvg');
+  const svg=$('#tsvg'),box=svg.parentNode;const W=640,L=40,T=14,B=26;const H=Math.max(200,Math.round(W*box.clientHeight/Math.max(1,box.clientWidth)));
+  svg.setAttribute('viewBox','0 0 '+W+' '+H);const d=S.series.slice(-300);const n=d.length;
   if(n<2){svg.innerHTML='';return}
   const vals=d.map(p=>mb(p.down));const top=Math.max(1,Math.ceil(Math.max(...vals)/5)*5);
   const X=i=>L+i*(W-L-4)/(n-1),Y=v=>T+(1-v/top)*(H-T-B);
-  let s='<defs><pattern id="dp" width="5" height="5" patternUnits="userSpaceOnUse"><circle cx="2.5" cy="2.5" r="0.9" fill="#3ee08a" opacity="0.45"/></pattern><linearGradient id="fm" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><mask id="mk"><rect x="0" y="0" width="640" height="200" fill="url(#fm)"/></mask></defs>';
+  let s='<defs><pattern id="dp" width="5" height="5" patternUnits="userSpaceOnUse"><circle cx="2.5" cy="2.5" r="0.9" fill="#3ee08a" opacity="0.45"/></pattern><linearGradient id="fm" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><mask id="mk"><rect x="0" y="0" width="640" height="'+H+'" fill="url(#fm)"/></mask></defs>';
   for(let k=0;k<=4;k++){const v=top*k/4;s+=`<line x1="${L}" x2="${W}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" class="gl"/><text x="0" y="${(Y(v)+3.5).toFixed(1)}">${v.toFixed(v<10?1:0)}</text>`}
   let p='';vals.forEach((v,i)=>{p+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)});
   s+=`<path d="${p}L${X(n-1)} ${Y(0)}L${L} ${Y(0)}Z" fill="url(#dp)" mask="url(#mk)"/><path d="${p}" fill="none" stroke="#3ee08a" stroke-width="2" stroke-linejoin="round"/>`;
@@ -540,7 +623,7 @@ $('#pwBtn').addEventListener('click',async()=>{
 });
 $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{method:'POST'})}catch(e){}showLogin()});
 
-window.PANEL={api,el,$,S,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
+window.PANEL={api,el,$,S,busy,ico,flaps,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
 
 /* ---------- boot ---------- */
 markDots();

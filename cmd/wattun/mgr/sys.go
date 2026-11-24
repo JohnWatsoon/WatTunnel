@@ -27,6 +27,9 @@ var (
 )
 
 // wireSystem swaps the inert adapter defaults for the live probes.
+// WireSystem is wireSystem for the web panel's process, which never runs Run.
+func WireSystem() { wireSystem() }
+
 func wireSystem() {
 	p2FWOpen, envFWOpen = fwOpen, fwOpen
 	p2FWClose, envFWClose = fwClose, fwClose

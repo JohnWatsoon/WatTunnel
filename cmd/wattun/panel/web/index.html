@@ -68,6 +68,7 @@
 
     <div class="head">
       <div><h1 id="vTitle">Overview</h1><div class="find" id="find"></div></div>
+      <div class="hact" id="hAct"></div>
     </div>
 
     <main id="vOverview" class="grid pane">
@@ -110,7 +111,7 @@
           <button class="btn sec st-btn" id="stBtn" type="button">Run test</button>
         </section>
       </div>
-      <section class="card s2">
+      <section class="card s2 c-tp">
         <div class="ch"><div class="ct">Throughput <span class="lab">download, all tunnels, this visit</span></div><span class="chip"><i class="dot-g"></i>live</span></div>
         <div class="tc"><svg id="tsvg" viewBox="0 0 640 200" role="img" aria-label="Download speed over time"></svg><div class="tt" id="tt" hidden></div></div>
         <div class="feet">
@@ -122,10 +123,10 @@
       </section>
       <section class="card c-srv">
           <div class="ch"><div class="ct">This server</div><span class="lab" id="srvUp"></span></div>
-          <div class="res res3">
-            <div><span class="lab" id="rCpu">load</span><div class="tr"><span id="bCpu"></span></div></div>
-            <div><span class="lab" id="rMem">ram</span><div class="tr"><span id="bMem"></span></div></div>
-            <div><span class="lab" id="rDisk">disk</span><div class="tr"><span id="bDisk"></span></div></div>
+          <div class="rings">
+            <div class="ring" id="gCpu"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="r0" cx="50" cy="50" r="42"/><circle class="r1" cx="50" cy="50" r="42"/></svg><div class="rv"><span class="n"></span><span class="lab">load</span></div></div>
+            <div class="ring" id="gMem"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="r0" cx="50" cy="50" r="42"/><circle class="r1" cx="50" cy="50" r="42"/></svg><div class="rv"><span class="n"></span><span class="lab">ram</span></div></div>
+            <div class="ring" id="gDisk"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="r0" cx="50" cy="50" r="42"/><circle class="r1" cx="50" cy="50" r="42"/></svg><div class="rv"><span class="n"></span><span class="lab">disk</span></div></div>
           </div>
           <div class="kv mt14"><span>Clock</span><span id="srvClock">–</span></div>
           <div class="kv"><span>Two-factor</span><span id="srv2fa">–</span></div>
@@ -136,7 +137,7 @@
       </section>
       <section class="card s4">
         <div class="ch"><div class="ct">Tunnels <span class="lab" id="tunN"></span></div></div>
-        <div class="tw"><table><thead><tr><th>name</th><th>side</th><th>carrier</th><th>status</th><th class="r">download</th><th class="r">upload</th><th class="r">latency</th><th class="r">loss</th><th>last 24 h</th><th class="r">ports</th></tr></thead><tbody id="rows"></tbody></table></div>
+        <div class="tw"><table><thead><tr><th>name</th><th>carrier</th><th>status</th><th class="r">download</th><th class="r">upload</th><th class="r">latency</th><th class="r">loss</th><th>last 24 h</th><th>ports</th><th class="r"><span class="ghost">actions</span></th></tr></thead><tbody id="rows"></tbody></table></div>
       </section>
     </main>
 
@@ -182,6 +183,11 @@
       </section>
       <div id="setMore" class="s2w setmore"></div>
     </main>
+  </div>
+  <button class="fab" id="fab" type="button" aria-label="Quick actions" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+  <div class="qa" id="qa" role="dialog" aria-label="Quick actions" hidden>
+    <div class="qtiles" id="qaTiles"></div>
+    <button class="qx" id="qaX" type="button" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
 
   <dialog id="dlg" aria-labelledby="dlgT"><form method="dialog" id="dlgF"><h2 id="dlgT"></h2><div id="dlgB"></div><div class="err" id="dlgE" role="alert"></div><div class="tools dlg-b" id="dlgA"></div></form></dialog>

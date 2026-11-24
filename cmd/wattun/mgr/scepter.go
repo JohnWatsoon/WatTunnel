@@ -381,6 +381,12 @@ func scepterCodeHint(code int, p map[string]any) string {
 		if s := str("ports"); s != "" {
 			return "Kharej refused the ports: " + s
 		}
+		if s := str("detail"); s != "" {
+			return "Kharej refused it: " + s
+		}
+		if s := str("carrier"); s != "" {
+			return "Kharej cannot make a " + s + " tunnel this way (update wattun on Kharej, or pick another carrier)"
+		}
 		if s := str("name"); s != "" {
 			return fmt.Sprintf("%q is not a valid tunnel name (1-32 letters, digits, - or _)", s)
 		}
@@ -404,6 +410,9 @@ func scepterCodeHint(code int, p map[string]any) string {
 	case scepterCodeInternal:
 		if rb, _ := p["rolled_back"].(bool); rb {
 			return "Kharej failed to apply it and rolled back — nothing changed"
+		}
+		if s := str("detail"); s != "" {
+			return "Kharej-side failure: " + s
 		}
 		return "Kharej-side failure"
 	case scepterCodeUnpaired:

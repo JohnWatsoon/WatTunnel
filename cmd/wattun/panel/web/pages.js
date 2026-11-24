@@ -9,7 +9,7 @@ const enc=encodeURIComponent;
 const COLS=['#3ee08a','#5b93ff','#9a8cff','#ff7a33','#d4f36a','#ff5d62','#7fe0ff','#f0a6ff'];
 const colOf=n=>{const i=(S.ov?S.ov.tunnels:[]).findIndex(t=>t.name===n);return COLS[(i<0?0:i)%COLS.length]};
 function svgEl(tag,attrs){const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e}
-function btn(txt,cls,fn){const b=el('button','btn sm '+(cls||'sec'),txt);b.type='button';b.onclick=fn;return b}
+function btn(txt,cls,fn){const b=el('button','btn sm '+(cls||'sec'),txt);b.type='button';if(fn)b.onclick=e=>busy(b,fn(e));return b}
 function card(cls,title,sub,right){const c=el('section','card '+(cls||''));const h=el('div','ch');const t=el('div','ct',title);if(sub)t.appendChild(el('span','lab',sub));h.appendChild(t);if(right)h.appendChild(right);c.appendChild(h);return c}
 function pill(cls,txt){const p=el('span','pill '+cls);p.append(el('i'),txt);return p}
 function split(v,unit){const w=el('span','sv');const s=String(v);const i=s.indexOf('.');w.append(i<0?s:s.slice(0,i));if(i>=0)w.appendChild(el('span','dim',s.slice(i)));if(unit)w.appendChild(el('span','unit',unit));return w}
@@ -89,13 +89,13 @@ let jobT=0;
 const strip=l=>l.replace(/\x1b\[[0-9;]*m/g,'');
 function jobShell(){
   const d=$('#dlg');d.classList.add('wide');$('#dlgE').textContent='';const b=$('#dlgB');b.textContent='';
-  const head=el('div','jh');const st=pill('p-slow','running');const sub=el('span','lab');head.append(st,sub);
+  const head=el('div','jh');const st=pill('p-slow','running');const sub=el('span','lab n');head.append(st,sub);const bar=el('div','jbar run');bar.appendChild(el('i'));
   const body=el('div','jbody');const det=el('details','jlog');det.appendChild(el('summary','lab','Show the full log'));const pre=el('pre','log');det.appendChild(pre);const res=el('div','mt8');
-  b.append(head,body,res,det);
+  b.append(head,bar,body,res,det);
   const a=$('#dlgA');a.textContent='';const close=el('button','btn sec','Close (it keeps running)');close.type='button';close.onclick=()=>{clearTimeout(jobT);d.close()};a.appendChild(close);
   $('#dlgF').onsubmit=e=>e.preventDefault();d.onclose=()=>{if(!d.open)d.classList.remove('wide')};d.oncancel=()=>clearTimeout(jobT);
   if(!d.open)d.showModal();
-  return {st,sub,body,pre,res,close};
+  return {st,sub,bar,body,pre,res,close};
 }
 // speed test: the matrix waves while it measures, then fills; download and upload as big split numbers
 function speedView(body){
@@ -154,7 +154,10 @@ function chooser(w,list,tun,picks){
 // any other job: its steps, the current one pulsing
 function stepView(body){
   const steps=el('div','jsteps jsv');body.appendChild(steps);
-  return (lines,state)=>{steps.textContent='';lines.slice(-6).forEach((l,i,arr)=>{const s=el('div','jstep'+(i===arr.length-1&&state==='running'?' now':''));s.append(el('i'),el('span',null,l));steps.appendChild(s)})};
+  return (lines,state)=>{steps.textContent='';const ls=lines.filter(l=>l.trim()).slice(-6);
+    if(!ls.length){const s=el('div','jstep '+(state==='running'?'now':'bad'));s.append(el('i'),el('span',null,state==='running'?'Starting …':'It stopped before printing anything.'));steps.appendChild(s);return}
+    ls.forEach((l,i,arr)=>{const last=i===arr.length-1;const k=last&&state==='running'?'now':last&&state!=='done'?'bad':'ok';
+      const s=el('div','jstep '+k);const m=el('i');if(k!=='now')m.appendChild(P.ico(k==='ok'?'check':'x'));s.append(m,el('span',null,l));steps.appendChild(s)})};
 }
 async function openJob(id){
   clearTimeout(jobT);
@@ -163,23 +166,25 @@ async function openJob(id){
     let r=null;try{r=await api('jobs/'+id,{auth:true})}catch(e){}
     if(!r||!r.ok){misses++;v.st.lastChild.textContent=misses>3?'waiting for the panel to come back':'running';jobT=setTimeout(tick,2000);return}
     misses=0;const j=r.j;$('#dlgT').textContent=j.title;
-    const all=(j.log||[]).map(strip).filter(l=>j.kind!=='pair'||!/^TUNNEL=/.test(l)); // a pairing link is hidden: no carrier switch on itconst shown=all.filter(l=>!/^[A-Z_]+=/.test(l));
+    const all=(j.log||[]).map(strip).filter(l=>j.kind!=='pair'||!/^TUNNEL=/.test(l)); /* a pairing link is hidden: no carrier switch on it */const shown=all.filter(l=>!/^[A-Z_]+=/.test(l));
     if(j.kind==='speedtest'){spd=spd||speedView(v.body);spd(shown,j.state)}
     else{car=car||carrierView(v.body);steps=steps||stepView(v.body);
       // the board takes over as soon as the manager reports carriers; until then the plain steps
       if(car(all,j.state))v.body.classList.add('has-car');else steps(shown,j.state)}
     const atEnd=v.pre.scrollTop+v.pre.clientHeight>=v.pre.scrollHeight-8;v.pre.textContent=shown.join('\n')||'…';if(atEnd)v.pre.scrollTop=v.pre.scrollHeight;
-    v.sub.textContent=j.state==='running'?'started '+when(j.started):'';
+    const secs=Math.max(0,Math.round(Date.now()/1000-j.started));const dur=secs<60?secs+' s':Math.floor(secs/60)+' min '+(secs%60)+' s';if(j.state==='running')v.seen=1;v.sub.textContent=j.state==='running'?'running for '+dur:v.seen?'took about '+dur:'';
+    v.bar.className='jbar '+({running:'run',done:'ok'}[j.state]||'bad');
     const cls={running:'p-slow',done:'p-up',failed:'p-down',lost:'p-down'}[j.state];v.st.className='pill '+cls;v.st.lastChild.textContent={running:'running',done:'done',failed:'failed (code '+j.rc+')',lost:'ended without a result'}[j.state];
     if(j.state==='running'){jobT=setTimeout(tick,1000);return}
     v.close.textContent='Close';v.res.textContent='';
-    if(j.state!=='done'){const last=shown.filter(l=>l.trim()).slice(-2).join(' · ');if(last)v.res.appendChild(el('p','note bad',last))}
+    if(j.state!=='done'){const last=shown.filter(l=>l.trim()).slice(-2).join(' · ');
+      v.res.appendChild(el('p','note bad',last||(j.rc===127?'The command could not start on this server (code 127: not found). Reinstall with the installer, then try again.':'It ended with code '+j.rc+' and printed nothing. The server journal has more: '+(S.cli||'wattun')+' logs.')))}
     if(j.result&&j.result.TOKEN)v.res.appendChild(tokenBox(j.result.TOKEN));
     toast(j.title+(j.state==='done'?': done':': failed'),j.state!=='done');P.loadOverview();if(S.view==='system')loadSystem();loadSpeedCard();
   };
   tick();
 }
-P.openJob=openJob;
+P.openJob=openJob;P.toast=toast;
 function tokenBox(tok,svg){const w=el('div','tokbox');if(svg){const q=el('div','qr');q.innerHTML=svg;w.appendChild(q)}
   const r=el('div','tokr');const t=el('code','tok',tok);t.hidden=true;const sh=btn('Show the token','sec',()=>{t.hidden=!t.hidden;sh.textContent=t.hidden?'Show the token':'Hide'});
   const cp=btn('Copy','sec',()=>{navigator.clipboard&&navigator.clipboard.writeText(tok).then(()=>toast('Copied'),()=>toast('The browser blocked the clipboard: select and copy it.',true))});
@@ -272,6 +277,7 @@ async function bulk(a){
 }
 const TESTF={k:'test',label:'Carrier test',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]};
 const PICK={k:'pick',label:'Then use, for auto',options:[['best','the fastest carrier'],['bond','a bond of every working carrier']],hint:'Either way, the results let you switch to any tested carrier or bond the ones you choose.'};
+P.newTunnel=()=>newTunnel();
 async function newTunnel(){
   const ov=S.ov||{tunnels:[],kharej:[]};const vias=(ov.kharej||[]).filter(k=>k.online);
   const fields=[{k:'where',label:'Where',options:vias.length?[['both','On Kharej and here, in one go'],['here','Here only, from a token']]:[['here','Here only, from a token']],
@@ -356,7 +362,7 @@ function renderKharejPage(still){
     if(k.version){const vc=el('span','chip n','v'+k.version);top.appendChild(vc);if(latest&&newer(latest,k.version))top.appendChild(el('span','chip upd','v'+latest+' is out'))}
     top.appendChild(el('span','grow'));
     const caps=el('div','caps');caps.title='what this pairing may do on Kharej';const ti=TIERS.indexOf(k.caps);TIERS.forEach((x,j)=>{const s=el('span',j<=ti?'on':'',x);caps.appendChild(s)});top.appendChild(caps);c.appendChild(top);
-    const fl=el('div','flaps big'+(k.host.length>11?' long':''));fl.setAttribute('aria-label',k.host);k.host.split('').slice(0,24).forEach((ch,j)=>{const s=el('span','flap',ch);s.setAttribute('aria-hidden','true');s.style.animationDelay=(0.2+j*0.04).toFixed(2)+'s';fl.appendChild(s)});c.appendChild(fl);
+    const fl=P.flaps(k,'big',24,0.04);c.appendChild(fl);
     // the link: this server to Kharej, packets at the live rate
     const link=el('div','k-link');const a1=el('div','kl-end');a1.append(el('span','kl-dot me'),el('span',null,S.ov.host.name||'this server'));
     const mid=el('div','kl-mid');const line=el('i','t-line wide'+(k.online?' on':''));line.appendChild(el('b'));const st=el('div','kl-st');st.dataset.k='kst';mid.append(line,st);
@@ -367,17 +373,17 @@ function renderKharejPage(still){
     (k.tunnels||[]).forEach(rt=>{const row=el('div','ktr');const ok=rt.health==='ok',act2=rt.state==='active';
       row.append(el('i','kdot '+(ok?'ok':act2?'bad':'off')),el('span','kt-n',rt.name),el('span','chip',rt.carrier||'–'),el('span','kt-p n',rt.ports||''),el('span','lab kt-s',ok?'up':act2?(rt.health||'no link'):'stopped'));
       const m=el('div','kt-a');
-      if(k.online){[[act2?'restart':'start',act2?'Restart':'Start',''],act2&&['stop','Stop','danger']].filter(Boolean).forEach(([a,t,d])=>m.appendChild(btn(t,'sec '+d,()=>act('kharej/'+enc(k.host)+'/tunnel',{body:{name:rt.name,action:a},confirm:a==='stop'?'Stop '+rt.name+' on '+k.host+'?':null,title:t+' '+rt.name,danger:a==='stop'}).then(r=>{if(r){toast(rt.name+': '+a+' done');P.loadOverview()}}))));
-        m.appendChild(btn('New key','sec',()=>keyRotate(k,rt)));m.appendChild(btn('Delete','sec danger',()=>kharejDelete(k,rt)))}
+      if(k.online){[[act2?'restart':'start',act2?'Restart':'Start',''],act2&&['stop','Stop','danger']].filter(Boolean).forEach(([a,t,d])=>m.appendChild(btn(t,'sec ic '+d,()=>act('kharej/'+enc(k.host)+'/tunnel',{body:{name:rt.name,action:a},confirm:a==='stop'?'Stop '+rt.name+' on '+k.host+'?':null,title:t+' '+rt.name,danger:a==='stop'}).then(r=>{if(r){toast(rt.name+': '+a+' done');P.loadOverview()}}))));
+        m.appendChild(btn('New key','sec ic',()=>keyRotate(k,rt)));m.appendChild(btn('Delete','sec ic danger',()=>kharejDelete(k,rt)))}
       row.appendChild(m);list.appendChild(row)});
     if(k.online&&!(k.tunnels||[]).length)list.appendChild(el('div','empty','No tunnels listed on that server.'));
     c.appendChild(list);
     if(k.online){const t=el('div','k-acts');
-      t.append(btn('Update','sec',()=>act('kharej/'+enc(k.host)+'/update',{full:true,title:'Update '+k.host,confirm:'Kharej downloads the latest release, checks its signature and restarts its tunnels. It rolls back by itself if the new version fails.'}).then(r=>r&&toast(r.note||'Update started'))),
-        btn('Backup','sec',()=>askDownload('Back up '+k.host,'kharej/'+enc(k.host)+'/backup','It holds every tunnel key of that server.')),
-        btn('Update status','sec',async()=>{const r=await api('kharej/'+enc(k.host)+'/status');const pre=el('pre','log',r.ok?JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Update status of '+k.host,pre)}),
-        btn('Audit','sec',async()=>{const r=await api('kharej/'+enc(k.host)+'/audit');const pre=el('pre','log',r.ok?(r.j.logs||[]).join('\n')||JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Audit of '+k.host,pre)}),
-        btn('Rotate pairing','sec',()=>act('kharej/'+enc(k.host)+'/pair-rotate',{full:true,title:'New pairing credential for '+k.host,confirm:'Kharej makes a new pairing credential; '+k.via.join(', ')+' switch to it and restart. The old one keeps working for 5 minutes.'}).then(r=>r&&toast('Pairing rotated'))));
+      t.append(btn('Update','sec sm',()=>act('kharej/'+enc(k.host)+'/update',{full:true,title:'Update '+k.host,confirm:'Kharej downloads the latest release, checks its signature and restarts its tunnels. It rolls back by itself if the new version fails.'}).then(r=>r&&toast(r.note||'Update started'))),
+        btn('Backup','sec sm',()=>askDownload('Back up '+k.host,'kharej/'+enc(k.host)+'/backup','It holds every tunnel key of that server.')),
+        btn('Update status','sec ic push',async()=>{const r=await api('kharej/'+enc(k.host)+'/status');const pre=el('pre','log',r.ok?JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Update status of '+k.host,pre)}),
+        btn('Audit','sec ic',async()=>{const r=await api('kharej/'+enc(k.host)+'/audit');const pre=el('pre','log',r.ok?(r.j.logs||[]).join('\n')||JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Audit of '+k.host,pre)}),
+        btn('Rotate pairing','sec ic',()=>act('kharej/'+enc(k.host)+'/pair-rotate',{full:true,title:'New pairing credential for '+k.host,confirm:'Kharej makes a new pairing credential; '+k.via.join(', ')+' switch to it and restart. The old one keeps working for 5 minutes.'}).then(r=>r&&toast('Pairing rotated'))));
       c.appendChild(t)}
     if(k.link){const t=el('div','k-acts');t.appendChild(btn('Remove','sec danger',()=>act('kharej/'+enc(k.host)+'/remove',{full:true,danger:true,title:'Remove Kharej '+k.host,confirm:'Deletes the pairing link to '+k.host+'. Your tunnels to it keep running; they are no longer managed from here. Add it again with its pairing token.'}).then(r=>{if(r)setTimeout(()=>P.loadOverview(),1500)})));c.appendChild(t)}
     g.appendChild(c);
@@ -385,6 +391,7 @@ function renderKharejPage(still){
   v.appendChild(g);liveKharej();
 }
 // Iran: pair with one more Kharej from its pairing token (wattun add-kharej as a job; the carrier board shows the test)
+P.addKharej=()=>addKharej();
 function addKharej(){return act('kharej-add',{full:true,title:'Add Kharej',ok:'Add',fields:[{k:'token',label:'Pairing token from Kharej (wat1:...)',area:true,rows:3,hint:'On the Kharej server: '+(S.cli||'wattun')+', then t. Or its panel: Kharej servers.'},
   {k:'test',label:'Carrier test',options:[['fast','fast (a few minutes)'],['normal','normal'],['anti','anti-censor grid']]}]})}
 // Kharej: its pairing token and who is paired; made on first use, rotate makes a new one
