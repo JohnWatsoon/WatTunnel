@@ -772,7 +772,10 @@ type ScepterState struct {
 	// claimer (Handoff 4 R2) is set while the credential is the token bootstrap: the first hello that proves
 	// it trades it for a fresh credential, which claimer stores; nil once claimed (or for a stored credential).
 	claimer func(*PairingConfig) error
-	claimMu sync.Mutex       // serializes claims: two Iran racing the same token, one wins
+	claimMu sync.Mutex // serializes claims: two Iran racing the same token, one wins
+	// pending is a claim not yet confirmed by the claimer's next command: its answer may have died with the
+	// session, so the bootstrap proof still gets the SAME claim back until then (never a second mint)
+	pending *pendingClaim    // guarded by mu
 	qmu     sync.Mutex       // the ONE command queue (plan B.4/E.2): held from idempotency replay to journal record
 	recent  []ScepterRec     // last scepterRecent handled commands: the doctor's ONLY visible trace (plan A.3)
 	nowf    func() time.Time // tests shrink the clock
@@ -987,6 +990,7 @@ func (ss *ScepterState) ReloadPairing(p *PairingConfig) {
 	old := ss.pair
 	ss.pair = p
 	ss.claimer = nil // a reloaded credential is a stored one; the bootstrap re-arms only via SetClaimer
+	ss.pending = nil
 	var lives []*Stream
 	for st := range ss.lives {
 		lives = append(lives, st)
@@ -2336,6 +2340,7 @@ func ServeScepter(st *Stream, ss *ScepterState) {
 // proven: the latch already checked a keyed proof; the in-band channel must prove the pairing key in its
 // hello first (Handoff 4 R2: the tunnel PSK alone no longer opens the management plane).
 func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState, proven bool) {
+	claimed := false // this stream's hello handed out a claim not yet confirmed
 	ss.mu.Lock()
 	if ss.pair == nil { // disarmed by ReloadPairing(nil) (or a pairing-less state): the reserved stream serves
 		// nothing — refused contacts get a reset, never a command answer (F8-revoke, 2026-11-22)
@@ -2379,15 +2384,33 @@ func serveScepterLoop(st *Stream, d *scepterDecoder, ss *ScepterState, proven bo
 		if !proven {
 			resp := ss.helloProven(req, st.s.cfg.SID)
 			proven = resp.Code == CodeOK
+			_, claimed = resp.Params["claim"]
 			resp.Seq = ss.StateSeq()
 			writeResp(st, &wmu, resp)
 			continue
+		}
+		if claimed { // a command after the claim's hello: the claimer read its answer
+			ss.confirmClaim()
+			claimed = false
 		}
 		_, caps := ss.cred() // re-read per command: ReloadPairing (rotate) changes the caps mid-stream
 		resp := ss.Handle(req, caps)
 		resp.Seq = ss.StateSeq() // the response tail: every answer carries the state it was built on
 		writeResp(st, &wmu, resp)
 	}
+}
+
+// pendingClaim is a handed-out claim awaiting confirmation (see ScepterState.pending).
+type pendingClaim struct {
+	boot *PairingConfig // the bootstrap credential the claim replaced
+	line string         // the claimed credential's watp1: line, re-issued as-is
+}
+
+// confirmClaim ends the re-issue window: the claimer sent a command after the hello, so it read the answer.
+func (ss *ScepterState) confirmClaim() {
+	ss.mu.Lock()
+	ss.pending = nil
+	ss.mu.Unlock()
 }
 
 // SetClaimer arms the token bootstrap claim (Handoff 4 R2): store persists the minted credential before it is
@@ -2425,23 +2448,29 @@ func (ss *ScepterState) helloProven(req ScepterRequest, sid uint64) ScepterRespo
 	ss.claimMu.Lock()
 	defer ss.claimMu.Unlock()
 	ss.mu.Lock()
-	p, claim := ss.pair, ss.claimer
+	p, claim, pend := ss.pair, ss.claimer, ss.pending
 	ss.mu.Unlock()
 	if p == nil {
 		return ScepterResponse{ID: req.ID, Code: CodeUnpaired}
 	}
-	want := ScepterProof(p, sid)
-	ok := false
-	for _, x := range proofs {
-		if hmac.Equal([]byte(x), []byte(want)) {
-			ok = true
+	proves := func(c *PairingConfig) bool {
+		want := ScepterProof(c, sid)
+		for _, x := range proofs {
+			if hmac.Equal([]byte(x), []byte(want)) {
+				return true
+			}
 		}
+		return false
 	}
-	if !ok {
+	line := ""
+	switch {
+	case proves(p):
+	case pend != nil && proves(pend.boot):
+		line = pend.line // the claim's answer was lost: hand the same credential out again
+	default:
 		ss.audit.record(ss.nowf(), p.UUIDString(), req.Cmd, req.ID, CodeDenied)
 		return ScepterResponse{ID: req.ID, Code: CodeDenied, Params: map[string]any{"need": "proof"}}
 	}
-	line := ""
 	if claim != nil {
 		np := &PairingConfig{Ver: p.Ver, Caps: p.Caps}
 		if _, err := crand.Read(np.Key[:]); err != nil {
@@ -2454,7 +2483,7 @@ func (ss *ScepterState) helloProven(req ScepterRequest, sid uint64) ScepterRespo
 			return ScepterResponse{ID: req.ID, Code: CodeInternal, Params: map[string]any{"detail": "claim store: " + err.Error()}}
 		}
 		ss.mu.Lock()
-		ss.pair, ss.claimer = np, nil
+		ss.pair, ss.claimer, ss.pending = np, nil, &pendingClaim{boot: p, line: np.Line()}
 		ss.mu.Unlock()
 		ss.audit.record(ss.nowf(), np.UUIDString(), EvPairClaimed, req.ID, CodeOK)
 		ss.AddEvent(EvPairClaimed, map[string]any{"uuid": np.UUIDString()})

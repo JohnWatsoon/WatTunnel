@@ -2426,7 +2426,9 @@ Example: `watp1:1|0a0b0c0d-0e0f-1011-1213-141516171819|AAAA...=|manage`. Version
 answers `denied {need:"hello"}`, a missing or wrong proof `denied {need:"proof"}`. When the current
 credential is still the token-derived one, the first proven hello CLAIMS it: Kharej mints a fresh random
 32-byte key and UUID with the same capability, stores it as `.pairing` (marked `# claimed`), switches to it,
-and returns it once in the hello answer as `claim` (a `watp1:` line, inside the session AEAD). Iran keeps
+and returns it in the hello answer as `claim` (a `watp1:` line, inside the session AEAD). Until the claimer
+sends its next command on that stream (proof that it read the answer), a bootstrap proof gets the SAME claim
+back, never a second one, so a session that dies right after the claim does not lock Iran out. Iran keeps
 every claim in `<config dir>/.pairing.claims` (0600, one line per pairing UUID) and proves them on every
 later dial. From then on the token alone opens nothing: a second Iran with the same token gets
 `denied {need:"proof"}`, and its manager says "Kharej is paired with another Iran". The token keeps working

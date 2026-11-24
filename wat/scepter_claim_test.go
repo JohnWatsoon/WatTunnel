@@ -139,3 +139,40 @@ func TestScepterClaim(t *testing.T) {
 		t.Fatal("a claim is handed out once")
 	}
 }
+
+// A claim whose answer died with the session must not lock the claimer out: until the claimer's next command
+// confirms it, the bootstrap proof gets the SAME claim back (no second mint); after that the token is refused.
+func TestScepterClaimLostAnswer(t *testing.T) {
+	boot := testPairing(CapFull)
+	state, err := NewScepterState(boot, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(state.Stop)
+	stored := 0
+	state.SetClaimer(func(*PairingConfig) error { stored++; return nil })
+	dial := func() (*ScepterClient, error) {
+		cli, srv, _, _ := newPair(t, 0, 2*time.Millisecond, 20e6, Config{Pairing: boot})
+		t.Cleanup(func() { cli.Close(); srv.Close() })
+		servePairs(state, srv)
+		return DialScepter(cli)
+	}
+	a, err := dial() // claims, then "loses" the answer: no further command on this stream
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := a.Hello["claim"].(string)
+	b, err := dial() // the same Iran re-dials with only the token
+	if err != nil {
+		t.Fatalf("an unconfirmed claim must be re-issued to the bootstrap proof: %v", err)
+	}
+	if again, _ := b.Hello["claim"].(string); again == "" || again != first || stored != 1 {
+		t.Fatalf("re-issue: %q vs %q, stored %d", again, first, stored)
+	}
+	if _, code := b.Call("state.get", nil); code != CodeOK { // confirms
+		t.Fatalf("confirming command: code %d", code)
+	}
+	if _, err := dial(); err == nil {
+		t.Fatal("after the confirmation the token alone must be refused")
+	}
+}
