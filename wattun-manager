@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112402   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112403   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -4492,7 +4492,9 @@ wizard_kharej_auto() { # suggested-name : called from wizard_kharej when the car
   if [ -n "$NI_PORTS" ]; then ni_kharej_ports || return 1; allow=$(maps_allow_str); fi
 
   ask_public_addr || return 1
-  # B3: extended opt-in is CLI-only (--extended); never prompt interactively during creation.
+  # 3.6.0 (owner 2026-11-24): the 13 shaped carriers are always planned when this engine runs them; Iran picks
+  # them with the Extended test preset. --extended stays the explicit form that fails loudly on an old engine.
+  carrier_ok_here vxlan && AUTO_EXT=1
   if [ "${NI_EXTENDED:-0}" = 1 ]; then
     if ! carrier_ok_here vxlan; then
       err "--extended needs wattun 3.3.0 on this server (found ${ver:-none}); both ends must run 3.3.0. Run: $SELF update"
@@ -5050,7 +5052,8 @@ auto_variants() { # T_* from the auto token -> AV_* (the token's plan is the sou
     [ "$name" = icmp ] && continue # the bare-IP icmp variant is the first row, added above
     is_raw_carrier "$name" && ! ipv4_ok "$AT_ADDR" && continue
     if ! carrier_ok_here "$name"; then AT_SKIPPED+="${AT_SKIPPED:+, }$name"; continue; fi # B2: Iran skips what it cannot run
-    if is_shaped_raw "$name"; then av_add "$name (shape only)" "$name" d "$AT_ADDR" '' ''
+    if { is_shaped_raw "$name" || is_shaped_udp "$name"; } && [ "$AT_PRESET" != extended ]; then continue # Extended preset rows (3.6.0)
+    elif is_shaped_raw "$name"; then av_add "$name (shape only)" "$name" d "$AT_ADDR" '' ''
     elif is_shaped_udp "$name"; then av_add "$name (shape only)" "$name" d "$(join_hp "$AT_ADDR" "$p")" '' ''
     elif [ -n "$p" ]; then av_add "$name" "$name" d "$(join_hp "$AT_ADDR" "$p")" '' ''
     else av_add "$name" "$name" d "$AT_ADDR" '' ''; fi
@@ -5922,7 +5925,7 @@ at_none() { # nothing worked
 # screening rows x ~20 s a row at the 8-16 MB probe sizes and the ~8 MB/s budget rate, rounded to a range.
 #   normal  ~14 rows  -> ~1-3 min    fast    ~14 + 7x6 rows -> ~4-6 min
 #   anti    ~200 rows -> ~15-40 min  reverse ~8 rows        -> ~1-2 min
-at_preset_ask() { # -> AT_PRESET normal|anti|fast|reverse (--test in unattended runs), T_SNI (CDN domain, d) ; rc 1 = cancelled
+at_preset_ask() { # -> AT_PRESET normal|anti|fast|reverse|extended (--test in unattended runs), T_SNI (CDN domain, d) ; rc 1 = cancelled
   AT_PRESET=${NI_TEST:-normal}
   [ "$NONINTERACTIVE" = 1 ] && return 0
   [ "${UI_W:-0}" -gt 0 ] || ui_init_width
@@ -5941,6 +5944,7 @@ at_preset_ask() { # -> AT_PRESET normal|anti|fast|reverse (--test in unattended 
     box_row "$(key_label f)      Anti-censor fast      ${GRY}rst/synrst x 3 SNIs,       ~4-6 min${RST}"
     box_row "                               ${GRY}best row applied${RST}"
     box_row "$(key_label a)      + Anti-censor         ${GRY}full grid, fake-SNI, fp   ~15-40 min${RST}"
+    box_row "$(key_label x)      + Extended            ${GRY}13 shaped carriers         ~4-7 min${RST}"
     box_row "$(key_label r)      Reverse only          ${GRY}just the r= plan carriers ~1-2 min${RST}"
     box_row "$(key_label d)      Cloudflare domain     ${GRY}$dom_lbl${RST}"
     box_row "$(key_label q)      Cancel"
@@ -5951,6 +5955,10 @@ at_preset_ask() { # -> AT_PRESET normal|anti|fast|reverse (--test in unattended 
       enter) AT_PRESET=normal; echo; return 0 ;;
       f|F) AT_PRESET=fast; echo; return 0 ;;
       a|A) AT_PRESET=anti; echo; return 0 ;;
+      x|X) if [ -z "$(auto_plan_extnames "$(plan_part "$T_AUTO" d)")" ]; then
+             echo; warn "This token has no extended carriers: Kharej made it before 3.6.0 or cannot run them. Update Kharej, show its token (t) and paste it here."; continue
+           fi
+           AT_PRESET=extended; echo; return 0 ;;
       r|R) AT_PRESET=reverse; echo; return 0 ;;
       d|D) echo; hint "Domain proxied to Kharej via Cloudflare (orange cloud, SSL Full)."
            ask_ok "Cloudflare domain" "$T_SNI" v_domain_opt || continue; T_SNI=$REPLY_V
@@ -10544,7 +10552,7 @@ ni_parse() {
       --fake-ttl) [[ "$v" =~ ^[0-9]{1,3}$ ]] && [ "$v" -le 255 ] || { err "--fake-ttl: use a hop count 0-255 (0 = auto, got '$v')"; return 1; }; NI_FAKETTL=$v ;;
       --pool-rotate) v_pool_rotate "$v" || return 1; NI_POOLROT=$v ;;
       --pool-rotate-bytes) v_pool_bytes "$v" || return 1; NI_POOLBYTES=$v ;;
-      --test) case "$v" in normal|anti|fast|reverse) NI_TEST=$v ;; *) err "--test: use normal, anti, fast or reverse (got '$v')"; return 1 ;; esac ;;
+      --test) case "$v" in normal|anti|fast|reverse|extended) NI_TEST=$v ;; *) err "--test: use normal, anti, fast, reverse or extended (got '$v')"; return 1 ;; esac ;;
       --token) v_token "$v" || return 1; NI_TOKEN=$v ;;
       --map) [ -n "$v" ] || { err "--map needs a list such as 39901:18999,8443:443"; return 1; }; NI_MAP=$v ;;
       --pick) case "$v" in best|bond|rbond) NI_PICK=$v ;; *,*|*+*) [[ "$v" =~ ^[0-9]+([,+][0-9]+)+$ ]] || { err "--pick: rows joined with commas or +, such as 1,3 or 1+3 (got '$v')"; return 1; }; NI_PICK=$v ;; *) [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] || { err "--pick: use best, bond, a row number or rows such as 1,3 (got '$v')"; return 1; }; NI_PICK=$((10#$v)) ;; esac ;;
@@ -10642,7 +10650,7 @@ or NONINTERACTIVE=1). Plain output, errors on stderr, exit code 0 = done, 1 = fa
          old Iran ignores them, so their test ports stay open in the background for Iran to probe anytime. Raw tier needs CAP_NET_RAW
          and the cloud firewall to pass IP protocols 41/50/97/115.
          (--addr skips the public-IP detection; --cdn-domain is for auto; --listen/--path/--sni/--max-mbps for the others)
-  iran --token TOKEN --map 39901:18999[,8443:443] [--name NAME] [--pick best|bond|N|N,N...] [--test normal|anti|fast|reverse] [--sessions N] [--max-mbps N] --yes
+  iran --token TOKEN --map 39901:18999[,8443:443] [--name NAME] [--pick best|bond|N|N,N...] [--test normal|anti|fast|reverse|extended] [--sessions N] [--max-mbps N] --yes
          creates and starts the Iran tunnel. Auto token: runs the test, --pick chooses a row (default best, bond = all
          working direct carriers, 1,3 = join those rows). CDN token: automatic CDN tuning. Ends with LINK=up|down and TUNNEL=NAME; exit 1 if down.
          An extended auto token is tested too; carriers this engine cannot run are skipped with a hint and never written

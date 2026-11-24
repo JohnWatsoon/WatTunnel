@@ -1481,8 +1481,8 @@ side, which is Kharej for a reverse tunnel. During the test `s` skips the runnin
 anti-censor variants and `q` stops the test; the table then ranks what was measured and the usual choice (Enter, `1`-`N`, `c`, `f`, `q`) follows.
 An anti-censor variant has to beat the plain type by 8 % to rank above it, cannot be joined into a bond, and is written with its `fake-sni`,
 `fake-mode`, `fp`, `ech` and `tls-frag` lines. Unattended runs (`wattun iran --token ... --yes`, `auto-test NAME --yes`) use
-`--test normal|anti|fast|reverse`
-(default normal); `auto-retest` and auto-heal always run normal. The times in the preset menu are estimates (rows x ~20 s); the traffic figure the
+`--test normal|anti|fast|reverse|extended`
+(default normal; *+ Extended* (`x`, 3.6.0) = normal plus the 13 shaped carriers, which no other preset tests); `auto-retest` and auto-heal always run normal. The times in the preset menu are estimates (rows x ~20 s); the traffic figure the
 test prints before it starts is the exact worst case.
 
 **Auto-heal.** After two failed restart cycles on an auto tunnel, `wattun-manager heal` starts a re-test (a normal
@@ -1495,8 +1495,10 @@ Screening runs a throw-away client per variant with 8 streams: the probe starts 
 and a sustained run sized to at least 1.5 s each way at their screening rate, clamped to 20-40 MB each way. A
 finalist that fails the longer run keeps its screening numbers. The table is ranked by download plus upload.
 
-**Extended transports (3.3.0, CLI opt-in `--extended`).** In `wattun kharej --extended` (CLI-only, never prompted in
-the interactive wizard, offered when the local engine is 3.3.0), extended creates one hidden single-carrier server unit
+**Extended transports (3.3.0; always on since 3.6.0).** Since 3.6.0 every auto Kharej whose engine runs the shapes
+(3.3.0+) plans and opens them without asking (owner decision: about 10 MB RAM per idle listener, 130-200 MB for all 13);
+Iran tests them only with the *+ Extended* preset. `wattun kharej --extended` remains the explicit form that fails on an
+older engine. Extended creates one hidden single-carrier server unit
 per shape (`NAME-e-<shape>`, shared `NAME.key`, own metrics port, the parent's `ports:` allowlist, per-port `limits:`
 and `allow-clients`/`allow-clients-file`; `listen` on verified-free random UDP ports `10000..32767` for the eight UDP
 shapes, bare entries for the five raw shapes) and appends the shapes to the plan. Iran tests them like any other

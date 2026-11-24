@@ -82,6 +82,7 @@ const (
 	atEstFast    = "~4-6 min"
 	atEstAnti    = "~15-40 min"
 	atEstReverse = "~1-2 min"
+	atEstExt     = "~4-7 min"
 )
 
 const atScreenMBStart = 8
@@ -762,12 +763,11 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 		res.Error = fmt.Errorf("Could not detect this server's public IP.")
 		return res
 	}
-	extended := o.Extended
-	// the bash wizard asked this; the Go port only took --extended, so interactive users lost the option (field 2026-11-22)
-	if !extended && !NonInteractive && carrierOkHere("vxlan") {
-		extended = Confirm("Also test extended transports? (13 shaped carriers; both ends need 3.3.0)", false)
-	}
-	if extended && !carrierOkHere("vxlan") {
+	// owner decision 2026-11-24: every auto Kharej that can run the shaped carriers plans and runs them always
+	// (~10 MB per idle listener, ~130-200 MB for all); Iran picks them with the Extended test preset, not a prompt.
+	// --extended stays as the explicit form that fails loudly on an old engine.
+	extended := o.Extended || carrierOkHere("vxlan")
+	if o.Extended && !carrierOkHere("vxlan") {
 		res.Error = fmt.Errorf("--extended needs wattun 3.3.0 on this server (found %s); both ends must run 3.3.0. Run: wattun-manager update", orOld(engineVer()))
 		return res
 	}
@@ -1556,6 +1556,9 @@ func autoVariants(tok Token) {
 				atScreenSkipped = joinNonEmpty(atScreenSkipped, ", ", name)
 				continue
 			}
+			if (isShapedRaw(name) || isShapedUDP(name)) && atPreset != "extended" {
+				continue // the 13 shaped carriers are the Extended preset's rows (3.6.0)
+			}
 			switch {
 			case isShapedRaw(name):
 				avAdd(name+" (shape only)", name, "d", atAddr, "", "", "", "", "", "", "", "")
@@ -2134,7 +2137,7 @@ func atPresetAsk(nonInteractive bool, niTest string) (string, error) {
 		}
 		return "normal", nil
 	}
-	// Interactive box (Test mode): [Enter] Standard / [f] Anti-censor fast / [a] + Anti-censor /
+	// Interactive box (Test mode): [Enter] Standard / [f] Anti-censor fast / [a] + Anti-censor / [x] + Extended /
 	// [r] Reverse only / [d] domain / [q] Cancel.
 	domLbl := avTok.SNI
 	if domLbl == "" {
@@ -2147,6 +2150,7 @@ func atPresetAsk(nonInteractive bool, niTest string) (string, error) {
 			keyLabel("f")+"      Anti-censor fast      "+GRY+"rst/synrst x 3 SNIs,       "+atEstFast+RST,
 			"                               "+GRY+"best row applied"+RST,
 			keyLabel("a")+"      + Anti-censor         "+GRY+"full grid, fake-SNI, fp   "+atEstAnti+RST,
+			keyLabel("x")+"      + Extended            "+GRY+"13 shaped carriers         "+atEstExt+RST,
 			keyLabel("r")+"      Reverse only          "+GRY+"just the r= plan carriers "+atEstReverse+RST,
 			keyLabel("d")+"      Cloudflare domain     "+GRY+domLbl+RST,
 			keyLabel("q")+"      Cancel")
@@ -2158,6 +2162,12 @@ func atPresetAsk(nonInteractive bool, niTest string) (string, error) {
 			return "fast", nil
 		case "a", "A":
 			return "anti", nil
+		case "x", "X":
+			if autoPlanExtNames(planPart(avTok.Auto, "d")) == "" {
+				Warn("This token has no extended carriers: Kharej made it before 3.6.0 or cannot run them. Update Kharej, show its token (t) and paste it here.")
+				continue
+			}
+			return "extended", nil
 		case "r", "R":
 			return "reverse", nil
 		case "d", "D":

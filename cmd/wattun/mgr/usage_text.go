@@ -82,19 +82,19 @@ or NONINTERACTIVE=1). Plain output, errors on stderr, exit code 0 = done, 1 = fa
          [--sni HOST] [--cdn-domain D] [--ports 18999,2000,53/udp] [--max-mbps N] [--extended] --yes
          creates and starts the Kharej tunnel; the last lines are TUNNEL=NAME and TOKEN=wat1:...
          C=auto: the token makes Iran test the standard transports (icmp, udp, tcp/tls/ws/wss/h2/h2c/grpc and
-         gre/ipip, which need 3.2.0 on both ends). --extended (needs Kharej 3.3.0) also opens the 13 F19 shaped
-         carriers, one hidden single-carrier listener per shape (wattun@NAME-e-<shape>); both ends must run 3.3.0 and
-         old Iran ignores them, so their test ports stay open in the background for Iran to probe anytime. Raw tier needs CAP_NET_RAW
+         gre/ipip, which need 3.2.0 on both ends). Since 3.6.0 it also always opens the 13 F19 shaped carriers when
+         this engine can run them (3.3.0+), one hidden single-carrier listener per shape (wattun@NAME-e-<shape>, ~10 MB
+         each); Iran tests them with --test extended. --extended makes that a hard requirement (fails on an old engine). Raw tier needs CAP_NET_RAW
          and the cloud firewall to pass IP protocols 41/50/97/115.
          (--addr skips the public-IP detection; --cdn-domain is for auto; --listen/--path/--sni/--max-mbps for the others)
-  iran --token TOKEN --map 39901:18999[,8443:443] [--name NAME] [--pick best|bond|N|N,N...] [--test normal|anti|fast|reverse] [--sessions N] [--max-mbps N] --yes
+  iran --token TOKEN --map 39901:18999[,8443:443] [--name NAME] [--pick best|bond|N|N,N...] [--test normal|anti|fast|reverse|extended] [--sessions N] [--max-mbps N] --yes
          creates and starts the Iran tunnel. Auto token: runs the test, --pick chooses a row (default best, bond = all
          working direct carriers, 1,3 = join those rows). CDN token: automatic CDN tuning. Ends with LINK=up|down and TUNNEL=NAME; exit 1 if down.
-         An extended auto token is tested too; carriers this engine cannot run are skipped with a hint and never written
-         into the config.
+         The shaped carriers of an extended token are tested only with --test extended; carriers this engine cannot run
+         are skipped with a hint and never written into the config.
          --test picks the preset (default normal): normal = direct+CDN+reverse; fast = rst/synrst against
          mci.ir/irancell.ir/cloudflare.com on every direct pool carrier (best row applied); anti = the full
-         fake-SNI/fp grid; reverse = only the plan's r= carriers.
+         fake-SNI/fp grid; reverse = only the plan's r= carriers; extended = normal + the 13 shaped carriers.
          --sessions N writes "sessions: N", 1-16 (only with wattun 2.3.0 or newer and one udp/tcp/tls/ws/wss/h2/h2c/grpc
          carrier: the engine refuses it on icmp/gre/ipip, the F19 shapes, bonds and reverse; otherwise it is ignored with a warning)
          --preset rst-fast|mci|irancell|blackout|conservative applies an operator-tailored anti-censorship preset

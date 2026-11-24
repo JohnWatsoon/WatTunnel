@@ -116,10 +116,10 @@ func niParse(args []string) error {
 			NI.PoolBytes = v
 		case "--test":
 			switch v {
-			case "normal", "anti", "fast", "reverse":
+			case "normal", "anti", "fast", "reverse", "extended":
 				NI.Test = v
 			default:
-				Err("--test: use normal, anti, fast or reverse (got '" + v + "')")
+				Err("--test: use normal, anti, fast, reverse or extended (got '" + v + "')")
 				return fmt.Errorf("bad --test %q", v)
 			}
 		case "--token":

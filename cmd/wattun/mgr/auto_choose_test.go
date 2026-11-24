@@ -37,3 +37,27 @@ func TestAtProbeReverseBusyPort(t *testing.T) {
 		t.Fatalf("why = %q", ar[0].Why)
 	}
 }
+
+// 3.6.0: the 13 shaped carriers are always in an auto Kharej's plan, so only the Extended preset tests them.
+func TestAutoVariantsExtendedPreset(t *testing.T) {
+	ov := engineVer
+	defer func() { engineVer = ov; atPreset = "normal" }()
+	engineVer = func() string { return "3.6.0" }
+	tok := Token{Peer: "203.0.113.5", Auto: "d=udp:21000,vxlan:21001;r=tcp:21002"}
+	count := func(preset string) (shaped int) {
+		atPreset = preset
+		autoVariants(tok)
+		for _, v := range av {
+			if isShapedUDP(v.Car) || isShapedRaw(v.Car) {
+				shaped++
+			}
+		}
+		return
+	}
+	if n := count("normal"); n != 0 {
+		t.Fatalf("standard preset tests %d shaped rows", n)
+	}
+	if n := count("extended"); n != 1 {
+		t.Fatalf("extended preset: %d shaped rows, want 1", n)
+	}
+}

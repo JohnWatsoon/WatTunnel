@@ -86,7 +86,7 @@ Done. Users connect to the Iran server's IP, and Kharej forwards only to its own
 
 > **Important (avoid Iran IP filtering):** WatTunnel encrypts only **Iran ↔ Kharej**. Your panel inbound on Kharej (the config you give end users) **must also be encrypted** — use **VLESS+Reality**, **VLESS+WS+TLS**, **VLESS Encryption (PQ)**, or **Shadowsocks 2022**. Plain `VLESS + TCP header` is unencrypted between the user and your Iran server, so Iranian ISP DPI detects and blocks the Iran IP.
 
-**Auto uses data.** The manager prints the worst case before it starts: up to 1184 MB for a normal test, and far less on a filtered route (`--extended` adds shaped carriers via CLI, up to 416 MB more). On a traffic-billed server, pick a type yourself:
+**Auto uses data.** The manager prints the worst case before it starts: up to 1184 MB for a normal test, and far less on a filtered route (the *+ Extended* test preset adds the 13 shaped carriers, up to 416 MB more). On a traffic-billed server, pick a type yourself:
 
 | Your route | Use |
 |---|---|

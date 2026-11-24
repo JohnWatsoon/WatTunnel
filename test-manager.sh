@@ -1373,7 +1373,7 @@ VER=3.2.0; T_AUTO='d=gre;r=icmp'; auto_variants
 chk "Iran gate: gre works on 3.2 (B2)" "${AT_SKIPPED}/${#AV_LABEL[@]}" "/3"
 T_AUTO='d=vxlan:4789;r=icmp'; auto_variants
 chk "Iran gate: a shaped variant is skipped on 3.2 (B2)" "${AT_SKIPPED}/${#AV_LABEL[@]}" "vxlan/2"
-VER=3.3.0; T_AUTO='d=vxlan:4789,sit;r=icmp'; auto_variants
+VER=3.3.0; T_AUTO='d=vxlan:4789,sit;r=icmp'; AT_PRESET=extended; auto_variants; AT_PRESET=normal
 chk "Iran gate: shaped variants work on 3.3 (B2)" "${AT_SKIPPED}/${#AV_LABEL[@]}" "/4"
 VER=3.1.0; listen_blocked() { return 1; }; auto_pick_ports
 chk "Kharej gate: gre/ipip are left out of the plan on 3.1 (B2)" "$(plan_has "$AUTO_D" gre && echo y || echo n)/$AUTO_SKIP" "n/gre, ipip"
@@ -1389,7 +1389,7 @@ T_AUTO=''; AT_SKIPPED=''
 VER=3.3.0
 bin_ver() { echo "$VER"; }
 bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
-T_AUTO='d=vxlan:4789,sit,gre;r=icmp'; T_PEER='203.0.113.10'; AT_PRESET=normal; auto_variants
+T_AUTO='d=vxlan:4789,sit,gre;r=icmp'; T_PEER='203.0.113.10'; AT_PRESET=extended; auto_variants
 chk "shaped variants: UDP shape peer carries the plan port (B4)" "${AV_PEER[1]}" "203.0.113.10:4789"
 chk "shaped variants: raw shape peer is bare (B4)" "${AV_PEER[2]}" "203.0.113.10"
 chk "shaped variants: gre peer is bare (B4)" "${AV_PEER[3]}" "203.0.113.10"
@@ -1436,10 +1436,11 @@ chk "auto plan display: a normal plan has no extended line (A6)" "$(auto_plan_in
 chk "auto plan display: an extended plan is labelled (A6)" "$(auto_plan_intro 'udp:4443,vxlan:4789,sit')" $'standard carriers: udp\nextended carriers: vxlan sit (both ends must run 3.3.0; shaped transports, not the real protocols)'
 _bvd6=$(declare -f bin_ver); _bvokd6=$(declare -f bin_ver_ok); _verd6=$VER
 bin_ver() { echo "$VER"; }; bin_ver_ok() { ver_ge "$(bin_ver)" "$1" && echo 1; }
-VER=3.2.1; T_AUTO='d=udp:4443,vxlan:4789;r=icmp'; T_PEER='203.0.113.10'; AT_PRESET=normal; auto_variants
+VER=3.2.1; T_AUTO='d=udp:4443,vxlan:4789;r=icmp'; T_PEER='203.0.113.10'; AT_PRESET=extended; auto_variants
 _n32=${#AV_LABEL[@]}; _p32=$(at_budget "$_n32" "$AT_SCREEN_CAP_MB" "$AT_FINAL_MB_MAX" "$AT_TUNE_PROBES_MAX" "$AT_TUNE_PROBE_MB")
 VER=3.3.0; auto_variants
 _n33=${#AV_LABEL[@]}; _p33=$(at_budget "$_n33" "$AT_SCREEN_CAP_MB" "$AT_FINAL_MB_MAX" "$AT_TUNE_PROBES_MAX" "$AT_TUNE_PROBE_MB")
+AT_PRESET=normal
 chk "auto budget: a skipped carrier is not counted (A6)" "$([ "$_n32" -lt "$_n33" ] && echo y)/$([ "$_p32" != "$_p33" ] && echo y)" "y/y"
 chk "auto screen: the skip hint names the carrier (A6)" "$(AT_SKIPPED=vxlan at_skipped_hint | grep -c vxlan)" "1"
 chk "auto screen: plan split helper stays defined (A6)" "$(grep -c '^auto_plan_intro()' wattun-manager)" "1"
@@ -1513,10 +1514,10 @@ chk "extended delete: the hidden units are stopped (B3)" "$(grep -c 'disable --n
 chk "extended delete: the UDP child's rule is closed (L8)" "$(grep -c "^${_vxp}/udp$" "$SMOKE/fw.log")" "1"
 chk "extended delete: parent listen-udp rule is closed too (L8)" "$(grep -cE '/udp$' "$SMOKE/fw.log")" "2"
 # SKIP-L8-Step2: parent's listen-* TCP entries also fw_close'd with random ports
-# default stays unchanged: no --extended, no hidden configs and no plan marker
+# 3.6.0 (owner 2026-11-24): without --extended an engine that runs the shapes still plans and opens all 13
 ( NONINTERACTIVE=1 NI_CARRIER=auto NI_NAME=t_extn NI_ADDR=203.0.113.5 wizard_kharej ) >/dev/null 2>&1
-chk "extended off by default: no hidden configs (B3)" "$(ls "$WAT_CONF"/t_extn-e-*.yml 2>/dev/null | wc -l | tr -d ' ')" "0"
-chk "extended off by default: the plan has no marker (B3)" "$(read_token "$(cat "$WAT_CONF/t_extn.token")"; case "$T_AUTO" in *';e=1'*) echo y ;; *) echo n ;; esac)" "n"
+chk "extended on by default (3.6.0): all hidden configs (B3)" "$(ls "$WAT_CONF"/t_extn-e-*.yml 2>/dev/null | wc -l | tr -d ' ')" "13"
+chk "extended on by default (3.6.0): the plan has the marker (B3)" "$(read_token "$(cat "$WAT_CONF/t_extn.token")"; case "$T_AUTO" in *';e=1'*) echo y ;; *) echo n ;; esac)" "y"
 rm -f "$WAT_CONF"/t_extn*
 # an old Kharej refuses --extended with one clear message and writes nothing
 VER=3.2.1; : >"$SMOKE/ext.out"
@@ -2474,7 +2475,7 @@ EOF
   chk "conflict: a normal tunnel keeps its name" \
     "$(eval "$_tul"; listen_conflict_desc tcp 26443)" "tunnel 'probe-12345'"
   rm -f "$WAT_CONF/hidden2.yml" "$WAT_CONF/probe-$_ts.yml" "$WAT_CONF/probe-$_ts-2.yml" "$WAT_CONF/probe-12345.yml"
-  chk "mgr: MGR_VERSION bumped with the panel subcommand (3.6.0)" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112402"
+  chk "mgr: MGR_VERSION bumped with the Extended preset (3.6.0)" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112403"
 
   # refresh_token keeps field 10 when the allowed ports change
   role() { echo Kharej; }
