@@ -17,6 +17,24 @@ ARCHES=${*:-"amd64 arm64 windows"}
 export CGO_ENABLED=0
 mkdir -p dist
 rm -f dist/wattun-* dist/install.sh dist/SHA256SUMS dist/SHA256SUMS.sig
+# The panel's font, Satoshi (Indian Type Foundry, Fontshare Free Font License): the license allows embedding it in an
+# app and self-hosting it, not a copy in a public repository, so the build fetches it (pinned by sha256) into the
+# gitignored web/fonts/ that go:embed picks up. Without it the panel falls back to system fonts.
+FONT=cmd/wattun/panel/web/fonts/Satoshi-Variable.woff2
+FONT_SHA=e739aff9b4d02c264341d6d4872edcda28e79373aeda936f659566a1cd3eb47f
+fsum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+if [ ! -f "$FONT" ] || [ "$(fsum "$FONT")" != "$FONT_SHA" ]; then
+  ft=$(mktemp -d)
+  if curl -fsSL --max-time 60 -o "$ft/s.zip" https://api.fontshare.com/v2/fonts/download/satoshi &&
+    unzip -q -o -j "$ft/s.zip" "Satoshi_Complete/Fonts/WEB/fonts/Satoshi-Variable.woff2" -d "$ft" &&
+    [ "$(fsum "$ft/Satoshi-Variable.woff2")" = "$FONT_SHA" ]; then
+    mkdir -p "${FONT%/*}" && mv "$ft/Satoshi-Variable.woff2" "$FONT"
+  else
+    rm -f "$FONT"
+    echo "warning: Satoshi font not fetched or changed upstream; the panel uses system fonts" >&2
+  fi
+  rm -rf "$ft"
+fi
 for a in $ARCHES; do
   case "$a" in
     amd64|arm64) os=linux; arch=$a; out="dist/wattun-linux-$a" ;;

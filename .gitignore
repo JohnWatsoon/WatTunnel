@@ -27,3 +27,6 @@ FIELD*.md
 plans/
 *PLAN*.md
 
+
+# Satoshi webfont: fetched by build.sh, never committed (Fontshare FFL forbids a copy in a public repo)
+cmd/wattun/panel/web/fonts/

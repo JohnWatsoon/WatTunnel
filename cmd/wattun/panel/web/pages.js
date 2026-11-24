@@ -9,7 +9,7 @@ const enc=encodeURIComponent;
 const COLS=['#3ee08a','#5b93ff','#9a8cff','#ff7a33','#d4f36a','#ff5d62','#7fe0ff','#f0a6ff'];
 const colOf=n=>{const i=(S.ov?S.ov.tunnels:[]).findIndex(t=>t.name===n);return COLS[(i<0?0:i)%COLS.length]};
 function svgEl(tag,attrs){const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e}
-function btn(txt,cls,fn){const b=el('button','btn sm '+(cls||'sec'),txt);b.type='button';if(fn)b.onclick=e=>busy(b,fn(e));return b}
+function btn(txt,cls,fn){const b=el('button','btn sm '+(cls||'sec'),txt);b.type='button';if(fn)b.onclick=e=>P.busy(b,fn(e));return b}
 function card(cls,title,sub,right){const c=el('section','card '+(cls||''));const h=el('div','ch');const t=el('div','ct',title);if(sub)t.appendChild(el('span','lab',sub));h.appendChild(t);if(right)h.appendChild(right);c.appendChild(h);return c}
 function pill(cls,txt){const p=el('span','pill '+cls);p.append(el('i'),txt);return p}
 function split(v,unit){const w=el('span','sv');const s=String(v);const i=s.indexOf('.');w.append(i<0?s:s.slice(0,i));if(i>=0)w.appendChild(el('span','dim',s.slice(i)));if(unit)w.appendChild(el('span','unit',unit));return w}
@@ -593,9 +593,12 @@ async function certPick(k){
 }
 
 /* ---------- Overview: speed test card ---------- */
-// The matrix columns are the last 7 real runs of the shown tunnel (download, scaled to their best); Run test
-// keeps it waving while the job measures.
-let stRun=null;
+// The matrix fills the card: one column per real run of the shown tunnel (download, scaled to their best), as many
+// columns and rows as fit; Run test keeps it waving while the job measures.
+let stRun=null,stDown=[];
+function mxFit(box){return [Math.max(7,Math.floor((box.clientWidth+5)/14)),Math.max(4,Math.floor((box.clientHeight+5)/14))]}
+function mxDraw(){const box=$('#mx');if(!box||stRun)return;const [n,rows]=mxFit(box);matrix(box,fillCols(stDown.slice(0,n).reverse(),n,rows),rows,false)}
+let mxT=0;window.addEventListener('resize',()=>{clearTimeout(mxT);mxT=setTimeout(mxDraw,150)});
 async function loadSpeedCard(){
   const box=$('#mx');if(!box||!S.ov)return;
   const iran=S.ov.tunnels.filter(t=>t.role==='Iran');const btn=$('#stBtn');
@@ -605,7 +608,7 @@ async function loadSpeedCard(){
   $('#stName').textContent=name;btn.dataset.name=name;
   if(stRun)return;
   const mine=rows.filter(x=>x.name===name&&x.down>0);const last=mine[0];
-  matrix(box,fillCols(mine.slice(0,7).reverse().map(x=>x.down),7,7),7,false);
+  stDown=mine.map(x=>x.down);mxDraw();
   const v=$('#stVal');v.textContent='';
   if(last){v.appendChild(split(last.down.toFixed(1),'MB/s'));$('#stLab').textContent='last run · '+P.fmtDur(Math.max(1,Math.round(Date.now()/1000-last.t)))+' ago';$('#stSub').textContent='↑ '+last.up.toFixed(1)+' MB/s · '+last.mb+' MB'+(last.auto?' · scheduled':'')}
   else{v.textContent='–';$('#stLab').textContent='no test yet';$('#stSub').textContent=''}
@@ -615,7 +618,7 @@ $('#stBtn').addEventListener('click',async()=>{
   const b=$('#stBtn');const name=b.dataset.name;if(!name||stRun)return;
   let r;try{r=await api('tunnels/'+enc(name)+'/speedtest',{method:'POST',body:{mb:10}})}catch(e){return}
   if(!r.ok||!r.j.job){toast(r.j.error||'Could not start the test.',true);return}
-  stRun=r.j.job;b.disabled=true;b.textContent='Testing…';matrix($('#mx'),null,7,true);$('#stVal').textContent='··';$('#stSub').textContent='';
+  stRun=r.j.job;b.disabled=true;b.textContent='Testing…';{const [n,rows]=mxFit($('#mx'));matrix($('#mx'),new Array(n).fill(null),rows,true)}$('#stVal').textContent='··';$('#stSub').textContent='';
   const t0=Date.now();
   const poll=async()=>{let j=null;try{const x=await api('jobs/'+stRun,{auth:true});if(x.ok)j=x.j}catch(e){}
     const lines=j?(j.log||[]):[];const down=lines.map(l=>/^down: ([\d.]+) MB\/s/.exec(l)).filter(Boolean).pop();

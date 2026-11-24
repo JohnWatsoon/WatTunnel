@@ -3763,6 +3763,11 @@ Layout: `wat/` is the library (session, congestion control, streams, carriers), 
 rebuild `dist/` (`sh build.sh`). A change that is slower on ICMP is not
 shipped.
 
+The web panel's font, Satoshi (Indian Type Foundry, Fontshare Free Font License), is not in the repository: the license
+allows embedding it in an app and self-hosting it, not a copy in a public repository. `build.sh` downloads it from
+Fontshare, checks its sha256 and puts it in the gitignored `cmd/wattun/panel/web/fonts/`, which the binary embeds. If
+the download fails or the file changed upstream, the build still succeeds and the panel uses system fonts.
+
 `cmd/wprobe` is the standalone ICMP path prober for the Iran ⇄ Kharej route: server mode on Kharej, client on
 Iran; it measures the reply ratio and loss against rate, packet size and ICMP identifier count. It is not part of the
 tunnel, ships in `dist/` as `wattun-wprobe-<os>-<arch>`, and needs Linux + CAP_NET_RAW (root), like the `icmp` carrier.

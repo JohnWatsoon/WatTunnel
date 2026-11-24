@@ -329,3 +329,19 @@ func must(t *testing.T, f string) io.Reader {
 	}
 	return bytes.NewReader(b)
 }
+
+// app.js runs inside an IIFE: pages.js reaches its helpers only through window.PANEL (P.x). A bare call to one
+// throws a ReferenceError on click, which once left every drawer and Kharej button dead.
+func TestPagesUseOnlyExportedHelpers(t *testing.T) {
+	app, _ := fs.ReadFile(webFS, "web/app.js")
+	pages, _ := fs.ReadFile(webFS, "web/pages.js")
+	for _, m := range regexp.MustCompile(`(?m)^(?:async )?function (\w+)\(`).FindAllSubmatch(app, -1) {
+		n := string(m[1])
+		if regexp.MustCompile(`function ` + n + `\(|(?:const|let) ` + n + `\b|\{[^}]*\b` + n + `\b[^}]*\}=P`).Match(pages) {
+			continue // pages.js has its own, or destructures it from P
+		}
+		if loc := regexp.MustCompile(`(?:^|[^.\w])` + n + `\(`).FindIndex(pages); loc != nil {
+			t.Errorf("pages.js calls app.js-private %s() at byte %d; use P.%s", n, loc[0], n)
+		}
+	}
+}

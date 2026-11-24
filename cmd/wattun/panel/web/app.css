@@ -1,10 +1,13 @@
-/* The approved look: docs/handoff/panel-mockup-v2.html. System fonts until the owner ships Geist / Vazirmatn
-   files to embed (no external requests from the browser: CDNs are slow or filtered in Iran and would leak the page). */
+/* The approved look: docs/handoff/panel-mockup-v2.html. Satoshi (Indian Type Foundry, Fontshare FFL) is served by
+   the panel itself: build.sh fetches it into web/fonts/ (the license allows embedding and self-hosting, not a copy in
+   a public repository). Without it, system fonts. No external requests from the browser: CDNs are slow or filtered in
+   Iran and would leak the page. */
+@font-face{font-family:"Satoshi";src:url(fonts/Satoshi-Variable.woff2) format("woff2");font-weight:300 900;font-style:normal;font-display:swap}
 :root{
   --bg:#0a0a0b; --card:#141416; --well:#1a1a1d; --line:#232327; --line2:#2c2c31; --hov:#26262a;
   --fg:#f3f3f4; --mut:#a2a2aa; --dim:#86868f;
   --green:#3ee08a; --lime:#d4f36a; --orange:#ff7a33; --blue:#5b93ff; --violet:#9a8cff; --red:#ff5d62;
-  --sans:"Geist","Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --sans:"Satoshi","Geist","Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   --mono:"Geist Mono",ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
   --ease:cubic-bezier(.16,1,.3,1); --spring:cubic-bezier(.34,1.45,.64,1);
   color-scheme:dark;
@@ -421,9 +424,12 @@ dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
 .kl-st{color:var(--fg);font-size:12px}
 .k-via{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .k-tuns{display:flex;flex-direction:column}
-.ktr{display:grid;grid-template-columns:10px minmax(70px,1fr) auto auto 44px auto;gap:12px;align-items:center;min-height:48px;padding:6px 0;border-top:1px solid var(--line);font-size:13px}
-.ktr .kt-a{display:flex;gap:2px;justify-content:flex-end}
-.ktr .kt-s{text-align:right}
+/* a Kharej tunnel row: name and state on top, carrier and ports under it, actions on the right over both lines */
+.ktr{display:grid;grid-template-columns:10px minmax(0,1fr) auto auto;grid-template-rows:auto auto;column-gap:12px;row-gap:5px;align-items:center;padding:11px 0;border-top:1px solid var(--line);font-size:13px}
+.ktr>.kdot{grid-area:1/1}.ktr>.kt-n{grid-area:1/2}.ktr>.kt-s{grid-area:1/3;text-align:right}
+.ktr>.chip{grid-area:2/2;justify-self:start;max-width:100%;overflow:hidden;text-overflow:ellipsis;display:block;line-height:24px}
+.ktr>.kt-p{grid-area:2/3;text-align:right;white-space:nowrap}
+.ktr .kt-a{grid-area:1/4/3/5;display:flex;gap:4px;justify-content:flex-end}
 .kt-n{font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kt-p{font:11.5px var(--mono);color:var(--mut)}
 .kdot{width:8px;height:8px;border-radius:50%;background:#5a5a62;display:inline-block;flex:none}
@@ -553,7 +559,7 @@ dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
   .flaps.big .flap,.flaps.big.long .flap{width:19px;height:28px;font-size:14px}
   .k-link{grid-template-columns:minmax(0,1fr)}
   .au{grid-template-columns:1fr 1fr}
-  .ktr{grid-template-columns:10px minmax(0,1fr) auto auto}.ktr .kt-p,.ktr .kt-s{display:none}
+  .ktr .kt-p{display:none}
 }
 .still .tile,.still .card,.still .flap,.still .segbar i,.still .q-tr i{animation:none}
 .fld>.btn{align-self:flex-start;margin-top:8px}
@@ -679,5 +685,10 @@ td.ta .btn{margin-left:4px;--h:30px}
 .rv{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px}
 .rv .n{font-size:19px;letter-spacing:-.03em}
 .ring.hi .rv .n{color:#ff9a9d}
-#stCard .st{flex:1 1 auto}
 @media (max-width:760px){.tip .lab{display:none}}
+
+/* speed test card: value on top, the run history fills the rest of the card */
+#stCard .st-r{min-width:0}
+.mx.fill{flex:1 1 0;min-height:56px;overflow:hidden;margin-top:18px;grid-template-columns:repeat(var(--n),9px);justify-content:space-between;align-content:space-between}
+#stCard .dcx{margin-top:8px}
+.c-map{display:flex;flex-direction:column}.c-map .routes{margin-top:auto;padding-top:6px}
