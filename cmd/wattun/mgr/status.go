@@ -1239,6 +1239,12 @@ func Doctor(name string, io_ *DoctorIO) {
 	if alive {
 		rtt := getFFlat(stats, "rtt_ms", "srtt_ms")
 		okLine(w, fmt.Sprintf("Link        CONNECTED · RTT %s ms", Ms(rtt)))
+		// public listeners refuse silently at -max-conns (total) or 1024 per source IP; behind a CDN every user
+		// shares a few edge IPs, so users see EOFs while the link looks fine (field report 2026-11-23)
+		if drops := get(stats, "conn_limit_drops"); drops != "" && drops != "0" {
+			warnLine(w, "Refused     "+drops+" user connection(s) at the connection cap (now holding "+orStr(get(stats, "conns_active"), "?")+")")
+			hintLine(w, " · Raise it: add  max-conns: 16384  to "+P.Conf+"/"+n+".yml"+" and restart (the journal says which cap was hit)")
+		}
 		if cars := parseCarriers(stats); len(cars) > 0 {
 			secHdr(w, "Live paths")
 			for _, c := range cars {

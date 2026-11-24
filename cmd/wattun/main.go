@@ -1658,7 +1658,10 @@ func acceptLoop(ln net.Listener, handle func(net.Conn)) {
 		}
 		ip := remoteIP(c.RemoteAddr())
 		if !publicConns.acquire(ip) {
-			connLimitDrops.Add(1)
+			if connLimitDrops.Add(1)%100 == 1 { // say why, without one line per refused connection
+				log.Printf("refusing connections: cap reached (%s); total %d, per source IP %d; raise with max-conns (config) or -max-conns",
+					publicConns.why(ip), publicConns.max, publicConns.maxPer)
+			}
 			c.Close()
 			continue
 		}

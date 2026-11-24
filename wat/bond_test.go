@@ -28,6 +28,7 @@ type bondDir struct {
 	out      chan []byte
 	done     chan struct{}
 	drops    atomic.Int64
+	loss     float64 // random drop probability (0 = none); set before traffic starts
 }
 
 func newBondDir(delay time.Duration, bps float64, done chan struct{}) *bondDir {
@@ -53,7 +54,7 @@ func newBondDir(delay time.Duration, bps float64, done chan struct{}) *bondDir {
 }
 
 func (d *bondDir) send(p []byte) {
-	if len(p) > 700 {
+	if len(p) > 700 || d.loss > 0 && rand.Float64() < d.loss {
 		return
 	}
 	d.mu.Lock()
@@ -1253,3 +1254,53 @@ func (dummyConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
 func (dummyConn) SetDeadline(time.Time) error      { return nil }
 func (dummyConn) SetReadDeadline(time.Time) error  { return nil }
 func (dummyConn) SetWriteDeadline(time.Time) error { return nil }
+
+// Field reports 3.3.2-3.3.7 (2026-11): a bond that mixes lossy datagram legs (udp, icmp) with a reliable pool leg
+// (tcp/ws/h2c, which queues instead of dropping and whose rate saws when its TCP loses) fell to a fraction of one
+// leg. Pin: the mixed bond beats its best single leg by a clear margin. reliableSawLink is the pool-leg model.
+func TestBondMixedReliableAndDatagram(t *testing.T) {
+	dgram := func(d time.Duration) *bondLink {
+		l := newBondLink(t, d, 5e6)
+		l.up.loss, l.down.loss = 0.01, 0.01
+		return l
+	}
+	run := func(links []*bondLink) float64 {
+		rig := newBondRig(t, links, PathTimings{})
+		t0 := time.Now()
+		d, _, err := bondDownload(rig.cli, 16<<20)
+		if err != nil || d != 16<<20 {
+			t.Fatalf("download: %v (%d)", err, d)
+		}
+		return float64(d) / time.Since(t0).Seconds() / 1e6
+	}
+	one := run([]*bondLink{dgram(45 * time.Millisecond)})
+	mix := run([]*bondLink{dgram(45 * time.Millisecond), dgram(48 * time.Millisecond), reliableSawLink(t, 50*time.Millisecond)})
+	t.Logf("udp alone %.2f MB/s, udp+icmp+tcp %.2f MB/s", one, mix)
+	if mix < 1.3*one && !raceBuild {
+		t.Errorf("mixed bond %.2f MB/s is not clearly faster than one datagram leg (%.2f)", mix, one)
+	}
+}
+
+// reliableSawLink: a reliable pool leg — no drops (a deep send queue instead), capacity sawing 5 <-> 1.5 MB/s.
+func reliableSawLink(t testing.TB, delay time.Duration) *bondLink {
+	l := newBondLink(t, delay, 5e6)
+	l.prof = Profile{Reliable: true, MTU: 640, MaxMTU: 640}
+	l.up.maxQueue, l.down.maxQueue = 1500*time.Millisecond, 1500*time.Millisecond
+	go func() {
+		hi := true
+		for {
+			select {
+			case <-l.done:
+				return
+			case <-time.After(700 * time.Millisecond):
+			}
+			hi = !hi
+			for _, d := range []*bondDir{l.up, l.down} {
+				d.mu.Lock()
+				d.bps = map[bool]float64{true: 5e6, false: 1.5e6}[hi]
+				d.mu.Unlock()
+			}
+		}
+	}()
+	return l
+}

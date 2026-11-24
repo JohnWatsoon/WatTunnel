@@ -763,6 +763,10 @@ func wizardKharejAuto(suggested string, o autoWizardOpts) autoWizardResult {
 		return res
 	}
 	extended := o.Extended
+	// the bash wizard asked this; the Go port only took --extended, so interactive users lost the option (field 2026-11-22)
+	if !extended && !NonInteractive && carrierOkHere("vxlan") {
+		extended = Confirm("Also test extended transports? (13 shaped carriers; both ends need 3.3.0)", false)
+	}
 	if extended && !carrierOkHere("vxlan") {
 		res.Error = fmt.Errorf("--extended needs wattun 3.3.0 on this server (found %s); both ends must run 3.3.0. Run: wattun-manager update", orOld(engineVer()))
 		return res
@@ -2018,6 +2022,14 @@ func atProbe(i, waitSecs int) {
 	if av[i].Kind == "r" {
 		args = append(args, "-reverse")
 		if IsPool(av[i].Car) && av[i].Port != "" {
+			// Kharej picked this port; if something here holds it the probe cannot listen and would only time out
+			if pn, _ := strconv.Atoi(av[i].Port); pn > 0 && p2PortBusy(pn, p2Rproto(av[i].Car)) {
+				ar[i].Why = "port " + av[i].Port + " busy here"
+				if u := p2PortUser(pn, p2Rproto(av[i].Car)); u != "" {
+					ar[i].Why += " (" + u + ")"
+				}
+				return
+			}
 			args = append(args, "-listen", ":"+av[i].Port)
 		}
 	}
@@ -2100,8 +2112,17 @@ func atFailed() ([]int, bool) {
 // at_none — nothing worked.
 func atNone() {
 	Err(fmt.Sprintf("No carrier reached %s", orNone(atAddr)))
-	Hint(" · Check Kharej status, token currency, and cloud firewall")
-	Hint(" · Retest after fixing:  paste the token again")
+	if atTunnel != "" {
+		if s, err := statsOf(atTunnel); err == nil && get(s, "alive") == "true" {
+			// the live tunnel works, so the route and the key are fine: Kharej's test listeners are not where
+			// Iran's saved plan says (a token rebuilt on Kharej moves them) — the field case of 2026-11-15/22
+			Warn("Your running tunnel works, but none of Kharej's test carriers answered on the ports this server saved.")
+			Hint(" · Kharej's test ports most likely changed. On Kharej: " + P.Self + ", open the tunnel, t (token); paste it here with t, then test again")
+		}
+	}
+	// nothing direct linked, so Kharej may never have learned this server's IP for its reverse companion
+	Hint(" · Reverse didn't start? On Kharej run:  " + P.Self + " auto-ip <kharej tunnel name> " + orStr(envPublicIP(), "<this server's IP>"))
+	Hint(" · Check that the Kharej tunnel runs, that the token is current, and Kharej's cloud firewall")
 }
 
 // at_preset_ask — normal | fast | anti | reverse | CDN domain. Non-interactive path takes NI_TEST.
@@ -2257,8 +2278,31 @@ func atChoose(rank []int, nonInteractive bool, niPick string) ([]int, error) {
 			return []int{rank[n-1]}, nil
 		}
 	}
+	jd, jr := atJoinableSummary(rank)
+	canJoin := len(jd) >= 2 || len(jr) >= 2
+	fmt.Fprintln(Stdout)
+	fmt.Fprintf(Stdout, "  %s  Use #1 %s(%s · %.1f / %.1f MB/s)%s\n", keyLabel("Enter"), GRY, av[best].Label, ar[best].Down, ar[best].Up, RST)
+	if len(bond) >= 2 {
+		fmt.Fprintf(Stdout, "  %s      Bond all %d direct carriers %s(failover + aggregate)%s\n", keyLabel("b"), len(bond), GRY, RST)
+	} else if len(rbond) >= 2 {
+		fmt.Fprintf(Stdout, "  %s      Bond all %d reverse carriers %s(failover + aggregate)%s\n", keyLabel("b"), len(rbond), GRY, RST)
+	}
+	var opts []string
+	if len(rank) > 1 {
+		opts = append(opts, fmt.Sprintf("1-%d", len(rank)), "pick row")
+		if canJoin {
+			opts = append(opts, "c", "custom join")
+		}
+	}
+	if _, any := atFailed(); any {
+		opts = append(opts, "f", "force failed")
+	}
+	menuLine(Stdout, append(opts, "q", "cancel")...)
 	for {
-		k, _, _ := KeyRead(0)
+		k, _, ok := KeyRead(0)
+		if !ok { // EOF: the loop would spin on "" forever
+			return nil, fmt.Errorf("cancelled")
+		}
 		switch k {
 		case "enter":
 			return []int{best}, nil
@@ -2270,6 +2314,29 @@ func atChoose(rank []int, nonInteractive bool, niPick string) ([]int, error) {
 				return rbond, nil
 			}
 			Warn("Bonding needs two or more working direct or reverse carriers.")
+		case "c", "C": // custom join (bash at_custom): rows of one kind, each carrier once
+			if !canJoin {
+				Warn("Joining needs at least two compatible direct rows or two reverse rows.")
+				continue
+			}
+			var hs []string
+			if len(jd) >= 2 {
+				hs = append(hs, "Direct: "+intsJoin(jd))
+			}
+			if len(jr) >= 2 {
+				hs = append(hs, "Reverse: "+intsJoin(jr))
+			}
+			Hint(strings.Join(hs, "  ·  ") + " (cannot mix)")
+			v := Ask("Join rows (e.g. 1+3, Enter = cancel)", "")
+			if v == "" {
+				continue
+			}
+			sel, err := atRows(rank, v)
+			if err != nil {
+				Warn(err.Error())
+				continue
+			}
+			return sel, nil
 		case "f", "F":
 			f, any := atFailed()
 			if !any {
@@ -2288,6 +2355,9 @@ func atChoose(rank []int, nonInteractive bool, niPick string) ([]int, error) {
 			}
 			return []int{f[n-1]}, nil
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			if len(rank) > 9 { // two-digit rows: finish the number on a line
+				k = Ask("Row", k)
+			}
 			n, _ := strconv.Atoi(k)
 			if n >= 1 && n <= len(rank) {
 				return []int{rank[n-1]}, nil
@@ -2295,8 +2365,18 @@ func atChoose(rank []int, nonInteractive bool, niPick string) ([]int, error) {
 			Warn("No row " + k + ".")
 		case "q", "Q", "esc":
 			return nil, fmt.Errorf("cancelled")
+		default:
+			Warn("Press Enter, b, c, f, a row number or q.")
 		}
 	}
+}
+
+func intsJoin(v []int) string {
+	s := make([]string, len(v))
+	for i, x := range v {
+		s[i] = strconv.Itoa(x)
+	}
+	return strings.Join(s, " ")
 }
 
 // at_skip_reverse_keys — space-padded AT_SKIP of active reverse leg keys.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -45,6 +46,16 @@ func (l *connLimiter) acquire(ip string) bool {
 	l.total++
 	l.perIP[ip]++
 	return true
+}
+
+// why names the cap a refused ip hit, for the log line.
+func (l *connLimiter) why(ip string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.perIP[ip] >= l.maxPer {
+		return "source " + ip + " holds " + strconv.Itoa(l.perIP[ip])
+	}
+	return "all sources hold " + strconv.Itoa(l.total)
 }
 
 // release frees the slot acquire reserved for ip.
