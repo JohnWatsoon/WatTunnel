@@ -201,10 +201,14 @@ func main() {
 		hdrs = append(hdrs, v)
 		return nil
 	})
+	panelFile := flag.String("panel", "", "run the web panel from this config (written by `wattun panel on`); a separate process from any tunnel (3.6.0)")
 	flag.Parse()
 	if *version {
 		fmt.Println("wattun " + wat.Version)
 		return
+	}
+	if *panelFile != "" {
+		log.Fatal(runPanel(*panelFile))
 	}
 	var fileCfg *fileConfig
 	explicit := map[string]bool{}

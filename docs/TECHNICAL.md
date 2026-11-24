@@ -32,12 +32,13 @@ Version: see `wat/version.go` (`wattun -version`).
 11. [Command-line flags](#command-line-flags)
 12. [Metrics](#metrics)
 13. [Scepter: the pairing and management plane (3.5.0)](#scepter-the-pairing-and-management-plane-350)
-14. [Handover, drain and rollback](#handover-drain-and-rollback)
-15. [Troubleshooting](#troubleshooting)
-16. [Security model](#security-model)
-17. [Build and test](#build-and-test)
-18. [Release history](#release-history)
-19. [License and attribution](#license-and-attribution)
+14. [Web panel (3.6.0)](#web-panel-360)
+15. [Handover, drain and rollback](#handover-drain-and-rollback)
+16. [Troubleshooting](#troubleshooting)
+17. [Security model](#security-model)
+18. [Build and test](#build-and-test)
+19. [Release history](#release-history)
+20. [License and attribution](#license-and-attribution)
 
 ## Why it exists
 
@@ -1981,6 +1982,7 @@ Every flag can also be a config key. Flags win over the file.
 | `-latch-dial HOST:PORT` | | Client, standalone (3.5.0): contact the scepter latch at host:port with the pairing attached, prove the key, run the hello and one ping, then exit — the cockpit revival primitive and drill tool. |
 | `-scepter-call CMD` | | Client, standalone one-shot (3.5.0): dial the paired session's reserved stream, run ONE command, print every response line as JSONL on stdout and exit; exit 0 once the command was answered (the machine code rides the JSON), 1 on a transport failure. |
 | `-scepter-args JSON` | | With `-scepter-call`: the command's args as a JSON object; a top-level `"id"` becomes the command id, so a retried call replays the journaled outcome at-most-once. |
+| `-panel FILE` | | Run the web panel from FILE (`panel.conf`, 3.6.0) instead of a tunnel. Normally started by the `wattun-panel` unit that `wattun panel on` writes; see [Web panel](#web-panel-360). |
 | `-update-job DIR` | | Internal (3.5.0): run one Scepter update job from a staged dir (backup → install → restart units → watch → roll back); `update.run` launches it through `systemd-run` so the watchdog outlives the engine restart it performs. Not a human entry point. |
 | `-version` | | Print `wattun X.Y.Z` and exit. |
 
@@ -3394,6 +3396,72 @@ Measured 2026-10-10 on the real Iran <-> Kharej path (only ICMP passes):
   Note: Linux itself answers timestamp requests (and echo requests unless `icmp_echo_ignore_all=1`); the kernel's
   extra reply carries our own payload back, fails authentication and is dropped. `info` and `mask` requests are
   ignored by the kernel.
+
+## Web panel (3.6.0)
+
+A browser dashboard on the **Iran** server: this server's tunnels with live rates, health, a 24-hour outage
+watchdog, per-tunnel history and logs, and the paired Kharej servers (reached through the scepter channel).
+Phase 1 is read-only: the panel never writes a tunnel config or touches a tunnel unit. The only file it writes is
+its own `panel.conf` (password, 2FA). Every action a later phase adds calls the manager's functions or a scepter
+command, so a panel login can never do more than the pairing's capability tier on Kharej allows.
+
+It is optional. The installer's Iran wizard asks `Turn on the web panel ...? [Y/n]` (Enter = yes) on a fresh
+install; non-interactive installs turn it on only with `WAT_PANEL=1`. An update never turns it on or off; it
+restarts a running panel so it serves the new binary. Uninstall removes the unit and its data.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `wattun panel on` | First run: picks a random port (20000-60000, skips busy ports and the usual x-ui ports), a 16-character secret path, a random user and a 15-character password, makes a self-signed certificate, writes `wattun-panel.service`, starts it and opens the port in the firewall. Prints the URL, user, password (**shown once**), the certificate fingerprint and the URL as a QR code. Running it again keeps the credentials. |
+| `wattun panel off [--forget]` | Stops and disables the unit and closes the port. `--forget` also deletes `panel.conf`, the certificate and the data dir. |
+| `wattun panel` / `url` / `status` | URL, user, unit state, 2FA state, fingerprint. Never the password. |
+| `wattun panel reset` | New password (printed once). Signs every browser out. |
+| `wattun panel 2fa` | Turns on 2FA from the console: shows the QR in the terminal, checks one code, prints 10 recovery codes. |
+| `wattun panel 2fa-reset` | Turns 2FA off (the way back when the phone is lost and the recovery codes are gone). |
+
+The Go manager has the same under Settings -> Web panel; the bash manager passes `wattun-manager panel ...`
+through to the binary.
+
+### Files
+
+| Path | What |
+|---|---|
+| `/etc/wattun/panel.conf` | Port, secret path, title, user, bcrypt password hash, TOTP secret, last used TOTP step, hashed recovery codes. Mode 0600. Deliberately not `.yml`: the managers list every `*.yml` as a tunnel. Keys: `port`, `path`, `title`, `user`, `pass`, `totp`, `totp-last`, `recovery`, `cert`, `cert-key`. Edit by hand only with the panel stopped. |
+| `/etc/wattun/.panel.crt`, `.panel.key` | Self-signed ECDSA P-256 certificate, 10 years, SAN = the server's IPs. `cert:` / `cert-key:` in `panel.conf` point at your own instead. |
+| `/var/lib/wattun/panel/outages.jsonl` | Closed watchdog outages, kept 90 days. |
+| `wattun-panel.service` | Runs `wattun -panel /etc/wattun/panel.conf`, `Restart=always`. |
+
+### TLS
+
+Iran servers often cannot reach an ACME CA, so the panel makes its own certificate and the browser shows a
+warning on first visit. Compare the SHA-256 fingerprint the console printed with the one the browser shows, then
+accept it. To use a real certificate, put its paths in `cert:` and `cert-key:` and restart the unit.
+
+### Login and 2FA
+
+- Everything outside `/<secret>/` (and every request from a banned address) gets a byte-exact nginx 1.18 404, so
+  a scanner sees a default nginx. Before login no page, header or asset names the product.
+- 5 failed logins from one IP ban it for 15 minutes. Passwords are bcrypt.
+- The session cookie is HttpOnly, Secure, SameSite=Strict and scoped to the secret path. Every non-GET request
+  needs `X-Requested-With: panel`. Content-Security-Policy allows no inline script or style and no outside URL.
+- 2FA is TOTP (RFC 6238, SHA-1, 6 digits, 30 s, one step of drift each way, a code works once). Turn it on in
+  Settings (scan the QR, type one code) or with `wattun panel 2fa`. The issuer shown in the authenticator app is
+  the panel title (the hostname), never the product name.
+- Turning 2FA on prints 10 one-time recovery codes. Each works once in place of a 6-digit code.
+- Sessions live in memory: a panel restart signs everyone out. Settings -> Sign out everywhere does the same.
+
+### What the pages show
+
+- **Overview**: routes map (Kharej servers by IP), current download and upload, health gauge (enabled tunnels
+  that are up), watchdog heatmap for the last 24 hours with uptime %, outages, longest and ongoing outage, this
+  server (load, RAM, disk, clock, uptime), throughput for this visit, Kharej cards, tunnels table.
+- **Tunnels**: click a row for live numbers, the tunnel's own `/stats/history` (5 minutes) and its journal.
+- **Kharej servers**: per paired host, version, capability tier and its tunnels as Kharej reports them over the
+  scepter channel (polled every 15 s; a host that does not answer within 65 s shows as unreachable).
+
+Live numbers come from each tunnel's `/stats` once a second and reach the page as server-sent events. An outage
+is a tunnel that is enabled or running but not up; stopping a tunnel by hand is not an outage.
 
 ## Handover, drain and rollback
 

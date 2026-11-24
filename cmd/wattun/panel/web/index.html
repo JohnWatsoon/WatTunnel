@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<title>{{TITLE}}</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+
+<section id="login" class="view" hidden aria-label="Sign in">
+  <div class="frame">
+    <i class="fl t"></i><i class="fl b"></i><i class="fl l"></i><i class="fl r"></i>
+    <i class="cx a"></i><i class="cx b"></i><i class="cx c"></i><i class="cx d"></i>
+    <div class="lg-art">
+      <canvas id="globe" aria-hidden="true"></canvas>
+      <div class="lg-meta"><div class="mk" aria-hidden="true"></div><span class="host" data-title></span></div>
+      <div class="lg-foot"><span class="lab">private</span><span class="lab" id="clock">--:--:-- UTC</span></div>
+    </div>
+    <div class="lg-side">
+      <div class="lg-card">
+        <div class="lg-top"><div class="prog" aria-hidden="true"><i class="on"></i><i id="p2"></i></div><span class="lab">TLS</span></div>
+        <div class="lg-body">
+          <form id="f1" class="step" novalidate>
+            <h1 class="lg-h">Sign in</h1>
+            <p class="lg-p">The panel for this server and the servers paired with it.</p>
+            <div class="fld"><label for="user">Username</label><input id="user" name="user" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
+            <div class="fld"><label for="pass">Password</label><input id="pass" name="pass" type="password" autocomplete="current-password"></div>
+            <div class="err" id="e1" role="alert"></div>
+            <div class="lg-row">
+              <span class="lab">5 tries, then a 15 min wait</span>
+              <button class="go" type="submit" aria-label="Continue"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+            </div>
+          </form>
+          <form id="f2" class="step" hidden novalidate>
+            <h2 class="lg-h">Two-step code</h2>
+            <p class="lg-p" id="f2p">Enter the 6 digits from your authenticator app.</p>
+            <div class="otp" role="group" aria-label="6-digit code"></div>
+            <div class="fld" id="recWrap" hidden><label for="rec">Recovery code</label><input id="rec" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+            <div class="err" id="e2" role="alert"></div>
+            <button class="txt" type="button" id="useRec">Use a recovery code instead</button>
+            <div class="lg-row">
+              <button class="txt" type="button" id="back">← Back</button>
+              <button class="go" type="submit" aria-label="Verify and open the panel"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></svg></button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="app" class="view" hidden>
+  <div class="frame">
+    <i class="fl t"></i><i class="fl b"></i><i class="fl l"></i><i class="fl r"></i>
+    <i class="cx a"></i><i class="cx b"></i><i class="cx c"></i><i class="cx d"></i>
+    <header class="top">
+      <div class="brand"><div class="mk" aria-hidden="true"></div><span class="host" id="hName"></span><span class="lab" id="hMeta"></span></div>
+      <nav class="nav" aria-label="Sections">
+        <button data-v="overview">Overview</button><button data-v="tunnels">Tunnels</button><button data-v="kharej">Kharej servers</button><button data-v="settings">Settings</button>
+      </nav>
+      <div class="who"><span class="live lab"><i class="pulse" id="pulse"></i><span id="liveTxt">connecting</span></span><button class="av" id="out" aria-label="Sign out">⏻</button></div>
+    </header>
+
+    <div class="head">
+      <div><h1 id="vTitle">Overview</h1><div class="find" id="find"></div></div>
+    </div>
+
+    <main id="vOverview" class="grid pane">
+      <section class="card s2 c-map">
+        <div class="ch"><div class="ct">Routes <span class="lab" id="mapSub"></span></div><div class="chips" id="mapChips"></div></div>
+        <div class="mapw" id="mapw"><canvas id="map" role="img" aria-label="Map of the routes from this server to the Kharej servers"></canvas></div>
+        <div class="routes" id="routes"></div>
+      </section>
+      <div class="stack">
+        <section class="card">
+          <div class="ch"><div class="ct">Download now</div><span class="chip" id="upChip"><i class="dot-g"></i><span></span></span></div>
+          <div class="big n" id="odo"></div>
+          <div class="lab mt10">upload <span class="n fg" id="upNow">0</span> MB/s · peak this visit <span class="n fg" id="peak">0</span></div>
+          <svg class="sb" id="sbars" viewBox="0 0 300 84" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <div class="dcx"><span>60 s ago</span><span>now</span></div>
+        </section>
+        <section class="card">
+          <div class="ch"><div class="ct">Health</div><span class="lab">tunnels up</span></div>
+          <div class="gauge"><svg id="gauge" viewBox="0 0 250 140" aria-hidden="true"></svg><div class="gnum"><div class="mid n gbig" id="gNum">–</div><div class="lab mt4" id="gLab"></div></div></div>
+          <div class="mt8">
+            <div class="kv"><span>Latency, average</span><span class="n" id="kvRtt">–</span></div>
+            <div class="kv"><span>Packet loss, worst</span><span class="n" id="kvLoss">–</span></div>
+            <div class="kv"><span>Connections</span><span class="n" id="kvConns">–</span></div>
+          </div>
+        </section>
+      </div>
+      <div class="stack">
+        <section class="card">
+          <div class="ch"><div class="ct">Watchdog</div><span class="lab">last 24 h</span></div>
+          <div class="mid n" id="wdUp">–</div>
+          <div class="hm mt18" id="hm"></div>
+          <div class="hm mt2"><span class="nm ghost" id="hmPad"></span><div class="hx"><span>−24 h</span><span>−18</span><span>−12</span><span>−6</span></div></div>
+          <div class="legend mt14"><div class="lg lab">no data <i class="h0"></i><i class="h1"></i> up</div><div class="lg lab"><i class="h2"></i>some <i class="h3"></i>down</div></div>
+          <div class="stats3"><div><div class="lab">outages</div><div class="v n" id="wdN">0</div></div><div><div class="lab">longest</div><div class="v n" id="wdL">–</div></div><div><div class="lab">ongoing</div><div class="v n" id="wdO">0</div></div></div>
+        </section>
+        <section class="card">
+          <div class="ch"><div class="ct">This server</div><span class="lab" id="srvUp"></span></div>
+          <div class="res res3">
+            <div><span class="lab" id="rCpu">load</span><div class="tr"><span id="bCpu"></span></div></div>
+            <div><span class="lab" id="rMem">ram</span><div class="tr"><span id="bMem"></span></div></div>
+            <div><span class="lab" id="rDisk">disk</span><div class="tr"><span id="bDisk"></span></div></div>
+          </div>
+          <div class="kv mt14"><span>Clock</span><span id="srvClock">–</span></div>
+          <div class="kv"><span>Two-factor</span><span id="srv2fa">–</span></div>
+        </section>
+      </div>
+      <section class="card s2">
+        <div class="ch"><div class="ct">Throughput <span class="lab">download, all tunnels, this visit</span></div><span class="chip"><i class="dot-g"></i>live</span></div>
+        <div class="tc"><svg id="tsvg" viewBox="0 0 640 200" role="img" aria-label="Download speed over time"></svg><div class="tt" id="tt" hidden></div></div>
+        <div class="feet">
+          <div><div class="lab">average</div><div class="v n" id="fAvg">–</div></div>
+          <div><div class="lab">peak</div><div class="v n" id="fPeak">–</div></div>
+          <div><div class="lab">lowest</div><div class="v n" id="fLow">–</div></div>
+          <div><div class="lab">moved</div><div class="v n" id="fMoved">–</div></div>
+        </div>
+      </section>
+      <section class="card s2">
+        <div class="ch"><div class="ct">Kharej servers</div><span class="lab" id="khSub"></span></div>
+        <div id="khList" class="khgrid"></div>
+      </section>
+      <section class="card s4">
+        <div class="ch"><div class="ct">Tunnels <span class="lab" id="tunN"></span></div></div>
+        <div class="tw"><table><thead><tr><th>name</th><th>side</th><th>carrier</th><th>status</th><th class="r">download</th><th class="r">upload</th><th class="r">latency</th><th class="r">loss</th><th>last 24 h</th><th class="r">ports</th></tr></thead><tbody id="rows"></tbody></table></div>
+      </section>
+    </main>
+
+    <main id="vTunnels" class="pane" hidden>
+      <section class="card">
+        <div class="ch"><div class="ct">All tunnels <span class="lab" id="tunN2"></span></div></div>
+        <div class="tw"><table><thead><tr><th>name</th><th>side</th><th>carrier</th><th>status</th><th class="r">download</th><th class="r">upload</th><th class="r">latency</th><th class="r">loss</th><th>last 24 h</th><th class="r">ports</th></tr></thead><tbody id="rows2"></tbody></table></div>
+      </section>
+    </main>
+
+    <main id="vKharej" class="pane" hidden>
+      <div id="khFull" class="grid g2"></div>
+    </main>
+
+    <main id="vSettings" class="pane grid g2" hidden>
+      <section class="card">
+        <div class="ch"><div class="ct">Two-factor sign-in</div><span class="chip" id="tfChip"></span></div>
+        <div id="tfOff">
+          <p class="note">A 6-digit code from your phone on every sign-in. Works with Google Authenticator, Aegis, 2FAS, Bitwarden and the rest.</p>
+          <button class="btn pri" id="tfStart">Set up</button>
+          <div id="tfSetup" hidden>
+            <div class="qrrow"><div class="qr" id="tfQR"></div><div><div class="lab">or type this key</div><div class="key n" id="tfKey"></div><p class="note">The app shows this server's name, not what it runs.</p></div></div>
+            <div class="fld"><label for="tfCode">Code from the app</label><input id="tfCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
+            <div class="err" id="tfErr" role="alert"></div>
+            <button class="btn pri" id="tfOn">Turn on</button>
+          </div>
+        </div>
+        <div id="tfOnBox" hidden>
+          <p class="note" id="tfLeft"></p>
+          <div id="tfRec" hidden><div class="lab">recovery codes, each works once, shown only now</div><pre class="rec" id="tfRecList"></pre></div>
+          <details class="mt14"><summary class="lab">Turn 2FA off</summary>
+            <div class="fld mt14"><label for="tfOffPass">Password</label><input id="tfOffPass" type="password" autocomplete="current-password"></div>
+            <div class="fld"><label for="tfOffCode">Code</label><input id="tfOffCode" inputmode="numeric" maxlength="6"></div>
+            <div class="err" id="tfOffErr" role="alert"></div>
+            <button class="btn sec danger" id="tfOffBtn">Turn off</button>
+          </details>
+        </div>
+      </section>
+      <section class="card">
+        <div class="ch"><div class="ct">Password</div></div>
+        <div class="fld"><label for="pwOld">Current password</label><input id="pwOld" type="password" autocomplete="current-password"></div>
+        <div class="fld"><label for="pwNew">New password, 12 characters or more</label><input id="pwNew" type="password" autocomplete="new-password"></div>
+        <div class="err" id="pwErr" role="alert"></div>
+        <button class="btn pri" id="pwBtn">Change</button>
+        <div class="ch mt28"><div class="ct">Sessions</div></div>
+        <p class="note">Signs out every browser, this one included.</p>
+        <button class="btn sec" id="outAll">Sign out everywhere</button>
+        <p class="note mt28">Lost access? On the server: <code data-cli="panel reset"></code> makes a new password, <code data-cli="panel 2fa-reset"></code> turns 2FA off.</p>
+      </section>
+    </main>
+  </div>
+
+  <aside class="drawer" id="drawer" hidden aria-label="Tunnel">
+    <div class="dr-in">
+      <div class="ch"><div class="ct"><span id="dName"></span> <span class="lab" id="dSub"></span></div><button class="qx" id="dX" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+      <div class="dstats">
+        <div><div class="lab">download</div><div class="mid n" id="dDown">–</div></div>
+        <div><div class="lab">upload</div><div class="mid n" id="dUp">–</div></div>
+        <div><div class="lab">latency</div><div class="mid n" id="dRtt">–</div></div>
+        <div><div class="lab">loss</div><div class="mid n" id="dLoss">–</div></div>
+      </div>
+      <div class="lab mt18">last 5 minutes, from the tunnel</div>
+      <div class="tc"><svg id="dChart" viewBox="0 0 640 180" role="img" aria-label="Rate over the last five minutes"></svg></div>
+      <div class="kvs" id="dInfo"></div>
+      <div class="ch mt18"><div class="ct">Log</div><button class="btn sec sm" id="dLogR">Refresh</button></div>
+      <pre class="log" id="dLog"></pre>
+    </div>
+  </aside>
+</section>
+
+</body>
+</html>

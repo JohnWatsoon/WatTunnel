@@ -184,6 +184,8 @@ func runCommand(cmd string, args []string) int {
 		return runFlow("delete_tunnel", pos(args, 0))
 	case "uninstall":
 		return runFlow("uninstall_all")
+	case "panel":
+		return panelCmd(args[1:])
 	case "status", "list", "status-all":
 		return dispatch("status_all")
 	case "start-all":

@@ -1148,12 +1148,12 @@ func TestFileScepterOpsUpdateDrill(t *testing.T) {
 			t.Fatal(err)
 		}
 		o.updGrace = time.Millisecond
-		o.updProbe = func(string) (string, error) { return "3.6.0", nil }
+		o.updProbe = func(string) (string, error) { return "99.0.0", nil }
 		o.updFetch = func(dir, to string) error {
 			if to != "latest" {
 				t.Errorf("fetch got to %q, want latest", to)
 			}
-			return os.WriteFile(filepath.Join(dir, "wattun.new"), []byte("NEWBIN-3.6.0"), 0o700)
+			return os.WriteFile(filepath.Join(dir, "wattun.new"), []byte("NEWBIN-99.0.0"), 0o700)
 		}
 		return o, fu, conf, bin, filepath.Join(binDir, "wattun.prev")
 	}
@@ -1194,7 +1194,7 @@ func TestFileScepterOpsUpdateDrill(t *testing.T) {
 		if err != nil || st.Phase != wat.UpdatePhaseApplied {
 			t.Fatalf("phase: %v %v", err, st)
 		}
-		if got := mustReadExisting(t, bin); got != "NEWBIN-3.6.0" {
+		if got := mustReadExisting(t, bin); got != "NEWBIN-99.0.0" {
 			t.Fatalf("bin after install: %q", got)
 		}
 		if got := mustReadExisting(t, prev); got != "OLDBIN-3.5.0" {
@@ -1269,7 +1269,7 @@ func TestFileScepterOpsUpdateDrill(t *testing.T) {
 			return launchViaJob(t, fu, prev, false)(stage, bin)
 		}
 		o.updateWorker("upd-5", bin, "latest")
-		if atLaunch == nil || atLaunch.Phase != wat.UpdatePhaseStarted || atLaunch.Run != "upd-5" || atLaunch.To != "3.6.0" {
+		if atLaunch == nil || atLaunch.Phase != wat.UpdatePhaseStarted || atLaunch.Run != "upd-5" || atLaunch.To != "99.0.0" {
 			t.Fatalf("mailbox at launch must be the re-armed started record: %+v", atLaunch)
 		}
 		if time.Since(time.Unix(atLaunch.Ts, 0)) > 5*time.Second {

@@ -215,6 +215,9 @@ type ScepterClient interface {
 	Call(cmd string, args map[string]any) (ScepterResult, error)
 }
 
+// DialScepter is scepterDial for the web panel (cmd/wattun/panel_backend.go): same channel, same caps.
+func DialScepter(tunnel string) (ScepterClient, error) { return scepterDial(tunnel) }
+
 // scepterDial opens the cockpit channel of tunnel NAME's paired session.
 // Refusal is honest and local: an unpaired tunnel has no channel. Everything
 // that can only be learned from Kharej (old peer, dead link, unknown flag)

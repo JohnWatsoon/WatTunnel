@@ -650,6 +650,13 @@ func uninstallAll() bool {
 		}
 	}
 	kreplyRestore()
+	if fileExists(panelConf()) || fileExists(filepath.Join(unitDir(), panelUnit()+".service")) {
+		old := Stdout
+		Stdout = io.Discard
+		panelDisable(false) // the unit and its port; panel.conf goes with $CONF below if the owner says so
+		Stdout = old
+		_ = os.RemoveAll(panelDataDir())
+	}
 	for _, pat := range []string{"-bondretest-*.service", "-bondretest-*.timer"} {
 		fs, _ := filepath.Glob("/etc/systemd/system/" + P.Prefix + pat)
 		for _, f := range fs {

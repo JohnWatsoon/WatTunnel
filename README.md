@@ -157,6 +157,27 @@ What Iran can do over the channel — all of it from the Go manager's `wattun sc
 Details and the full command table:
 [TECHNICAL.md](docs/TECHNICAL.md#scepter-the-pairing-and-management-plane-350).
 
+## Web panel (Iran server)
+
+3.6.0 adds an optional browser dashboard on the Iran server: live download and upload per tunnel, a health
+gauge, a 24-hour outage watchdog, per-tunnel history and logs, and the paired Kharej servers seen through the
+scepter channel. It is read-only in this release.
+
+The installer asks `Turn on the web panel ...? [Y/n]` when you pick Iran (Enter = yes). Later, or on an
+existing server:
+
+```bash
+wattun panel on        # prints the address, user and password (shown once) and a QR code
+wattun panel 2fa       # optional: authenticator app 2FA from the console (or in the panel's Settings)
+wattun panel off       # stop it; --forget also deletes its address and password
+```
+
+It listens on a random port behind a random secret path, with its own certificate (Iran servers often cannot
+get one from a CA, so the browser warns once: compare the fingerprint the console printed). Anything outside the
+secret path looks like a default nginx 404, and 5 wrong passwords ban the address for 15 minutes.
+Authenticator-app 2FA with 10 one-time recovery codes is in the panel's Settings.
+Details: [TECHNICAL.md](docs/TECHNICAL.md#web-panel-360).
+
 ## What it does
 
 WatTunnel connects an **Iran** server (where your users connect) to a **Kharej** server (where your service runs) and

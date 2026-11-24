@@ -1357,6 +1357,7 @@ func settingsItems() []Item {
 		}
 		items = append(items, Item{Label: "Pairing", Desc: desc})
 	}
+	items = append(items, Item{Label: "Web panel", Desc: onOff(panelOn()) + GRY + "   manage everything from a browser" + RST})
 	items = append(items, Item{Label: "Uninstall", Desc: RED + "remove wattun, its tunnels and configs" + RST})
 	return items
 }
@@ -1412,6 +1413,9 @@ func settingsMenu() int {
 		case "Pairing":
 			ClearScreen()
 			scepterConsole()
+		case "Web panel":
+			ClearScreen()
+			panelMenu()
 		case "Uninstall":
 			ClearScreen()
 			Page("Uninstall", "")

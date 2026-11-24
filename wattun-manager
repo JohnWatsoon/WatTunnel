@@ -73,7 +73,7 @@ sums_verify() { # sums sig [pubfile]: the optional third argument lets the self-
   return "$rc"
 }
 sums_has() { grep -qx -- "$3  $2" "$1"; } # sums name sha
-MGR_VERSION=2026112401   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
+MGR_VERSION=2026112402   # YYYYMMDDNN; install.sh refuses to replace a newer manager with an older one
 HEAL_UNIT=$WAT_PREFIX-heal
 MCONF=$CONF/.manager.conf
 self_cmd() { # the command to type to start this manager (user-facing hints)
@@ -1579,7 +1579,8 @@ ENG_MTU_MAX_POOL=16384 # poolMaxMTU: a tcp/tls/ws/wss/h2/h2c/grpc carrier frames
 #   pair/pair-to: the one-shot bootstrap forms of the same (engine flags; the manager writes .pairing itself)
 #   latch-port/latch-dial: the scepter latch listener and its one-shot contact/drill form (3.5.0, Kharej side; opt-in with a stored pairing)
 #   scepter-call/scepter-args: the one-shot write-intent/RPC call form (3.5.0, Iran side; the Go manager shells out to it)
-CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial scepter-call scepter-args update-job scepter-deny-ports'
+#   panel: runs the web panel from panel.conf (3.6.0), not a tunnel; `wattun panel on` writes its unit
+CFG_FILE_ONLY='debug ping-every udp-idle tcp-cc slack-ms hedge lanes mem-budget plain port-offset tls-cert tls-key header keep-slow tls-small-ch hdr-mask legacy-mask-flip udp-dns-edns probe-guard mtu-adapt tcp-mimic tls-pin fake-ip fake-split max-sessions max-conns decoy repair fast-rtx burst-cap rate-tune ptcp-hop spray-hop pair pair-to pairing latch-port latch-dial scepter-call scepter-args update-job scepter-deny-ports panel'
 # The server's target-port allowlist (-allow-min/-allow-max/-allow-ports/-allow-file) is reachable through the wizard's
 # ports:/allowed-ports editor instead of separate rows: same data, one code path. The coverage test excludes these four.
 CFG_PORTS_UI='allow-min allow-max allow-ports allow-file'
@@ -10585,6 +10586,7 @@ Usage: $SELF [command]
   unmute NAME PATH      unmute it again; both talk to the running tunnel's metrics server (no root)
   logs NAME             follow the log
   token NAME            print the Kharej token again
+  panel [on|off|url|reset|2fa|2fa-reset]   web panel: turn on/off, show its address, new password, 2FA
   scepter [status|pair|rotate|revoke|audit]
                         Kharej's Pairing console: which Iran server may manage this one
                         (watp1: line, key rotation with a 24 h overlap, revocation, audit
@@ -10723,6 +10725,7 @@ main() {
     unmute) unmute_cmd "${2:-}" "${3:-}" ;;
     logs) need_tunnel "${2:?name}" && journalctl -u "${WAT_PREFIX}@$2" -f -o short-iso ;;
     token) need_tunnel "${2:?name}" && show_token "$2" ;;
+    panel) shift; exec env -u WAT_BASH_MGR "$BIN" panel "$@" ;; # the web panel lives in the Go manager (PLAN-panel.md D2)
     preset) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run preset_cmd "${NI_POS[0]:-${2:-}}" "${NI_POS[1]:-${3:-}}" ;;
     test-anticensor|test-bypass) need_tunnel "${NI_POS[0]:-${2:-}}" && ni_run anticensor_test "${NI_POS[0]:-${2:-}}" ;;
     profile) shift; profile_cmd "$@" ;;

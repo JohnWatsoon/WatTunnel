@@ -374,9 +374,10 @@ uninstall() {
   done
   systemctl disable --now wattun-heal.timer >/dev/null 2>&1 || true
   systemctl disable --now wattun-auto-optimize.timer >/dev/null 2>&1 || true
+  systemctl disable --now wattun-panel.service >/dev/null 2>&1 || true
 
   ok "Removed the unit files"
-  rm -f "$UNIT" /etc/systemd/system/wattun-heal.service /etc/systemd/system/wattun-heal.timer /etc/systemd/system/wattun-auto-optimize.service /etc/systemd/system/wattun-auto-optimize.timer
+  rm -f "$UNIT" /etc/systemd/system/wattun-heal.service /etc/systemd/system/wattun-heal.timer /etc/systemd/system/wattun-auto-optimize.service /etc/systemd/system/wattun-auto-optimize.timer /etc/systemd/system/wattun-panel.service
   systemctl daemon-reload
 
   ok "Removed $BIN and $MGR"
@@ -862,6 +863,12 @@ if [ "${#WARNINGS[@]}" -gt 0 ] || [ "$PREV_WARN" = 1 ]; then echo; fi
 
 # Scepter pairing no longer needs installer material (owner directive 2026-11-22: zero manual steps — the pairing rides the wizard's token as field 10, the engine derives it); a .pairing.pending left by an older install is inert — the engine never reads it.
 
+# ---- web panel (3.6.0, opt-in; docs/TECHNICAL.md "Web panel") ----
+# An update restarts a running panel so it serves the new binary; it never turns the panel on or off.
+if systemctl is-active -q wattun-panel 2>/dev/null; then systemctl restart wattun-panel >/dev/null 2>&1 || true; fi
+# Non-interactive installs turn it on only when asked (WAT_PANEL=1); the interactive Iran wizard asks below.
+if [ "${WAT_PANEL:-0}" = 1 ] && ! [ -f "$CONF/panel.conf" ]; then "$BIN" panel on || warn "Web panel could not start (wattun panel on)."; echo; fi
+
 # ---- summary & post-install status card ----
 total=0; running=0; stale_names=''
 is_stale() {
@@ -915,7 +922,19 @@ if [ -t 0 ] && [ -t 1 ]; then
       echo "$side"
       case "$side" in
         1) save_side kharej; cleanup; exec "$MGR" kharej ;;
-        2) save_side iran; cleanup; exec "$MGR" iran ;;
+        2) save_side iran
+           if ! [ -f "$CONF/panel.conf" ]; then
+             echo
+             printf '  %s?%s Turn on the web panel (password + 2FA, browser dashboard for this server)? %s[Y/n]%s ' "$CYN" "$RST" "$GRY" "$RST"
+             IFS= read -rsn1 a || a=y; echo
+             case "$a" in
+               n|N) hint "Later: wattun panel on" ;;
+               *) echo; "$BIN" panel on || warn "Web panel could not start. Try later: wattun panel on"
+                  echo; printf '  %sSave the login above, it is shown once. Press Enter to continue.%s' "$GRY" "$RST"
+                  IFS= read -r _ || true; echo ;;
+             esac
+           fi
+           cleanup; exec "$MGR" iran ;;
         3|''|q|Q) break ;;
         *) warn "Please press 1, 2 or 3." ;;
       esac

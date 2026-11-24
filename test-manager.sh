@@ -2474,7 +2474,7 @@ EOF
   chk "conflict: a normal tunnel keeps its name" \
     "$(eval "$_tul"; listen_conflict_desc tcp 26443)" "tunnel 'probe-12345'"
   rm -f "$WAT_CONF/hidden2.yml" "$WAT_CONF/probe-$_ts.yml" "$WAT_CONF/probe-$_ts-2.yml" "$WAT_CONF/probe-12345.yml"
-  chk "mgr: MGR_VERSION bumped with the pairing claim (Handoff 4)" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112401"
+  chk "mgr: MGR_VERSION bumped with the panel subcommand (3.6.0)" "$(sed -n 's/^MGR_VERSION=\([0-9]*\).*/\1/p' wattun-manager | head -1)" "2026112402"
 
   # refresh_token keeps field 10 when the allowed ports change
   role() { echo Kharej; }

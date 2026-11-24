@@ -17,6 +17,7 @@ Usage: $SELF [command]
   unmute NAME PATH      unmute it again; both talk to the running tunnel's metrics server (no root)
   logs NAME             follow the log
   token NAME            print the Kharej token again
+  panel [on|off|url|reset|2fa|2fa-reset]   web panel: turn on/off, show its address, new password, 2FA
   scepter [NAME]        pairing cockpit (Iran; also on the main menu). Setup: paste the
                         Kharej token once — the token carries the pairing credential, so
                         the pair and the cockpit open together (attach with a watp1: line
