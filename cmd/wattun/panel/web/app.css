@@ -267,3 +267,4 @@ dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
 /* the map canvas draws light on dark: in the light theme it keeps a dark island */
 :root[data-theme=light] .mapw{background:#0a0a0b;border-radius:14px;margin:0;color-scheme:dark;--fg:#f3f3f4;--mut:#a2a2aa;--dim:#86868f;--well:#1a1a1d}
 @media (prefers-color-scheme:light){:root:not([data-theme=dark]) .mapw{background:#0a0a0b;border-radius:14px;margin:0;--fg:#f3f3f4;--mut:#a2a2aa;--dim:#86868f;--well:#1a1a1d}}
+.fgdot{fill:var(--fg)}

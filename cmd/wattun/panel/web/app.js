@@ -354,7 +354,7 @@ function chart(){
   for(let k=0;k<=4;k++){const v=top*k/4;s+=`<line x1="${L}" x2="${W}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" class="gl"/><text x="0" y="${(Y(v)+3.5).toFixed(1)}">${v.toFixed(v<10?1:0)}</text>`}
   let p='';vals.forEach((v,i)=>{p+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)});
   s+=`<path d="${p}L${X(n-1)} ${Y(0)}L${L} ${Y(0)}Z" fill="url(#dp)" mask="url(#mk)"/><path d="${p}" fill="none" stroke="#3ee08a" stroke-width="2" stroke-linejoin="round"/>`;
-  s+=`<circle r="4" style="fill:var(--fg)" cx="${X(n-1)}" cy="${Y(vals[n-1])}"/>`;
+  s+=`<circle r="4" class="fgdot" cx="${X(n-1)}" cy="${Y(vals[n-1])}"/>`;
   const span=d[n-1].t-d[0].t;s+=`<text x="${L}" y="${H-6}">${fmtDur(span)} ago</text><text x="${W}" y="${H-6}" text-anchor="end">now · MB/s</text>`;
   svg.innerHTML=s;
   const avg=vals.reduce((a,b)=>a+b,0)/n;$('#fAvg').textContent=avg.toFixed(1)+' MB/s';$('#fPeak').textContent=Math.max(...vals).toFixed(1)+' MB/s';$('#fLow').textContent=Math.min(...vals).toFixed(1)+' MB/s';$('#fMoved').textContent=fmtBytes(S.moved);

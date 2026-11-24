@@ -870,7 +870,7 @@ write_ports() { # name : replace the ports: block of NAME.yml with the array MAP
   chmod 600 "$tmp"; wmv "$tmp" "$f"
 }
 wmv() { # src dst : the one-writer lock (panel plan D3) around a config rename; shared with the Go manager and the panel
-  if command -v flock >/dev/null 2>&1 && mkdir -p "$RUN" 2>/dev/null; then
+  if command -v flock >/dev/null 2>&1 && mkdir -p "$RUN" 2>/dev/null && : >>"$RUN/write.lock" 2>/dev/null; then
     flock -w 10 "$RUN/write.lock" mv -f "$1" "$2" || { rm -f "$1"; err "another change is being saved, try again"; return 1; }
   else
     mv -f "$1" "$2"
