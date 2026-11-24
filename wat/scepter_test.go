@@ -2332,7 +2332,7 @@ func TestScepterDoctorFetchRPC(t *testing.T) {
 // sha256 pinned). A monster export is refused, not exploded.
 func TestScepterBackupExportChunked(t *testing.T) {
 	ops := newFakeOps(t)
-	ops.backupPad = scepterChunk * 2 // forces 3+ chunks through the real writeResp
+	ops.backupPad = scepterChunk * 2                           // forces 3+ chunks through the real writeResp
 	c, _ := newScepterPair(t, CapFull, "", &fakeSource{}, ops) // backup.export needs full (Handoff 4 R5)
 	p, code := c.Call("backup.export", nil)
 	if code != CodeOK {
