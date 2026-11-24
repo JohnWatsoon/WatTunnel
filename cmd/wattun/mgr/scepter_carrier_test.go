@@ -731,3 +731,60 @@ func TestScepterCreatedToken(t *testing.T) {
 		t.Fatal("Kharej's own token wins")
 	}
 }
+
+// Handoff 4 R7: a tunnel made by "On Kharej and here" has no pairing of its own; its K row rides the paired
+// direct tunnel that dials the same Kharej host. Other hosts, reverse tunnels and pairing: false get none.
+func TestScepterChannelForSibling(t *testing.T) {
+	dir := scepterCarrierTestConf(t)
+	writeTestYml(t, dir, "pair", "mode: client\ncarrier: udp\npeer: 198.51.100.9:4443\npairing: true\n")
+	writeTestYml(t, dir, "made", "mode: client\ncarrier: wss\npeer: 198.51.100.9:8443\n")
+	writeTestYml(t, dir, "other", "mode: client\ncarrier: udp\npeer: 203.0.113.1:4443\n")
+	writeTestYml(t, dir, "off", "mode: client\ncarrier: udp\npeer: 198.51.100.9:5000\npairing: false\n")
+	for n, want := range map[string]string{"pair": "pair", "made": "pair", "other": "", "off": ""} {
+		if got := scepterChannelFor(n); got != want {
+			t.Errorf("scepterChannelFor(%s) = %q, want %q", n, got, want)
+		}
+	}
+	if !tunnelKharejKeyWanted("made") {
+		t.Error("the sibling's tunnel page must offer On Kharej")
+	}
+}
+
+// Handoff 4 R4 on the owner's route: a reverse pair creates a reverse tunnel — no Kharej listen question,
+// reverse=true and a peer at this server's address, so Kharej's answer carries the token itself.
+func TestScepterWizardCreateReversePair(t *testing.T) {
+	InitColor(false, 8)
+	NonInteractive = false
+	dir := scepterCarrierTestConf(t)
+	writeTestYml(t, dir, "rp", "mode: client\ncarrier: tcp\npeer: 203.0.113.5:27443\nreverse: true\nlisten: \":27443\"\npairing: true\n")
+	done := ScepterResult{Code: scepterCodeOK, Params: map[string]any{"name": "tunnel", "carrier": "tcp"}}
+	cl := &scriptClient{byCmd: map[string][]scriptAns{"tunnel.create": {{r: done}}}}
+	// name default, tcp (quick pick 3), dial port 28000, ports 443, send
+	defer feed("\n328000\n443\ny")() // a quick pick takes no Enter
+	out := capture(t, func() { scepterWizardCreate("rp", cl, scepterDoc{StateSeq: 7}) })
+	sent := cl.cmds["tunnel.create"]
+	if len(sent) != 1 {
+		t.Fatalf("sends = %d:\n%s", len(sent), out)
+	}
+	p, _ := sent[0]["params"].(map[string]string)
+	if p["reverse"] != "true" || p["peer"] != "203.0.113.5:28000" || p["listen"] != "" {
+		t.Errorf("reverse create params = %v", p)
+	}
+	if strings.Contains(out, "Listen port on Kharej") {
+		t.Errorf("a reverse tunnel binds nothing on Kharej; no listen question:\n%s", out)
+	}
+}
+
+// A reverse sibling rides the reverse pair only while that pair is the one reverse pair (its peer names no Kharej).
+func TestScepterChannelForReverseSibling(t *testing.T) {
+	dir := scepterCarrierTestConf(t)
+	writeTestYml(t, dir, "rp", "mode: client\ncarrier: tcp\npeer: 203.0.113.5:27443\nreverse: true\npairing: true\n")
+	writeTestYml(t, dir, "made", "mode: client\ncarrier: tcp\npeer: 203.0.113.5:28000\nreverse: true\n")
+	if got := scepterChannelFor("made"); got != "rp" {
+		t.Fatalf("single reverse pair: %q", got)
+	}
+	writeTestYml(t, dir, "rp2", "mode: client\ncarrier: tcp\npeer: 203.0.113.5:27500\nreverse: true\npairing: true\n")
+	if got := scepterChannelFor("made"); got != "" {
+		t.Fatalf("two reverse pairs are ambiguous: %q", got)
+	}
+}

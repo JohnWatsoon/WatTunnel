@@ -1488,7 +1488,7 @@ func tunnelHead(w io.Writer, n, r, car string, ti *tunnelInfo) {
 // pair the explicit off-switch had disabled, and pressing K then did nothing
 // silently (ScepterKharejView refuses an unpaired tunnel, round 3).
 func tunnelKharejKeyWanted(n string) bool {
-	return IsPaired(n)
+	return scepterChannelFor(n) != "" // a cockpit-made sibling rides its paired tunnel's channel (Handoff 4 R7)
 }
 
 // deckItems flattens the deck into one Choose list (section order kept) plus Delete.

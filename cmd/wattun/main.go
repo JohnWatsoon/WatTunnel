@@ -1139,7 +1139,7 @@ func main() {
 		tun = newTunnel(list)
 		tunRef.Store(tun)       // -ech ladder's DoH hook (2.9.0)
 		if *scepterCall != "" { // one-shot cockpit command (3.5.0 phase B): dial, run, print, exit
-			os.Exit(runScepterCall(tun, *scepterCall, *scepterArgs))
+			os.Exit(runScepterCall(tun, *scepterCall, *scepterArgs, readClaims(claimsPath(*cfgPath))))
 		}
 		if cfg.Pairing != nil {
 			hub := startScepterClient(tun, *cfgPath)

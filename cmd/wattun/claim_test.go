@@ -48,6 +48,18 @@ func TestClaimStores(t *testing.T) {
 	if fi, _ := os.Stat(srvPath); fi != nil && fi.Mode().Perm() != 0o600 && os.PathSeparator == '/' {
 		t.Fatalf("store mode %v", fi.Mode().Perm())
 	}
+	// a second unit claiming before its poller adopted the first claim is refused, never overwrites it
+	second, _ := wat.ParsePairingLine(testPairingLine("manage"))
+	second.UUID[0] ^= 0xff
+	if storePairingClaim(srvPath, second) == nil {
+		t.Fatal("a second claim must be refused")
+	}
+	if got, _ := readPairingFile(srvPath); got == nil || *got != *np {
+		t.Fatal("the first claim must survive a second one")
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir, ".pairing.claim-*")); len(m) != 0 {
+		t.Fatalf("leftover temp files: %v", m)
+	}
 	cp := claimsPath(filepath.Join(dir, "ir.yml"))
 	other, _ := wat.ParsePairingLine(testPairingLine("manage"))
 	other.UUID[0] ^= 0xff

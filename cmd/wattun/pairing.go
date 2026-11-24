@@ -69,7 +69,27 @@ var errPairingRevoked = errors.New("pairing revoked on this server")
 func storePairingClaim(path string, p *wat.PairingConfig) error {
 	body := p.Line() + "\n# claimed by the first paired Iran over the token bootstrap, " + time.Now().UTC().Format(time.RFC3339) + "\n" +
 		"# revoke: replace this file with a 'revoked' line; allow a new Iran to pair: delete this file\n"
-	return atomicWriteFile(path, []byte(body), 0o600)
+	f, err := os.CreateTemp(dirOf(path), ".pairing.claim-*") // 0600
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.WriteString(body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	// create-only: every unit of this Kharej shares .pairing and its poller adopts a new one within 5 s; a
+	// second claim in that window is refused rather than overwriting the first Iran's credential
+	if err := os.Link(f.Name(), path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return errors.New("another Iran claimed this pairing first")
+		}
+		return err
+	}
+	return nil
 }
 
 // claimsPath is a client's store of the credentials it claimed (one watp1: line each). It is separate from

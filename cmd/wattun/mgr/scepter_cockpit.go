@@ -774,7 +774,7 @@ func scepterRemoteNameSuggest(rows []scepterTunRow) string {
 // path gets a fresh random and the SNI starts empty. False = the user backed out.
 func scepterAskParams(cr, listenDef, pathDef, sniDef string) (map[string]string, bool) {
 	params := map[string]string{}
-	if carrierWriteListen(cr) {
+	if carrierWriteListen(cr) && listenDef != "-" { // "-": a reverse tunnel binds nothing on Kharej
 		if !AskOK("Listen port on Kharej (empty = carrier default)", listenDef, vPortOpt) {
 			return nil, false
 		}
@@ -798,6 +798,35 @@ func scepterAskParams(cr, listenDef, pathDef, sniDef string) (map[string]string,
 	return params, true
 }
 
+// scepterCreateParams asks the shape params of a remote create. On a reverse pair (Kharej reaches this server
+// only by dialing it, the owner's filtered route) the new tunnel is reverse too: Kharej dials this server's
+// address at a port picked here, so the token Kharej answers needs no Kharej address (Handoff 4 R4).
+func scepterCreateParams(pair, cr, listenDef string) (map[string]string, bool) {
+	if Cfg(pair, "reverse") != "true" {
+		return scepterAskParams(cr, listenDef, p2RandPath(), "")
+	}
+	host := scepterPeerHost(pair)
+	if strings.Contains(cr, "+") || !IsRpool(cr) || host == "" {
+		Warn("This Kharej reaches this server only in reverse: pick one of tcp, tls, ws, wss, h2, h2c, grpc, udp.")
+		return nil, false
+	}
+	params, ok := scepterAskParams(cr, "-", p2RandPath(), "")
+	if !ok {
+		return nil, false
+	}
+	proto := p2Rproto(cr)
+	def := 27443
+	for def < 65000 && listenBlocked(proto, def) {
+		def++
+	}
+	if !AskOK("Port on this server that Kharej dials", strconv.Itoa(def), vPort) {
+		return nil, false
+	}
+	params["reverse"] = "true"
+	params["peer"] = net.JoinHostPort(host, ReplyV)
+	return params, true
+}
+
 func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	baseSeq := base.StateSeq
 	Page("New tunnel on Kharej and here", n)
@@ -816,7 +845,7 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	if cr == "" {
 		return
 	}
-	params, pok := scepterAskParams(cr, "", p2RandPath(), "")
+	params, pok := scepterCreateParams(n, cr, "")
 	if !pok {
 		return
 	}
@@ -886,7 +915,7 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 			if ncr == "" {
 				return
 			}
-			np, pok := scepterAskParams(ncr, strings.TrimPrefix(params["listen"], ":"), p2RandPath(), "")
+			np, pok := scepterCreateParams(n, ncr, strings.TrimPrefix(params["listen"], ":"))
 			if !pok {
 				return
 			}
@@ -2242,10 +2271,11 @@ var scepterStatusFetch = func(name string) string {
 // remote tunnel the pair screen opens instead (the honest "which one?" list).
 // False when nothing was shown (unpaired, or the channel refused).
 func ScepterKharejView(name string) bool {
-	if !IsPaired(name) {
+	ch := scepterChannelFor(name)
+	if ch == "" {
 		return false
 	}
-	cl, err := scepterDial(name)
+	cl, err := scepterDial(ch)
 	if err != nil {
 		Page("Kharej server", name)
 		GradBand(Stdout, uiW())
@@ -2263,7 +2293,7 @@ func ScepterKharejView(name string) bool {
 	} else {
 		hello = h.Params
 	}
-	caps := scepterPairCaps(name, hello, helloErr)
+	caps := scepterPairCaps(ch, hello, helloErr)
 	doc, derr := scepterFetchDoc(cl)
 	if derr != nil {
 		Page("Kharej server", name)
@@ -2275,11 +2305,11 @@ func ScepterKharejView(name string) bool {
 	}
 	for _, r := range doc.Tunnels {
 		if r.Name == name {
-			scepterTunnelPage(name, cl, caps, r.Name)
+			scepterTunnelPage(ch, cl, caps, r.Name)
 			return true
 		}
 	}
-	scepterPairScreen(name) // no same-named remote tunnel: pick from the list
+	scepterPairScreen(ch) // no same-named remote tunnel: pick from the list
 	return true
 }
 
@@ -2513,4 +2543,33 @@ func scepterNewBoth(pairs []string) {
 	}
 	scepterWizardCreate(n, cl, doc)
 	Pause()
+}
+
+// scepterChannelFor is the paired tunnel whose channel reaches name's Kharej: name itself when it is paired,
+// else a paired direct Iran tunnel dialing the same host (a tunnel made by "On Kharej and here" carries no
+// pairing of its own, Handoff 4 R7). "" = no channel; an explicit pairing: false stays off.
+func scepterChannelFor(name string) string {
+	if IsPaired(name) {
+		return name
+	}
+	host := scepterPeerHost(name)
+	if host == "" || Role(name) != "Iran" || Cfg(name, "pairing") == "false" {
+		return ""
+	}
+	rev := Cfg(name, "reverse") == "true"
+	var revPairs []string
+	for _, p := range pairedIranTunnels() {
+		switch {
+		case Cfg(p, "reverse") == "true":
+			revPairs = append(revPairs, p)
+		case !rev && scepterPeerHost(p) == host:
+			return p
+		}
+	}
+	// a reverse tunnel's peer is this server's own address, so it names no Kharej: only a single reverse pair
+	// is unambiguous
+	if rev && len(revPairs) == 1 {
+		return revPairs[0]
+	}
+	return ""
 }

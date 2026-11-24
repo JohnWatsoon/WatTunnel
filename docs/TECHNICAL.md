@@ -2455,8 +2455,13 @@ long after a reset.
 **Remote create writes both sides.** `tunnel.create` answers `listen_port` (the one carrier port Kharej
 bound; absent for icmp and bonds) and `allow`. The cockpit builds the Iran token from the pair's Kharej host
 and those fields, runs the Iran wizard with it and starts the unit; the token is printed only on request.
-A reverse pair cannot build it (its peer is Iran's own address): the manager says so and points to the
-token on Kharej. `tunnel.keyrotate` rewrites and restarts the matching Iran tunnel without asking.
+On a reverse pair (Kharej reaches Iran only by dialing it) the new tunnel is reverse too: the cockpit sends
+`reverse: true` and `peer: <this Iran's address>:<a free port picked here>`, and Kharej's answer carries the
+token itself. A tunnel made this way has no pairing of its own; its tunnel page reaches Kharej through the
+paired tunnel that dials the same Kharej host (for reverse tunnels: the one reverse pair, when there is only
+one). A second unit's claim inside the 5 s poller window is refused (`.pairing` is written create-only), so
+the first Iran's credential is never overwritten. `tunnel.keyrotate` rewrites and restarts the matching Iran
+tunnel without asking.
 
 Both ends need 3.5.0 for all of the above (3.5.0 introduced Scepter, so there is no older peer to support).
 
