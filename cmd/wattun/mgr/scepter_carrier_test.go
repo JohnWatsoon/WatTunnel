@@ -258,7 +258,7 @@ func TestScepterFollowLocalRevert(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	if !strings.Contains(out, "carrier.change back") {
+	if !strings.Contains(out, "its carrier back") {
 		t.Errorf("the remote revert contract must be surfaced:\n%s", out)
 	}
 	if *calls != 2 {
@@ -617,7 +617,7 @@ func TestScepterPairScreenCarrierItems(t *testing.T) {
 	NonInteractive = false
 	defer feed("0")() // leave immediately
 	out := capture(t, func() { scepterScreen("ir") })
-	for _, want := range []string{"Probe carrier test", "Fleet auto-test", "measure it from here"} {
+	for _, want := range []string{"Test a carrier", "Find the best carrier", "measure it from here"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("pair screen missing the phase-C items (%q):\n%s", want, out)
 		}
@@ -636,7 +636,7 @@ func TestScepterTunnelPageCarrierItem(t *testing.T) {
 	NonInteractive = false
 	defer feed("0")() // leave immediately
 	out := capture(t, func() { scepterTunnelPage("ir", cl, CapTunnel|CapCreate|CapManage, "web") })
-	if !strings.Contains(out, "Carrier") || !strings.Contains(out, "this side follows") {
+	if !strings.Contains(out, "Carrier") || !strings.Contains(out, "on both sides") {
 		t.Errorf("tunnel page missing the carrier item:\n%s", out)
 	}
 }

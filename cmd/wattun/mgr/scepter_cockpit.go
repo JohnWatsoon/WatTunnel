@@ -137,7 +137,7 @@ func scepterFetchDoc(cl ScepterClient) (scepterDoc, error) {
 		return scepterDoc{}, err
 	}
 	if res.Code != scepterCodeOK {
-		return scepterDoc{}, fmt.Errorf("state.get answered code %d: %s", res.Code, scepterCodeHint(res.Code, res.Params))
+		return scepterDoc{}, fmt.Errorf("Kharej did not send its state (code %d): %s", res.Code, scepterCodeHint(res.Code, res.Params))
 	}
 	return scepterParseDoc(res.Params)
 }
@@ -279,7 +279,7 @@ func scepterRun(cl ScepterClient, cmd string, argsf func(baseSeq uint64, id stri
 		res, err := scepterCall(cl, cmd, argsf(cur, id))
 		if err != nil {
 			Warn("channel: " + err.Error())
-			if !Confirm("Retry the same intent (same command id — an applied one replays from the journal)?", true) {
+			if !Confirm("No answer from Kharej. Try again (it never runs twice)?", true) {
 				return ScepterResult{}, false
 			}
 			continue // id unchanged: at-most-once
@@ -296,7 +296,7 @@ func scepterRun(cl ScepterClient, cmd string, argsf func(baseSeq uint64, id stri
 			Warn("could not refresh the state: " + derr.Error())
 			return res, true
 		}
-		if !Confirm(fmt.Sprintf("Rebuild on the fresh state (seq %d) and retry?", fresh.StateSeq), true) {
+		if !Confirm("Kharej changed meanwhile. Try again on its current state?", true) {
 			return res, true
 		}
 		cur, id = fresh.StateSeq, scepterNewID()
@@ -349,11 +349,11 @@ func scepterFleet() {
 	for {
 		names := pairedTunnels()
 		if len(names) == 0 {
-			Page("Scepter fleet", "no pairs yet")
+			Page("Kharej servers", "none paired yet")
 			GradBand(Stdout, uiW())
 			fmt.Fprintln(Stdout)
-			Hint("Pair a Kharej once: its install.sh prints a watp1: line; on the Iran tunnel run")
-			Hint(P.Self + " scepter NAME and press a to attach it.")
+			Hint("A tunnel made from a Kharej token pairs this server by itself (New tunnel).")
+			Hint("Or attach a watp1: line from Kharej: " + P.Self + " scepter NAME, then a.")
 			Pause()
 			return
 		}
@@ -410,9 +410,9 @@ func scepterFleet() {
 		fetchAll() // fetched on entry and on r — never per tick (the loop used to
 		build()    // re-dial every pair every second while idle; round-2 finding)
 		head := func(w io.Writer) {
-			Title(w, "Scepter fleet", fmt.Sprintf("%d pair(s) · Iran cockpit", len(names)))
+			Title(w, "Kharej servers", fmt.Sprintf("%d paired", len(names)))
 			GradBand(w, uiW())
-			hintLine(w, "One row per paired tunnel; the state is live from its Kharej.")
+			hintLine(w, "One row per paired Kharej, live.")
 			unreach := 0
 			for _, r := range rows {
 				if r.err != "" {
@@ -454,7 +454,7 @@ func scepterFleet() {
 func scepterPairScreen(n string) {
 	cl, err := scepterDial(n)
 	if err != nil {
-		Page("Scepter", n)
+		Page("Kharej server", n)
 		GradBand(Stdout, uiW())
 		Warn(err.Error())
 		Hint("Check the tunnel's link (tunnel page, d), then open this screen again.")
@@ -468,7 +468,7 @@ func scepterPairScreen(n string) {
 	if h, e := cl.Call("scepter.hello", nil); e != nil {
 		helloErr = e.Error()
 	} else if h.Code != scepterCodeOK {
-		helloErr = fmt.Sprintf("scepter.hello answered code %d", h.Code)
+		helloErr = fmt.Sprintf("Kharej refused this server (code %d)", h.Code)
 	} else {
 		hello = h.Params
 	}
@@ -491,7 +491,7 @@ func scepterPairScreen(n string) {
 			scepterPairHead(w, n, doc, docErr, caps, helloErr, seq, up)
 		}
 		i, k := Choose(head, items, &sel, []string{"⏎", "open", "n", "create", "t", "test",
-			"a", "auto", "o", "ops", "s", "state", "e", "events", "h", "hello", "r", "refresh", "esc", "back"}, time.Second)
+			"a", "auto", "o", "ops", "r", "refresh", "esc", "back"}, time.Second)
 		switch {
 		case i >= 0 && i < len(rows): // a remote tunnel row
 			scepterTunnelPage(n, cl, caps, rows[i].Name)
@@ -519,18 +519,7 @@ func scepterPairScreen(n string) {
 		case "a": // plan C.2: the fleet auto-test, ranked table, apply a row
 			scepterFleetAuto(n, cl, caps, doc)
 			doc, docErr = refetch()
-		case "s":
-			scepterStateView(cl)
-			Pause()
-			doc, docErr = refetch()
-		case "e":
-			scepterEventsView(cl, doc.Cursor)
-			Pause()
-			doc, docErr = refetch()
-		case "h":
-			scepterHelloView(cl)
-			Pause()
-		case "o": // plan D: the ops console (update, doctor, backup, audit)
+		case "o": // plan D: the ops console (update, doctor, backup, audit, diagnostics)
 			scepterOpsScreen(n, cl, caps)
 			doc, docErr = refetch()
 		case "r":
@@ -553,25 +542,21 @@ func scepterPairItems(doc scepterDoc, docErr string, caps ScepterCaps) ([]Item, 
 		items = append(items, Item{Label: r.Name, Desc: scepterRowDesc(r)})
 	}
 	if caps.Has(CapCreate) {
-		items = append(items, Item{Key: "n", Label: "Create a tunnel on Kharej", Desc: "the wizard drives tunnel.create"})
+		items = append(items, Item{Key: "n", Label: "New tunnel on Kharej and here", Desc: "makes both sides; no token to copy"})
 	}
 	if caps.Has(CapManage) {
 		items = append(items,
-			Item{Key: "t", Label: "Probe carrier test", Desc: "open a probe on Kharej, measure it from here, close it"},
-			Item{Key: "a", Label: "Fleet auto-test", Desc: "rank what Kharej can serve (auto.test), apply a row"},
-			Item{Key: "o", Label: "Operations", Desc: "update, doctor, backup, audit — the pair's ops console"},
+			Item{Key: "t", Label: "Test a carrier", Desc: "open a test port on Kharej, measure it from here, close it"},
+			Item{Key: "a", Label: "Find the best carrier", Desc: "rank what passes between this server and Kharej, apply one"},
 		)
 	}
-	items = append(items,
-		Item{Key: "s", Label: "State document", Desc: "seq, uptime, tunnels — the pair's whole state"},
-		Item{Key: "e", Label: "Events", Desc: "what changed since the last cursor"},
-		Item{Key: "h", Label: "Hello", Desc: "versions and capabilities of the pair"},
-	)
+	// Handoff 4 R7: the raw views (state, recent changes, versions) live under Operations, Diagnostics
+	items = append(items, Item{Key: "o", Label: "Operations", Desc: "update, health check, backup, audit, diagnostics"})
 	return items, rows
 }
 
 func scepterPairHead(w io.Writer, n string, doc scepterDoc, docErr string, caps ScepterCaps, helloErr string, seq uint64, up int64) {
-	Title(w, n, "Iran cockpit · caps "+orStr(caps.Labels(), "none"))
+	Title(w, n, "paired Kharej · access: "+orStr(capTier(caps), "none"))
 	GradBand(w, uiW())
 	if helloErr != "" {
 		warnLine(w, "no hello: "+helloErr)
@@ -582,8 +567,7 @@ func scepterPairHead(w io.Writer, n string, doc scepterDoc, docErr string, caps 
 		fmt.Fprintln(w)
 		return
 	}
-	fmt.Fprintln(w, "  "+kv("Kharej", fmt.Sprintf("%s · seq %d · up %s · cursor %d",
-		orStr(doc.Ver, "?"), seq, scepterUp(up), doc.Cursor)))
+	fmt.Fprintln(w, "  "+kv("Kharej", fmt.Sprintf("wattun %s · up %s", orStr(doc.Ver, "?"), scepterUp(up))))
 	fmt.Fprintln(w, "  "+kv("Pairing", orStr(doc.PairUUID, "?")+" · "+orStr(doc.PairCaps, "?")))
 	if len(doc.Tunnels) == 0 {
 		if caps.Has(CapCreate) {
@@ -599,7 +583,7 @@ func scepterPairHead(w io.Writer, n string, doc scepterDoc, docErr string, caps 
 
 func scepterStateView(cl ScepterClient) {
 	fmt.Fprintln(Stdout)
-	Hint("state.get — the versioned state document of the pair")
+	Hint("What Kharej reports right now")
 	doc, err := scepterFetchDoc(cl)
 	if err != nil {
 		Warn(err.Error())
@@ -607,10 +591,9 @@ func scepterStateView(cl ScepterClient) {
 	}
 	lines := []string{
 		KV(12, "Engine", doc.Ver),
-		KV(12, "State seq", strconv.FormatUint(doc.StateSeq, 10)),
+		KV(12, "Changes", strconv.FormatUint(doc.StateSeq, 10)),
 		KV(12, "Uptime", scepterUp(doc.UptimeS)),
-		KV(12, "Event cursor", strconv.FormatUint(doc.Cursor, 10)),
-		KV(12, "Pairing", orStr(doc.PairUUID, "?")+" · caps "+orStr(doc.PairCaps, "?")),
+		KV(12, "Pairing", orStr(doc.PairUUID, "?")+" · access "+orStr(doc.PairCaps, "?")),
 	}
 	for _, r := range doc.Tunnels {
 		lines = append(lines, KV(12, "Tunnel", scepterRowDesc(r)))
@@ -620,7 +603,7 @@ func scepterStateView(cl ScepterClient) {
 
 func scepterHelloView(cl ScepterClient) {
 	fmt.Fprintln(Stdout)
-	Hint("scepter.hello — versions and capabilities of the pair")
+	Hint("Kharej's version and what this server may do there")
 	res, err := cl.Call("scepter.hello", nil)
 	if err != nil {
 		Warn("channel: " + err.Error())
@@ -635,7 +618,7 @@ func scepterHelloView(cl ScepterClient) {
 
 func scepterEventsView(cl ScepterClient, since uint64) {
 	fmt.Fprintln(Stdout)
-	Hint(fmt.Sprintf("events.since %d — what changed on Kharej", since))
+	Hint("What happened on Kharej lately")
 	res, err := cl.Call("events.since", map[string]any{"seq": since})
 	if err != nil {
 		Warn("channel: " + err.Error())
@@ -667,9 +650,6 @@ func scepterEventsView(cl ScepterClient, since uint64) {
 		rows[i], rows[j] = rows[j], rows[i]
 	}
 	scepterTimeline(Stdout, rows)
-	if c := scepterU64(res.Params["cursor"]); c > since {
-		Hint(fmt.Sprintf("cursor is now %d", c))
-	}
 }
 
 // scepterEvRow is one timeline node: the event's seq, type, timestamp and the
@@ -820,7 +800,7 @@ func scepterAskParams(cr, listenDef, pathDef, sniDef string) (map[string]string,
 
 func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	baseSeq := base.StateSeq
-	Page("Create tunnel on Kharej", n+" · built on seq "+strconv.FormatUint(baseSeq, 10))
+	Page("New tunnel on Kharej and here", n)
 	Hint("Kharej checks the request, starts the tunnel and answers; then this server")
 	Hint("sets up its own side of the tunnel, with no token to copy.")
 	fmt.Fprintln(Stdout)
@@ -830,7 +810,7 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	}
 	name = ReplyV
 	head := func(w io.Writer) {
-		Title(w, "Create tunnel on Kharej", n+" · built on seq "+strconv.FormatUint(baseSeq, 10))
+		Title(w, "New tunnel on Kharej and here", n)
 	}
 	cr := pickCarrier(false, head)
 	if cr == "" {
@@ -860,10 +840,9 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 		sum.add(k, params[k])
 	}
 	sum.add("Ports", pstr)
-	sum.add("Base seq", strconv.FormatUint(baseSeq, 10))
-	Box(Stdout, "Intent", sum...)
+	Box(Stdout, "Summary", sum...)
 	fmt.Fprintln(Stdout)
-	if !Confirm("Send tunnel.create?", true) {
+	if !Confirm("Create it on Kharej now?", true) {
 		Warn("Cancelled.")
 		return
 	}
@@ -1015,7 +994,7 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 	var cursor uint64
 	var stateSeq uint64
 	gone := func() bool {
-		Page("Scepter", pair)
+		Page("Kharej server", pair)
 		Warn("Tunnel '" + name + "' is no longer in the state document (deleted on Kharej?).")
 		Pause()
 		return false
@@ -1023,7 +1002,7 @@ func scepterTunnelPage(pair string, cl ScepterClient, caps ScepterCaps, name str
 	refresh := func() bool { // one state.get per action, never per tick
 		doc, err := scepterFetchDoc(cl)
 		if err != nil {
-			Page("Scepter", pair)
+			Page("Kharej server", pair)
 			Warn(err.Error())
 			Pause()
 			return false
@@ -1123,20 +1102,20 @@ func scepterTunnelItems(row scepterTunRow, caps ScepterCaps) []Item {
 	}
 	items := []Item{
 		{Key: "s", Label: "Stats", Desc: "live /stats numbers of the remote unit"},
-		{Key: "l", Label: "Logs", Desc: "remote journal tail (chunked)"},
-		{Key: "c", Label: "Carrier", Desc: "switch it (carrier.change rolls back; this side follows)"},
+		{Key: "l", Label: "Logs", Desc: "the tunnel's last log lines on Kharej"},
+		{Key: "c", Label: "Carrier", Desc: "switch it on both sides (rolls back if the link fails)"},
 		{Key: "p", Label: "Ports", Desc: "edit the forwarded ports (restarts the unit)"},
 		{Key: "k", Label: "Config keys", Desc: "per-key prompts for the common keys (restarts the unit)"},
-		{Key: "z", Label: "Preset", Desc: "the engine's catalog via preset.list (rolls back on failure)"},
+		{Key: "z", Label: "Preset", Desc: "pick a ready-made setting (rolls back on failure)"},
 		{Key: "q", Label: "Limits", Desc: "per-port rate and quota (hot-reloads, no restart)"},
-		{Key: "f", Label: "Reset quotas", Desc: "limits.reset — the usage counters restart at 0"},
+		{Key: "f", Label: "Reset quotas", Desc: "the usage counters restart at 0"},
 	}
 	if strings.Contains(row.Carrier, "+") {
 		items = append(items, Item{Key: "m", Label: "Mute a carrier",
-			Desc: "carrier.mute — drop one leg of this bond (or bring it back)"})
+			Desc: "drop one leg of this bond (or bring it back)"})
 	}
 	items = append(items,
-		Item{Key: "t", Label: "Rotate key", Desc: "tunnel.keyrotate — new PSK on Kharej; the twin's token follows"},
+		Item{Key: "t", Label: "Rotate key", Desc: "new key on Kharej; this server switches to it by itself"},
 		Item{Key: "r", Label: "Restart", Desc: "restart the remote unit (drops connections)"},
 		Item{Key: "u", Label: run, Desc: "start or stop the remote unit"},
 		Item{Key: "d", Label: RED + "Delete" + RST, Desc: "stop it; files move to .bak on Kharej (types the name)"},
@@ -1154,10 +1133,6 @@ func scepterTunnelHead(w io.Writer, pair string, row scepterTunRow, cursor uint6
 	}
 	if row.Metrics != "" {
 		fmt.Fprintln(w, "  "+kv("Metrics", row.Metrics+" (on Kharej)"))
-	}
-	fmt.Fprintln(w, "  "+kv("Event cursor", strconv.FormatUint(cursor, 10)))
-	if cursor == 0 {
-		hintLine(w, "The events cursor rides the state document; press e on the pair screen to read events.")
 	}
 	if !caps.Has(CapManage) {
 		// scepterTunnelItems returned an empty action list for this tier; say why
@@ -1291,7 +1266,7 @@ func scepterMiniChart(w io.Writer, name string) {
 
 func scepterTunnelStats(cl ScepterClient, name string) {
 	fmt.Fprintln(Stdout)
-	Hint("tunnel.stats — live numbers of the remote unit")
+	Hint("Live numbers of the tunnel on Kharej")
 	res, ok := scepterAct(cl, "tunnel.stats", map[string]any{"name": name})
 	if !ok {
 		return
@@ -1327,7 +1302,7 @@ func scepterTunnelStats(cl ScepterClient, name string) {
 // page, and says how many were cut.
 func scepterTunnelLogs(cl ScepterClient, name string) {
 	fmt.Fprintln(Stdout)
-	Hint("tunnel.logs — the remote unit's last log lines")
+	Hint("The tunnel's last log lines on Kharej")
 	res, ok := scepterAct(cl, "tunnel.logs", map[string]any{"name": name, "tail": 100})
 	if !ok {
 		return
@@ -1711,7 +1686,7 @@ func scepterRemoteKeyMenu(pair string, cl ScepterClient, name string, row scepte
 			items[i] = Item{Key: r.hk, Label: label, Desc: desc, Off: r.ask == nil}
 		}
 		head := func(w io.Writer) {
-			Title(w, "Config keys of "+name, "on Kharej · tunnel.edit")
+			Title(w, "Settings of "+name, "on Kharej")
 			GradBand(w, uiW())
 			hintLine(w, "The channel cannot read the remote values: a prompt starts at the engine's default,")
 			hintLine(w, "an unset word drops the key, and every edit restarts the remote unit (with rollback).")
@@ -1811,7 +1786,7 @@ func scepterRemotePresetCatalog(cl ScepterClient, name string, baseSeq uint64, r
 		items[i] = Item{Label: r.Name, Desc: r.Desc}
 	}
 	head := func(w io.Writer) {
-		Title(w, "Remote preset", name+" · preset.apply")
+		Title(w, "Preset", name+" · on Kharej")
 		GradBand(w, uiW())
 		hintLine(w, "The engine's own catalog, applied through the edit path (the unit")
 		hintLine(w, "restarts; one that refuses the new config rolls back on Kharej).")
@@ -1851,7 +1826,7 @@ func scepterRemotePresetCatalog(cl ScepterClient, name string, baseSeq uint64, r
 func scepterRemotePresetPlain(cl ScepterClient, name string, baseSeq uint64) bool {
 	Page("Remote preset", name)
 	GradBand(Stdout, uiW())
-	Hint("This Kharej does not answer preset.list (wattun 3.5.0 there adds it), so the")
+	Hint("This Kharej has no preset list yet (update it to wattun 3.5.0), so the")
 	Hint("built-in pair: stealth pads stream packets and sends idle filler while quiet;")
 	Hint("plain removes both again. Applied through the edit path, so a unit that refuses")
 	Hint("the new config rolls back on Kharej.")
@@ -2272,10 +2247,10 @@ func ScepterKharejView(name string) bool {
 	}
 	cl, err := scepterDial(name)
 	if err != nil {
-		Page("Scepter", name)
+		Page("Kharej server", name)
 		GradBand(Stdout, uiW())
 		Warn(err.Error())
-		Hint("Fix the pairing first (Scepter screen, a); the fleet view lists every pair.")
+		Hint("Fix the pairing first (Kharej server, a); that screen lists every paired Kharej.")
 		Pause()
 		return false
 	}
@@ -2284,17 +2259,17 @@ func ScepterKharejView(name string) bool {
 	if h, e := cl.Call("scepter.hello", nil); e != nil {
 		helloErr = e.Error()
 	} else if h.Code != scepterCodeOK {
-		helloErr = fmt.Sprintf("scepter.hello answered code %d", h.Code)
+		helloErr = fmt.Sprintf("Kharej refused this server (code %d)", h.Code)
 	} else {
 		hello = h.Params
 	}
 	caps := scepterPairCaps(name, hello, helloErr)
 	doc, derr := scepterFetchDoc(cl)
 	if derr != nil {
-		Page("Scepter", name)
+		Page("Kharej server", name)
 		GradBand(Stdout, uiW())
 		Warn(derr.Error())
-		Hint("The Kharej view needs the state document; retry when the link is up.")
+		Hint("Kharej did not answer; try again when the tunnel is connected.")
 		Pause()
 		return false
 	}
@@ -2497,4 +2472,45 @@ func vScepterLimits(s string) bool {
 		}
 	}
 	return true
+}
+
+// pairedIranTunnels: the paired tunnels this server dials as Iran (a Kharej's own token carries the pair field
+// too, so IsPaired alone would list the Kharej side).
+func pairedIranTunnels() []string {
+	var out []string
+	for _, n := range pairedTunnels() {
+		if Role(n) == "Iran" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// scepterNewBoth is New tunnel's first choice on a paired Iran (Handoff 4 R7): one wizard makes the tunnel on
+// Kharej and its Iran side here, with no token to copy.
+func scepterNewBoth(pairs []string) {
+	n := pairs[0]
+	if len(pairs) > 1 {
+		set := map[string]bool{}
+		for _, p := range pairs {
+			set[p] = true
+		}
+		if n = pickTunnel("Which Kharej?", "picked by the tunnel already paired with it", func(s string) bool { return set[s] }); n == "" {
+			return
+		}
+	}
+	cl, err := scepterDial(n)
+	if err != nil {
+		Warn(err.Error())
+		Pause()
+		return
+	}
+	doc, err := scepterFetchDoc(cl)
+	if err != nil {
+		Warn(err.Error())
+		Pause()
+		return
+	}
+	scepterWizardCreate(n, cl, doc)
+	Pause()
 }

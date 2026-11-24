@@ -1347,7 +1347,7 @@ func tunnelMenuKeys(n string, d *deck) {
 	}
 	fmt.Fprintf(Stdout, "  %s %-14s %s%s%s\n", KeyLabel("x"), "Delete", GRY, "Remove tunnel and all files (confirms first)", RST)
 	if tunnelKharejKeyWanted(n) { // the K row exists in the menu, so it belongs here too (round 3)
-		fmt.Fprintf(Stdout, "  %s %-14s %s%s%s\n", KeyLabel("K"), "Kharej view", GRY, "the remote side of this tunnel (Scepter)", RST)
+		fmt.Fprintf(Stdout, "  %s %-14s %s%s%s\n", KeyLabel("K"), "On Kharej", GRY, "this tunnel's Kharej side: carrier, settings, restart, logs", RST)
 	}
 	fmt.Fprintf(Stdout, "  %s %-14s %s%s%s\n", KeyLabel("s"), "Spoofing & shaping", GRY, "How each anti-censor option behaves", RST)
 	fmt.Fprintln(Stdout)
@@ -1525,7 +1525,7 @@ func tunnelPage(n string) {
 		d := buildDeck(n, r, run, car)
 		items := deckItems(d)
 		if tunnelKharejKeyWanted(n) { // the paired Kharej side, one key away
-			items = append(items, Item{Key: "K", Label: "Kharej view", Desc: "the remote side of this tunnel (Scepter)"})
+			items = append(items, Item{Key: "K", Label: "On Kharej", Desc: "this tunnel's Kharej side: carrier, settings, restart, logs"})
 		}
 		ti := tinfo(n)
 		if first { // land on what this state most likely needs

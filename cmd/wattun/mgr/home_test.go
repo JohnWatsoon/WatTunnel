@@ -40,7 +40,7 @@ func resetPairCache() {
 func TestMainMenuItemsScepterPromoted(t *testing.T) {
 	homeTestHost(t) // no tunnels, side unset: the union menu keeps all 8 slots
 	items := mainMenuItems(3)
-	want := []string{"Tunnels", "New tunnel", "Scepter", "Find a carrier", "Blackout kit", "Tools", "Settings", "Exit"}
+	want := []string{"Tunnels", "New tunnel", "Kharej server", "Find a carrier", "Blackout kit", "Tools", "Settings", "Exit"}
 	if len(items) != len(want) {
 		t.Fatalf("home menu has %d rows, want %d", len(items), len(want))
 	}
@@ -70,7 +70,7 @@ func TestRoleAwareHome(t *testing.T) {
 		t.Errorf("iran routes %q, want scepter_fleet", got)
 	}
 	items := mainMenuItems(1)
-	if items[2].Label != "Scepter" || !strings.Contains(items[2].Desc, "cockpit") {
+	if items[2].Label != "Kharej server" || !strings.Contains(items[2].Desc, "paired Kharej") {
 		t.Errorf("iran scepter row = %q %q, want the cockpit", items[2].Label, items[2].Desc)
 	}
 	var b strings.Builder
@@ -85,7 +85,7 @@ func TestRoleAwareHome(t *testing.T) {
 		t.Errorf("kharej routes %q, want scepter_menu", got)
 	}
 	items = mainMenuItems(1)
-	if items[2].Label != "Scepter console" || strings.Contains(items[2].Label, "cockpit") {
+	if items[2].Label != "Pairing" {
 		t.Errorf("kharej scepter row = %q, want the local console label", items[2].Label)
 	}
 	for _, it := range items {
@@ -157,22 +157,22 @@ func TestSettingsItemsBoostAndScepterGate(t *testing.T) {
 	if !has(labels(), "Kernel boost") {
 		t.Error("Settings lost the Kernel boost row again (bash parity)")
 	}
-	if !has(labels(), "Scepter") {
+	if !has(labels(), "Pairing") {
 		t.Error("Settings must show the Scepter console row while the role is unset")
 	}
 	// explicit Iran and no store: the row hides — Iran pairs from the cockpit.
 	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
-	if has(labels(), "Scepter") {
+	if has(labels(), "Pairing") {
 		t.Error("Scepter console row must hide on an explicit Iran host with no store")
 	}
 	// Iran with an existing store: bash pairing_active bypasses the side gate.
 	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	os.WriteFile(pairStorePath(), []byte("watp1:1|1b0e6a52-9f3d-4c2a-8e77-2f0a51d3c9e4|"+key+"|full\n"), 0o600)
-	if !has(labels(), "Scepter") {
+	if !has(labels(), "Pairing") {
 		t.Error("an existing pairing store must surface the Scepter row on any side")
 	}
 	for _, it := range settingsItems() {
-		if it.Label == "Scepter" && !strings.Contains(it.Desc, "paired") {
+		if it.Label == "Pairing" && !strings.Contains(it.Desc, "paired") {
 			t.Errorf("paired store renders %q, want a paired state", it.Desc)
 		}
 	}
@@ -360,7 +360,7 @@ func TestPairLinesStates(t *testing.T) {
 	pairAt = time.Now()
 	pairDocs["irp"] = &scepterDoc{Ver: "3.5.0", StateSeq: 42, UptimeS: 3750, Tunnels: []scepterTunRow{{Name: "web"}}}
 	out := render()
-	for _, want := range []string{"Scepter irp", "seq 42", "1 remote tunnel", "62m"} {
+	for _, want := range []string{"Kharej irp", "1 tunnel", "62m"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fleet line missing %q:\n%s", want, out)
 		}
@@ -368,7 +368,7 @@ func TestPairLinesStates(t *testing.T) {
 
 	resetPairCache()
 	pairAt = time.Now()
-	if out := render(); !strings.Contains(out, "checking the pair") {
+	if out := render(); !strings.Contains(out, "checking") {
 		t.Errorf("no data and nothing fetched yet: the waiting state must show:\n%s", out)
 	}
 }
@@ -494,14 +494,14 @@ func TestTunnelKharejKeyGate(t *testing.T) {
 		defer feed("x")() // the keys page ends on a key read
 		return capture(t, func() { tunnelMenuKeys("ir", &deck{}) })
 	}
-	if out := keys(); strings.Contains(out, "Kharej view") {
+	if out := keys(); strings.Contains(out, "On Kharej") {
 		t.Errorf("the ?-keys page must hide the K row when the item is hidden:\n%s", out)
 	}
 	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
 	if !tunnelKharejKeyWanted("ir") {
 		t.Error("pairing:true must show the K row")
 	}
-	if out := keys(); !strings.Contains(out, "Kharej view") {
+	if out := keys(); !strings.Contains(out, "On Kharej") {
 		t.Errorf("the ?-keys page must list the K row exactly when the menu shows it:\n%s", out)
 	}
 }

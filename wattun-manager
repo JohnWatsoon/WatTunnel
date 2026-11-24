@@ -1374,10 +1374,10 @@ scepter_menu() { # Kharej's local Scepter console: status, pair, rotate, revoke,
   local sd; sd=$(server_side)
   if [ "$sd" = iran ]; then
     while :; do
-      page "Scepter" "Iran · read-only"
+      page "Pairing" "Iran · read-only"
       pairing_status
       echo
-      hint "Pairing is managed on Kharej. On Iran run: wattun -pair-to <watp1: line> (Go cockpit)."
+      hint "Pairing is managed on Kharej; this server pairs by itself when its tunnel connects."
       menu_line a 'audit tail' 0 back
       key_read
       case "$KEY" in
@@ -10416,7 +10416,7 @@ settings_menu() {
       # (3.5.0). An unsaved side must still reach the first-pair path — the CLI gate (scepter_kharej_only)
       # refuses an explicit Iran only, so hiding the entry on '' locked the first pairing out (round-2).
       if pairing_active; then psc="${GRN}paired${RST} ${GRY}($(pairing_get caps))${RST}"; else psc="${GRY}off${RST}"; fi
-      printf '  %s %-15s %s\n' "$(key_label c)" 'Scepter' "$psc"
+      printf '  %s %-15s %s\n' "$(key_label c)" 'Pairing' "$psc"
     fi
     echo
     menu_line r 'restart all' v 'roll back'
@@ -10432,7 +10432,7 @@ settings_menu() {
       r|R) echo; if confirm "Restart all tunnels? Open connections drop." n; then restart_all; sleep 1; fi ;;
       a|A) if [ "$(conf_get anim 1)" = 1 ]; then conf_set anim 0; ANIM=0; else conf_set anim 1; [ "$IS_TTY" = 1 ] && [ "${WAT_NO_ANIM:-0}" != 1 ] && ANIM=1; fi ;;
       b|B) boost_menu ;;
-      c|C) { [ "$sd" = kharej ] || [ -z "$sd" ] || pairing_active; } || { warn "Scepter pairing is the Kharej-side console."; sleep 1; continue; }
+      c|C) { [ "$sd" = kharej ] || [ -z "$sd" ] || pairing_active; } || { warn "Pairing is managed on Kharej."; sleep 1; continue; }
            echo; scepter_menu ;;
       p|P)
         echo
@@ -10586,8 +10586,8 @@ Usage: $SELF [command]
   logs NAME             follow the log
   token NAME            print the Kharej token again
   scepter [status|pair|rotate|revoke|audit]
-                        Kharej's local Scepter console: the pairing credential Iran's cockpit
-                        uses (watp1: line, key rotation with a 24 h overlap, revocation, audit
+                        Kharej's Pairing console: which Iran server may manage this one
+                        (watp1: line, key rotation with a 24 h overlap, revocation, audit
                         tail). Both ends need wattun 3.5.0. Unattended: pair/rotate run as-is,
                         revoke needs --yes.
   preset NAME [PRESET]  apply built-in anti-censorship preset (rst-fast, mci, irancell, blackout, conservative)

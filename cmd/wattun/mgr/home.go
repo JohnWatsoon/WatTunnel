@@ -377,12 +377,12 @@ func wideTable() bool { return TermCols() >= 112 }
 // on Iran it is the cockpit. An unset role shows Iran's row with a hint to set
 // the role, so the first pair stays reachable.
 func mainMenuItems(n int) []Item {
-	scepter := Item{Label: "Scepter", Desc: "the paired Kharej cockpit: remote tunnels and state"}
+	scepter := Item{Label: "Kharej server", Desc: "manage the paired Kharej from here: its tunnels, health, updates"}
 	switch serverSide() {
 	case "kharej":
-		scepter = Item{Label: "Scepter console", Desc: "LOCAL: this server's pairing: rotate, revoke, audit"}
+		scepter = Item{Label: "Pairing", Desc: "which Iran server may manage this one: allow, revoke, audit"}
 	case "":
-		scepter.Desc = "the paired Kharej cockpit — set this server's role in Settings to focus this menu"
+		scepter.Desc = "manage the paired Kharej — set this server's role in Settings to focus this menu"
 	}
 	return []Item{
 		{Label: "Tunnels", Desc: fmt.Sprintf("watch traffic, restart, edit or delete (%d)", n)},
@@ -832,7 +832,7 @@ func pairLines(w io.Writer) {
 	pairKick()
 	pairs := pairedTunnels()
 	if len(pairs) == 0 {
-		fmt.Fprintf(w, "  %s◌%s %sScepter%s  %snot paired — open a tunnel and attach the Kharej pairing line%s\n",
+		fmt.Fprintf(w, "  %s◌%s %sKharej%s  %snot paired — a new Iran tunnel pairs by itself%s\n",
 			GRY, RST, BOLD, RST, GRY, RST)
 		return
 	}
@@ -842,7 +842,7 @@ func pairLines(w io.Writer) {
 		doc, fail := pairDocs[n], pairFail[n]
 		switch {
 		case fail != "":
-			fmt.Fprintf(w, "  %s!%s %sScepter %s%s  %sunreachable: %s%s\n", YEL, RST, BOLD, trunc(n, 16), RST, YEL, fail, RST)
+			fmt.Fprintf(w, "  %s!%s %sKharej %s%s  %sunreachable: %s%s\n", YEL, RST, BOLD, trunc(n, 16), RST, YEL, fail, RST)
 		case doc != nil:
 			// The status dot breathes (◆↔◇) only while a refresh is in flight
 			// — a live "working" tell; a settled pair holds the solid diamond.
@@ -850,10 +850,10 @@ func pairLines(w io.Writer) {
 			if pairFlying && !Breath(pairBreathMS) {
 				dot = "◇"
 			}
-			fmt.Fprintf(w, "  %s%s%s %sScepter %s%s  %sseq %d · %d remote tunnel(s) · up %s%s\n",
-				GRN, dot, RST, BOLD, trunc(n, 16), RST, GRY, doc.StateSeq, len(doc.Tunnels), scepterUp(doc.UptimeS), RST)
+			fmt.Fprintf(w, "  %s%s%s %sKharej %s%s  %s%d tunnel(s) · up %s%s\n",
+				GRN, dot, RST, BOLD, trunc(n, 16), RST, GRY, len(doc.Tunnels), scepterUp(doc.UptimeS), RST)
 		default:
-			fmt.Fprintf(w, "  %s%s%s %sScepter %s%s  %schecking the pair…%s\n",
+			fmt.Fprintf(w, "  %s%s%s %sKharej %s%s  %schecking…%s\n",
 				GRY, homeSpin.Frame(), RST, BOLD, trunc(n, 16), RST, GRY, RST)
 		}
 	}
@@ -1351,11 +1351,11 @@ func settingsItems() []Item {
 		{Label: "Server role", Desc: orStr(serverSide(), "not set") + GRY + "   Kharej (outside) or Iran (inside)"},
 	}
 	if serverSide() != "iran" || fileExists(pairStorePath()) {
-		desc := GRY + "off" + RST + GRY + "   Kharej's pairing console: pair, rotate, revoke, audit" + RST
+		desc := GRY + "off" + RST + GRY + "   which Iran server may manage this one" + RST
 		if c, st := pairLoad(); st == 0 {
-			desc = GRN + "paired" + RST + GRY + "   (" + capTier(c.line.Caps) + ") pair, rotate, revoke, audit" + RST
+			desc = GRN + "paired" + RST + GRY + "   (" + capTier(c.line.Caps) + ") allow, revoke, audit" + RST
 		}
-		items = append(items, Item{Label: "Scepter", Desc: desc})
+		items = append(items, Item{Label: "Pairing", Desc: desc})
 	}
 	items = append(items, Item{Label: "Uninstall", Desc: RED + "remove wattun, its tunnels and configs" + RST})
 	return items
@@ -1409,7 +1409,7 @@ func settingsMenu() int {
 			sleepMS(800)
 		case "Server role":
 			askSide()
-		case "Scepter":
+		case "Pairing":
 			ClearScreen()
 			scepterConsole()
 		case "Uninstall":
@@ -1649,7 +1649,7 @@ func pairCapsOK(s string) bool {
 // written by wattun -pair-to; rewriting it here would desync the pair.
 func pairKharejOnly() bool {
 	if serverSide() == "iran" {
-		Err("This is the Kharej-side action; Iran's pairing is managed by the Go cockpit (wattun -pair-to).")
+		Err("This is a Kharej action; on Iran, pairing happens by itself when a tunnel connects.")
 		return false
 	}
 	return true
@@ -1785,7 +1785,7 @@ func scepterPair() {
 	}
 	fmt.Fprintln(Stdout)
 	fmt.Fprintf(Stdout, "  %s%s%s\n\n", BOLD+YEL, MakePairingLine(p.Version, p.UUID, p.Key, p.Caps), RST)
-	Hint("Give this watp1: line to Iran (pairs the cockpit; wattun 3.5.0 on both ends).")
+	Hint("Give this watp1: line to the Iran server (wattun 3.5.0 on both servers).")
 }
 
 // scepterRotate mints a new key under the same UUID, keeping the original

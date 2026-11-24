@@ -1229,6 +1229,15 @@ func newTunnelScreen() {
 	if serverSide() == "iran" {
 		sel = 1
 	}
+	// Handoff 4 R7: a paired Iran makes both sides from here first; pasting a token comes second
+	var pairs []string
+	if serverSide() != "kharej" {
+		pairs = pairedIranTunnels()
+	}
+	if len(pairs) > 0 {
+		items = append([]Item{{Key: "b", Label: "On Kharej and here", Desc: "the paired Kharej makes it; no token to copy"}}, items...)
+		sel = 0
+	}
 	head := func(w io.Writer) {
 		Title(w, "New tunnel", "which side is this server?")
 		hintLine(w, "Set up Kharej first; its token sets up Iran.")
@@ -1236,16 +1245,22 @@ func newTunnelScreen() {
 	}
 	for {
 		i, k := Choose(head, items, &sel, []string{"⏎", "pick", "esc", "back"}, 0)
-		switch {
-		case i == 0:
+		if i >= 0 {
+			k = items[i].Key
+		}
+		switch k {
+		case "b":
+			scepterNewBoth(pairs)
+			return
+		case "k":
 			runFlow("wizard_kharej")
 			Pause() // keep the token on screen
 			return
-		case i == 1:
+		case "i":
 			runFlow("wizard_iran")
 			Pause()
 			return
-		case k == "0" || k == "esc" || k == "q" || k == "eof":
+		case "0", "esc", "q", "eof":
 			return
 		}
 	}

@@ -245,13 +245,16 @@ func TestScepterOpsCapGating(t *testing.T) {
 		t.Fatalf("manage-only ops items = %d, want 4", len(items))
 	}
 	for _, it := range items {
-		if it.Key == "u" {
-			t.Error("update.run must be hidden without the full capability")
+		if it.Key == "u" || it.Key == "b" {
+			t.Error("update.run and backup.export must be hidden without the full capability")
 		}
 	}
 	items = scepterOpsItems(full)
-	if len(items) != 5 || items[len(items)-1].Key != "u" {
+	if len(items) != 6 || items[len(items)-2].Key != "u" || items[len(items)-1].Key != "g" {
 		t.Errorf("full ops items = %+v", items)
+	}
+	if it := scepterOpsItems(CapTunnel); len(it) != 1 || it[0].Key != "g" {
+		t.Errorf("a tunnel-only pairing keeps only Diagnostics: %+v", it)
 	}
 	// a direct call refuses too, before any RPC (the action repeats its gate)
 	cl := &scriptClient{}
@@ -265,11 +268,11 @@ func TestScepterOpsCapGating(t *testing.T) {
 	if len(cl.cmds) != 0 {
 		t.Errorf("a gated update.run must not reach the channel: %v", cl.cmds)
 	}
-	// and the pair screen hides the whole ops item without manage
+	// the pair screen keeps the ops item for every pairing: Diagnostics lives there (Handoff 4 R7)
 	pairItems, _ := scepterPairItems(scepterDoc{}, "", CapTunnel|CapCreate)
 	for _, it := range pairItems {
-		if it.Key == "o" {
-			t.Error("the ops item must be hidden without the manage capability")
+		if it.Key == "t" || it.Key == "a" {
+			t.Error("the carrier tests must be hidden without the manage capability")
 		}
 	}
 	pairItems, _ = scepterPairItems(scepterDoc{}, "", manage)
@@ -290,7 +293,7 @@ func TestScepterOpsMenuSmoke(t *testing.T) {
 	defer feed("0")()
 	cl := &scriptClient{}
 	out := capture(t, func() { scepterOpsScreen("ir", cl, CapTunnel|CapCreate|CapManage) })
-	for _, want := range []string{"Update status", "Doctor", "Export backup", "Audit trail"} {
+	for _, want := range []string{"Update status", "Health check", "Audit trail", "Diagnostics"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ops menu missing %q:\n%s", want, out)
 		}
@@ -321,7 +324,7 @@ func TestScepterUpdateStatusView(t *testing.T) {
 	}
 	// a started mailbox record carries the survival semantics: the journal
 	// replays for the same command id, the revived engine reports the outcome
-	if !strings.Contains(out, "journal replays") || !strings.Contains(out, "interrupted") {
+	if !strings.Contains(out, "never a second update") || !strings.Contains(out, "interrupted") {
 		t.Errorf("started record must explain the journal-replay semantics:\n%s", out)
 	}
 	// no prev evidence: the watchdog gate says so, honestly
@@ -350,7 +353,7 @@ func TestScepterUpdateRunConfirmFlow(t *testing.T) {
 	defer feed("uv3.6.0\nyx0")()
 	out := capture(t, func() { scepterOpsScreen("ir", cl, CapTunnel|CapCreate|CapManage|CapFull) })
 	// the drop warning and the survival contract are on the screen BEFORE the confirm
-	for _, want := range []string{"channel WILL drop", "latch", "journal", "Update status",
+	for _, want := range []string{"WILL drop", "comes back by itself", "never runs a second update", "Update status",
 		"Update accepted", "upd-1", "Nothing moves for 3 s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("update.run flow missing %q:\n%s", want, out)
@@ -417,7 +420,7 @@ func TestScepterAuditView(t *testing.T) {
 	}}
 	defer feed("a\nrx0")()
 	out := capture(t, func() { scepterOpsScreen("ir", cl, CapTunnel|CapCreate|CapManage) })
-	for _, want := range []string{".pairing.audit", ".pairing.journal", "(2 line(s))", "(1 line(s))",
+	for _, want := range []string{"pairing changes", "remote commands", "(2 line(s))", "(1 line(s))",
 		"revoke 1b0e6a52", `"cmd":"state.get"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("audit view missing %q:\n%s", want, out)
@@ -487,8 +490,8 @@ func TestScepterBackupExportView(t *testing.T) {
 			Params: map[string]any{"why": "config dir larger than the 5 MB export cap"}}}},
 	}}
 	defer feed("bx0")()
-	out = capture(t, func() { scepterOpsScreen("ir", cl3, CapTunnel|CapCreate|CapManage) })
-	if !strings.Contains(out, "answered code 8") || !strings.Contains(out, "5 MB export cap") {
+	out = capture(t, func() { scepterOpsScreen("ir", cl3, CapTunnel|CapCreate|CapManage|CapFull) })
+	if !strings.Contains(out, "(code 8)") || !strings.Contains(out, "5 MB export cap") {
 		t.Errorf("too_large not surfaced honestly:\n%s", out)
 	}
 }
@@ -770,7 +773,7 @@ func TestScepterOpsReachableFromPairScreen(t *testing.T) {
 			keys[it.Key] = true
 		}
 	}
-	for _, k := range []string{"n", "t", "a", "o", "s", "e", "h"} { // B: create, C: probe+auto+rows, A: state/events/hello, D: ops
+	for _, k := range []string{"n", "t", "a", "o"} { // B: create, C: probe+auto+rows, D: ops (A's raw views: ops, Diagnostics)
 		if !keys[k] {
 			t.Errorf("pair screen lost the %q item: %+v", k, items)
 		}
@@ -780,7 +783,7 @@ func TestScepterOpsReachableFromPairScreen(t *testing.T) {
 	}
 	// the ops menu itself stays complete with full: five items, update last
 	ops := scepterOpsItems(CapTunnel | CapCreate | CapManage | CapFull)
-	if len(ops) != 5 || ops[0].Key != "s" || ops[len(ops)-1].Key != "u" {
+	if len(ops) != 6 || ops[0].Key != "s" || ops[len(ops)-2].Key != "u" || ops[len(ops)-1].Key != "g" {
 		t.Errorf("ops items = %+v", ops)
 	}
 	// the tunnel page keeps every phase B/C action: stats, logs, carrier,

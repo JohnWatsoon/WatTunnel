@@ -657,7 +657,7 @@ func TestScepterFleetScreenEmpty(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
 	defer feed("0")()
 	out := capture(t, scepterFleet)
-	if !strings.Contains(out, "no pairs") || !strings.Contains(out, "watp1:") {
+	if !strings.Contains(out, "none paired") || !strings.Contains(out, "watp1:") {
 		t.Errorf("empty fleet hint missing:\n%s", out)
 	}
 }
@@ -686,7 +686,7 @@ func TestScepterPairScreenSmoke(t *testing.T) {
 	defer func() { scepterDial = oldDial }()
 	defer feed("0")()
 	out := capture(t, func() { scepterScreen("ir") })
-	for _, want := range []string{"web", "3.5.0", "create", "State document"} {
+	for _, want := range []string{"web", "3.5.0", "create", "Operations"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("pair screen missing %q:\n%s", want, out)
 		}
@@ -1203,7 +1203,7 @@ func TestScepterRemotePresetFallbackUnknownCmd(t *testing.T) {
 	}}
 	defer feed("p")() // the plain row of the built-in pair
 	out := capture(t, func() { scepterRemotePreset(cl, "web", 6) })
-	if !strings.Contains(out, "preset.list") {
+	if !strings.Contains(out, "no preset list yet") {
 		t.Errorf("the old-peer hint is missing:\n%s", out)
 	}
 	sent := cl.cmds["preset.apply"]
@@ -1495,7 +1495,7 @@ func TestScepterKharejView(t *testing.T) {
 	defer feed("0")()
 	ok = false
 	out = capture(t, func() { ok = ScepterKharejView("ir") })
-	if !ok || !strings.Contains(out, "Iran cockpit") {
+	if !ok || !strings.Contains(out, "paired Kharej") {
 		t.Errorf("the pair screen did not open (ok %v):\n%s", ok, out)
 	}
 }
@@ -1577,7 +1577,7 @@ func TestScepterAppliedGateOnCode(t *testing.T) {
 			cl := &scriptClient{byCmd: c.script}
 			defer feed(c.feed)()
 			out := capture(t, func() { c.run(cl) })
-			if !strings.Contains(out, "answered code") {
+			if !strings.Contains(out, "Kharej refused it (code") {
 				t.Errorf("the rejection was not printed:\n%s", out)
 			}
 			if strings.Contains(out, c.noLine) {

@@ -314,7 +314,7 @@ func scepterFollowLocal(pair, remote, carrier string, params map[string]string, 
 	fmt.Fprintln(Stdout)
 	Hint("Restarting " + Unit(local) + " — the Iran side follows the change…")
 	if !scepterRestartAndCheck(local) {
-		Hint("Kharej's '" + remote + "' stays on " + carrier + " — run carrier.change back to undo it there.")
+		Hint("Kharej's '" + remote + "' stays on " + carrier + " — change its carrier back to undo it there.")
 		if Confirm("Revert "+local+" to its previous settings and restart?", true) {
 			if err := scepterRestoreLocal(local, saved); err != nil {
 				Err("Revert write failed: " + err.Error())
@@ -655,7 +655,7 @@ func scepterRemoteCarrierChange(pair string, cl ScepterClient, caps ScepterCaps,
 		Warn("Changing the carrier needs the 'manage' capability on the pairing line.")
 		return false
 	}
-	head := func(w io.Writer) { Title(w, "Carrier of "+name, "on Kharej "+pair+" · carrier.change") }
+	head := func(w io.Writer) { Title(w, "Carrier of "+name, "on Kharej "+pair) }
 	Page("Carrier change", name+" · on Kharej "+pair)
 	GradBand(Stdout, uiW()) // the screen's one bright moment
 	Hint("Kharej patches its yml, restarts the unit and link-checks the new shape;")
@@ -701,10 +701,9 @@ func scepterRemoteCarrierChange(pair string, cl ScepterClient, caps ScepterCaps,
 	for _, k := range ks {
 		sum.add(k, params[k])
 	}
-	sum.add("Base seq", strconv.FormatUint(baseSeq, 10))
-	Box(Stdout, "Intent", sum...)
+	Box(Stdout, "Summary", sum...)
 	fmt.Fprintln(Stdout)
-	if !Confirm("Send carrier.change?", true) {
+	if !Confirm("Change the carrier on Kharej now?", true) {
 		Warn("Cancelled.")
 		return false
 	}
@@ -780,7 +779,7 @@ func scepterFleetAuto(pair string, cl ScepterClient, caps ScepterCaps, doc scept
 // that follows the data (anim off: frame 0 every poll, byte-stable).
 func scepterAutoWait(cl ScepterClient) {
 	fmt.Fprintln(Stdout)
-	Hint("Polling auto.rows — esc to skip the wait.")
+	Hint("Waiting for Kharej's results — esc to skip the wait.")
 	var sp Spinner
 	for i := 0; i < 150; i++ { // 150 x 2 s: a run takes ~1 min; the ceiling bounds a wedged channel
 		res, err := cl.Call("auto.rows", nil)

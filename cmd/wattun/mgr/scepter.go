@@ -538,9 +538,9 @@ func scepterScreen(n string) {
 	// views all need the channel, so they are not offered (they would only
 	// print the dial refusal).
 	for {
-		Page("Scepter", n+" · Iran cockpit")
+		Page("Kharej server", n)
 		Say("  " + GRY + "◌" + RST + " not paired — attach the pairing line from Kharej (install.sh prints it)")
-		Hint("Pairing needs wattun 3.5.0 on both ends; the cockpit then rides this tunnel's reserved stream.")
+		Hint("Pairing needs wattun 3.5.0 on both servers; it then runs inside this tunnel.")
 		fmt.Fprintln(Stdout)
 		MenuLine(Stdout, "a", "attach pairing line", "0", "back")
 		fmt.Fprintf(Stdout, "  %s▸%s ", CYN, RST)
@@ -620,7 +620,7 @@ func scepterPrintParams(p map[string]any) {
 // scepterCodeErr prints a non-OK answer: the machine code, its hint and any
 // detail Kharej attached.
 func scepterCodeErr(cmd string, res ScepterResult) {
-	Err(fmt.Sprintf("%s answered code %d", cmd, res.Code))
+	Err(fmt.Sprintf("Kharej refused it (code %d)", res.Code)) // the command name is ours, not the user's (Handoff 4 R7)
 	if h := scepterCodeHint(res.Code, res.Params); h != "" {
 		Hint(h)
 	}

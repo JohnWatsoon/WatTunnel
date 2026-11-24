@@ -396,26 +396,27 @@ func scepterActSpin(cl ScepterClient, cmd string, args map[string]any) (ScepterR
 // others are judged against), update.run last and in red — the scariest remote
 // op in the plane.
 func scepterOpsItems(caps ScepterCaps) []Item {
-	if !caps.Has(CapManage) {
-		return nil // every ops command needs at least manage
-	}
-	items := []Item{
-		{Key: "s", Label: "Update status", Desc: "engine version, wattun.prev, unit states, the update mailbox"},
-		{Key: "d", Label: "Doctor", Desc: "doctor.fetch — the pair's structured self-report"},
-		{Key: "b", Label: "Export backup", Desc: "Kharej's config dir as a verified tarball, saved here"},
-		{Key: "a", Label: "Audit trail", Desc: "the last audit + journal lines, raw"},
+	var items []Item
+	if caps.Has(CapManage) { // every ops command needs at least manage
+		items = append(items,
+			Item{Key: "s", Label: "Update status", Desc: "wattun version on Kharej, the previous one, tunnel states"},
+			Item{Key: "d", Label: "Health check", Desc: "Kharej checks itself and reports"},
+			Item{Key: "a", Label: "Audit trail", Desc: "who did what on Kharej, newest last"},
+		)
 	}
 	if caps.Has(CapFull) {
-		items = append(items, Item{Key: "u", Label: RED + "Run update" + RST,
-			Desc: "Kharej updates its own binary (drops this channel; rolls back on a dead engine)"})
+		items = append(items,
+			Item{Key: "b", Label: "Export backup", Desc: "Kharej's settings as a checked archive, saved here"},
+			Item{Key: "u", Label: RED + "Run update" + RST,
+				Desc: "Kharej updates wattun (this connection drops; it rolls back if the new one fails)"})
 	}
-	return items
+	return append(items, Item{Key: "g", Label: "Diagnostics", Desc: "Kharej's raw state, recent changes, versions"})
 }
 
 func scepterOpsHead(w io.Writer, pair string, caps ScepterCaps) {
-	Title(w, "Operations", pair+" · caps "+orStr(caps.Labels(), "none"))
+	Title(w, "Operations", pair+" · access: "+orStr(capTier(caps), "none"))
 	GradBand(w, uiW()) // the screen's one bright moment
-	hintLine(w, "The pair's ops console; every row below is Kharej's own answer.")
+	hintLine(w, "Everything below runs on Kharej; the answers are Kharej's own.")
 	fmt.Fprintln(w)
 }
 
@@ -448,9 +449,39 @@ func scepterOpsScreen(pair string, cl ScepterClient, caps ScepterCaps) {
 		case "u":
 			scepterUpdateRun(pair, cl, caps)
 			Pause()
+		case "g":
+			scepterDiagScreen(pair, cl)
 		case "0", "esc", "q":
 			return
 		}
+	}
+}
+
+// scepterDiagScreen holds the raw read views (Handoff 4 R7): useful when something is wrong, noise otherwise.
+func scepterDiagScreen(pair string, cl ScepterClient) {
+	sel := 0
+	items := []Item{
+		{Key: "s", Label: "Current state", Desc: "what Kharej reports right now: version, uptime, tunnels"},
+		{Key: "e", Label: "Recent changes", Desc: "what happened on Kharej lately"},
+		{Key: "h", Label: "Versions and access", Desc: "Kharej's version and what this server may do there"},
+	}
+	head := func(w io.Writer) { Title(w, "Diagnostics", pair) }
+	for {
+		i, k := Choose(head, items, &sel, []string{"⏎", "show", "esc", "back"}, 0)
+		if i >= 0 {
+			k = items[i].Key
+		}
+		switch k {
+		case "s":
+			scepterStateView(cl)
+		case "e":
+			scepterEventsView(cl, 0)
+		case "h":
+			scepterHelloView(cl)
+		default:
+			return
+		}
+		Pause()
 	}
 }
 
@@ -458,7 +489,7 @@ func scepterOpsScreen(pair string, cl ScepterClient, caps ScepterCaps) {
 
 func scepterUpdateStatusView(cl ScepterClient) {
 	fmt.Fprintln(Stdout)
-	Hint("update.status — the remote engine's update evidence (local reads only)")
+	Hint("Kharej's wattun version and its last update")
 	GradBand(Stdout, uiW())
 	res, ok := scepterActSpin(cl, "update.status", nil)
 	if !ok {
@@ -512,9 +543,9 @@ func scepterPrintUpdStatus(st scepterUpdStatus) {
 		}
 		scepterStepperShow(key, st.Mail.Phase, false)
 		if st.Mail.Phase == "started" {
-			Hint("A started record means an update was accepted; if the channel died before")
-			Hint("the answer, the journal replays it for the same command id — and a record")
-			Hint("silent past the job's watch window arrives as update_failed {interrupted}.")
+			Hint("'started' means Kharej accepted an update. If the connection dropped")
+			Hint("before the answer, asking again shows the same result, never a second update;")
+			Hint("an update that never reports back shows up as interrupted.")
 		}
 	}
 	if st.StagedBytes > 0 {
@@ -669,25 +700,23 @@ func scepterUpdateRun(pair string, cl ScepterClient, caps ScepterCaps) {
 		Warn("Running an update needs the 'full' capability on the pairing line.")
 		return
 	}
-	Page("Run update on Kharej", pair+" · update.run")
+	Page("Run update on Kharej", pair)
 	GradBand(Stdout, uiW())
 	Hint("Kharej downloads the release, verifies the signature, installs the binary")
 	Hint("and restarts every unit that was up — the unit carrying this channel too.")
 	Hint("A watchdog watches 40 s; a new engine that does not stay up rolls back to")
 	Hint("wattun.prev and the units restart on it.")
 	fmt.Fprintln(Stdout)
-	Warn("The channel WILL drop mid-update. It comes back on its own: the scepter")
-	Warn("latch arms while Kharej's units are down and revives the cockpit.")
-	Hint("The outcome survives the drop: the answer is journaled. After the revival,")
-	Hint("open Update status — the update mailbox carries applied/failed/rolled_back,")
-	Hint("and a retried command id replays from the journal (never a second update).")
+	Warn("The connection to Kharej WILL drop during the update and comes back by itself.")
+	Hint("Kharej keeps the result. Afterwards open Update status: it says applied,")
+	Hint("failed or rolled back. Asking again never runs a second update.")
 	fmt.Fprintln(Stdout)
 	if !AskOK("Target version (empty = latest release)", "", vScepterTag) {
 		return
 	}
 	to := ReplyV
 	fmt.Fprintln(Stdout)
-	if !Confirm("Send update.run to Kharej now?", false) { // hard confirm: default no
+	if !Confirm("Update wattun on Kharej now?", false) { // hard confirm: default no
 		Warn("Cancelled.")
 		return
 	}
@@ -716,7 +745,7 @@ func scepterUpdateRun(pair string, cl ScepterClient, caps ScepterCaps) {
 
 func scepterDoctorView(pair string, cl ScepterClient) {
 	fmt.Fprintln(Stdout)
-	Hint("doctor.fetch — the pair's structured self-report (state, recent commands, ops fragments)")
+	Hint("Kharej checks itself and reports")
 	GradBand(Stdout, uiW())
 	res, ok := scepterActSpin(cl, "doctor.fetch", nil)
 	if !ok {
@@ -725,7 +754,7 @@ func scepterDoctorView(pair string, cl ScepterClient) {
 	scepterLearnLatchPort(pair, res.Params)
 	rows := scepterRenderRows(res.Params)
 	if len(rows) == 0 {
-		Warn("doctor.fetch answered nothing.")
+		Warn("Kharej's health check answered nothing.")
 		return
 	}
 	scepterPrintDoctorRows(Stdout, res.Params, rows)
@@ -822,21 +851,20 @@ func scepterLearnLatchPort(pair string, params map[string]any) {
 // ---- backup.export ----
 
 func scepterBackupExport(pair string, cl ScepterClient) {
-	Page("Export backup", pair+" · backup.export")
+	Page("Export backup", pair)
 	GradBand(Stdout, uiW())
-	Hint("A tarball of Kharej's config dir: ymls, keys, tokens, .bak states, the")
-	Hint("pairing store and its audit — what a host rebuild restores from. Keys are")
-	Hint("in it on purpose; the command journal is not (machine replay state).")
-	Hint("Caps: 4 MB per file, 5 MB total — more is refused with too_large.")
+	Hint("An archive of Kharej's settings: tunnel configs, keys, tokens and the")
+	Hint("pairing with its audit — what a rebuilt server is restored from. It holds")
+	Hint("the keys on purpose: keep it private. Limit: 4 MB per file, 5 MB in all.")
 	fmt.Fprintln(Stdout)
-	Hint("Kharej is packaging and sending the config dir in chunks — a moment.")
+	Hint("Kharej is packing and sending its settings — a moment.")
 	res, ok := scepterActSpin(cl, "backup.export", nil)
 	if !ok {
 		return
 	}
 	docs := scepterLogsOf(res.Params)
 	if len(docs) != 1 {
-		Warn(fmt.Sprintf("backup.export answered %d document(s), want exactly 1.", len(docs)))
+		Warn(fmt.Sprintf("Kharej sent %d backup files, want exactly 1.", len(docs)))
 		return
 	}
 	// The chunk counter and its GradBar fill are honest: n is the number of
@@ -891,11 +919,11 @@ func scepterChunkMeter(n int) {
 // ---- audit.tail ----
 
 func scepterAuditView(cl ScepterClient) {
-	Page("Audit trail", "Kharej · audit.tail")
+	Page("Audit trail", "Kharej")
 	GradBand(Stdout, uiW())
-	Hint("The last lines of Kharej's two append-only scepter records, raw:")
-	Hint("  .pairing.audit   — the local console's credential audit (pair/rotate/revoke)")
-	Hint("  .pairing.journal — every cockpit command with its recorded outcome")
+	Hint("The last lines of Kharej's two records:")
+	Hint("  pairing changes   — allow, rotate, revoke on Kharej's own console")
+	Hint("  remote commands   — every command this server sent, with its result")
 	fmt.Fprintln(Stdout)
 	if !AskOK("Lines per source (empty = 100, cap 1000)", "", vScepterAuditN) {
 		return
@@ -930,7 +958,7 @@ func scepterAuditFetch(cl ScepterClient, nStr string) {
 	}
 	docs := scepterLogsOf(res.Params)
 	if len(docs) != 2 {
-		Warn(fmt.Sprintf("audit.tail answered %d source document(s), want 2 (audit + journal).", len(docs)))
+		Warn(fmt.Sprintf("Kharej sent %d audit files, want 2.", len(docs)))
 		return
 	}
 	labels := []string{".pairing.audit", ".pairing.journal"}
