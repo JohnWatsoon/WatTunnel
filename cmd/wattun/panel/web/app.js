@@ -167,6 +167,7 @@ function setView(v){
   $('#vTitle').textContent=VIEWS[v][1];
   if(v==='overview'&&S.ov&&!S.mapStarted)startMap();
   if(v==='settings')loadSettings();
+  if(window.PANEL&&PANEL.onView)PANEL.onView(v);
   render();
 }
 $('#out').addEventListener('click',async()=>{try{await api('logout',{method:'POST'})}catch(e){}showLogin()});
@@ -212,10 +213,12 @@ function render(){
   down.forEach(t=>{const b=el('b',null,t.name);parts.push([b,' is down'])});
   lossy.forEach(t=>{const m=el('em',null,t.name);parts.push([m,' is losing '+S.live[t.name].loss.toFixed(1)+'%'])});
   offK.forEach(k=>{const b=el('b',null,k.host);parts.push([b,' cannot be reached'])});
+  (ov.alerts||[]).filter(a=>a.kind!=='down'&&a.kind!=='kharej').forEach(a=>parts.push([el('em',null,a.text),'']));
   if(!ov.twofa)parts.push([el('em',null,'Two-factor sign-in is off'),' · Settings']);
-  if(!parts.length)f.appendChild(el('span','ok',ov.tunnels.length?'Everything is up.':'No tunnels yet. Create one with the manager: '+S.cli+' new'));
+  if(!parts.length)f.appendChild(el('span','ok',ov.tunnels.length?'Everything is up.':'No tunnels yet. Use New tunnel on the Tunnels page, or the manager: '+S.cli+' new'));
   parts.forEach((p,i)=>{if(i)f.append(' · ');f.append(...p)});
   renderTables();renderWatchdog();renderServer();renderKharej();renderRoutes();
+  if(window.PANEL&&PANEL.onRender)PANEL.onRender();
 }
 function sparkCells(name){
   const w=(S.ov.watchdog||[]).find(x=>x.name===name);
@@ -339,7 +342,7 @@ function gaugeBase(){
   svg.innerHTML=s;
 }
 function gauge(frac,ups,total){
-  const N=46;$('#gauge').querySelectorAll('line').forEach((ln,i)=>{const f=i/(N-1);const on=total&&f<=frac+1e-9;const col=f<.35?'#ff5d62':f<.6?'#ff7a33':f<.8?'#d4f36a':'#3ee08a';ln.setAttribute('stroke',on?col:'#26262a')});
+  const N=46;$('#gauge').querySelectorAll('line').forEach((ln,i)=>{const f=i/(N-1);const on=total&&f<=frac+1e-9;const col=f<.35?'#ff5d62':f<.6?'#ff7a33':f<.8?'#d4f36a':'#3ee08a';ln.setAttribute('stroke',on?col:getComputedStyle(document.body).getPropertyValue('--line').trim()||'#26262a')});
   $('#gNum').textContent=total?ups+'/'+total:'–';$('#gLab').textContent=!total?'no tunnels':ups===total?'all up':(total-ups)+' need attention';
 }
 function chart(){
@@ -348,10 +351,10 @@ function chart(){
   const vals=d.map(p=>mb(p.down));const top=Math.max(1,Math.ceil(Math.max(...vals)/5)*5);
   const X=i=>L+i*(W-L-4)/(n-1),Y=v=>T+(1-v/top)*(H-T-B);
   let s='<defs><pattern id="dp" width="5" height="5" patternUnits="userSpaceOnUse"><circle cx="2.5" cy="2.5" r="0.9" fill="#3ee08a" opacity="0.45"/></pattern><linearGradient id="fm" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><mask id="mk"><rect x="0" y="0" width="640" height="200" fill="url(#fm)"/></mask></defs>';
-  for(let k=0;k<=4;k++){const v=top*k/4;s+=`<line x1="${L}" x2="${W}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="#202024"/><text x="0" y="${(Y(v)+3.5).toFixed(1)}">${v.toFixed(v<10?1:0)}</text>`}
+  for(let k=0;k<=4;k++){const v=top*k/4;s+=`<line x1="${L}" x2="${W}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" class="gl"/><text x="0" y="${(Y(v)+3.5).toFixed(1)}">${v.toFixed(v<10?1:0)}</text>`}
   let p='';vals.forEach((v,i)=>{p+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)});
   s+=`<path d="${p}L${X(n-1)} ${Y(0)}L${L} ${Y(0)}Z" fill="url(#dp)" mask="url(#mk)"/><path d="${p}" fill="none" stroke="#3ee08a" stroke-width="2" stroke-linejoin="round"/>`;
-  s+=`<circle r="4" fill="#f3f3f4" cx="${X(n-1)}" cy="${Y(vals[n-1])}"/>`;
+  s+=`<circle r="4" style="fill:var(--fg)" cx="${X(n-1)}" cy="${Y(vals[n-1])}"/>`;
   const span=d[n-1].t-d[0].t;s+=`<text x="${L}" y="${H-6}">${fmtDur(span)} ago</text><text x="${W}" y="${H-6}" text-anchor="end">now · MB/s</text>`;
   svg.innerHTML=s;
   const avg=vals.reduce((a,b)=>a+b,0)/n;$('#fAvg').textContent=avg.toFixed(1)+' MB/s';$('#fPeak').textContent=Math.max(...vals).toFixed(1)+' MB/s';$('#fLow').textContent=Math.min(...vals).toFixed(1)+' MB/s';$('#fMoved').textContent=fmtBytes(S.moved);
@@ -419,7 +422,7 @@ async function openDrawer(name){
   const info=$('#dInfo');info.textContent='';
   const kv=(k,v)=>{const d=el('div','kv');d.append(el('span',null,k),el('span','n',v));info.appendChild(d)};
   if(t.peer)kv('Kharej',t.peer);kv('Ports',(t.ports||[]).join(', ')||'–');kv('Paired',t.paired?'yes':'no');kv('Starts at boot',t.enabled?'yes':'no');
-  drawerLive();$('#dX').focus();
+  drawerLive();$('#dX').focus();if(window.PANEL&&PANEL.onDrawer)PANEL.onDrawer(name,t);
   const [h,l]=await Promise.all([api('tunnels/'+encodeURIComponent(name)+'/history').catch(()=>null),api('tunnels/'+encodeURIComponent(name)+'/logs?n=200').catch(()=>null)]);
   if(S.drawer!==name)return;
   drawHist(h&&h.ok&&Array.isArray(h.j)?h.j:[]);
@@ -434,7 +437,7 @@ function drawHist(d){
   if(d.length<2){svg.innerHTML='<text x="320" y="90" text-anchor="middle">No history yet: the tunnel keeps 5 minutes once it runs.</text>';return}
   const v=d.map(s=>mb(s.rate_bps||0)),r=d.map(s=>s.srtt_ms||0);const top=Math.max(1,Math.ceil(Math.max(...v)/5)*5),rt=Math.max(10,Math.max(...r)*1.2);const n=d.length;
   const X=i=>L+i*(W-L-4)/(n-1),Y=x=>T+(1-x/top)*(H-T-B),YR=x=>T+(1-x/rt)*(H-T-B);
-  let s='';for(let k=0;k<=4;k++){const y=top*k/4;s+=`<line x1="${L}" x2="${W}" y1="${Y(y).toFixed(1)}" y2="${Y(y).toFixed(1)}" stroke="#202024"/><text x="0" y="${(Y(y)+3.5).toFixed(1)}">${y.toFixed(y<10?1:0)}</text>`}
+  let s='';for(let k=0;k<=4;k++){const y=top*k/4;s+=`<line x1="${L}" x2="${W}" y1="${Y(y).toFixed(1)}" y2="${Y(y).toFixed(1)}" class="gl"/><text x="0" y="${(Y(y)+3.5).toFixed(1)}">${y.toFixed(y<10?1:0)}</text>`}
   let p='',q='';v.forEach((x,i)=>{p+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(x).toFixed(1)});r.forEach((x,i)=>{q+=(i?'L':'M')+X(i).toFixed(1)+' '+YR(x).toFixed(1)});
   s+=`<path d="${q}" fill="none" stroke="#9a8cff" stroke-width="1.4" stroke-dasharray="3 3"/><path d="${p}" fill="none" stroke="#3ee08a" stroke-width="2"/>`;
   s+=`<text x="${L}" y="${H-4}">${fmtDur(d[n-1].t-d[0].t)} ago</text><text x="${W}" y="${H-4}" text-anchor="end">— sending rate MB/s · - - latency (max ${Math.max(...r).toFixed(0)} ms)</text>`;
@@ -471,6 +474,8 @@ $('#pwBtn').addEventListener('click',async()=>{
   $('#pwErr').textContent=r.ok?'':(r.j.error||'Failed.');if(r.ok){$('#pwOld').value='';$('#pwNew').value='';$('#pwErr').textContent='';$('#pwBtn').textContent='Changed';setTimeout(()=>{$('#pwBtn').textContent='Change'},2000)}
 });
 $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{method:'POST'})}catch(e){}showLogin()});
+
+window.PANEL={api,el,$,S,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf};
 
 /* ---------- boot ---------- */
 markDots();

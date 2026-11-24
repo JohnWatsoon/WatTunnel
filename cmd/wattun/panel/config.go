@@ -27,7 +27,18 @@ type Config struct {
 	Recovery []string
 	CertFile string
 	KeyFile  string
-	file     string
+	CertKind string   // self (default) | owner | ca | acme: what the certificate is, for Settings and alerts
+	ACMEName string   // the domain or IP the ACME certificate is for (renewal)
+	Allow    []string // IP allowlist (CIDRs or single IPs); empty = everyone may reach the sign-in page
+
+	// alerts and schedules (phase 3)
+	AlertLoss   float64 // loss % held for 5 min
+	AlertDisk   float64 // disk use %
+	AlertRAM    float64 // RAM use %
+	SpeedEvery  int     // hours between scheduled speed tests of every Iran tunnel; 0 = off
+	BackupEvery int     // hours between scheduled backups of this server; 0 = off
+	BackupKeep  int     // scheduled backups kept
+	file        string
 }
 
 // LoadConfig reads FILE. Unknown keys are ignored so an older binary reads a newer file.
@@ -71,8 +82,27 @@ func LoadConfig(file string) (*Config, error) {
 			c.CertFile = v
 		case "cert-key":
 			c.KeyFile = v
+		case "cert-kind":
+			c.CertKind = v
+		case "acme-name":
+			c.ACMEName = v
+		case "allow":
+			c.Allow = splitList(v)
+		case "alert-loss":
+			c.AlertLoss, _ = strconv.ParseFloat(v, 64)
+		case "alert-disk":
+			c.AlertDisk, _ = strconv.ParseFloat(v, 64)
+		case "alert-ram":
+			c.AlertRAM, _ = strconv.ParseFloat(v, 64)
+		case "speedtest-every":
+			c.SpeedEvery, _ = strconv.Atoi(v)
+		case "backup-every":
+			c.BackupEvery, _ = strconv.Atoi(v)
+		case "backup-keep":
+			c.BackupKeep, _ = strconv.Atoi(v)
 		}
 	}
+	c.defaults()
 	if c.Port < 1 || c.Port > 65535 || len(c.Path) < 8 || c.User == "" || c.PassHash == "" {
 		return nil, fmt.Errorf("%s: port, path (8+ chars), user and pass are required", file)
 	}
@@ -102,9 +132,48 @@ func (c *Config) SaveAs(file string) error {
 	if c.KeyFile != "" && c.KeyFile != filepath.Join(dir, ".panel.key") {
 		fmt.Fprintf(&b, "cert-key: %s\n", c.KeyFile)
 	}
+	if c.CertKind != "" && c.CertKind != "self" {
+		fmt.Fprintf(&b, "cert-kind: %s\n", c.CertKind)
+	}
+	if c.ACMEName != "" {
+		fmt.Fprintf(&b, "acme-name: %s\n", c.ACMEName)
+	}
+	if len(c.Allow) > 0 {
+		fmt.Fprintf(&b, "allow: %s\n", strings.Join(c.Allow, ","))
+	}
+	fmt.Fprintf(&b, "alert-loss: %g\nalert-disk: %g\nalert-ram: %g\n", c.AlertLoss, c.AlertDisk, c.AlertRAM)
+	fmt.Fprintf(&b, "speedtest-every: %d\nbackup-every: %d\nbackup-keep: %d\n", c.SpeedEvery, c.BackupEvery, c.BackupKeep)
 	tmp := file + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, file)
+}
+
+func (c *Config) defaults() {
+	if c.AlertLoss <= 0 {
+		c.AlertLoss = 5
+	}
+	if c.AlertDisk <= 0 {
+		c.AlertDisk = 90
+	}
+	if c.AlertRAM <= 0 {
+		c.AlertRAM = 90
+	}
+	if c.BackupKeep <= 0 {
+		c.BackupKeep = 7
+	}
+	if c.CertKind == "" {
+		c.CertKind = "self"
+	}
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

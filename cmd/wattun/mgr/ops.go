@@ -28,7 +28,7 @@ import (
 
 func init() {
 	Register("update", func(a ...string) int { return b2i(update(a)) })
-	Register("rollback", func(a ...string) int { rollback(); return 0 })
+	Register("rollback", func(a ...string) int { rollback(hasFlag(a, "--yes")); return 0 })
 	Register("uninstall_all", func(a ...string) int { return b2i(uninstallAll()) })
 	Register("bundle_cmd", func(a ...string) int { return b2i(bundleCmd(arg(a, 0), arg(a, 1))) })
 	Register("heal", func(a ...string) int { heal(); return 0 })
@@ -492,7 +492,8 @@ func restartStale() bool {
 
 // ---- roll back ----
 
-func rollback() {
+// rollback swaps wattun.prev back in; yes skips the question (`rollback --yes`, the web panel's job).
+func rollback(yes bool) {
 	prev := P.Bin + ".prev"
 	if !fileExists(prev) {
 		Warn("No previous version saved.")
@@ -501,7 +502,7 @@ func rollback() {
 	pv, _ := exec.Command(prev, "-version").CombinedOutput()
 	Say("  Current: " + BOLD + BinVersion() + RST + "    Previous: " + BOLD + strings.TrimSpace(string(pv)) + RST)
 	fmt.Fprintln(Stdout)
-	if !Confirm("Roll back to the previous version?", false) {
+	if !yes && !Confirm("Roll back to the previous version?", false) {
 		return
 	}
 	rb := P.Bin + ".rb"
@@ -512,6 +513,7 @@ func rollback() {
 	Ver = BinVersion()
 	Ok("Rolled back: wattun is now " + BOLD + Ver + RST + ".")
 	restartStale()
+	panelRestartIfOn() // plan D4: every binary swap restarts a running panel
 }
 
 // ---- offline bundle ----
@@ -800,6 +802,7 @@ func slaVal(f, key string) int {
 // running.
 func heal() {
 	_ = os.MkdirAll(P.Run, 0o755)
+	healPanel()
 	for _, n := range Tunnels() {
 		if Role(n) != "Iran" || !IsEnabled(Unit(n)) {
 			continue
@@ -850,6 +853,15 @@ func heal() {
 			autoSyncCompanion(n)
 			healAutoHelpers(n)
 		}
+	}
+}
+
+// healPanel restarts the web panel only when it is on (panel.conf exists) and its unit failed (plan D4): it never
+// starts a panel the owner turned off.
+func healPanel() {
+	if fileExists(panelConf()) && systemctlOK("is-failed", "-q", panelUnit()) {
+		envLogger("wattun-heal", "web panel failed, restarting")
+		_ = Systemctl("restart", panelUnit())
 	}
 }
 

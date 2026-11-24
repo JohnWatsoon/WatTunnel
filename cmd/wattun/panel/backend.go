@@ -10,6 +10,32 @@ type Backend interface {
 	History(name string) []byte         // the unit's /stats/history JSON (5 min of 5 s samples), nil if none
 	Logs(name string, n int) []string   // the unit's journal, newest last
 	Kharej() []Kharej                   // one per paired Kharej, through the pairing (may be slow: called by the poller)
+
+	// Actions (phase 2). Each is the console's own function; the panel only asks and shows.
+	Unit(name, action string) error // start | stop | restart a tunnel here
+	SetPorts(name string, specs []string) error
+	SetLimit(name, port, rate, quota, period string) error
+	SpeedTest(name, dir string, mb int) (Speed, error)
+	Token(name string) string
+	// ManagerArgv is the argv of one unattended manager command (`wattun delete NAME --yes` ...): long
+	// actions run it as a job, so the panel and the console share one implementation.
+	ManagerArgv(args ...string) []string
+	// KharejCall runs one pairing command through local tunnel VIA; refused is the console's plain-words
+	// refusal ("" = done).
+	KharejCall(via, cmd string, args map[string]any) (params map[string]any, refused string, err error)
+	KharejCreate(via, name, carrier, ports string) (token string, err error)
+	KharejKeyRotate(via, name string) (local, token string, err error)
+	KharejBackup(params map[string]any) ([]byte, error)
+	RestartSelf() // restart the panel's own unit (after a certificate or port change)
+}
+
+// Speed is one direction of the built-in speed test.
+type Speed struct {
+	Dir     string  `json:"dir"`
+	OK      bool    `json:"ok"`
+	MBps    float64 `json:"mb_per_s"`
+	Seconds float64 `json:"seconds"`
+	Error   string  `json:"error,omitempty"`
 }
 
 type Host struct {

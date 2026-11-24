@@ -49,6 +49,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/JohnWatsoon/WatTunnel/cmd/wattun/mgr"
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
 
@@ -205,6 +206,12 @@ func (o *fileScepterOps) writeAtomic(path, content string) error {
 	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
 		return err
 	}
+	unlock, err := mgr.WriteLock() // plan D3: the console and the web panel write these files too
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	defer unlock()
 	return os.Rename(tmp, path)
 }
 

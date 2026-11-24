@@ -19,12 +19,48 @@ type fakeBE struct{}
 
 func (fakeBE) Host() Host { return Host{Name: "box", Version: "x"} }
 func (fakeBE) Tunnels() []Tunnel {
-	return []Tunnel{{Name: "t1", Role: "Iran", Active: true, Enabled: true, Ports: []string{"443"}}}
+	return []Tunnel{{Name: "t1", Role: "Iran", Active: true, Enabled: true, Paired: fakePaired, Ports: []string{"443"}}}
 }
 func (fakeBE) Stats(string) (Counters, bool) { return Counters{Alive: true, BytesIn: 1000}, true }
 func (fakeBE) History(string) []byte         { return []byte(`[]`) }
 func (fakeBE) Logs(string, int) []string     { return []string{"a"} }
-func (fakeBE) Kharej() []Kharej              { return nil }
+func (fakeBE) Kharej() []Kharej              { return fakeKharej }
+
+// fake action state: what the actions called (the panel must only ever call these)
+var (
+	fakeKharej []Kharej
+	fakePaired bool
+	fakeCalls  []string
+)
+
+func (fakeBE) Unit(n, a string) error { fakeCalls = append(fakeCalls, a+" "+n); return nil }
+func (fakeBE) SetPorts(n string, p []string) error {
+	fakeCalls = append(fakeCalls, "ports "+n)
+	return nil
+}
+func (fakeBE) SetLimit(n, p, r, q, pd string) error {
+	fakeCalls = append(fakeCalls, "limit "+n)
+	return nil
+}
+func (fakeBE) SpeedTest(n, d string, mb int) (Speed, error) {
+	return Speed{Dir: d, OK: true, MBps: 12.5, Seconds: 1}, nil
+}
+func (fakeBE) Token(string) string { return "wat1:abc" }
+func (fakeBE) ManagerArgv(a ...string) []string {
+	fakeCalls = append(fakeCalls, "mgr "+strings.Join(a, " "))
+	return append([]string{os.Args[0], "-test.run=TestHelperNothing", "--"}, a...)
+}
+func (fakeBE) KharejCall(via, cmd string, args map[string]any) (map[string]any, string, error) {
+	fakeCalls = append(fakeCalls, "kharej "+cmd)
+	return map[string]any{}, "", nil
+}
+func (fakeBE) KharejCreate(via, n, c, p string) (string, error) { return "wat1:new", nil }
+func (fakeBE) KharejKeyRotate(via, n string) (string, string, error) {
+	fakeCalls = append(fakeCalls, "keyrotate "+n)
+	return n, "wat1:rot", nil
+}
+func (fakeBE) KharejBackup(map[string]any) ([]byte, error) { return []byte("tar"), nil }
+func (fakeBE) RestartSelf()                                {}
 
 const testPath = "s3cretpathXYZabc"
 

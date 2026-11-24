@@ -8,6 +8,7 @@
 <title>{{TITLE}}</title>
 <link rel="stylesheet" href="app.css">
 <script src="app.js" defer></script>
+<script src="actions.js" defer></script>
 </head>
 <body>
 
@@ -60,7 +61,7 @@
     <header class="top">
       <div class="brand"><div class="mk" aria-hidden="true"></div><span class="host" id="hName"></span><span class="lab" id="hMeta"></span></div>
       <nav class="nav" aria-label="Sections">
-        <button data-v="overview">Overview</button><button data-v="tunnels">Tunnels</button><button data-v="kharej">Kharej servers</button><button data-v="settings">Settings</button>
+        <button data-v="overview">Overview</button><button data-v="tunnels">Tunnels</button><button data-v="kharej">Kharej servers</button><button data-v="traffic">Traffic</button><button data-v="system">System</button><button data-v="settings">Settings</button>
       </nav>
       <div class="who"><span class="live lab"><i class="pulse" id="pulse"></i><span id="liveTxt">connecting</span></span><button class="av" id="out" aria-label="Sign out">⏻</button></div>
     </header>
@@ -135,13 +136,56 @@
 
     <main id="vTunnels" class="pane" hidden>
       <section class="card">
-        <div class="ch"><div class="ct">All tunnels <span class="lab" id="tunN2"></span></div></div>
+        <div class="ch"><div class="ct">All tunnels <span class="lab" id="tunN2"></span></div>
+          <div class="tools"><button class="btn sec sm" data-bulk="start">Start all</button><button class="btn sec sm" data-bulk="restart">Restart all</button><button class="btn sec sm danger" data-bulk="stop">Stop all</button><button class="btn pri sm" id="newBtn">New tunnel</button></div></div>
         <div class="tw"><table><thead><tr><th>name</th><th>side</th><th>carrier</th><th>status</th><th class="r">download</th><th class="r">upload</th><th class="r">latency</th><th class="r">loss</th><th>last 24 h</th><th class="r">ports</th></tr></thead><tbody id="rows2"></tbody></table></div>
       </section>
     </main>
 
     <main id="vKharej" class="pane" hidden>
       <div id="khFull" class="grid g2"></div>
+    </main>
+
+    <main id="vTraffic" class="pane grid g2" hidden>
+      <section class="card s2w">
+        <div class="ch"><div class="ct">Traffic by day <span class="lab">download, all tunnels, 30 days</span></div><a class="btn sec sm" href="api/traffic.csv" download>CSV</a></div>
+        <div class="tc"><svg id="trDays" viewBox="0 0 640 200" role="img" aria-label="Traffic by day"></svg></div>
+      </section>
+      <section class="card s2w">
+        <div class="ch"><div class="ct">Per tunnel</div></div>
+        <div class="tw"><table><thead><tr><th>tunnel</th><th class="r">today</th><th class="r">7 days</th><th class="r">30 days</th></tr></thead><tbody id="trRows"></tbody></table></div>
+      </section>
+      <section class="card s2w">
+        <div class="ch"><div class="ct">Speed tests</div><div class="tools"><select id="spTun" aria-label="Tunnel"></select><button class="btn pri sm" id="spRun">Run</button></div></div>
+        <div class="tw"><table><thead><tr><th>when</th><th>tunnel</th><th>carrier</th><th class="r">download</th><th class="r">upload</th><th>note</th></tr></thead><tbody id="spRows"></tbody></table></div>
+      </section>
+    </main>
+
+    <main id="vSystem" class="pane grid g2" hidden>
+      <section class="card">
+        <div class="ch"><div class="ct">Updates</div></div>
+        <div id="upList"></div>
+        <div class="tools mt14"><button class="btn pri sm" id="upHere">Update this server</button><button class="btn sec sm" id="upBack">Roll back</button></div>
+        <p class="note">Update Kharej first, then this server. The page reconnects after this server restarts.</p>
+      </section>
+      <section class="card">
+        <div class="ch"><div class="ct">Backups of this server</div><button class="btn pri sm" id="bkNow">Back up now</button></div>
+        <div id="bkList"></div>
+        <div class="fld mt14"><label for="bkFile">Restore from a backup file (.tar.gz)</label><input id="bkFile" type="file" accept=".gz,.tgz,application/gzip"></div>
+        <button class="btn sec sm danger" id="bkRestore">Restore</button>
+      </section>
+      <section class="card">
+        <div class="ch"><div class="ct">Alerts</div></div>
+        <div id="alList"></div>
+      </section>
+      <section class="card">
+        <div class="ch"><div class="ct">Recent jobs</div></div>
+        <div id="jbList"></div>
+      </section>
+      <section class="card s2w">
+        <div class="ch"><div class="ct">Panel audit log</div></div>
+        <div class="tw"><table><thead><tr><th>when</th><th>who</th><th>from</th><th>what</th><th>on</th><th>result</th></tr></thead><tbody id="auRows"></tbody></table></div>
+      </section>
     </main>
 
     <main id="vSettings" class="pane grid g2" hidden>
@@ -177,10 +221,58 @@
         <div class="ch mt28"><div class="ct">Sessions</div></div>
         <p class="note">Signs out every browser, this one included.</p>
         <button class="btn sec" id="outAll">Sign out everywhere</button>
+        <div class="ch mt28"><div class="ct">Signed-in browsers</div></div>
+        <div id="sessList"></div>
         <p class="note mt28">Lost access? On the server: <code data-cli="panel reset"></code> makes a new password, <code data-cli="panel 2fa-reset"></code> turns 2FA off.</p>
+      </section>
+      <section class="card">
+        <div class="ch"><div class="ct">Panel</div></div>
+        <div class="fld"><label for="stTitle">Page title (also the name in the 2FA app)</label><input id="stTitle" maxlength="60"></div>
+        <div class="fld"><label for="stPath">Secret path</label><input id="stPath" autocapitalize="none" spellcheck="false"></div>
+        <div class="fld"><label for="stAllow">Only these addresses may open the panel (one IP or range per line, empty = anyone)</label><textarea id="stAllow" rows="3" spellcheck="false"></textarea></div>
+        <div class="err" id="stErr" role="alert"></div>
+        <button class="btn pri" id="stSave">Save</button>
+        <div class="ch mt28"><div class="ct">Look</div></div>
+        <div class="tools"><button class="btn sec sm" data-theme-set="system">System</button><button class="btn sec sm" data-theme-set="dark">Dark</button><button class="btn sec sm" data-theme-set="light">Light</button></div>
+        <label class="chk mt14"><input type="checkbox" id="stNotify"> Browser notifications for new alerts</label>
+        <p class="note">Browsers allow notifications only once they trust the certificate (your own, ACME, or the private CA installed).</p>
+      </section>
+      <section class="card">
+        <div class="ch"><div class="ct">Certificate</div><span class="chip" id="ceKind"></span></div>
+        <div class="kvs" id="ceInfo"></div>
+        <details class="mt14"><summary class="lab">Use your own certificate</summary>
+          <div class="fld mt14"><label for="ceCrt">Certificate (PEM)</label><textarea id="ceCrt" rows="4" spellcheck="false"></textarea></div>
+          <div class="fld"><label for="ceKey">Private key (PEM)</label><textarea id="ceKey" rows="4" spellcheck="false"></textarea></div>
+          <button class="btn sec sm" id="ceOwn">Use it</button>
+        </details>
+        <details class="mt14"><summary class="lab">Get one for a domain (ACME)</summary>
+          <p class="note">The domain must point at this server. Port 80 opens for a few seconds during the check and is refused if something else uses it. If it fails, the current certificate stays.</p>
+          <div class="fld"><label for="ceDom">Domain</label><input id="ceDom" autocapitalize="none" spellcheck="false"></div>
+          <button class="btn sec sm" id="ceAcme">Get certificate</button>
+        </details>
+        <details class="mt14"><summary class="lab">Private CA for your phone</summary>
+          <p class="note">Makes a CA that can only vouch for this server's own IPs. Install it on your phone once and the warning goes away, without trusting it for any other site.</p>
+          <div class="tools"><button class="btn sec sm" id="ceCA">Make and use it</button><a class="btn sec sm" id="ceCAdl" href="api/settings/ca.crt" download hidden>Download the CA</a></div>
+        </details>
+        <button class="btn sec sm mt14" id="ceSelf">Back to self-signed</button>
+        <div class="err" id="ceErr" role="alert"></div>
+      </section>
+      <section class="card">
+        <div class="ch"><div class="ct">Alerts and schedules</div></div>
+        <div class="fld"><label for="alLoss">Alert when packet loss stays above (%) for 5 minutes</label><input id="alLoss" inputmode="decimal"></div>
+        <div class="fld"><label for="alDisk">Disk use alert (%)</label><input id="alDisk" inputmode="decimal"></div>
+        <div class="fld"><label for="alRam">RAM use alert (%)</label><input id="alRam" inputmode="decimal"></div>
+        <div class="fld"><label for="alSpeed">Speed test every N hours (0 = off)</label><input id="alSpeed" inputmode="numeric"></div>
+        <div class="fld"><label for="alBackup">Backup every N hours (0 = off)</label><input id="alBackup" inputmode="numeric"></div>
+        <div class="fld"><label for="alKeep">Scheduled backups kept</label><input id="alKeep" inputmode="numeric"></div>
+        <div class="err" id="alErr" role="alert"></div>
+        <button class="btn pri" id="alSave">Save</button>
       </section>
     </main>
   </div>
+
+  <dialog id="dlg" aria-labelledby="dlgT"><form method="dialog" id="dlgF"><h2 id="dlgT"></h2><div id="dlgB"></div><div class="err" id="dlgE" role="alert"></div><div class="tools dlg-b" id="dlgA"></div></form></dialog>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <aside class="drawer" id="drawer" hidden aria-label="Tunnel">
     <div class="dr-in">
@@ -194,6 +286,7 @@
       <div class="lab mt18">last 5 minutes, from the tunnel</div>
       <div class="tc"><svg id="dChart" viewBox="0 0 640 180" role="img" aria-label="Rate over the last five minutes"></svg></div>
       <div class="kvs" id="dInfo"></div>
+      <div class="tools mt18" id="dActs"></div>
       <div class="ch mt18"><div class="ct">Log</div><button class="btn sec sm" id="dLogR">Refresh</button></div>
       <pre class="log" id="dLog"></pre>
     </div>

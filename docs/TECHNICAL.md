@@ -3403,9 +3403,12 @@ Measured 2026-10-10 on the real Iran <-> Kharej path (only ICMP passes):
 
 A browser dashboard on the **Iran** server: this server's tunnels with live rates, health, a 24-hour outage
 watchdog, per-tunnel history and logs, and the paired Kharej servers (reached through the scepter channel).
-Phase 1 is read-only: the panel never writes a tunnel config or touches a tunnel unit. The only file it writes is
-its own `panel.conf` (password, 2FA). Every action a later phase adds calls the manager's functions or a scepter
-command, so a panel login can never do more than the pairing's capability tier on Kharej allows.
+Since the second batch of 3.6.0 it also manages them: start, stop and restart, ports and per-port limits, speed
+tests, carrier re-tests, tokens, new tunnels (here only, or on Kharej and here in one go), delete, updates and
+rollback, backups and restore, traffic history, alerts, and the panel's own settings and certificate. The panel
+never re-implements a manager action: each one calls the manager's Go functions, the manager's unattended CLI
+(`wattun iran --token ... --yes`, `delete NAME --yes`, `update`, `rollback --yes`, `backup FILE`, `restore FILE`)
+or a scepter command, so a panel login can never do more than the pairing's capability tier on Kharej allows.
 
 It is optional. The installer's Iran wizard asks `Turn on the web panel ...? [Y/n]` (Enter = yes) on a fresh
 install; non-interactive installs turn it on only with `WAT_PANEL=1`. An update never turns it on or off; it
@@ -3429,16 +3432,30 @@ through to the binary.
 
 | Path | What |
 |---|---|
-| `/etc/wattun/panel.conf` | Port, secret path, title, user, bcrypt password hash, TOTP secret, last used TOTP step, hashed recovery codes. Mode 0600. Deliberately not `.yml`: the managers list every `*.yml` as a tunnel. Keys: `port`, `path`, `title`, `user`, `pass`, `totp`, `totp-last`, `recovery`, `cert`, `cert-key`. Edit by hand only with the panel stopped. |
-| `/etc/wattun/.panel.crt`, `.panel.key` | Self-signed ECDSA P-256 certificate, 10 years, SAN = the server's IPs. `cert:` / `cert-key:` in `panel.conf` point at your own instead. |
+| `/etc/wattun/panel.conf` | Port, secret path, title, user, bcrypt password hash, TOTP secret, last used TOTP step, hashed recovery codes, certificate, allowlist, alert thresholds and schedules. Mode 0600. Deliberately not `.yml`: the managers list every `*.yml` as a tunnel. Keys: `port`, `path`, `title`, `user`, `pass`, `totp`, `totp-last`, `recovery`, `cert`, `cert-key`, `cert-kind` (`self`, `owner`, `ca`, `acme`), `acme-name`, `allow` (comma-separated IPs and ranges, empty = anyone), `alert-loss` (%, default 5), `alert-disk` (%, 90), `alert-ram` (%, 90), `speedtest-every` (hours, 0 = off), `backup-every` (hours, 0 = off), `backup-keep` (7). Edit by hand only with the panel stopped. |
+| `/etc/wattun/.panel.crt`, `.panel.key` | Self-signed ECDSA P-256 certificate, 10 years, SAN = the server's IPs. The other tiers write `.panel-owner.*`, `.panel-ca.*` (leaf) and `.panel-acme.*`; the private CA itself is `.panel-ca.crt` / `.panel-ca.key`. |
 | `/var/lib/wattun/panel/outages.jsonl` | Closed watchdog outages, kept 90 days. |
+| `/var/lib/wattun/panel/sessions` | Signed-in browsers: sha256 of the cookie (never the cookie), user, IP, browser, created and last seen. A panel restart (an update) keeps everyone signed in. |
+| `/var/lib/wattun/panel/jobs/ID.json`, `.log`, `.rc` | Long actions (new tunnel, delete, update, backup, restore, speed test, ACME). |
+| `/var/lib/wattun/panel/audit.jsonl` | Every change made in the panel: time, user, IP, action, target, result. Rotated at 5 MB. |
+| `/var/lib/wattun/panel/traffic.jsonl` | Hourly bytes per tunnel (`traffic.jsonl.cur` holds the open hour), kept 400 days. |
+| `/var/lib/wattun/panel/speedtests.jsonl`, `alerts.jsonl`, `schedule.json` | Speed test results, cleared alerts, the scheduler's last runs. |
+| `/var/lib/wattun/panel/backups/` | `manual-*.tar.gz` and `auto-*.tar.gz` (the scheduled ones, only `backup-keep` of them kept). |
 | `wattun-panel.service` | Runs `wattun -panel /etc/wattun/panel.conf`, `Restart=always`. |
 
 ### TLS
 
 Iran servers often cannot reach an ACME CA, so the panel makes its own certificate and the browser shows a
 warning on first visit. Compare the SHA-256 fingerprint the console printed with the one the browser shows, then
-accept it. To use a real certificate, put its paths in `cert:` and `cert-key:` and restart the unit.
+accept it. Settings -> Certificate switches between four kinds without a restart (the listener picks the new pair
+up at once; a pair that does not load leaves the old one in place):
+
+| Kind | How |
+|---|---|
+| Self-signed | The default. "Back to self-signed" returns to it. |
+| Your own | Paste a PEM certificate and key. Refused when they do not match or the certificate has expired. |
+| Private CA | The panel makes a CA whose name constraints allow only this server's IPs (and no DNS name), and a 397-day leaf. Install the CA on your phone once (Download the CA) and the warning is gone; the CA cannot vouch for any other site. |
+| ACME | Let's Encrypt over HTTP-01, for a domain that points at this server. Port 80 is bound only during the check and the request is refused when something else holds it. Runs as a job; on failure the current certificate stays. The scheduler renews it when less than 30 days are left. |
 
 ### Login and 2FA
 
@@ -3451,7 +3468,18 @@ accept it. To use a real certificate, put its paths in `cert:` and `cert-key:` a
   Settings (scan the QR, type one code) or with `wattun panel 2fa`. The issuer shown in the authenticator app is
   the panel title (the hostname), never the product name.
 - Turning 2FA on prints 10 one-time recovery codes. Each works once in place of a 6-digit code.
-- Sessions live in memory: a panel restart signs everyone out. Settings -> Sign out everywhere does the same.
+- Sessions survive a panel restart (`sessions` file above). Settings lists every signed-in browser; sign out one or
+  all of them there.
+- **Three tiers.** Reading needs a session. Day-to-day changes (start, stop, ports, limits, speed tests, backups)
+  need a session. Actions that expose a key or cannot be undone (show token, delete, Kharej key rotation, updates,
+  rollback, backup download, restore, Kharej backup, panel settings, certificates) need 2FA turned on **and** the
+  password plus a fresh 6-digit code in the same request. A wrong password or code counts toward the 5-failure ban.
+  With 2FA off these actions answer `need2fa`.
+- **Last link.** Stopping, bulk-stopping, deleting or rotating the key of the last running tunnel paired with a
+  Kharej server is refused until you type that tunnel's name: without it that Kharej server can only be managed
+  from its own console.
+- **IP allowlist.** Settings -> Panel can limit the panel to IPs and ranges. Everyone else gets the nginx 404. A
+  list that would leave out your own address is refused.
 
 ### What the pages show
 
@@ -3462,8 +3490,55 @@ accept it. To use a real certificate, put its paths in `cert:` and `cert-key:` a
 - **Kharej servers**: per paired host, version, capability tier and its tunnels as Kharej reports them over the
   scepter channel (polled every 15 s; a host that does not answer within 65 s shows as unreachable).
 
+- **Traffic**: bytes per day for 30 days, per tunnel today / 7 days / 30 days, CSV export, speed test history.
+- **System**: versions here and on each Kharej, update and rollback, backups (make, download, delete, restore from
+  a file), alerts, recent jobs, the panel audit log.
+- **Settings**: password, 2FA, signed-in browsers, title, secret path, allowlist, theme (system, dark, light),
+  browser notifications, certificate, alert thresholds and schedules.
+
 Live numbers come from each tunnel's `/stats` once a second and reach the page as server-sent events. An outage
 is a tunnel that is enabled or running but not up; stopping a tunnel by hand is not an outage.
+
+### Actions and jobs
+
+Short actions answer at once. Long ones start a job and the page shows its log live; closing the page does not
+stop it. On Linux a job runs as `systemd-run --unit=panel-job-ID --collect`, outside the panel's unit, so a panel
+update or restart does not kill it, and the panel shows its end state after it comes back (`done`, `failed` with
+the exit code, or `lost` when it ended without one). `KEY=VALUE` lines in a job's log (`TOKEN=`, `TUNNEL=`) are its
+results; the page never prints a `TOKEN=` line, it offers a Show button.
+
+- **New tunnel.** "Here only, from a token" runs `wattun iran --token T --map M [--name N] [--test PRESET] --yes`.
+  "On Kharej and here" creates the tunnel on Kharej through a paired tunnel's scepter channel, then runs the same
+  command with the token Kharej returned.
+- **Kharej.** Per remote tunnel: start, stop, restart and new key. A new key restarts the tunnel on Kharej; the
+  twin tunnel here (same name and host, or the only tunnel to that host) switches to it by itself. Per Kharej
+  server: update, backup download, update status, audit log. All Kharej calls are serialized.
+- **Update here** runs `wattun update` as a job and restarts the panel; the page waits and reconnects. **Roll back**
+  runs `wattun rollback --yes`.
+- **Restore** takes a `.tar.gz` made by the panel or the manager (8 MB at most). The archive must hold exactly one
+  top folder named like the config directory and no absolute paths, `..` or links; then `wattun restore FILE`
+  writes it.
+
+### Alerts and schedules
+
+Checked every 5 seconds: a tunnel down for 30 s, loss above `alert-loss` for 5 minutes, a Kharej server
+unreachable for 2 minutes, disk or RAM above the threshold, the panel certificate expiring within 14 days, and 10
+failed sign-ins within 10 minutes. Active alerts show on the overview headline and on System; cleared ones go to
+`alerts.jsonl`. With browser notifications on, a new alert also pops up (browsers allow this only once they trust
+the certificate). Once a minute the scheduler runs the speed tests (`speedtest-every`), the backups
+(`backup-every`, keeping `backup-keep`) and the ACME renewal.
+
+### Write lock
+
+The panel, the Go manager, the bash manager and the scepter on Kharej can all change the same files. Each takes
+`flock` on `$RUN/write.lock` (10 s timeout) around the final rename of a config, around enable/disable, and in the
+bash manager's `wmv`. A change that cannot get the lock fails with "another change is being saved, try again"
+instead of overwriting the other one.
+
+### Auto-heal
+
+`wattun-manager heal` (and the Go manager's heal) restarts the panel unit when `panel.conf` exists and the unit is
+in the failed state.
 
 ## Handover, drain and rollback
 

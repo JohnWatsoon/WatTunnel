@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JohnWatsoon/WatTunnel/cmd/wattun/mgr"
@@ -173,7 +174,12 @@ func (mgrBackend) Kharej() []panel.Kharej {
 	return out
 }
 
+// kharejMu serializes every pairing call of the panel (the 15 s poller and the actions): one channel at a time.
+var kharejMu sync.Mutex
+
 func askKharej(k *panel.Kharej, via string) error {
+	kharejMu.Lock()
+	defer kharejMu.Unlock()
 	cl, err := mgr.DialScepter(via)
 	if err != nil {
 		return err
@@ -203,4 +209,64 @@ func askKharej(k *panel.Kharej, via string) error {
 			State: s("state"), Health: s("health")})
 	}
 	return nil
+}
+
+// ---- actions (phase 2): the console's own functions ----
+
+func (mgrBackend) Unit(name, action string) error {
+	u := mgr.Unit(name)
+	switch action {
+	case "start":
+		return mgr.Start(u)
+	case "stop":
+		return mgr.Stop(u)
+	case "restart":
+		return mgr.Restart(u)
+	}
+	return fmt.Errorf("unknown action %q", action)
+}
+
+func (mgrBackend) SetPorts(name string, specs []string) error { return mgr.SetPorts(name, specs) }
+
+func (mgrBackend) SetLimit(name, port, rate, quota, period string) error {
+	return mgr.SetPortLimit(name, port, rate, quota, period)
+}
+
+func (mgrBackend) SpeedTest(name, dir string, mb int) (panel.Speed, error) {
+	r, err := mgr.SpeedTestOnce(name, dir, mb)
+	return panel.Speed{Dir: r.Dir, OK: r.OK, MBps: r.MBps, Seconds: r.Seconds, Error: r.Error}, err
+}
+
+func (mgrBackend) Token(name string) string { return mgr.TokenOf(name) }
+
+func (mgrBackend) ManagerArgv(args ...string) []string {
+	self, err := os.Executable()
+	if err != nil {
+		self = "wattun"
+	}
+	return append([]string{self}, args...)
+}
+
+func (mgrBackend) KharejCall(via, cmd string, args map[string]any) (map[string]any, string, error) {
+	kharejMu.Lock()
+	defer kharejMu.Unlock()
+	return mgr.KharejCall(via, cmd, args)
+}
+
+func (mgrBackend) KharejCreate(via, name, carrier, ports string) (string, error) {
+	kharejMu.Lock()
+	defer kharejMu.Unlock()
+	return mgr.KharejCreate(via, name, carrier, ports)
+}
+
+func (mgrBackend) KharejKeyRotate(via, name string) (string, string, error) {
+	kharejMu.Lock()
+	defer kharejMu.Unlock()
+	return mgr.KharejKeyRotate(via, name)
+}
+
+func (mgrBackend) KharejBackup(p map[string]any) ([]byte, error) { return mgr.KharejBackup(p) }
+
+func (mgrBackend) RestartSelf() {
+	_ = exec.Command("systemctl", "--no-block", "restart", mgr.PanelUnit()+".service").Run()
 }

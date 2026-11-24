@@ -50,6 +50,15 @@ type Server struct {
 	pendingTOTP string // secret shown on the enrolment screen, not active until a code confirms it
 
 	hub *hub
+
+	jobs   *jobs
+	certs  *certStore
+	tr     *traffic
+	al     *alerts
+	hostMu sync.Mutex
+	host   Host
+	hostAt time.Time
+	tick   int
 }
 
 type liveRow struct {
@@ -69,6 +78,11 @@ func New(cfg *Config, be Backend, dataDir string) *Server {
 	s := &Server{cfg: cfg, be: be, g: newGuard(), base: "/" + cfg.Path + "/", dataDir: dataDir,
 		live: map[string]*liveRow{}, last: map[string]Counters{}, hub: newHub()}
 	s.wd = newWatchdog(filepath.Join(dataDir, "outages.jsonl"))
+	s.jobs, s.certs, s.tr, s.al = newJobs(""), &certStore{}, newTraffic(dataDir), newAlerts(dataDir)
+	if dataDir != "" {
+		s.g.loadSessions(filepath.Join(dataDir, "sessions"))
+		s.jobs = newJobs(filepath.Join(dataDir, "jobs"))
+	}
 	return s
 }
 
@@ -85,16 +99,25 @@ func Run(file string, be Backend) error {
 	if err := EnsureCert(cfg.CertFile, cfg.KeyFile, localIPs()); err != nil {
 		return fmt.Errorf("certificate: %w", err)
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
-	if err != nil {
-		return fmt.Errorf("certificate: %w", err)
-	}
 	s := New(cfg, be, dataDir)
+	if err := s.certs.load(cfg.CertFile, cfg.KeyFile); err != nil {
+		if cfg.CertKind == "self" {
+			return fmt.Errorf("certificate: %w", err)
+		}
+		log.Printf("panel: certificate %s does not load (%v); back to the self-signed one", cfg.CertFile, err)
+		if err := useSelfSigned(cfg); err != nil {
+			return fmt.Errorf("certificate: %w", err)
+		}
+		if err := s.certs.load(cfg.CertFile, cfg.KeyFile); err != nil {
+			return fmt.Errorf("certificate: %w", err)
+		}
+		cfg.Save()
+	}
 	s.StartPollers()
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           s,
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}},
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: s.certs.get},
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		ErrorLog:          log.New(discard{}, "", 0), // TLS handshake noise from scanners
@@ -137,16 +160,25 @@ func (s *Server) StartPollers() {
 	ctx := context.Background()
 	go s.pollLive(ctx)
 	go s.pollKharej(ctx)
+	if s.dataDir != "" {
+		go s.schedule(ctx)
+	}
 }
 
 // ServeHTTP: the secret prefix or the nginx 404, nothing in between.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
-	if r.URL.Path == strings.TrimSuffix(s.base, "/") && !s.g.banned(ip) {
-		http.Redirect(w, r, s.base, http.StatusFound)
+	cfg := s.conf()
+	base := "/" + cfg.Path + "/"
+	if !allowed(cfg.Allow, ip) {
+		notFound(w, r)
 		return
 	}
-	if !strings.HasPrefix(r.URL.Path, s.base) || s.g.banned(ip) {
+	if r.URL.Path == strings.TrimSuffix(base, "/") && !s.g.banned(ip) {
+		http.Redirect(w, r, base, http.StatusFound)
+		return
+	}
+	if !strings.HasPrefix(r.URL.Path, base) || s.g.banned(ip) {
 		notFound(w, r)
 		return
 	}
@@ -155,7 +187,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "no-store")
-	rest := strings.TrimPrefix(r.URL.Path, s.base)
+	rest := strings.TrimPrefix(r.URL.Path, base)
 	if strings.HasPrefix(rest, "api/") {
 		s.api(w, r, strings.TrimPrefix(rest, "api/"), ip)
 		return
@@ -230,35 +262,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request, route, ip string) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "sign in"})
 		return
 	}
-	switch {
-	case route == "logout" && r.Method == http.MethodPost:
-		s.g.drop(r)
-		setCookie(w, s.base, "", -1)
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	case route == "logout-all" && r.Method == http.MethodPost:
-		s.g.dropAll()
-		setCookie(w, s.base, "", -1)
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	case route == "me":
-		c := s.conf()
-		writeJSON(w, http.StatusOK, map[string]any{"user": c.User, "twofa": c.TOTP != "", "recovery_left": len(c.Recovery), "title": c.Title, "cli": cliName})
-	case route == "overview":
-		s.apiOverview(w)
-	case route == "live":
-		s.apiLive(w, r)
-	case strings.HasPrefix(route, "tunnels/"):
-		s.apiTunnel(w, r, strings.TrimPrefix(route, "tunnels/"))
-	case route == "settings/2fa/setup" && r.Method == http.MethodPost:
-		s.api2FASetup(w)
-	case route == "settings/2fa/enable" && r.Method == http.MethodPost:
-		s.api2FAEnable(w, r)
-	case route == "settings/2fa/disable" && r.Method == http.MethodPost:
-		s.api2FADisable(w, r)
-	case route == "settings/password" && r.Method == http.MethodPost:
-		s.apiPassword(w, r)
-	default:
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
-	}
+	s.dispatch(w, r, route, ip, sess)
 }
 
 func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request, ip string) {
@@ -278,7 +282,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request, ip string) {
 		return
 	}
 	s.g.clear(ip)
-	setCookie(w, s.base, s.g.newSession(c.User), 0)
+	setCookie(w, s.cookiePath(), s.g.newSession(c.User, r), 0)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -315,7 +319,7 @@ func (s *Server) api2FA(w http.ResponseWriter, r *http.Request, ip string) {
 		log.Printf("panel: saving the 2FA replay guard: %v", saveErr)
 	}
 	s.g.clear(ip)
-	setCookie(w, s.base, s.g.newSession(c.User), 0)
+	setCookie(w, s.cookiePath(), s.g.newSession(c.User, r), 0)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -434,7 +438,7 @@ func (s *Server) apiOverview(w http.ResponseWriter) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"host": s.be.Host(), "tunnels": tun, "kharej": kh, "twofa": s.conf().TOTP != "",
-		"watchdog": s.wd.summary(tunnelNames(tun), time.Now()),
+		"watchdog": s.wd.summary(tunnelNames(tun), time.Now()), "alerts": s.al.list(),
 	})
 }
 
@@ -446,39 +450,42 @@ func tunnelNames(t []Tunnel) []string {
 	return out
 }
 
-func (s *Server) apiTunnel(w http.ResponseWriter, r *http.Request, rest string) {
-	name, what, _ := strings.Cut(rest, "/")
-	known := false
+func (s *Server) known(name string) bool {
 	for _, t := range s.be.Tunnels() {
 		if t.Name == name {
-			known = true
+			return true
 		}
 	}
-	if !known {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such tunnel"})
+	return false
+}
+
+func (s *Server) apiHistory(c *call) {
+	if !s.known(c.arg[0]) {
+		c.fail(http.StatusNotFound, "no such tunnel")
 		return
 	}
-	switch what {
-	case "history":
-		b := s.be.History(name)
-		if b == nil {
-			b = []byte("[]")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(b)
-	case "logs":
-		n, _ := strconv.Atoi(r.URL.Query().Get("n"))
-		if n <= 0 || n > 2000 {
-			n = 200
-		}
-		lines := s.be.Logs(name, n)
-		if lines == nil {
-			lines = []string{}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
-	default:
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
+	b := s.be.History(c.arg[0])
+	if b == nil {
+		b = []byte("[]")
 	}
+	c.w.Header().Set("Content-Type", "application/json")
+	c.w.Write(b)
+}
+
+func (s *Server) apiLogs(c *call) {
+	if !s.known(c.arg[0]) {
+		c.fail(http.StatusNotFound, "no such tunnel")
+		return
+	}
+	n, _ := strconv.Atoi(c.r.URL.Query().Get("n"))
+	if n <= 0 || n > 2000 {
+		n = 200
+	}
+	lines := s.be.Logs(c.arg[0], n)
+	if lines == nil {
+		lines = []string{}
+	}
+	c.ok(map[string]any{"lines": lines})
 }
 
 // ---- live data ----
@@ -523,6 +530,7 @@ func (s *Server) sample(now time.Time) {
 				}
 				if in >= pin && out >= pout {
 					row.Down, row.Up = (in-pin)/dt, (out-pout)/dt
+					s.tr.add(t.Name, in-pin, out-pout, now)
 				}
 			}
 			s.last[t.Name] = c
@@ -541,7 +549,11 @@ func (s *Server) sample(now time.Time) {
 	for _, r := range rows {
 		s.live[r.Name] = r
 	}
+	live := s.live
 	s.liveMu.Unlock()
+	if s.tick++; s.tick%5 == 0 {
+		s.checkAlerts(tun, live, now)
+	}
 	b, _ := json.Marshal(map[string]any{"t": now.Unix(), "tunnels": rows})
 	s.hub.publish(b)
 }
@@ -619,3 +631,6 @@ func (h *hub) publish(b []byte) {
 	}
 	h.mu.Unlock()
 }
+
+// cookiePath is the secret prefix the session cookie is scoped to.
+func (s *Server) cookiePath() string { return "/" + s.conf().Path + "/" }

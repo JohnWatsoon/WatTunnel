@@ -41,8 +41,12 @@ func IsEnabled(unit string) bool { return systemctlOK("is-enabled", "-q", unit) 
 func Start(unit string) error   { return Systemctl("start", unit) }
 func Stop(unit string) error    { return systemctlErr("stop", unit) }
 func Restart(unit string) error { return systemctlErr("restart", unit) }
-func Enable(unit string) error  { return systemctlErr("enable", unit) }
-func Disable(unit string) error { return systemctlErr("disable", unit) }
+func Enable(unit string) error {
+	return withWriteLock(func() error { return systemctlErr("enable", unit) })
+}
+func Disable(unit string) error {
+	return withWriteLock(func() error { return systemctlErr("disable", unit) })
+}
 
 func systemctlErr(args ...string) error {
 	if err := exec.Command("systemctl", args...).Run(); err != nil {

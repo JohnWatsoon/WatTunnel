@@ -867,20 +867,27 @@ write_ports() { # name : replace the ports: block of NAME.yml with the array MAP
     skip && /^[[:space:]]*$/ {next}
     {skip=0; print}' "$f" >"$tmp"
   maps_yaml_block >>"$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$f"
+  chmod 600 "$tmp"; wmv "$tmp" "$f"
+}
+wmv() { # src dst : the one-writer lock (panel plan D3) around a config rename; shared with the Go manager and the panel
+  if command -v flock >/dev/null 2>&1 && mkdir -p "$RUN" 2>/dev/null; then
+    flock -w 10 "$RUN/write.lock" mv -f "$1" "$2" || { rm -f "$1"; err "another change is being saved, try again"; return 1; }
+  else
+    mv -f "$1" "$2"
+  fi
 }
 set_value() { # name key value : set or add a top-level key
   local f="$CONF/$1.yml" tmp
   tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
   # key and value through the environment: awk -v would expand backslash escapes in the value
   grep -v "^$2:" "$f" | K="$2" V="$3" awk '/^(metrics|ports):/ && !d {print ENVIRON["K"] ": " ENVIRON["V"]; d=1} {print} END{if(!d) print ENVIRON["K"] ": " ENVIRON["V"]}' >"$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$f"
+  chmod 600 "$tmp"; wmv "$tmp" "$f"
 }
 unset_value() { # same tmp+mv pattern as set_value: the 3 s hot-reloader must never see an interleaved rewrite
   local f="$CONF/$1.yml" tmp
   tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
   grep -v "^$2:" "$f" >"$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$f"
+  chmod 600 "$tmp"; wmv "$tmp" "$f"
 }
 set_port_limit() { # name port rate quota [period: day|week|month, 3.3.6; written only with a quota]
   local f="$CONF/$1.yml" lp=$2 lr=$3 lq=$4 lpd=${5:-} tmp
@@ -925,7 +932,7 @@ set_port_limit() { # name port rate quota [period: day|week|month, 3.3.6; writte
       }
     }
   ' "$f" >"$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$f"
+  chmod 600 "$tmp"; wmv "$tmp" "$f"
 }
 
 # Connection token: wat1:BASE64("carrier|peer|key|path|sni|icmp-type|allowed-ports[|reverse]")
@@ -1028,7 +1035,7 @@ refresh_token() { # name [fortress] : keep NAME.token in step with NAME.yml — 
   [ "$changed" = 0 ] && return 0
   tmp=$(mktemp "$CONF/.tmp.XXXXXX") || return 1
   ( umask 077; make_token "$cr" "$bp" "$T_KEY" "$T_PATH" "$T_SNI" "$T_ICMP" "$allow" "$T_REV" "$T_AUTO" "$T_PAIR" >"$tmp" )
-  mv -f "$tmp" "$f"
+  wmv "$tmp" "$f"
 }
 # M1 (2026-11-18): a bonded Kharej config listens on one port per leg (listen-<carrier>:), so its token carries
 # one endpoint per leg in field 2, comma separated in the carrier list's order; bare-carrier legs (icmp, gre,
@@ -4624,7 +4631,7 @@ companion_create() { # name ip [no_start=0]
     [ -n "$m" ] && echo "metrics: 127.0.0.1:$m" # F25: write no invalid metrics: line when the range is exhausted
     maps_yaml_block
   } >"$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$f"; umask "$old"
+  chmod 600 "$tmp"; wmv "$tmp" "$f"; umask "$old"
   auto_sync_helper_settings "$n" "$r"
   if [ "$no_start" != 1 ]; then
     ensure_template >/dev/null
@@ -8642,7 +8649,7 @@ profile_cmd() { # profile save|list|show|del|apply NAME [tunnel]
            echo "DNSLISTEN=$(cfg "$tun" dns-listen)"
            echo "SRCIP=$(cfg "$tun" src-ip)"
          } >"$tmp"; then
-        mv -f "$tmp" "$f"
+        wmv "$tmp" "$f"
         ok "Profile '$name' saved (from $tun). Re-apply later: $SELF profile apply $name TUNNEL."
       else rm -f "$tmp"; err "Could not write $(prof_path "$name")."; return 1
       fi ;;
@@ -9984,6 +9991,11 @@ mgr_lock() { # L10: one manager pass at a time; fd 9 holds the lock until this p
 heal() { # restart Iran tunnels whose link is down or breaches SLA 3 checks in a row
   local n cnt f st cyc sla_f b_f
   mkdir -p "$RUN"
+  # the web panel: restarted only when it is on (panel.conf) and its unit failed; a panel that is off stays off
+  if [ -f "$CONF/panel.conf" ] && systemctl is-failed -q "${WAT_PREFIX}-panel" 2>/dev/null; then
+    logger -t wattun-heal "web panel failed, restarting" 2>/dev/null || true
+    systemctl restart "${WAT_PREFIX}-panel" 2>/dev/null || true
+  fi
   for n in $(tunnels); do
     [ "$(role "$n")" = Iran ] && systemctl is-enabled -q "${WAT_PREFIX}@$n" || continue
     f="$RUN/$n.down"

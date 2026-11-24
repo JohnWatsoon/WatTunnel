@@ -348,7 +348,7 @@ func runCommand(cmd string, args []string) int {
 	case "update":
 		return dispatch("update", args[1:]...)
 	case "rollback":
-		return dispatch("rollback")
+		return dispatch("rollback", args[1:]...)
 	case "bundle":
 		return dispatch("bundle_cmd", args[1:]...)
 	}

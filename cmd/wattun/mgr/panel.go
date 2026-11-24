@@ -362,3 +362,6 @@ func panelMenu() {
 		ClearScreen()
 	}
 }
+
+// PanelUnit is the panel's systemd unit name (the panel restarts itself after a certificate change).
+func PanelUnit() string { return panelUnit() }

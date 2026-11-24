@@ -259,7 +259,7 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	if err := os.Chmod(tmpName, perm); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	return withWriteLock(func() error { return os.Rename(tmpName, path) })
 }
 
 // SetValue mirrors set_value(): set or add a top-level key. Like the bash awk,
