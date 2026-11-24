@@ -1459,3 +1459,35 @@ credential; R3 revoke = tombstone; R4 remote create writes the local half; R5 Kh
 backup.export CapFull; R6 no latch for reverse, jitter+backoff otherwise; R7 UI in user words, one place
 per tunnel. Four phases A-D. No pushes by the implementer; the reviewer runs CI once at the end.
 Commit: (this entry)
+
+## 2026-11-24 · reviewer (implementing) · Handoff 4 READY FOR REVIEW — Scepter, made real
+The owner chose to have the reviewer build all four phases. Each phase was gated locally (gofmt, build,
+vet on windows+linux, `go test ./cmd/...`, `bash test-manager.sh`, `bash -n`); one push to `gomgr-review`
+for CI at the end. Commits: afd9e7e (A), f19dfca (B), d08b1e5 (C), 594e929 (D), b46844c (docs), 09aa456
+(review fixes), df6fd36 (lost claim answer), 4f119be (wat test at full caps: the full wat suite was not
+run before the Phase B commit, and TestScepterBackupExportChunked still paired at manage — caught here).
+
+| # | Fixed by | Pinned by |
+|---|----------|-----------|
+| F1 cockpit on reverse | afd9e7e: the running client unit serves `<conf>/.<name>.scepter.sock` (0600) and relays over its own sid-0 stream; `-scepter-call` uses it first and, with no unit running, refuses on reverse instead of binding | TestScepterSockRelay, TestScepterSockErrors |
+| F2 revoke no-op | f19dfca: revoke writes a `revoked <uuid> <ts>` tombstone (works with no file before it); a tombstone beats the token; "Allow a new Iran to pair" deletes the store and re-opens the claim live | TestRevokeTombstoneBeatsToken, TestPairingPollerReclaim, TestPairStatusRows, test-manager pairing checks |
+| F3 token = root | f19dfca: hello must prove the CURRENT key (HMAC over uuid+sid); the first proven hello over the token mints a fresh credential, stores it as `.pairing`, returns it once; the token alone is then refused. Port guard (sshd, every metrics/latch port, probe range, `scepter-deny-ports`, code 13). `backup.export` needs `full`. 09aa456: claim store is create-only (a second unit's claim in the 5 s window is refused), the `-scepter-call` fallback proves claims too. df6fd36: until the claimer's next command confirms it, the bootstrap proof gets the SAME claim back, so a session lost right after the claim does not lock Iran out | TestScepterHelloNeedsProof, TestScepterClaim, TestScepterClaimLostAnswer, TestClaimStores, TestFileScepterOps* (port guard), TestScepterOpsCapGating |
+| F4 token in the cockpit | d08b1e5: `tunnel.create` answers `listen_port`/`allow`; the cockpit builds the token and runs the Iran wizard with it (`wizardIranWith`), token only on request; keyrotate rewrites and restarts the twin silently. 09aa456: on a reverse pair the create is reverse (peer = this Iran's address + a free port), so Kharej answers the token itself | TestScepterCreatedToken, TestScepterWizardCreateReversePair, TestScepterRemoteKeyrotateTwin* |
+| F5 latch | d08b1e5: `latch-port` ignored on reverse (engine) and not written by reverse wizards or learned by the cockpit; client retry 30 s → 10 min, ±50 % jitter, counted from the failed attempt's end; revival proves claims before the token; the server latch re-keys after a claim (the poller skipped rePair on its own write) | TestLatchBackoffBounds, TestLatchReviveTriesClaims, TestLatchAutoRevive, test-manager "a reverse token writes no latch-port" |
+| F6 process per click | afd9e7e: same socket — one long-lived channel per unit, kept warm by a 30 s ping | TestScepterSockRelay |
+| F7 developer UI | 594e929: "Kharej server" (Iran) / "Pairing" (Kharej, Go and bash); New tunnel offers "On Kharej and here" first on a paired Iran; the tunnel row's K is "On Kharej" (09aa456: also for cockpit-made siblings via the paired tunnel to the same host); state/changes/versions under Operations → Diagnostics; no RPC names, PSK, twin, journal, seq, cursor, chunked in menu text | TestNoProtocolWordsInUI, TestNewTunnelOffersBothSides, TestScepterChannelForSibling, TestScepterChannelForReverseSibling, TestRoleAwareHome |
+
+Not done, with reasons:
+1. Plan C.2 "a keyrotate failure leaves both sides on the old key": not built. Kharej rotates first and
+   answers the new token; a failed local rewrite leaves Kharej on the new key (the manager prints the token
+   and says so). A two-phase rotate needs a new RPC; left for the owner to weigh.
+2. Until the first Iran connects, whoever holds the token can claim the pairing first. That window is the
+   install itself (the owner pastes the token minutes after minting it); a stolen token after the claim
+   gives a tunnel only.
+3. After a channel timeout or reset the session tombs sid 0 for about 2 minutes, so the cockpit is
+   unavailable for that long. Lifting it needs a wat/ change to the tomb rule; not touched.
+4. `runScepterCall` (the one-shot fallback) has no unit test: it needs a live tunnel; the claim proof it now
+   sends is covered by TestScepterClaim on the wat side.
+5. Windows-only: TestDialLocalIPv6 fails on this box at clean HEAD too (host IPv6 setup); CI is Ubuntu.
+6. None of this has field time. Both ends need 3.5.0 (unreleased), so no older peer exists.
+wat suite: ok (717 s, Windows). Commit: (this entry)
