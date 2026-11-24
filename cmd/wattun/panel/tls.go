@@ -31,9 +31,9 @@ import (
 )
 
 type certStore struct {
-	mu       sync.Mutex
-	cert     *tls.Certificate
-	notAfter time.Time
+	mu                  sync.Mutex
+	cert                *tls.Certificate
+	notAfter, notBefore time.Time
 }
 
 func (c *certStore) load(certFile, keyFile string) error {
@@ -46,7 +46,7 @@ func (c *certStore) load(certFile, keyFile string) error {
 		return err
 	}
 	c.mu.Lock()
-	c.cert, c.notAfter = &kp, leaf.NotAfter
+	c.cert, c.notAfter, c.notBefore = &kp, leaf.NotAfter, leaf.NotBefore
 	c.mu.Unlock()
 	return nil
 }
@@ -55,6 +55,19 @@ func (c *certStore) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.cert, nil
+}
+
+// renewDue: less than a third of the certificate's lifetime is left (30 of 90 days, 2 of 6 for an IP).
+func (c *certStore) renewDue(now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.notAfter.Sub(now) < c.notAfter.Sub(c.notBefore)/3
+}
+
+func (c *certStore) lifetime() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.notAfter.Sub(c.notBefore)
 }
 
 func (c *certStore) expires() time.Time {
@@ -245,8 +258,15 @@ var acmeDirectory = acme.LetsEncryptURL
 // useACME gets a certificate for DOMAIN with the HTTP-01 check (tier 3). Port 80 is bound only while the check
 // runs and refused if something else holds it. On any failure the current certificate stays.
 func useACME(ctx context.Context, cfg *Config, domain string, say func(string, ...any)) error {
-	if net.ParseIP(domain) != nil {
-		return errors.New("give a domain name that points at this server (IP certificates are not supported here)")
+	ip := net.ParseIP(domain)
+	ids, opts := acme.DomainIDs(domain), []acme.OrderOption(nil)
+	if ip != nil {
+		if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+			return errors.New("an IP certificate needs this server's public IP")
+		}
+		// Let's Encrypt issues IP certificates only under its 6-day "shortlived" profile; the scheduler renews
+		// at a third of the lifetime left, so it renews about every 4 days.
+		ids, opts = acme.IPIDs(domain), []acme.OrderOption{acme.WithOrderIssuanceProfile("shortlived")}
 	}
 	ln, err := net.Listen("tcp", acmeHTTPAddr)
 	if err != nil {
@@ -272,7 +292,7 @@ func useACME(ctx context.Context, cfg *Config, domain string, say func(string, .
 	if _, err := cl.Register(ctx, &acme.Account{}, acme.AcceptTOS); err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
 		return fmt.Errorf("the certificate service did not answer: %v", err)
 	}
-	order, err := cl.AuthorizeOrder(ctx, acme.DomainIDs(domain))
+	order, err := cl.AuthorizeOrder(ctx, ids, opts...)
 	if err != nil {
 		return err
 	}
@@ -313,7 +333,7 @@ func useACME(ctx context.Context, cfg *Config, domain string, say func(string, .
 	if err != nil {
 		return err
 	}
-	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{DNSNames: []string{domain}}, k)
+	csr, err := x509.CreateCertificateRequest(rand.Reader, csrFor(domain), k)
 	if err != nil {
 		return err
 	}
@@ -331,4 +351,11 @@ func useACME(ctx context.Context, cfg *Config, domain string, say func(string, .
 	cfg.ACMEName = domain
 	say("Certificate issued for %s.", domain)
 	return nil
+}
+
+func csrFor(name string) *x509.CertificateRequest {
+	if ip := net.ParseIP(name); ip != nil {
+		return &x509.CertificateRequest{IPAddresses: []net.IP{ip}}
+	}
+	return &x509.CertificateRequest{DNSNames: []string{name}}
 }

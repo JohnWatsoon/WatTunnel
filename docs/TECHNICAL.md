@@ -3455,7 +3455,7 @@ up at once; a pair that does not load leaves the old one in place):
 | Self-signed | The default. "Back to self-signed" returns to it. |
 | Your own | Paste a PEM certificate and key. Refused when they do not match or the certificate has expired. |
 | Private CA | The panel makes a CA whose name constraints allow only this server's IPs (and no DNS name), and a 397-day leaf. Install the CA on your phone once (Download the CA) and the warning is gone; the CA cannot vouch for any other site. |
-| ACME | Let's Encrypt over HTTP-01, for a domain that points at this server. Port 80 is bound only during the check and the request is refused when something else holds it. Runs as a job; on failure the current certificate stays. The scheduler renews it when less than 30 days are left. |
+| ACME | Let's Encrypt over HTTP-01, for a domain that points at this server or for the server's public IP. An IP certificate uses the `shortlived` profile (about 6 days). Port 80 is bound only during the check and the request is refused when something else holds it. Runs as a job; on failure the current certificate stays. The scheduler renews it when less than a third of its lifetime is left, at most every 6 hours. |
 
 ### Login and 2FA
 
@@ -3480,21 +3480,32 @@ up at once; a pair that does not load leaves the old one in place):
   from its own console.
 - **IP allowlist.** Settings -> Panel can limit the panel to IPs and ranges. Everyone else gets the nginx 404. A
   list that would leave out your own address is refused.
+- **Port.** Settings -> Panel can move the panel to another port (full tier). Allowed: 10000-65535, free, and not a
+  port that scanners and CDNs know (2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8080, 8443, 8880, 10000,
+  54321). "Random free port" picks one in 20000-60000. The panel opens the new port in the firewall, restarts on
+  it, then closes the old one; the page follows to the new address.
 
 ### What the pages show
 
 - **Overview**: routes map (Kharej servers by IP), current download and upload, health gauge (enabled tunnels
   that are up), watchdog heatmap for the last 24 hours with uptime %, outages, longest and ongoing outage, this
   server (load, RAM, disk, clock, uptime), throughput for this visit, Kharej cards, tunnels table.
-- **Tunnels**: click a row for live numbers, the tunnel's own `/stats/history` (5 minutes) and its journal.
-- **Kharej servers**: per paired host, version, capability tier and its tunnels as Kharej reports them over the
-  scepter channel (polled every 15 s; a host that does not answer within 65 s shows as unreachable).
+- **Tunnels**: a tile per tunnel with the route, live rate and a 3-minute sparkline, latency, loss, users, the
+  24-hour watchdog strip, public ports and quota meters. Start, restart or stop all from the top strip. A tile
+  opens the drawer: live numbers, `/stats/history` (5 minutes), per-port use (bytes, rate, users, rate limit, quota
+  with reset), actions and the journal.
+- **Kharej servers**: per paired host, version (and "vX is out" when a newer release exists), capability tier, the
+  live rate through its tunnels, and its tunnels as Kharej reports them over the scepter channel (polled every
+  15 s; a host that does not answer within 65 s shows as unreachable).
 
-- **Traffic**: bytes per day for 30 days, per tunnel today / 7 days / 30 days, CSV export, speed test history.
-- **System**: versions here and on each Kharej, update and rollback, backups (make, download, delete, restore from
-  a file), alerts, recent jobs, the panel audit log.
-- **Settings**: password, 2FA, signed-in browsers, title, secret path, allowlist, theme (system, dark, light),
-  browser notifications, certificate, alert thresholds and schedules.
+- **Traffic**: bytes per day for 30 days stacked per tunnel, the last 48 hours per hour, each tunnel's share,
+  today / 7 days / 30 days, CSV export, speed test history as a timeline.
+- **System**: load, RAM and disk, versions here and on each Kharej against the latest release, update and
+  rollback, backups (make, download, delete, restore from a file with a preview), alerts, recent jobs, the panel
+  audit log.
+- **Settings**: password, 2FA, signed-in browsers, title, secret path, port, allowlist, certificate, alert
+  thresholds and schedules, and for this browser only: Persian (Jalali) calendar for dates and browser
+  notifications. The panel is dark only.
 
 Live numbers come from each tunnel's `/stats` once a second and reach the page as server-sent events. An outage
 is a tunnel that is enabled or running but not up; stopping a tunnel by hand is not an outage.
@@ -3513,17 +3524,33 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
 - **Kharej.** Per remote tunnel: start, stop, restart and new key. A new key restarts the tunnel on Kharej; the
   twin tunnel here (same name and host, or the only tunnel to that host) switches to it by itself. Per Kharej
   server: update, backup download, update status, audit log. All Kharej calls are serialized.
+- **Delete.** Deleting a tunnel here can delete its Kharej twin (same name on the paired host) too: Kharej first
+  (`tunnel.delete`), then here. On the Kharej page a remote tunnel can be deleted on its own; type its name.
+- **Pairing.** Rotate pairing (per Kharej server, full tier) asks Kharej for a new pairing credential
+  (`pair.rotate`, the old one works 5 more minutes), attaches every local tunnel paired with that host to it and
+  restarts them. Forget pairing (per tunnel, full tier) sets `pairing: false` and restarts the tunnel: the tunnel
+  keeps carrying traffic, the management channel is gone. The last-link rule applies.
+- **Quota reset.** Per port in the drawer; sets that port's usage back to zero (`/quota/reset` on the tunnel's
+  metrics address).
 - **Update here** runs `wattun update` as a job and restarts the panel; the page waits and reconnects. **Roll back**
   runs `wattun rollback --yes`.
-- **Restore** takes a `.tar.gz` made by the panel or the manager (8 MB at most). The archive must hold exactly one
-  top folder named like the config directory and no absolute paths, `..` or links; then `wattun restore FILE`
-  writes it.
+- **Backup downloads** can be encrypted: give a passphrase (10 characters or more) and the file comes as `.wbk`
+  (`WATBK1` header, scrypt N=32768 r=8 p=1, XChaCha20-Poly1305). The passphrase is stored nowhere. Without one the
+  `.tar.gz` comes as it is. Kharej backups work the same way.
+- **Restore** takes a `.tar.gz` or `.wbk` made by the panel or the manager (8 MB at most; a `.wbk` asks for its
+  passphrase). The archive must hold exactly one top folder named like the config directory and no absolute
+  paths, `..` or links. First the panel shows a preview: each file new, changed, the same, or "key changes", a
+  line diff for changed files with keys and tokens masked, and the files here that the backup does not hold (they
+  stay). Confirming runs `wattun restore FILE`.
 
 ### Alerts and schedules
 
 Checked every 5 seconds: a tunnel down for 30 s, loss above `alert-loss` for 5 minutes, a Kharej server
 unreachable for 2 minutes, disk or RAM above the threshold, the panel certificate expiring within 14 days, and 10
-failed sign-ins within 10 minutes. Active alerts show on the overview headline and on System; cleared ones go to
+failed sign-ins within 10 minutes. Once a minute it also raises: a port at 90% of its quota or over it, a new
+release for this server or a Kharej server (checked every 6 hours against GitHub's latest release), and a
+scheduled speed test under half the median of the previous five scheduled runs of that tunnel. The certificate
+alert fires at 14 days, or at a sixth of the lifetime for short-lived certificates. Active alerts show on the overview headline and on System; cleared ones go to
 `alerts.jsonl`. With browser notifications on, a new alert also pops up (browsers allow this only once they trust
 the certificate). Once a minute the scheduler runs the speed tests (`speedtest-every`), the backups
 (`backup-every`, keeping `backup-keep`) and the ACME renewal.

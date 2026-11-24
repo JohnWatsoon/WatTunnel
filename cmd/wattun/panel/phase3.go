@@ -313,9 +313,9 @@ func (s *Server) checkAlerts(tun []Tunnel, rows map[string]*liveRow, now time.Ti
 	h := s.hostCached(now)
 	s.al.set("disk", "disk", fmt.Sprintf("Disk is %.0f%% full", h.DiskPct), h.DiskPct >= cfg.AlertDisk, 0, now)
 	s.al.set("ram", "ram", fmt.Sprintf("RAM is %.0f%% used", h.MemPct), h.MemPct >= cfg.AlertRAM, 2*time.Minute, now)
-	exp := s.certs.expires()
+	exp, life := s.certs.expires(), s.certs.lifetime()
 	s.al.set("cert", "cert", "The panel certificate expires on "+exp.Format("2006-01-02"),
-		!exp.IsZero() && exp.Sub(now) < 14*24*time.Hour, 0, now)
+		!exp.IsZero() && exp.Sub(now) < min(14*24*time.Hour, life/6), 0, now)
 	n := s.g.recentFails(now, 10*time.Minute)
 	s.al.set("logins", "logins", fmt.Sprintf("%d failed sign-ins in 10 minutes", n), n >= 10, 0, now)
 }
@@ -371,6 +371,7 @@ func (s *Server) schedule(ctx context.Context) {
 		case <-time.After(time.Minute):
 		}
 		cfg, now := s.conf(), time.Now()
+		s.slowChecks(now)
 		if cfg.SpeedEvery > 0 && now.Sub(time.Unix(st.Speed, 0)) >= time.Duration(cfg.SpeedEvery)*time.Hour {
 			st.Speed = now.Unix()
 			save()
@@ -400,8 +401,8 @@ func (s *Server) schedule(ctx context.Context) {
 			save()
 			s.backupNow("schedule", true)
 		}
-		if cfg.CertKind == "acme" && cfg.ACMEName != "" && s.certs.expires().Sub(now) < 30*24*time.Hour &&
-			now.Sub(time.Unix(st.ACME, 0)) >= 24*time.Hour {
+		if cfg.CertKind == "acme" && cfg.ACMEName != "" && s.certs.renewDue(now) &&
+			now.Sub(time.Unix(st.ACME, 0)) >= 6*time.Hour {
 			st.ACME = now.Unix()
 			save()
 			s.startACME("schedule", cfg.ACMEName)

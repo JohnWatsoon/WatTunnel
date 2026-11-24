@@ -5,12 +5,14 @@ package main
 // same scepter commands the cockpit uses; the pairing's caps decide what answers.
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -270,3 +272,60 @@ func (mgrBackend) KharejBackup(p map[string]any) ([]byte, error) { return mgr.Kh
 func (mgrBackend) RestartSelf() {
 	_ = exec.Command("systemctl", "--no-block", "restart", mgr.PanelUnit()+".service").Run()
 }
+
+func (mgrBackend) Ports(name string) []panel.PortUse {
+	addr := mgr.Cfg(name, "metrics")
+	if addr == "" {
+		return nil
+	}
+	r, err := panelHTTP.Get("http://" + addr + "/ports")
+	if err != nil {
+		return nil
+	}
+	defer r.Body.Close()
+	var m map[string]map[string]any
+	if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&m) != nil {
+		return nil
+	}
+	f := func(v any) float64 { x, _ := v.(float64); return x }
+	var out []panel.PortUse
+	for port, p := range m {
+		u := panel.PortUse{Port: port, Up: f(p["bytes_up_total"]), Down: f(p["bytes_down_total"]), RateUp: f(p["rate_bps_up"]),
+			RateDown: f(p["rate_bps_down"]), Conns: f(p["conns_active"]), RateLimit: f(p["rate_limit_bps"]),
+			QuotaLimit: f(p["quota_limit"]), QuotaUsed: f(p["quota_used"]), ResetsAt: int64(f(p["quota_resets_at"]))}
+		u.Exceeded, _ = p["quota_exceeded"].(bool)
+		u.Period, _ = p["quota_period"].(string)
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, _ := strconv.Atoi(out[i].Port)
+		b, _ := strconv.Atoi(out[j].Port)
+		return a < b
+	})
+	return out
+}
+
+func (mgrBackend) QuotaReset(name string, port int) error {
+	addr := mgr.Cfg(name, "metrics")
+	if addr == "" {
+		return fmt.Errorf("the tunnel has no metrics server")
+	}
+	r, err := panelHTTP.Post("http://"+addr+"/quota/reset?port="+strconv.Itoa(port), "", nil)
+	if err != nil {
+		return err
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		return fmt.Errorf("the tunnel answered %s", r.Status)
+	}
+	return nil
+}
+
+func (mgrBackend) LatestVersion() string { return mgr.LatestVersion() }
+func (mgrBackend) PairRotate(via []string) error {
+	kharejMu.Lock()
+	defer kharejMu.Unlock()
+	return mgr.KharejPairRotate(via)
+}
+func (mgrBackend) PairForget(name string) error  { return mgr.PairForget(name) }
+func (mgrBackend) PanelFirewall(open, close int) { mgr.PanelFirewall(open, close) }

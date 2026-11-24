@@ -55,6 +55,7 @@ func (s *Server) apiSettingsPanel(c *call) {
 	var in struct {
 		Title string
 		Path  string
+		Port  int
 		Allow []string
 	}
 	if c.json(&in) != nil {
@@ -72,6 +73,14 @@ func (s *Server) apiSettingsPanel(c *call) {
 	}
 	if len(in.Path) < 16 || len(in.Path) > 64 || strings.Trim(in.Path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != "" {
 		c.fail(http.StatusBadRequest, "Secret path: 16-64 letters, digits, - or _.")
+		return
+	}
+	cur := s.conf().Port
+	if in.Port == 0 {
+		in.Port = cur
+	}
+	if err := checkPort(in.Port, cur); err != nil {
+		c.fail(http.StatusBadRequest, err.Error())
 		return
 	}
 	var allow []string
@@ -94,6 +103,7 @@ func (s *Server) apiSettingsPanel(c *call) {
 	s.cfg.Title, s.cfg.Allow = in.Title, allow
 	moved := s.cfg.Path != in.Path
 	s.cfg.Path = in.Path
+	s.cfg.Port = in.Port
 	err := s.cfg.Save()
 	s.cfgMu.Unlock()
 	s.audit(c, "panel settings", "", errText(err))
@@ -101,7 +111,10 @@ func (s *Server) apiSettingsPanel(c *call) {
 		c.fail(http.StatusInternalServerError, err.Error())
 		return
 	}
-	c.ok(map[string]any{"ok": true, "moved": moved, "path": in.Path})
+	if in.Port != cur {
+		s.movePanel(cur, in.Port)
+	}
+	c.ok(map[string]any{"ok": true, "moved": moved || in.Port != cur, "path": in.Path, "port": in.Port, "port_changed": in.Port != cur})
 }
 
 // certChange runs FN on the config, saves it and loads the new pair into the listener.
@@ -157,7 +170,8 @@ func (s *Server) apiCACert(c *call) {
 
 func (s *Server) apiCertACME(c *call) {
 	var in struct{ Domain string }
-	if c.json(&in) != nil || strings.TrimSpace(in.Domain) == "" || strings.ContainsAny(in.Domain, " /:\n") {
+	if c.json(&in) != nil || strings.TrimSpace(in.Domain) == "" || strings.ContainsAny(in.Domain, " /\n") ||
+		(strings.Contains(in.Domain, ":") && net.ParseIP(strings.TrimSpace(in.Domain)) == nil) {
 		c.fail(http.StatusBadRequest, "Give the domain name that points at this server.")
 		return
 	}

@@ -27,6 +27,29 @@ type Backend interface {
 	KharejKeyRotate(via, name string) (local, token string, err error)
 	KharejBackup(params map[string]any) ([]byte, error)
 	RestartSelf() // restart the panel's own unit (after a certificate or port change)
+
+	Ports(name string) []PortUse // the tunnel's per-port counters, limits and quota usage (its /ports)
+	QuotaReset(name string, port int) error
+	LatestVersion() string         // newest release ("" = GitHub not reachable)
+	PairRotate(via []string) error // new pairing credential from Kharej, attached to every tunnel in VIA
+	PairForget(name string) error  // `pairing: false` on a local tunnel
+	PanelFirewall(open, close int) // firewall for a panel port change
+}
+
+// PortUse is one public port of a tunnel, from its /ports.
+type PortUse struct {
+	Port       string  `json:"port"`
+	Up         float64 `json:"up"`
+	Down       float64 `json:"down"`
+	RateUp     float64 `json:"rate_up"`
+	RateDown   float64 `json:"rate_down"`
+	Conns      float64 `json:"conns"`
+	RateLimit  float64 `json:"rate_limit"`
+	QuotaLimit float64 `json:"quota_limit"`
+	QuotaUsed  float64 `json:"quota_used"`
+	Exceeded   bool    `json:"exceeded"`
+	Period     string  `json:"period,omitempty"`
+	ResetsAt   int64   `json:"resets_at,omitempty"`
 }
 
 // Speed is one direction of the built-in speed test.

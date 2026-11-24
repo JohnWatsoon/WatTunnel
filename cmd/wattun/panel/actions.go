@@ -8,7 +8,6 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -226,6 +225,9 @@ func (s *Server) runSpeedTest(t Tunnel, mb int, auto bool, say func(string, ...a
 	if run.Error != "" {
 		return fmt.Errorf("%s", run.Error)
 	}
+	if auto {
+		s.speedCheck(t.Name, run.Down, time.Now())
+	}
 	say("RESULT=%.2f/%.2f", run.Down, run.Up)
 	return nil
 }
@@ -297,7 +299,7 @@ func (s *Server) apiToken(c *call) {
 }
 
 func (s *Server) apiDelete(c *call) {
-	var in struct{ Confirm string }
+	var in struct{ Confirm, Kharej string }
 	c.json(&in)
 	name := c.arg[0]
 	if _, ok := s.tunnel(name); !ok {
@@ -306,6 +308,16 @@ func (s *Server) apiDelete(c *call) {
 	}
 	if !s.guardLast(c, name, in.Confirm) {
 		return
+	}
+	if in.Kharej != "" { // delete on Kharej too: first, while this tunnel's channel still exists
+		host := s.hostOf(name)
+		if host == "" || !nameRe.MatchString(in.Kharej) {
+			c.fail(http.StatusBadRequest, "This tunnel has no pairing to delete through.")
+			return
+		}
+		if s.kharejDelete(c, host, in.Kharej) != nil {
+			return
+		}
 	}
 	id, err := s.jobs.run("delete", "Delete "+name, c.sess.User, s.be.ManagerArgv("delete", name, "--yes"))
 	s.jobReply(c, "delete", name, id, err)
@@ -427,7 +439,9 @@ func (s *Server) via(c *call, host string) (string, bool) {
 	return "", false
 }
 
-func (s *Server) kharejDo(c *call, action, host, cmd string, args map[string]any) (map[string]any, bool) {
+// kharejDo runs CMD on Kharej; TARGET is "host" or "host/tunnel" (the audit's target).
+func (s *Server) kharejDo(c *call, action, target, cmd string, args map[string]any) (map[string]any, bool) {
+	host, _, _ := strings.Cut(target, "/")
 	via, ok := s.via(c, host)
 	if !ok {
 		return nil, false
@@ -435,11 +449,11 @@ func (s *Server) kharejDo(c *call, action, host, cmd string, args map[string]any
 	p, refused, err := s.be.KharejCall(via, cmd, args)
 	switch {
 	case err != nil:
-		s.audit(c, action, host, err.Error())
+		s.audit(c, action, target, err.Error())
 		c.fail(http.StatusBadGateway, "No answer from Kharej: "+err.Error())
 		return nil, false
 	case refused != "":
-		s.audit(c, action, host, refused)
+		s.audit(c, action, target, refused)
 		c.fail(http.StatusConflict, refused)
 		return nil, false
 	}
@@ -515,7 +529,7 @@ func (s *Server) apiKharejBackup(c *call) {
 		c.fail(http.StatusBadGateway, err.Error())
 		return
 	}
-	attach(c.w, "kharej-"+c.arg[0]+"-"+time.Now().UTC().Format("20060102-1504")+".tar", "application/x-tar", raw)
+	sendBackup(c, "kharej-"+c.arg[0]+"-"+time.Now().UTC().Format("20060102-1504")+".tar", "application/x-tar", raw)
 }
 
 func attach(w http.ResponseWriter, name, ctype string, b []byte) {
@@ -646,7 +660,7 @@ func (s *Server) apiBackupGet(c *call) {
 		return
 	}
 	s.audit(c, "download backup", c.arg[0], "ok")
-	attach(c.w, c.arg[0], "application/gzip", b)
+	sendBackup(c, c.arg[0], "application/gzip", b)
 }
 
 func (s *Server) apiBackupDel(c *call) {
@@ -662,22 +676,8 @@ func (s *Server) apiBackupDel(c *call) {
 // apiRestore takes an uploaded backup (base64 in JSON: the body stays one small request), checks it is a tar.gz
 // of one config directory with no path tricks, lists what it holds into the job log, and runs `restore FILE`.
 func (s *Server) apiRestore(c *call) {
-	var in struct{ Data string }
-	if c.json(&in) != nil {
-		c.fail(http.StatusBadRequest, "bad request")
-		return
-	}
-	raw, err := base64.StdEncoding.DecodeString(in.Data)
-	if err != nil || len(raw) == 0 {
-		c.fail(http.StatusBadRequest, "The file did not arrive whole.")
-		return
-	}
-	files, top, err := tarList(raw)
-	if err == nil && top != filepath.Base(confDir(s.conf())) {
-		err = fmt.Errorf("it holds %q, this server keeps its settings in %q", top, filepath.Base(confDir(s.conf())))
-	}
-	if err != nil {
-		c.fail(http.StatusBadRequest, "That is not a backup of this kind: "+err.Error())
+	raw, files, ok := s.backupInput(c)
+	if !ok {
 		return
 	}
 	os.MkdirAll(s.backupDir(), 0o700)

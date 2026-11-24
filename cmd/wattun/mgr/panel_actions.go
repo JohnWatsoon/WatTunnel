@@ -6,10 +6,12 @@ package mgr
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // KharejCall runs one pairing command through local tunnel VIA. Writes get a fresh id and, when Kharej judges
@@ -210,4 +212,74 @@ func KharejCreate(via, name, carrier, ports string) (string, error) {
 func TokenOf(name string) string {
 	b, _ := os.ReadFile(filepath.Join(P.Conf, name+".token"))
 	return strings.TrimSpace(string(b))
+}
+
+// KharejPairRotate asks Kharej for a new pairing credential (pair.rotate, the old one stays valid for 5 minutes)
+// and attaches it to every local tunnel paired with that host, restarting each so it uses the new one.
+func KharejPairRotate(via []string) error {
+	if len(via) == 0 {
+		return fmt.Errorf("no tunnel to that server")
+	}
+	p, refused, err := KharejCall(via[0], "pair.rotate", map[string]any{"window_s": 300})
+	if err != nil {
+		return err
+	}
+	if refused != "" {
+		return fmt.Errorf("%s", refused)
+	}
+	line, _ := p["watp1"].(string)
+	if line == "" {
+		return fmt.Errorf("Kharej answered without a new credential")
+	}
+	for _, n := range via {
+		if err := scepterPairTo(n, line); err != nil {
+			return fmt.Errorf("%s: %v (Kharej already has the new credential; the old one works for 5 minutes)", n, err)
+		}
+		if IsActive(Unit(n)) {
+			_ = Restart(Unit(n))
+		}
+	}
+	return nil
+}
+
+// PairForget turns the pairing channel of a local tunnel off (`pairing: false`, the explicit off switch) and
+// restarts it. Kharej keeps its side; it is managed from its own console until a new pairing is attached.
+func PairForget(name string) error {
+	if err := SetValue(name, "pairing", "false"); err != nil {
+		return err
+	}
+	if IsActive(Unit(name)) {
+		return Restart(Unit(name))
+	}
+	return nil
+}
+
+// PanelFirewall opens the panel's new port and, after it, closes the old one (port change from the panel).
+func PanelFirewall(open, close int) {
+	if open > 0 {
+		fwOpen(strconv.Itoa(open) + "/tcp")
+	}
+	if close > 0 && close != open {
+		fwClose(strconv.Itoa(close) + "/tcp")
+	}
+}
+
+// LatestVersion is the newest release tag ("3.6.1"), read from the releases/latest redirect through the update
+// proxy; "" when GitHub cannot be reached.
+func LatestVersion() string {
+	updateProxyEnv()
+	cl := updClient()
+	cl.Timeout = 20 * time.Second
+	cl.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	r, err := cl.Get(uURLPrefix + "https://github.com/" + repo() + "/releases/latest")
+	if err != nil {
+		return ""
+	}
+	r.Body.Close()
+	loc := r.Header.Get("Location")
+	i := strings.LastIndex(loc, "/tag/v")
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(loc[i+len("/tag/v"):])
 }

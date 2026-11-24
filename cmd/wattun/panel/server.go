@@ -21,7 +21,12 @@ import (
 )
 
 //go:embed web
-var webFS embed.FS
+var webEmbed embed.FS
+
+var webFS fs.FS = webEmbed
+
+// SetDevWebDir serves web/ from DIR on disk instead of the binary (the local dev harness edits it live).
+func SetDevWebDir(dir string) { webFS = os.DirFS(dir) }
 
 const csp = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; " +
 	"font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -59,6 +64,7 @@ type Server struct {
 	host   Host
 	hostAt time.Time
 	tick   int
+	ver    versionCache
 }
 
 type liveRow struct {
@@ -438,7 +444,7 @@ func (s *Server) apiOverview(w http.ResponseWriter) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"host": s.be.Host(), "tunnels": tun, "kharej": kh, "twofa": s.conf().TOTP != "",
-		"watchdog": s.wd.summary(tunnelNames(tun), time.Now()), "alerts": s.al.list(),
+		"watchdog": s.wd.summary(tunnelNames(tun), time.Now()), "alerts": s.al.list(), "latest": s.latestVersion(),
 	})
 }
 

@@ -216,17 +216,19 @@ function render(){
   (ov.alerts||[]).filter(a=>a.kind!=='down'&&a.kind!=='kharej').forEach(a=>parts.push([el('em',null,a.text),'']));
   if(!ov.twofa)parts.push([el('em',null,'Two-factor sign-in is off'),' · Settings']);
   if(!parts.length)f.appendChild(el('span','ok',ov.tunnels.length?'Everything is up.':'No tunnels yet. Use New tunnel on the Tunnels page, or the manager: '+S.cli+' new'));
+  const more=parts.length>4?parts.splice(4).length:0;
   parts.forEach((p,i)=>{if(i)f.append(' · ');f.append(...p)});
+  if(more){f.append(' · ');const a=el('a','dim','+'+more+' more');a.href='#system';f.appendChild(a)}
   renderTables();renderWatchdog();renderServer();renderKharej();renderRoutes();
   if(window.PANEL&&PANEL.onRender)PANEL.onRender();
 }
-function sparkCells(name){
+function sparkCells(name){if(!S.ov)return el('div','spk');
   const w=(S.ov.watchdog||[]).find(x=>x.name===name);
   const sp=el('div','spk');(w?w.hours:new Array(24).fill(0)).forEach(v=>sp.appendChild(el('i','s'+v)));return sp;
 }
 function renderTables(){
   const ov=S.ov;
-  [['#rows','#tunN'],['#rows2','#tunN2']].forEach(([tb,cnt])=>{
+  [['#rows','#tunN']].forEach(([tb,cnt])=>{
     $(cnt).textContent=ov.tunnels.length;const body=$(tb);body.textContent='';
     if(!ov.tunnels.length){const tr=el('tr');const td=el('td','empty','No tunnels on this server yet.');td.colSpan=10;tr.appendChild(td);body.appendChild(tr);return}
     ov.tunnels.forEach(t=>{
@@ -270,8 +272,8 @@ function renderServer(){
   $('#srvClock').textContent=h.clock_synced?'synced':'not synced';$('#srvClock').className=h.clock_synced?'':'warnc';
   $('#srv2fa').textContent=S.ov.twofa?'on':'off';$('#srv2fa').className=S.ov.twofa?'':'warnc';
 }
-function khCard(k,full){
-  const c=el('div',full?'card':'kh');
+function khCard(k){
+  const c=el('div','kh');
   const top=el('div','khtop');const p=el('span','pill '+(k.online?'p-up':'p-down'));p.append(el('i'),k.online?'online':'unreachable');top.appendChild(p);
   top.appendChild(el('span','lab',k.online?(k.version?'v'+k.version:'')+(k.caps?' · '+k.caps:''):(k.error||'')));c.appendChild(top);
   const fl=el('div','flaps'+(k.host.length>11?' long':''));fl.setAttribute('aria-label',k.host);k.host.toUpperCase().split('').slice(0,20).forEach((ch,i)=>{const s=el('span','flap',ch);s.setAttribute('aria-hidden','true');s.style.animationDelay=(0.2+i*0.05).toFixed(2)+'s';fl.appendChild(s)});c.appendChild(fl);
@@ -282,9 +284,9 @@ function khCard(k,full){
 }
 function renderKharej(){
   const kh=S.ov.kharej;$('#khSub').textContent=kh.length?kh.length+' paired':'';
-  const l=$('#khList');l.textContent='';const full=$('#khFull');full.textContent='';
-  if(!kh.length){const m='No Kharej server is paired with this one. Pair from the manager: '+S.cli+' scepter';l.appendChild(el('div','empty',m));full.appendChild(el('div','card empty',m));return}
-  kh.forEach(k=>{l.appendChild(khCard(k,false));full.appendChild(khCard(k,true))});
+  const l=$('#khList');l.textContent='';
+  if(!kh.length){l.appendChild(el('div','empty','No Kharej server is paired with this one. Pair from the manager: '+S.cli+' scepter'));return}
+  kh.forEach(k=>l.appendChild(khCard(k)));
 }
 
 /* routes: per Kharej host, the summed live rate of the local tunnels paired with it */
@@ -324,11 +326,12 @@ function renderLive(down,up){
   $('#kvRtt').textContent=ls.length?(ls.reduce((a,l)=>a+l.rtt,0)/ls.length).toFixed(0)+' ms':'–';
   $('#kvLoss').textContent=ls.length?Math.max(...ls.map(l=>l.loss)).toFixed(1)+'%':'–';
   $('#kvConns').textContent=Object.values(S.live).reduce((a,l)=>a+(l.conns||0),0).toLocaleString('en-US');
-  document.querySelectorAll('#rows tr,#rows2 tr').forEach(tr=>{const l=S.live[tr.dataset.name];if(!l||!l.metrics)return;tr.querySelector('[data-k=down]').textContent=fmtRate(l.down)+' MB/s';tr.querySelector('[data-k=up]').textContent=fmtRate(l.up)+' MB/s'});
+  document.querySelectorAll('#rows tr').forEach(tr=>{const l=S.live[tr.dataset.name];if(!l||!l.metrics)return;tr.querySelector('[data-k=down]').textContent=fmtRate(l.down)+' MB/s';tr.querySelector('[data-k=up]').textContent=fmtRate(l.up)+' MB/s'});
   document.querySelectorAll('#routes [data-host]').forEach(v=>{const k=S.ov.kharej.find(x=>x.host===v.dataset.host);if(k)v.firstChild.textContent=fmtRate(hostRate(k))});
   const mv=$('#movedNum');if(mv)mv.textContent=fmtBytes(S.moved);
   chart();
   if(S.drawer)drawerLive();
+  if(window.PANEL&&PANEL.onLive)PANEL.onLive(down,up);
 }
 function stripes(){
   const svg=$('#sbars');const last=S.series.slice(-30);const n=30,bw=300/n;const top=Math.max(1,...last.map(s=>s.down));
@@ -422,6 +425,7 @@ async function openDrawer(name){
   const info=$('#dInfo');info.textContent='';
   const kv=(k,v)=>{const d=el('div','kv');d.append(el('span',null,k),el('span','n',v));info.appendChild(d)};
   if(t.peer)kv('Kharej',t.peer);kv('Ports',(t.ports||[]).join(', ')||'–');kv('Paired',t.paired?'yes':'no');kv('Starts at boot',t.enabled?'yes':'no');
+  const [pc,pw]=statusOf(t);const pl=$('#dPill');pl.textContent='';const pp=el('span','pill '+pc);pp.append(el('i'),pw);pl.appendChild(pp);
   drawerLive();$('#dX').focus();if(window.PANEL&&PANEL.onDrawer)PANEL.onDrawer(name,t);
   const [h,l]=await Promise.all([api('tunnels/'+encodeURIComponent(name)+'/history').catch(()=>null),api('tunnels/'+encodeURIComponent(name)+'/logs?n=200').catch(()=>null)]);
   if(S.drawer!==name)return;
@@ -475,7 +479,7 @@ $('#pwBtn').addEventListener('click',async()=>{
 });
 $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{method:'POST'})}catch(e){}showLogin()});
 
-window.PANEL={api,el,$,S,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf};
+window.PANEL={api,el,$,S,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
 
 /* ---------- boot ---------- */
 markDots();

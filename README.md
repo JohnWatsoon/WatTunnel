@@ -163,8 +163,11 @@ Details and the full command table:
 gauge, a 24-hour outage watchdog, per-tunnel history and logs, and the paired Kharej servers seen through the
 scepter channel. It also manages them: start, stop and restart, ports and limits, speed tests, new tunnels
 (on Kharej and here in one go), delete, updates and rollback, backups and restore, 30 days of traffic, alerts,
-and its own certificate (your own, a private CA for your phone, or ACME). Actions that show a key or cannot be
-undone need 2FA plus your password and a fresh code.
+and its own certificate (your own, a private CA for your phone, or ACME for a domain or the server's IP). It also
+shows per-port use and quotas (with reset), rotates or forgets a Kharej pairing, deletes a tunnel on both servers,
+moves itself to another port, encrypts backup downloads with a passphrase, previews a restore before it writes
+anything, warns about quotas, new releases and speed drops, and can show dates in the Persian calendar. Actions that
+show a key or cannot be undone need 2FA plus your password and a fresh code.
 
 The installer asks `Turn on the web panel ...? [Y/n]` when you pick Iran (Enter = yes). Later, or on an
 existing server:

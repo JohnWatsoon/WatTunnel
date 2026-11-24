@@ -3,6 +3,7 @@ package panel
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -61,6 +62,20 @@ func (fakeBE) KharejKeyRotate(via, n string) (string, string, error) {
 }
 func (fakeBE) KharejBackup(map[string]any) ([]byte, error) { return []byte("tar"), nil }
 func (fakeBE) RestartSelf()                                {}
+func (fakeBE) Ports(string) []PortUse {
+	return []PortUse{{Port: "443", Down: 9e9, QuotaLimit: 10e9, QuotaUsed: 9.5e9, Period: "month"}}
+}
+func (fakeBE) QuotaReset(n string, p int) error {
+	fakeCalls = append(fakeCalls, "quotareset "+n)
+	return nil
+}
+func (fakeBE) LatestVersion() string { return "9.9.9" }
+func (fakeBE) PairRotate(v []string) error {
+	fakeCalls = append(fakeCalls, "pairrotate "+strings.Join(v, ","))
+	return nil
+}
+func (fakeBE) PairForget(n string) error { fakeCalls = append(fakeCalls, "pairforget "+n); return nil }
+func (fakeBE) PanelFirewall(o, c int)    { fakeCalls = append(fakeCalls, fmt.Sprintf("fw %d %d", o, c)) }
 
 const testPath = "s3cretpathXYZabc"
 
