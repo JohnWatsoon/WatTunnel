@@ -103,15 +103,11 @@
           <div class="legend mt14"><div class="lg lab">no data <i class="h0"></i><i class="h1"></i> up</div><div class="lg lab"><i class="h2"></i>some <i class="h3"></i>down</div></div>
           <div class="stats3"><div><div class="lab">outages</div><div class="v n" id="wdN">0</div></div><div><div class="lab">longest</div><div class="v n" id="wdL">–</div></div><div><div class="lab">ongoing</div><div class="v n" id="wdO">0</div></div></div>
         </section>
-        <section class="card">
-          <div class="ch"><div class="ct">This server</div><span class="lab" id="srvUp"></span></div>
-          <div class="res res3">
-            <div><span class="lab" id="rCpu">load</span><div class="tr"><span id="bCpu"></span></div></div>
-            <div><span class="lab" id="rMem">ram</span><div class="tr"><span id="bMem"></span></div></div>
-            <div><span class="lab" id="rDisk">disk</span><div class="tr"><span id="bDisk"></span></div></div>
-          </div>
-          <div class="kv mt14"><span>Clock</span><span id="srvClock">–</span></div>
-          <div class="kv"><span>Two-factor</span><span id="srv2fa">–</span></div>
+        <section class="card" id="stCard">
+          <div class="ch"><div class="ct">Speed test</div><span class="lab" id="stName"></span></div>
+          <div class="st"><div class="mx" id="mx" aria-hidden="true"></div>
+            <div class="st-r"><div class="lab" id="stLab">no test yet</div><div class="mid n st-v" id="stVal">–</div><div class="lab mt4" id="stSub"></div></div></div>
+          <button class="btn sec st-btn" id="stBtn" type="button">Run test</button>
         </section>
       </div>
       <section class="card s2">
@@ -124,7 +120,17 @@
           <div><div class="lab">moved</div><div class="v n" id="fMoved">–</div></div>
         </div>
       </section>
-      <section class="card s2">
+      <section class="card c-srv">
+          <div class="ch"><div class="ct">This server</div><span class="lab" id="srvUp"></span></div>
+          <div class="res res3">
+            <div><span class="lab" id="rCpu">load</span><div class="tr"><span id="bCpu"></span></div></div>
+            <div><span class="lab" id="rMem">ram</span><div class="tr"><span id="bMem"></span></div></div>
+            <div><span class="lab" id="rDisk">disk</span><div class="tr"><span id="bDisk"></span></div></div>
+          </div>
+          <div class="kv mt14"><span>Clock</span><span id="srvClock">–</span></div>
+          <div class="kv"><span>Two-factor</span><span id="srv2fa">–</span></div>
+        </section>
+      <section class="card c-kh">
         <div class="ch"><div class="ct">Kharej servers</div><span class="lab" id="khSub"></span></div>
         <div id="khList" class="khgrid"></div>
       </section>

@@ -19,26 +19,52 @@ const LANDX=[
  [[23.5,35.6],[26.3,35.3],[26,35],[23.6,35.2]],[[32.3,35],[34.6,35.6],[33.9,34.6],[32.4,34.7]]
 ];
 const IRAN=[[44,39.5],[48,38.5],[49,38],[51.5,36.8],[54,37.3],[57,38],[60.5,36.6],[61.2,35.6],[60.5,33.5],[61.5,31.3],[63,29.5],[61.5,25.2],[57.3,25.7],[54.5,26.6],[51.5,27.9],[48.6,30],[48,31],[46,33],[45.5,34.5],[44.5,37.2]];
+// Outside the detailed Europe / Middle East box: coarse continent outlines, enough for a world-wide dot map.
+const WORLD=[
+ [[-168,66],[-162,70],[-156,71.3],[-141,69.6],[-128,70],[-115,68.5],[-95,68],[-85,69.5],[-80,63],[-94,59],[-92,57],[-82,55],[-79,52],[-77,60],[-70,59],[-64,60],[-61,56],[-55,52],[-60,47],[-66,45],[-70,43],[-70,41.5],[-74,40.5],[-76,38],[-75.5,35.5],[-81,31.5],[-80,27],[-80.4,25.2],[-82,26.5],[-83,29.5],[-85,30],[-89,30.2],[-91,29.5],[-94,29.5],[-97.3,27.5],[-97.5,25],[-97.7,22],[-96,19],[-94.5,18.2],[-91,18.8],[-90.5,21],[-87,21.5],[-88,17],[-88.5,15.8],[-84,15.9],[-83.5,11],[-81.5,9],[-79.5,9.5],[-77.5,8.5],[-78,7],[-80,7.5],[-81.5,8],[-83.5,8.4],[-85.7,11],[-87.5,13],[-91,13.9],[-94.5,16],[-96.5,15.7],[-100,17],[-105.5,20.5],[-105.5,23],[-109.5,25.5],[-112.5,29],[-114.5,31],[-113,29],[-110,23],[-112,24.5],[-114,27.5],[-115,30],[-117,32.5],[-120.5,34.5],[-122.5,37.5],[-124.3,40.5],[-124,46],[-124.7,48.4],[-123,49],[-127,50.5],[-130,54.5],[-133,57],[-137,58.5],[-142,60],[-146,61],[-150,59.5],[-154,57.5],[-158,56],[-163,54.7],[-158,58.5],[-162,60],[-165,62.5],[-164,64.5],[-168,65.5]],
+ [[-77.5,8.5],[-72,12],[-68,10.6],[-62,10.7],[-60,8.5],[-57,6],[-52,5],[-50,1.5],[-48,-1],[-44,-2.5],[-39,-3.5],[-35,-5.5],[-35,-9],[-39,-13.5],[-39.5,-18],[-41,-22],[-44.5,-23.2],[-48.5,-26],[-48.7,-28.5],[-52,-32],[-54,-34.8],[-57.5,-35],[-57.5,-38],[-62,-39],[-62.5,-41],[-65,-42],[-63.5,-42.8],[-65,-45],[-67.5,-46.5],[-66,-48],[-69,-50.5],[-68.5,-52.5],[-71,-54],[-74.5,-52],[-75.5,-48],[-74,-44],[-73.5,-40],[-73.5,-37],[-71.5,-32],[-71.4,-28],[-70.4,-23],[-70.2,-18.4],[-75,-15.5],[-77,-12],[-79.5,-7.5],[-81.2,-5],[-80,-2],[-80.5,0.5],[-78.8,1.5],[-77.5,4],[-77.4,7]],
+ [[-17,21],[-16.5,14.7],[-17.5,14.7],[-15,11],[-13,8],[-10.5,6.3],[-7.5,4.4],[-3,5],[1.5,6.2],[4.5,6.3],[6,4.3],[8.5,4.5],[9.5,3.5],[9.5,-1],[11.8,-4.5],[13.2,-9],[11.8,-16.5],[14.5,-22.5],[15.3,-27],[18.4,-34.2],[20,-34.8],[25.5,-34],[28,-33],[31,-29.5],[32.8,-26],[35.5,-24],[35.4,-21.5],[34.8,-19.8],[39.2,-16],[40.5,-10.5],[39.3,-7],[39.2,-4.7],[41.5,-1.5],[43.5,1.5],[47,4.5],[49.5,8],[51.2,11.8],[48,11.2],[44.5,10.4],[43.3,11.6],[42.7,13],[41,15],[39,15],[32,15],[0,15],[-17,15]],
+ [[49.3,-12],[50.4,-15.5],[47.2,-24.9],[45.2,-25.5],[43.7,-21.5],[44.2,-16.3],[46.5,-15.5],[48.7,-13.3]],
+ [[75,66],[75,72],[80,73],[88,75.5],[100,77.5],[105,77.5],[113,73.5],[128,72.5],[140,72.5],[150,71.5],[160,70],[170,70],[180,69],[180,65],[178,64.5],[174,61.5],[164,60],[163,57],[156.5,51],[156,57.5],[160,61.5],[154,59.3],[142,59.3],[137,54],[141,52],[140.5,48.5],[135,43.5],[132,43],[129.5,41],[129.5,37],[129,35],[126.5,34.5],[126.5,37.5],[125,39.5],[121.5,40],[122,40.5],[119,39.2],[118,38],[121,37],[119.5,35],[121,32.5],[122,30],[120,26],[116.5,22.8],[113.5,22.2],[110,21],[109.7,18.5],[108,21.5],[106,20],[106.5,17],[109,13],[109,11.5],[105,8.6],[103,10.5],[100.5,13.5],[100,12],[99.5,9],[100.5,7],[102,6.2],[103.5,4],[103.5,1.4],[101,2.5],[98,8],[98.5,10.5],[97.7,16],[95,15.8],[94,18],[92,21.5],[90,22],[88.5,21.7],[86.5,20],[85,19],[82.3,16.6],[80.2,13.5],[80,9.5],[77.5,8],[76.5,9],[75,12]],
+ [[12,66],[15,68],[18,69.8],[23,70.8],[28,71],[31,70],[40,68],[44,68.5],[53,68.5],[60,69.8],[68,69],[69,72.5],[73,72.5],[75,72],[75,66]],
+ [[79.8,9.8],[81.8,7.5],[81.2,6],[80,6],[79.7,8]],
+ [[130,31],[131.5,31.5],[132,33.5],[135,33.5],[137,34.5],[139.8,35],[141,37],[142,39.5],[141.5,41.4],[140,41.5],[140,40],[139.5,38],[137,37],[136,36],[133,35.5],[131,34.3],[129.7,33.2]],
+ [[140,41.5],[141.2,41.8],[143.5,42],[145.5,43.3],[144.5,44],[141.8,45.5],[141.5,43.3],[140,42.6]],
+ [[120,18.5],[122.3,18.5],[122,16],[124,13],[126,9],[125.5,6],[122,7],[123,10],[120,15]],
+ [[109,1.5],[109.7,-1],[110.5,-3],[114.5,-4],[116.5,-3.5],[118,1],[119,5],[117,7],[115.5,5],[113,3.2],[111,1.8]],
+ [[95.3,5.6],[97.5,5.2],[100.5,2],[104,-1],[106,-3],[105.7,-5.8],[104.5,-5.8],[102,-4],[100.5,-1],[98.5,2]],
+ [[105.2,-6.8],[106,-5.9],[108.5,-6.3],[111,-6.4],[114.5,-7.7],[114.4,-8.7],[110.7,-8.2],[106.5,-7.4]],
+ [[131,-1.5],[134,-0.8],[138,-1.5],[141,-2.6],[145.7,-5.3],[147.5,-6.2],[150.5,-10.5],[147,-10],[144,-7.8],[141,-9],[138,-8],[137.7,-5],[135,-4.4],[132,-2.8]],
+ [[113.5,-22],[114,-26.5],[115,-30],[115,-33.5],[117.8,-35.1],[123.5,-33.9],[126,-32.3],[131,-31.5],[134.2,-32.6],[135.9,-34.9],[137.7,-32.6],[137.5,-35.2],[140,-37.7],[143.5,-38.8],[146.3,-39.1],[150,-37.5],[151.2,-33.9],[153.2,-30],[153,-25],[150.8,-22.5],[146.3,-18.9],[145.3,-14.9],[143.5,-14],[142.5,-10.7],[141.5,-13.5],[141.6,-17],[140,-17.7],[135.8,-14.8],[136.8,-12.1],[132.6,-11.5],[131,-12.2],[129.5,-15],[126.5,-14],[122.2,-17.4],[121,-19.6],[117,-20.6]],
+ [[144.6,-40.7],[148.3,-40.9],[148,-43.2],[146,-43.6]],
+ [[172.7,-34.4],[174.4,-36.4],[175.9,-37.4],[178.5,-37.7],[176.9,-39.6],[174.9,-41.4],[173,-40.5],[172.7,-43.4],[171,-44.5],[169,-46.6],[166.5,-46],[168,-44],[170.8,-42.5],[172.2,-40.6],[173.9,-39.2],[174.6,-36.9]],
+ [[-73,78.3],[-66,81],[-50,82.5],[-30,83.5],[-20,82],[-18,77],[-20,72],[-22,70],[-30,68.2],[-40,65],[-43,60],[-48,61],[-52,65],[-54,68.5],[-56,72.5],[-62,76],[-70,77]],
+ [[-24,65.5],[-22,66.4],[-16,66.5],[-13.5,65.2],[-14.5,64.4],[-18,63.4],[-22.6,63.8]],
+ [[-62,66.5],[-65,63],[-72,62.5],[-78,64.5],[-73,68],[-80,70],[-90,73.5],[-80,73.8],[-70,71],[-64,68]],
+ [[-125,72],[-115,73.5],[-105,73],[-96,72],[-90,76],[-80,77],[-70,79],[-62,82],[-80,83],[-95,81.5],[-100,78],[-110,77.8],[-120,76],[-125,74.5]],
+ [[-85,21.8],[-82,23.2],[-77,22.2],[-74.2,20.2],[-77.5,19.8],[-81,21.5]],
+ [[-74.4,18.4],[-72.8,19.9],[-69,19.7],[-68.4,18.6],[-71,18.1]]
+];
 function isLand(lon,lat){
   if(lon>=-12&&lon<=75&&lat>=12&&lat<=66) return !WATER.some(p=>inPoly(lon,lat,p))||LANDX.some(p=>inPoly(lon,lat,p));
-  if(lat>66) return (lon>15&&lon<180&&lat<76)||(lon>5&&lon<=15&&lat<70)||(lon>-55&&lon<-20&&lat<82);
-  if(lon>75) return lat>22||(lon<80&&lat>8)||(lon>92&&lon<110&&lat>1);
-  if(lon<-12) return lon>-55&&lon<-20&&lat>60;
-  if(lat<=12&&lat>0) return (lon>-12&&lon<43)||(lon>=43&&lon<51&&lat>2);
-  if(lat<=0) return lon>10&&lon<40&&lat>-35;
-  return false;
+  if(lat<-63) return true;
+  return WORLD.some(p=>inPoly(lon,lat,p));
 }
 function hash(a,b){const s=Math.sin(a*127.1+b*311.7)*43758.5453;return s-Math.floor(s)}
 
 /* ---------- places ---------- */
-// The server knows its Kharej hosts by IP only (no GeoIP database ships), so each Kharej is drawn at a fixed
-// European anchor in pairing order and labelled with its address. shortcut: decorative position; a per-host
-// place setting can come with phase 4.
+// Positions come from the server's IP-location cache (overview.geo, keyed by address). An address it could not
+// place yet falls back: this server to Tehran, a Kharej server to a European anchor in pairing order.
 const IRAN_LL=[51.4,35.7];
 const ANCHORS=[[8.7,50.1],[24.9,60.2],[4.9,52.4],[2.35,48.9],[13.4,52.5],[-0.1,51.5],[16.4,48.2],[18.1,59.3]];
 const C_OK='62,224,138',C_BAD='255,93,98',C_IR='154,140,255';
 function regionOf(lon,lat){return inPoly(lon,lat,IRAN)?1:0}
-
+function places(){
+  const ov=S.ov;const geo=ov.geo||{};const g=geo[ov.host.ip];
+  const me={ll:g?[g.lon,g.lat]:IRAN_LL,city:g?(g.city||g.cc):'',cc:g?g.cc:'',known:!!g};
+  const kh=ov.kharej.map((k,i)=>{const q=geo[k.host];return {k,ll:q?[q.lon,q.lat]:ANCHORS[i%ANCHORS.length],city:q?(q.city||q.cc):'',cc:q?q.cc:'',known:!!q}});
+  return {me,kh};
+}
 /* ---------- small helpers ---------- */
 const $=(s)=>document.querySelector(s);
 const RM=matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -298,9 +324,10 @@ function renderRoutes(){
   const ch=(cls,t)=>{const c=el('span','chip');const i=el('i');i.style.background=cls;c.append(i,t);chips.appendChild(c)};
   ch('var(--violet)','this server');if(kh.length)ch('var(--green)','Kharej, up');if(kh.some(k=>!k.online))ch('var(--red)','unreachable');
   const r=$('#routes');r.textContent='';
-  kh.slice(0,2).forEach(k=>{const b=el('div','rt');b.appendChild(el('div','lab','to '+k.host+' · '+k.via.length+' tunnel'+(k.via.length>1?'s':'')));const v=el('div','mid n');v.dataset.host=k.host;v.append(fmtRate(hostRate(k)));v.appendChild(el('span','unit','MB/s'));b.appendChild(v);r.appendChild(b)});
+  const geo=ov.geo||{};const busy=kh.slice().sort((a,b)=>hostRate(b)-hostRate(a));
+  busy.slice(0,2).forEach(k=>{const g=geo[k.host];const b=el('div','rt');b.appendChild(el('div','lab','to '+(g&&g.city||k.host)+' · '+k.via.length+' tunnel'+(k.via.length>1?'s':'')));const v=el('div','mid n');v.dataset.host=k.host;v.append(fmtRate(hostRate(k)));v.appendChild(el('span','unit','MB/s'));b.appendChild(v);r.appendChild(b)});
   const mv=el('div','rt');mv.appendChild(el('div','lab','moved this visit'));const v=el('div','mid n');v.id='movedNum';v.textContent=fmtBytes(S.moved);mv.appendChild(v);r.appendChild(mv);
-  placeTips();
+  if(S.mapStarted)mapPlaces();
 }
 
 /* live numbers */
@@ -366,40 +393,69 @@ function chart(){
 }
 
 /* ---------- map ---------- */
-const MAPB={L0:-11,L1:66,A0:25.5,A1:66};const map={};
+// Equirectangular, fitted around every server: Iran and Germany fill the card, a US server zooms it out to the
+// Atlantic. shortcut: no wrap at the date line, fine until a server sits east of 150 E with one west of 150 W.
+let MAPB={L0:-11,L1:66,A0:25.5,A1:66};const map={sig:''};
+function fitBounds(lls,w,h){
+  const lo=lls.map(p=>p[0]),la=lls.map(p=>p[1]);const l0=Math.min(...lo),l1=Math.max(...lo),a0=Math.min(...la),a1=Math.max(...la);
+  const k=Math.max(0.35,Math.cos((a0+a1)/2*Math.PI/180));const A=w/h;
+  let dl=Math.max((l1-l0)*1.45,38),da=Math.max((a1-a0)*1.6,18);
+  if(dl*k/da<A)dl=A*da/k;else da=dl*k/A;
+  if(da>142){da=142;dl=Math.min(360,A*da/k)}
+  let ca=(a0+a1)/2+da*0.04;const cl=(l0+l1)/2;
+  if(ca+da/2>84)ca=84-da/2;if(ca-da/2<-62)ca=-62+da/2;
+  return {L0:cl-dl/2,L1:cl+dl/2,A0:ca-da/2,A1:ca+da/2};
+}
 function projM(ll,w,h){return [(ll[0]-MAPB.L0)/(MAPB.L1-MAPB.L0)*w,(MAPB.A1-ll[1])/(MAPB.A1-MAPB.A0)*h]}
 function buildMap(w,h){
-  const pitch=w<520?4.6:5.4,cols=Math.floor(w/pitch),rows=Math.floor(h/pitch),ox=(w-cols*pitch)/2+pitch/2,oy=(h-rows*pitch)/2+pitch/2;
-  const pts=[];const ir=projM(IRAN_LL,w,h);let md=1;
-  for(let j=0;j<rows;j++)for(let i=0;i<cols;i++){const sx=ox+i*pitch,sy=oy+j*pitch;const lon=MAPB.L0+sx/w*(MAPB.L1-MAPB.L0),lat=MAPB.A1-sy/h*(MAPB.A1-MAPB.A0);const land=isLand(lon,lat);const d=Math.hypot(sx-ir[0],sy-ir[1]);if(d>md)md=d;pts.push([sx,sy,land?1:0,land?regionOf(lon,lat):0,hash(i,j),d,lon,lat])}
+  const pl=map.pl;MAPB=fitBounds([pl.me.ll,...pl.kh.map(x=>x.ll)],w,h);
+  const span=MAPB.L1-MAPB.L0;const pitch=w<520?4.6:5.4,cols=Math.floor(w/pitch),rows=Math.floor(h/pitch),ox=(w-cols*pitch)/2+pitch/2,oy=(h-rows*pitch)/2+pitch/2;
+  const glow=Math.max(1.4,span*0.03);const iran=pl.me.cc==='IR'||!pl.me.known;
+  const pts=[];const ir=projM(pl.me.ll,w,h);let md=1;
+  for(let j=0;j<rows;j++)for(let i=0;i<cols;i++){const sx=ox+i*pitch,sy=oy+j*pitch;const lon=MAPB.L0+sx/w*(MAPB.L1-MAPB.L0),lat=MAPB.A1-sy/h*(MAPB.A1-MAPB.A0);
+    const land=isLand(lon,lat);const d=Math.hypot(sx-ir[0],sy-ir[1]);if(d>md)md=d;
+    // which endpoint lights this dot: -1 this server, n = kharej n, null none
+    let hit=null;if(land){if(iran?regionOf(lon,lat):Math.hypot(lon-pl.me.ll[0],(lat-pl.me.ll[1])*1.4)<glow)hit=-1;else for(let n=0;n<pl.kh.length;n++)if(Math.hypot(lon-pl.kh[n].ll[0],(lat-pl.kh[n].ll[1])*1.4)<glow){hit=n;break}}
+    pts.push([sx,sy,land?1:0,hit,hash(i,j),d])}
   map.pts=pts;map.md=md;map.pitch=pitch;
 }
+function mapPlaces(){
+  if(!S.ov)return;const pl=places();const sig=JSON.stringify([pl.me.ll,pl.kh.map(x=>x.ll)]);map.pl=pl;
+  if(sig!==map.sig&&map.g){map.sig=sig;buildMap(map.g.w,map.g.h);map.t0=performance.now()}
+  placeTips();
+}
 function placeTips(){
-  const w=$('#map').clientWidth,h=$('#map').clientHeight;const wrap=$('#mapw');wrap.querySelectorAll('.tip').forEach(t=>t.remove());if(!S.ov)return;
-  const tip=(ll,cls,dot,name,sub)=>{const t=el('div','tip '+cls+(S.mapShown?' on':''));const i=el('i');i.style.background=dot;t.append(i,el('b',null,name),el('span','lab',sub));const p=projM(ll,w,h);t.style.left=(p[0]+6)+'px';t.style.top=p[1]+'px';wrap.appendChild(t)};
-  tip(IRAN_LL,'lf','var(--violet)',S.ov.host.name||'this server','this server');
-  S.ov.kharej.slice(0,ANCHORS.length).forEach((k,i)=>tip(ANCHORS[i],i%2?'dn':'up',k.online?'var(--green)':'var(--red)',k.host,k.online?(k.tunnels.length+' tunnels'):'unreachable'));
+  const c=$('#map');const w=c.clientWidth,h=c.clientHeight;const wrap=$('#mapw');wrap.querySelectorAll('.tip').forEach(t=>t.remove());if(!S.ov||!map.pl)return;
+  const tip=(ll,dot,name,sub)=>{const p=projM(ll,w,h);const cls=p[0]>w*0.72?'lf':p[1]<h*0.3?'dn':'up';
+    const t=el('div','tip '+cls+(S.mapShown?' on':''));const i=el('i');i.style.background=dot;t.append(i,el('b',null,name),el('span','lab',sub));t.style.left=p[0]+'px';t.style.top=p[1]+'px';wrap.appendChild(t);
+    // close places (Amsterdam/Nuremberg): try the other sides until the label overlaps no earlier one and stays inside
+    const W=wrap.getBoundingClientRect();const hit=r=>r.left<W.left||r.right>W.right||r.top<W.top||r.bottom>W.bottom||put.some(q=>r.left<q.right&&r.right>q.left&&r.top<q.bottom&&r.bottom>q.top);
+    for(const k of [cls,'up','dn','rt','lf']){t.className='tip '+k+(S.mapShown?' on':'');if(!hit(t.getBoundingClientRect()))break}
+    if(hit(t.getBoundingClientRect()))t.className='tip '+cls+(S.mapShown?' on':'');put.push(t.getBoundingClientRect())};
+  const put=[];
+  const me=map.pl.me;tip(me.ll,'var(--violet)',me.city||(S.ov.host.name||'this server'),me.city?'this server':'this server · place unknown');
+  map.pl.kh.forEach(x=>tip(x.ll,x.k.online?'var(--green)':'var(--red)',x.city||x.k.host,(x.city?x.k.host+' · ':'')+(x.k.online?(x.k.via.length+' tunnel'+(x.k.via.length>1?'s':'')):'unreachable')));
 }
 function startMap(){
-  S.mapStarted=true;const c=$('#map');let g=fitCanvas(c);buildMap(g.w,g.h);placeTips();
-  new ResizeObserver(()=>{g=fitCanvas(c);buildMap(g.w,g.h);placeTips()}).observe(c);
-  const t0=performance.now();setTimeout(()=>{S.mapShown=true;document.querySelectorAll('.tip').forEach(t=>t.classList.add('on'))},RM?0:2100);
+  S.mapStarted=true;const c=$('#map');map.g=fitCanvas(c);map.sig='';mapPlaces();
+  new ResizeObserver(()=>{map.g=fitCanvas(c);if(map.pl){buildMap(map.g.w,map.g.h);placeTips()}}).observe(c);
+  map.t0=performance.now();setTimeout(()=>{S.mapShown=true;document.querySelectorAll('.tip').forEach(t=>t.classList.add('on'))},RM?0:2100);
   const draw=(now)=>{
     requestAnimationFrame(draw);
-    if(document.hidden||$('#vOverview').hidden)return;
-    const {x,w,h}=g;const t=(now-t0)/1000;x.clearRect(0,0,w,h);
-    const kh=(S.ov?S.ov.kharej:[]).slice(0,ANCHORS.length);
+    if(document.hidden||$('#vOverview').hidden||!map.pts)return;
+    const {x,w,h}=map.g;const t=(now-map.t0)/1000;x.clearRect(0,0,w,h);
+    const kh=map.pl.kh;
     const intro=RM?1:Math.min(1,t/1.5);const r=map.pitch*0.24;
     for(const p of map.pts){
       const f=Math.max(0,Math.min(1,(intro*1.25*map.md-p[5])/(map.md*0.18)));if(f<=0)continue;
-      let kc=null;if(p[2])for(let i=0;i<kh.length;i++){if(Math.hypot(p[6]-ANCHORS[i][0],(p[7]-ANCHORS[i][1])*1.4)<2.2){kc=kh[i].online?C_OK:C_BAD;break}}
-      if(p[3]||kc){x.fillStyle=`rgba(${kc||C_IR},${(0.92*f).toFixed(3)})`;x.beginPath();x.arc(p[0],p[1],r*1.08,0,6.283);x.fill()}
+      const kc=p[3]===null?null:p[3]<0?C_IR:(kh[p[3]]&&kh[p[3]].k.online?C_OK:C_BAD);
+      if(kc){x.fillStyle=`rgba(${kc},${(0.92*f).toFixed(3)})`;x.beginPath();x.arc(p[0],p[1],r*1.08,0,6.283);x.fill()}
       else if(p[2]){x.fillStyle=`rgba(236,236,240,${((0.36+0.2*p[4])*f).toFixed(3)})`;x.beginPath();x.arc(p[0],p[1],r,0,6.283);x.fill()}
       else{x.fillStyle=`rgba(236,236,240,${(0.06*f).toFixed(3)})`;x.beginPath();x.arc(p[0],p[1],r*0.75,0,6.283);x.fill()}
     }
-    const a=projM(IRAN_LL,w,h);const ar=RM?1:Math.max(0,Math.min(1,(t-1.1)/1.0));
-    kh.forEach((k,i)=>{
-      const b=projM(ANCHORS[i],w,h);const col=k.online?C_OK:C_BAD;
+    const a=projM(map.pl.me.ll,w,h);const ar=RM?1:Math.max(0,Math.min(1,(t-1.1)/1.0));
+    kh.forEach((pk,i)=>{const k=pk.k;
+      const b=projM(pk.ll,w,h);const col=k.online?C_OK:C_BAD;
       const mx=(a[0]+b[0])/2,my=(a[1]+b[1])/2,lx=b[0]-a[0],ly=b[1]-a[1],len=Math.hypot(lx,ly)||1;
       let nx=-ly/len,ny=lx/len;if(ny>0){nx=-nx;ny=-ny}const qx=mx+nx*len*.14,qy=my+ny*len*.14;
       const B=(s)=>{const v=1-s;return [v*v*b[0]+2*v*s*qx+s*s*a[0],v*v*b[1]+2*v*s*qy+s*s*a[1]]};

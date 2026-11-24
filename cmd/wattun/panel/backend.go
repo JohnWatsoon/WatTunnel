@@ -30,10 +30,12 @@ type Backend interface {
 
 	Ports(name string) []PortUse // the tunnel's per-port counters, limits and quota usage (its /ports)
 	QuotaReset(name string, port int) error
-	LatestVersion() string         // newest release ("" = GitHub not reachable)
-	PairRotate(via []string) error // new pairing credential from Kharej, attached to every tunnel in VIA
-	PairForget(name string) error  // `pairing: false` on a local tunnel
-	PanelFirewall(open, close int) // firewall for a panel port change
+	LatestVersion() string                         // newest release ("" = GitHub not reachable)
+	PairRotate(via []string) error                 // new pairing credential from Kharej, attached to every tunnel in VIA
+	PairForget(name string) error                  // `pairing: false` on a local tunnel
+	PanelFirewall(open, close int)                 // firewall for a panel port change
+	Paths(name string) (mode string, paths []Path) // bond mode and live legs of a bonded tunnel
+	Geo(addr string) (Geo, error)                  // where an IP or host name is (an outside lookup service; slow, called by a poller)
 }
 
 // PortUse is one public port of a tunnel, from its /ports.
@@ -71,6 +73,16 @@ type Host struct {
 	MemPct   float64 `json:"mem_pct"`
 	DiskPct  float64 `json:"disk_pct"`
 	ClockNTP bool    `json:"clock_synced"`
+}
+
+// Path is one leg of a bonded tunnel.
+type Path struct {
+	Name  string `json:"name"`
+	Alive bool   `json:"alive"`
+	Muted bool   `json:"muted"`
+	RTT   string `json:"rtt,omitempty"`
+	Loss  string `json:"loss,omitempty"`
+	Share string `json:"share,omitempty"`
 }
 
 type Tunnel struct {

@@ -166,7 +166,10 @@ scepter channel. It also manages them: start, stop and restart, ports and limits
 and its own certificate (your own, a private CA for your phone, or ACME for a domain or the server's IP). It also
 shows per-port use and quotas (with reset), rotates or forgets a Kharej pairing, deletes a tunnel on both servers,
 moves itself to another port, encrypts backup downloads with a passphrase, previews a restore before it writes
-anything, warns about quotas, new releases and speed drops, and can show dates in the Persian calendar. Actions that
+anything, warns about quotas, new releases and speed drops, and can show dates in the Persian calendar. Carrier
+tests run live in the page; when one ends you can switch to any working carrier or bond several, and a bonded
+tunnel's mode and legs (mute, unmute) are in its drawer. The map finds where your servers really are (it asks an
+IP-location service, so that service sees their IPs). Actions that
 show a key or cannot be undone need 2FA plus your password and a fresh code.
 
 The installer asks `Turn on the web panel ...? [Y/n]` when you pick Iran (Enter = yes). Later, or on an

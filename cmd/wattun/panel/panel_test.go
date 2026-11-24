@@ -18,7 +18,17 @@ import (
 
 type fakeBE struct{}
 
-func (fakeBE) Host() Host { return Host{Name: "box", Version: "x"} }
+func (fakeBE) Host() Host { return Host{Name: "box", Version: "x", IP: "203.0.113.9"} }
+func (fakeBE) Paths(n string) (string, []Path) {
+	return "balanced", []Path{{Name: "tcp", Alive: true}, {Name: "udp", Alive: true, Muted: true}}
+}
+
+func (fakeBE) Geo(a string) (Geo, error) {
+	if a == "203.0.113.9" {
+		return Geo{Lat: 35.7, Lon: 51.4, CC: "IR", City: "Tehran"}, nil
+	}
+	return Geo{}, fmt.Errorf("no answer")
+}
 func (fakeBE) Tunnels() []Tunnel {
 	return []Tunnel{{Name: "t1", Role: "Iran", Active: true, Enabled: true, Paired: fakePaired, Ports: []string{"443"}}}
 }

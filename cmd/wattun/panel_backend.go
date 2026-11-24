@@ -322,6 +322,19 @@ func (mgrBackend) QuotaReset(name string, port int) error {
 }
 
 func (mgrBackend) LatestVersion() string { return mgr.LatestVersion() }
+func (mgrBackend) Paths(name string) (string, []panel.Path) {
+	mode, ps := mgr.BondPaths(name)
+	out := make([]panel.Path, len(ps))
+	for i, p := range ps {
+		out[i] = panel.Path{Name: p.Name, Alive: p.Alive, Muted: p.Muted, RTT: p.RTT, Loss: p.Loss, Share: p.Share}
+	}
+	return mode, out
+}
+
+func (mgrBackend) Geo(addr string) (panel.Geo, error) {
+	lat, lon, cc, city, err := mgr.GeoLookup(addr)
+	return panel.Geo{Lat: lat, Lon: lon, CC: cc, City: city}, err
+}
 func (mgrBackend) PairRotate(via []string) error {
 	kharejMu.Lock()
 	defer kharejMu.Unlock()

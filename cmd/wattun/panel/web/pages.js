@@ -74,28 +74,108 @@ async function act(path,opts={}){
 }
 P.act=act;
 
-/* ---------- jobs ---------- */
+/* ---------- dot matrix: the speed test's look (Overview card and the speed test job) ---------- */
+// cols: one fill height per column (0..rows), null = empty; .run makes it a wave. Built with createElement:
+// the CSP blocks style="" inside markup.
+function matrix(box,cols,rows,run){
+  rows=rows||7;const n=cols?cols.length:7;box.textContent='';box.style.setProperty('--n',n);box.classList.toggle('run',!!run);
+  for(let j=0;j<rows;j++)for(let i=0;i<n;i++){const d=el('i');d.style.setProperty('--d',((Math.abs(i-(n-1)/2)+Math.abs(j-(rows-1)/2))*0.09).toFixed(2)+'s');
+    if(cols&&cols[i]!=null&&(rows-1-j)<cols[i])d.className='f';box.appendChild(d)}
+}
+function fillCols(vals,n,rows){const v=vals.slice(-n);const top=Math.max(...v,0.001),lo=Math.min(...v)*0.5;const out=v.map(x=>Math.max(1,Math.round(1+(x-lo)/Math.max(top-lo,0.001)*(rows-1))));while(out.length<n)out.unshift(null);return out}
+
+/* ---------- jobs: one card per kind ---------- */
 let jobT=0;
+const strip=l=>l.replace(/\x1b\[[0-9;]*m/g,'');
+function jobShell(){
+  const d=$('#dlg');d.classList.add('wide');$('#dlgE').textContent='';const b=$('#dlgB');b.textContent='';
+  const head=el('div','jh');const st=pill('p-slow','running');const sub=el('span','lab');head.append(st,sub);
+  const body=el('div','jbody');const det=el('details','jlog');det.appendChild(el('summary','lab','Show the full log'));const pre=el('pre','log');det.appendChild(pre);const res=el('div','mt8');
+  b.append(head,body,res,det);
+  const a=$('#dlgA');a.textContent='';const close=el('button','btn sec','Close (it keeps running)');close.type='button';close.onclick=()=>{clearTimeout(jobT);d.close()};a.appendChild(close);
+  $('#dlgF').onsubmit=e=>e.preventDefault();d.onclose=()=>{if(!d.open)d.classList.remove('wide')};d.oncancel=()=>clearTimeout(jobT);
+  if(!d.open)d.showModal();
+  return {st,sub,body,pre,res,close};
+}
+// speed test: the matrix waves while it measures, then fills; download and upload as big split numbers
+function speedView(body){
+  const w=el('div','jspeed');const mx=el('div','mx big');const r=el('div','js-r');
+  const tile=(lab)=>{const d=el('div','js-t');const l=el('div','lab',lab);const v=el('div','big2 n','··');d.append(l,v);return {d,l,v}};
+  const dn=tile('download'),up=tile('upload');r.append(dn.d,up.d);w.append(mx,r);body.appendChild(w);matrix(mx,null,9,true);
+  return (lines,state)=>{
+    let D=null,U=null,now='';lines.forEach(l=>{let m=/^(down|up): ([\d.]+) MB\/s in ([\d.]+) s/.exec(l);if(m){if(m[1]==='down')D=[+m[2],+m[3]];else U=[+m[2],+m[3]]}
+      m=/: \d+ MB (download|upload) \.\.\./.exec(l);if(m)now=m[1]});
+    const set=(t,x,word)=>{t.v.textContent='';if(x){t.v.appendChild(split(x[0].toFixed(1),'MB/s'));t.l.textContent=word+' · '+x[1].toFixed(1)+' s'}else t.v.textContent=state==='running'&&now===word?'measuring':'··';t.d.classList.toggle('now',state==='running'&&now===word&&!x)};
+    set(dn,D,'download');set(up,U,'upload');
+    if(state!=='running'){const top=Math.max(D?D[0]:0,U?U[0]:0,1);const h=x=>x?Math.max(1,Math.round(x[0]/top*9)):null;const a=h(D),b=h(U);matrix(mx,[a,a,a,a,null,b,b,b,b],9,false)}
+  };
+}
+// carrier test: a live board, one row per carrier as the manager tests it (ATROW lines), the winner marked
+function carrierView(body){
+  const w=el('div','jcar');const top=el('div','jc-top');const cnt=el('div','jc-cnt');const prog=el('div','jc-prog');top.append(cnt,prog);
+  const list=el('div','jc-list');w.append(top,list);body.appendChild(w);
+  const seen=new Set();let tun='';
+  const pend=el('div','jc-row pend');const pl=el('span','jc-lab lab');const pmx=el('div','mx line');matrix(pmx,new Array(12).fill(0),1,true);pend.append(el('span','jc-rank'),pl,pmx);
+  return (lines,state)=>{
+    let plan=0;const picks=new Set();const rows=new Map();
+    lines.forEach(l=>{let m=/^ATPLAN=(\d+)/.exec(l);if(m)plan=+m[1];m=/^ATPICK=(.+)$/.exec(l);if(m)picks.add(m[1].trim());m=/^TUNNEL=(.+)$/.exec(l);if(m)tun=m[1].trim();
+      m=/^ATROW=(ok|fail)\|([^|]*)\|(.*)$/.exec(l);if(m){const f=m[3].split('|');rows.set(m[2],m[1]==='ok'?{ok:true,down:+f[0],up:+f[1],rtt:+f[2]}:{ok:false,why:f.join('|')})}});
+    if(!plan&&!rows.size)return false;
+    const done=rows.size,ok=[...rows.values()].filter(r=>r.ok).length;
+    cnt.textContent='';cnt.append(el('span','big2 n',String(ok)),el('span','lab',' working of '+done+' tested'+(plan?' · '+plan+' planned':'')));
+    prog.textContent='';const N=Math.max(plan,done);for(let i=0;i<N;i++){const d=el('i');const r=[...rows.values()][i];d.className=r?(r.ok?'ok':'bad'):(i===done&&state==='running'?'now':'');prog.appendChild(d)}
+    const peak=Math.max(1,...[...rows.values()].map(r=>r.ok?Math.max(r.down,r.up):0));
+    const sorted=[...rows.entries()].sort((a,b)=>(b[1].ok-a[1].ok)||((b[1].down||0)-(a[1].down||0)));
+    [...list.children].forEach(c=>{if(c!==pend)c.remove()});
+    sorted.forEach(([lab,r],k)=>{const row=el('div','jc-row'+(r.ok?'':' fail')+(picks.has(lab)?' win':'')+(seen.has(lab)?'':' new'));seen.add(lab);row.dataset.lab=lab;row.dataset.ok=r.ok?'1':'';
+      row.appendChild(el('span','jc-rank n',r.ok?String(k+1):'–'));row.appendChild(el('span','jc-lab',lab));
+      if(r.ok){const bar=el('span','jc-bar');const B=16,on=Math.max(1,Math.round(r.down/peak*B));for(let i=0;i<B;i++)bar.appendChild(el('i',i<on?'on':''));row.appendChild(bar);
+        const v=el('span','jc-v n');v.append(el('b',null,r.down.toFixed(1)),' ↓ '+r.up.toFixed(1)+' ↑ · '+r.rtt.toFixed(0)+' ms');row.appendChild(v)}
+      else row.appendChild(el('span','jc-why',r.why));
+      if(picks.has(lab))row.appendChild(el('span','chip jc-pick',picks.size>1?'bonded':'in use'));
+      list.insertBefore(row,pend.parentNode===list?pend:null)});
+    if(state==='done'&&tun&&!w.querySelector('.jc-use'))chooser(w,list,tun,picks);
+    if(state==='running'){pl.textContent=plan&&done>=plan?'re-measuring the best ones':'testing the next carrier';if(pend.parentNode!==list)list.appendChild(pend)}else pend.remove();
+    return true;
+  };
+}
+// after a carrier test: tick rows to switch to one, or to bond several (same kind; the manager checks)
+function chooser(w,list,tun,picks){
+  const bar=el('div','jc-use');const say=el('span','lab','Tick a carrier to switch to it, or several of one kind (direct or reverse) to bond them.');const go=el('button','btn pri','Switch');go.type='button';go.disabled=true;bar.append(say,go);w.appendChild(bar);
+  const sel=new Set();
+  list.querySelectorAll('.jc-row.fail').forEach(row=>{row.prepend(el('span'));row.classList.add('pickable','nochk')});
+  list.querySelectorAll('.jc-row[data-ok="1"]').forEach(row=>{const c=el('input');c.type='checkbox';c.className='jc-chk';c.setAttribute('aria-label','use '+row.dataset.lab);row.prepend(c);row.classList.add('pickable');
+    c.onchange=()=>{c.checked?sel.add(row.dataset.lab):sel.delete(row.dataset.lab);row.classList.toggle('sel',c.checked);
+      const same=sel.size===picks.size&&[...sel].every(x=>picks.has(x));go.disabled=!sel.size||same;
+      go.textContent=sel.size>1?'Bond these '+sel.size:'Switch to this one'};
+    row.onclick=e=>{if(e.target!==c){c.checked=!c.checked;c.onchange()}}});
+  go.onclick=()=>{const labels=[...sel];act('tunnels/'+enc(tun)+'/use',{body:{labels},title:labels.length>1?'Bond '+labels.join(' + '):'Switch to '+labels[0],confirm:tun+' restarts on the new carrier'+(labels.length>1?'s':'')+'; open connections drop.',ok:'Switch'})};
+}
+// any other job: its steps, the current one pulsing
+function stepView(body){
+  const steps=el('div','jsteps jsv');body.appendChild(steps);
+  return (lines,state)=>{steps.textContent='';lines.slice(-6).forEach((l,i,arr)=>{const s=el('div','jstep'+(i===arr.length-1&&state==='running'?' now':''));s.append(el('i'),el('span',null,l));steps.appendChild(s)})};
+}
 async function openJob(id){
   clearTimeout(jobT);
-  const d=$('#dlg');$('#dlgE').textContent='';const b=$('#dlgB');b.textContent='';
-  const st=pill('p-slow','running');const steps=el('div','jsteps');const pre=el('pre','log');const res=el('div','mt8');b.append(st,steps,pre,res);
-  const a=$('#dlgA');a.textContent='';const close=el('button','btn sec','Close (it keeps running)');close.type='button';close.onclick=()=>{clearTimeout(jobT);d.close()};a.appendChild(close);
-  $('#dlgF').onsubmit=e=>e.preventDefault();d.onclose=null;d.oncancel=()=>clearTimeout(jobT);
-  if(!d.open)d.showModal();
-  let misses=0;
+  const v=jobShell();let spd=null,car=null,steps=null;let misses=0;
   const tick=async()=>{
     let r=null;try{r=await api('jobs/'+id,{auth:true})}catch(e){}
-    if(!r||!r.ok){misses++;st.lastChild.textContent=misses>3?'waiting for the panel to come back':'running';jobT=setTimeout(tick,2000);return}
+    if(!r||!r.ok){misses++;v.st.lastChild.textContent=misses>3?'waiting for the panel to come back':'running';jobT=setTimeout(tick,2000);return}
     misses=0;const j=r.j;$('#dlgT').textContent=j.title;
-    const lines=(j.log||[]).filter(l=>!/^[A-Z_]+=/.test(l));
-    steps.textContent='';lines.slice(-4).forEach((l,i,arr)=>{const s=el('div','jstep'+(i===arr.length-1&&j.state==='running'?' now':''));s.append(el('i'),el('span',null,l));steps.appendChild(s)});
-    const atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-8;pre.textContent=lines.join('\n')||'…';if(atEnd)pre.scrollTop=pre.scrollHeight;
-    const cls={running:'p-slow',done:'p-up',failed:'p-down',lost:'p-down'}[j.state];st.className='pill '+cls;st.lastChild.textContent={running:'running',done:'done',failed:'failed (code '+j.rc+')',lost:'ended without a result'}[j.state];
+    const all=(j.log||[]).map(strip);const shown=all.filter(l=>!/^[A-Z_]+=/.test(l));
+    if(j.kind==='speedtest'){spd=spd||speedView(v.body);spd(shown,j.state)}
+    else{car=car||carrierView(v.body);steps=steps||stepView(v.body);
+      // the board takes over as soon as the manager reports carriers; until then the plain steps
+      if(car(all,j.state))v.body.classList.add('has-car');else steps(shown,j.state)}
+    const atEnd=v.pre.scrollTop+v.pre.clientHeight>=v.pre.scrollHeight-8;v.pre.textContent=shown.join('\n')||'…';if(atEnd)v.pre.scrollTop=v.pre.scrollHeight;
+    v.sub.textContent=j.state==='running'?'started '+when(j.started):'';
+    const cls={running:'p-slow',done:'p-up',failed:'p-down',lost:'p-down'}[j.state];v.st.className='pill '+cls;v.st.lastChild.textContent={running:'running',done:'done',failed:'failed (code '+j.rc+')',lost:'ended without a result'}[j.state];
     if(j.state==='running'){jobT=setTimeout(tick,1000);return}
-    close.textContent='Close';res.textContent='';
-    if(j.result&&j.result.TOKEN)res.appendChild(tokenBox(j.result.TOKEN));
-    toast(j.title+(j.state==='done'?': done':': failed'),j.state!=='done');P.loadOverview();if(S.view==='system')loadSystem();
+    v.close.textContent='Close';v.res.textContent='';
+    if(j.state!=='done'){const last=shown.filter(l=>l.trim()).slice(-2).join(' · ');if(last)v.res.appendChild(el('p','note bad',last))}
+    if(j.result&&j.result.TOKEN)v.res.appendChild(tokenBox(j.result.TOKEN));
+    toast(j.title+(j.state==='done'?': done':': failed'),j.state!=='done');P.loadOverview();if(S.view==='system')loadSystem();loadSpeedCard();
   };
   tick();
 }
@@ -190,6 +270,8 @@ async function bulk(a){
   const r=await act('bulk',{body:{action:a},title:a[0].toUpperCase()+a.slice(1)+' every tunnel',confirm:a==='stop'?'Every tunnel on this server stops; users lose their connections.':'Every tunnel on this server '+(a==='start'?'starts':'restarts')+'.',danger:a==='stop'});
   if(r){const bad=Object.entries(r.results).filter(([,v])=>v!=='ok');toast(bad.length?bad.map(([k,v])=>k+': '+v).join('; '):'Done',bad.length>0);P.loadOverview()}
 }
+const TESTF={k:'test',label:'Carrier test',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]};
+const PICK={k:'pick',label:'Then use, for auto',options:[['best','the fastest carrier'],['bond','a bond of every working carrier']],hint:'Either way, the results let you switch to any tested carrier or bond the ones you choose.'};
 async function newTunnel(){
   const ov=S.ov||{tunnels:[]};const vias=ov.tunnels.filter(t=>t.paired&&t.active);
   const fields=[{k:'where',label:'Where',options:vias.length?[['both','On Kharej and here, in one go'],['here','Here only, from a token']]:[['here','Here only, from a token']],
@@ -199,7 +281,8 @@ async function newTunnel(){
     {k:'carrier',label:'Carrier',options:[['auto','auto: test them all and keep the best'],['wss','wss: TLS websocket, the safe default'],['tls','tls'],['tcp','tcp'],['udp','udp'],['icmp','icmp (ping)'],['grpc','grpc'],['h2','h2'],['ws','ws'],['h2c','h2c']]},
     {k:'map',label:'Ports',ph:'39901:18999, 8443:443',hint:'public port here : port on Kharej, comma-separated'},
     {k:'name',label:'Name (empty = automatic)'},
-    {k:'test',label:'Carrier test, for auto',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]}];
+    {k:'test',label:'Carrier test, for auto',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]},
+    PICK];
   await act('new',{title:'New tunnel',fields,ok:'Create'});
 }
 
@@ -211,14 +294,30 @@ P.onDrawer=async(name,t)=>{
   const u=act2=>()=>act('tunnels/'+enc(name)+'/'+act2,act2==='stop'?{confirm:'Stop '+name+'? Its users lose the connection.',title:'Stop '+name,danger:true}:{}).then(r=>{if(r){toast(name+': '+act2+' done');P.loadOverview()}});
   grp('Run',[t.active?btn('Restart','sec',u('restart')):btn('Start','pri',u('start')),t.active&&btn('Stop','sec danger',u('stop'))]);
   grp('Test',[t.role==='Iran'&&btn('Speed test','sec',()=>act('tunnels/'+enc(name)+'/speedtest',{title:'Speed test of '+name,fields:[{k:'mb',label:'Megabytes each way',value:'10',mode:'numeric'}],ok:'Run'})),
-    t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels) and switches to the best. The tunnel restarts if it switches.',title:'Re-test carriers'}))]);
+    t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches.',title:'Re-test carriers',fields:[TESTF,PICK],ok:'Start the test'}))]);
   grp('Configure',[btn('Ports','sec',()=>editPorts(name,t)),btn('Limit a port','sec',()=>limitPort(name))]);
+  if(/\+/.test(t.carrier||''))bondBlock(a,name);
   grp('Keys and pairing',[btn('Show token','sec',()=>showToken(name)),t.paired&&btn('Forget pairing','sec danger',()=>act('tunnels/'+enc(name)+'/pair-forget',{full:true,danger:true,title:'Forget the pairing of '+name,confirm:'Turns off the management channel of '+name+' (pairing: false) and restarts it. The tunnel keeps working; Kharej is then managed from its own console until you pair again.'}).then(r=>{if(r){toast('Pairing forgotten');P.loadOverview()}}))]);
   grp('Danger',[btn('Delete','sec danger',()=>deleteTunnel(name,t))]);
   renderDrawerPorts(name,[]);
   const r=await api('tunnels/'+enc(name)+'/ports').catch(()=>null);
   if(S.drawer===name&&r&&r.ok){PORTS[name]=r.j.ports;renderDrawerPorts(name,r.j.ports)}
 };
+// Bonding: the mode and every leg of a '+'-bond, live from /stats; mute takes a leg out without a restart
+async function bondBlock(a,name){
+  const g=el('div','agrp bondg');g.appendChild(el('div','lab','Bonding'));a.appendChild(g);
+  const seg=el('div','seg');const legs=el('div','legs');g.append(seg,legs);
+  const r=await api('tunnels/'+enc(name)+'/paths').catch(()=>null);if(!r||!r.ok||S.drawer!==name)return;
+  [['balanced','balanced','split by path capacity'],['active-backup','active-backup','one path, the next on failure'],['replicate','replicate','datagrams on every path']].forEach(([m,l,h])=>{
+    const b=el('button','seg-b'+(r.j.mode===m?' on':''));b.type='button';b.append(el('b',null,l),el('span','lab',h));
+    if(r.j.mode!==m)b.onclick=()=>act('tunnels/'+enc(name)+'/bond-mode',{body:{mode:m},title:'Bond mode: '+l,confirm:name+' restarts with the new mode; open connections drop.'}).then(x=>{if(x)setTimeout(()=>P.openDrawer(name),4000)});
+    seg.appendChild(b)});
+  if(!r.j.paths.length){legs.appendChild(el('div','empty','No path data: the tunnel is stopped.'));return}
+  r.j.paths.forEach(p=>{const row=el('div','leg'+(p.muted?' muted':p.alive?'':' down'));
+    row.append(el('i','kdot '+(p.muted?'off':p.alive?'ok':'bad')),el('span','leg-n',p.name),el('span','lab n',p.muted?'muted':p.alive?(p.share?p.share+' % of traffic':'up')+(p.rtt?' · '+p.rtt+' ms':''):'down'));
+    row.appendChild(btn(p.muted?'Unmute':'Mute','sec sm',()=>act('tunnels/'+enc(name)+'/mute',{body:{path:p.name,mute:!p.muted}}).then(x=>{if(x)setTimeout(()=>P.openDrawer(name),2500)})));
+    legs.appendChild(row)});
+}
 function renderDrawerPorts(name,ports){
   const w=$('#dPorts');w.textContent='';$('#dPortsSub').textContent=ports.length?ports.length+' public':'';
   if(!ports.length){w.appendChild(el('div','empty','No per-port numbers yet (the tunnel is stopped, or has no metrics address).'));return}
@@ -291,7 +390,7 @@ function newer(a,b){const x=a.split('.').map(Number),y=b.split('.').map(Number);
 
 /* ================= TRAFFIC ================= */
 async function loadTraffic(){
-  const v=$('#vTraffic');
+  const v=$('#vTraffic');if(!v.childElementCount)loading(v);
   const [r,sp]=await Promise.all([api('traffic?days=30'),api('speedtests')]);if(S.view!=='traffic')return;
   v.textContent='';const g=el('div','grid trg');
   const days=r.ok?r.j.days:[];const tot=r.ok?r.j.totals:{};const hours=r.ok?r.j.hours:[];
@@ -354,7 +453,7 @@ function arc(label,pct,text,warn){
     svg.appendChild(svgEl('line',{x1:60+52*Math.cos(a),y1:62-52*Math.sin(a),x2:60+43*Math.cos(a),y2:62-43*Math.sin(a),stroke:col,'stroke-width':2.6,'stroke-linecap':'round'}))}
   const t=el('div','arc-t');t.append(el('div','mid n',text),el('div','lab',label));w.append(svg,t);return w}
 async function loadSystem(){
-  const v=$('#vSystem');
+  const v=$('#vSystem');if(!v.childElementCount)loading(v);
   const [b,al,jb,au,ov]=await Promise.all([api('backups'),api('alerts'),api('jobs'),api('audit'),api('overview')]);if(S.view!=='system')return;
   if(ov.ok)S.ov=ov.j;const h=S.ov.host;const latest=S.ov.latest;v.textContent='';const g=el('div','grid sysg');
   // vitals
@@ -468,6 +567,43 @@ async function certPick(k){
     await act('settings/cert/acme',{body:v})}
 }
 
+/* ---------- Overview: speed test card ---------- */
+// The matrix columns are the last 7 real runs of the shown tunnel (download, scaled to their best); Run test
+// keeps it waving while the job measures.
+let stRun=null;
+async function loadSpeedCard(){
+  const box=$('#mx');if(!box||!S.ov)return;
+  const iran=S.ov.tunnels.filter(t=>t.role==='Iran');const btn=$('#stBtn');
+  $('#stCard').hidden=!iran.length;if(!iran.length)return;
+  const r=await api('speedtests').catch(()=>null);const rows=r&&r.ok?r.j.rows:[];
+  const name=(rows.find(x=>iran.some(t=>t.name===x.name))||{}).name||(iran.find(t=>t.active)||iran[0]).name;
+  $('#stName').textContent=name;btn.dataset.name=name;
+  if(stRun)return;
+  const mine=rows.filter(x=>x.name===name&&x.down>0);const last=mine[0];
+  matrix(box,fillCols(mine.slice(0,7).reverse().map(x=>x.down),7,7),7,false);
+  const v=$('#stVal');v.textContent='';
+  if(last){v.appendChild(split(last.down.toFixed(1),'MB/s'));$('#stLab').textContent='last run · '+P.fmtDur(Math.max(1,Math.round(Date.now()/1000-last.t)))+' ago';$('#stSub').textContent='↑ '+last.up.toFixed(1)+' MB/s · '+last.mb+' MB'+(last.auto?' · scheduled':'')}
+  else{v.textContent='–';$('#stLab').textContent='no test yet';$('#stSub').textContent=''}
+  btn.disabled=false;btn.textContent=last?'Run again':'Run test';
+}
+$('#stBtn').addEventListener('click',async()=>{
+  const b=$('#stBtn');const name=b.dataset.name;if(!name||stRun)return;
+  let r;try{r=await api('tunnels/'+enc(name)+'/speedtest',{method:'POST',body:{mb:10}})}catch(e){return}
+  if(!r.ok||!r.j.job){toast(r.j.error||'Could not start the test.',true);return}
+  stRun=r.j.job;b.disabled=true;b.textContent='Testing…';matrix($('#mx'),null,7,true);$('#stVal').textContent='··';$('#stSub').textContent='';
+  const t0=Date.now();
+  const poll=async()=>{let j=null;try{const x=await api('jobs/'+stRun,{auth:true});if(x.ok)j=x.j}catch(e){}
+    const lines=j?(j.log||[]):[];const down=lines.map(l=>/^down: ([\d.]+) MB\/s/.exec(l)).filter(Boolean).pop();
+    $('#stLab').textContent=down?'download done · now upload':'measuring · '+Math.round((Date.now()-t0)/1000)+' s';
+    if(down){const v=$('#stVal');v.textContent='';v.appendChild(split((+down[1]).toFixed(1),'MB/s'))}
+    if(j&&j.state==='running'||!j){setTimeout(poll,1000);return}
+    stRun=null;if(j.state!=='done')toast('Speed test failed: '+((lines.filter(l=>l.trim()).pop())||''),true);loadSpeedCard()};
+  poll();
+});
+
+/* ---------- loading state: a waving dot matrix while a page fetches ---------- */
+function loading(v){v.textContent='';const c=el('section','card loadc');const mx=el('div','mx line');matrix(mx,new Array(14).fill(0),3,true);c.append(mx,el('div','lab','loading'));v.appendChild(c)}
+
 /* ---------- browser notifications ---------- */
 const seenAlerts=new Set();let alertsPrimed=false;
 function notifyAlerts(){
@@ -477,6 +613,7 @@ function notifyAlerts(){
 }
 
 /* ---------- view hooks ---------- */
-P.onRender=()=>{notifyAlerts();if(S.view==='tunnels'&&!S.drawer)renderTunnels(true);if(S.view==='kharej')renderKharejPage(true)};
-P.onView=v=>{if(v==='tunnels')renderTunnels();if(v==='kharej')renderKharejPage();if(v==='traffic')loadTraffic();if(v==='system')loadSystem();if(v==='settings')loadSettings2()};
+let spLoaded=false;
+P.onRender=()=>{notifyAlerts();if(S.view==='overview'&&!spLoaded){spLoaded=true;loadSpeedCard()}if(S.view==='tunnels'&&!S.drawer)renderTunnels(true);if(S.view==='kharej')renderKharejPage(true)};
+P.onView=v=>{if(v==='overview')loadSpeedCard();if(v==='tunnels')renderTunnels();if(v==='kharej')renderKharejPage();if(v==='traffic')loadTraffic();if(v==='system')loadSystem();if(v==='settings')loadSettings2()};
 })();

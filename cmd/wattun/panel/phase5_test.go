@@ -120,3 +120,50 @@ func TestKharejTunnelAction(t *testing.T) {
 		t.Fatalf("%d %s %v", w.Code, w.Body, fakeCalls)
 	}
 }
+
+func TestGeoRefreshCachesAndSkips(t *testing.T) {
+	s, c := newTestServer(t, "")
+	s.kh = []Kharej{{Host: "198.51.100.7"}, {Host: "10.0.0.5"}}
+	now := time.Now()
+	s.geoRefresh(now)
+	g := s.geoAll()
+	if g["203.0.113.9"].CC != "IR" || len(g) != 1 {
+		t.Fatalf("geo = %v", g)
+	}
+	if s.geo.tried["198.51.100.7"].IsZero() || !s.geo.tried["10.0.0.5"].IsZero() {
+		t.Fatal("a failed lookup is remembered, a private address is never asked")
+	}
+	s2 := New(c, fakeBE{}, s.dataDir) // the answer survives a restart
+	if s2.geoAll()["203.0.113.9"].City != "Tehran" {
+		t.Fatal("geo.json not reloaded")
+	}
+}
+
+// The carrier switch and bond endpoints: labels and modes are checked before any manager command runs.
+func TestUseAndBondValidation(t *testing.T) {
+	s, _ := newTestServer(t, "")
+	ck := signIn(t, s, "")
+	for _, c := range []struct {
+		path, body string
+		want       int
+	}{
+		{"tunnels/t1/use", `{"labels":["tcp :443"]}`, 200},
+		{"tunnels/t1/use", `{"labels":["tcp :443","udp :51820"]}`, 200},
+		{"tunnels/t1/use", `{"labels":[]}`, 400},
+		{"tunnels/t1/use", `{"labels":["tcp;rm -rf /"]}`, 400},
+		{"tunnels/nope/use", `{"labels":["tcp :443"]}`, 400},
+		{"tunnels/t1/bond-mode", `{"mode":"balanced"}`, 400}, // t1 has one carrier
+		{"tunnels/t1/bond-mode", `{"mode":"fastest"}`, 400},
+		{"tunnels/t1/mute", `{"path":"udp","mute":true}`, 200},
+		{"tunnels/t1/mute", `{"path":"udp\nx","mute":true}`, 400},
+		{"tunnels/t1/retest", `{"pick":"bond","test":"fast"}`, 200},
+		{"tunnels/t1/retest", `{"pick":"all"}`, 400},
+	} {
+		if w := do(s, "POST", api+c.path, c.body, xr, ck); w.Code != c.want {
+			t.Errorf("%s %s: %d %s", c.path, c.body, w.Code, w.Body)
+		}
+	}
+	if w := do(s, "GET", api+"tunnels/t1/paths", "", xr, ck); w.Code != 200 || !strings.Contains(w.Body.String(), `"muted":true`) {
+		t.Fatalf("paths: %d %s", w.Code, w.Body)
+	}
+}

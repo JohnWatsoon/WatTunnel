@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -16,6 +17,7 @@ import (
 func init() {
 	Register("bond_retest_job", func(a ...string) int { return b2rc(bondRetestJob(arg(a, 0))) })
 	Register("bonding_menu", func(a ...string) int { bondingMenu(arg(a, 0)); return 0 })
+	Register("bond_mode_cmd", func(a ...string) int { return errRC(bondModeSet(arg(a, 0), arg(a, 1))) })
 }
 
 const bondRetestBudgetMB = 20 // traffic budget of one run, .manager.conf key bondretest-budget
@@ -511,6 +513,24 @@ func bondingMenu(n string) {
 		Pause()
 		ClearScreen()
 	}
+}
+
+var bondModes = []string{"balanced", "active-backup", "replicate"}
+
+// bondModeSet writes bond-mode and restarts the tunnel (the Bonding screen's "Bond mode", unattended).
+func bondModeSet(n, m string) error {
+	if !slices.Contains(bondModes, m) {
+		return fmt.Errorf("Bond mode is one of: %s.", strings.Join(bondModes, ", "))
+	}
+	if !isBond(Cfg(n, "carrier")) {
+		return fmt.Errorf("'%s' has one carrier; a bond mode needs two or more (carrier a+b).", n)
+	}
+	SetValue(n, "bond-mode", m)
+	Ok("Set bond-mode: " + m)
+	if err := Restart(Unit(n)); err != nil {
+		return fmt.Errorf("Restart %s: %v", Unit(n), err)
+	}
+	return nil
 }
 
 // bondPaths draws the live per-path table of a bond.

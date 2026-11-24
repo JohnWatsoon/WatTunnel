@@ -279,8 +279,88 @@ func (s *Server) apiRetest(c *call) {
 		c.fail(http.StatusBadRequest, "Carrier re-tests run on Iran tunnels made from an auto token.")
 		return
 	}
-	id, err := s.jobs.run("retest", "Re-test the carriers of "+t.Name, c.sess.User, s.be.ManagerArgv("auto-test", t.Name, "--yes"))
+	var in struct{ Test, Pick string }
+	if c.json(&in) != nil || !testPresets[in.Test] || !picks[in.Pick] {
+		c.fail(http.StatusBadRequest, "bad request")
+		return
+	}
+	a := []string{"auto-test", t.Name, "--yes"}
+	if in.Test != "" {
+		a = append(a, "--test", in.Test)
+	}
+	if in.Pick != "" {
+		a = append(a, "--pick", in.Pick)
+	}
+	id, err := s.jobs.run("retest", "Re-test the carriers of "+t.Name, c.sess.User, s.be.ManagerArgv(a...))
 	s.jobReply(c, "carrier re-test", t.Name, id, err)
+}
+
+var (
+	testPresets = map[string]bool{"": true, "normal": true, "fast": true, "anti": true, "reverse": true, "extended": true}
+	picks       = map[string]bool{"": true, "best": true, "bond": true}
+	labelRe     = regexp.MustCompile(`^[A-Za-z0-9 :./_+-]{1,48}$`)
+)
+
+// apiUse switches an auto Iran tunnel to rows of a finished carrier test (two or more = a bond), no re-test.
+func (s *Server) apiUse(c *call) {
+	t, ok := s.tunnel(c.arg[0])
+	var in struct{ Labels []string }
+	if !ok || t.Role != "Iran" || c.json(&in) != nil || len(in.Labels) == 0 || len(in.Labels) > 8 {
+		c.fail(http.StatusBadRequest, "Pick one tested carrier, or several to bond them.")
+		return
+	}
+	for _, l := range in.Labels {
+		if !labelRe.MatchString(l) {
+			c.fail(http.StatusBadRequest, "bad carrier label")
+			return
+		}
+	}
+	what := strings.Join(in.Labels, " + ")
+	id, err := s.jobs.run("use", "Switch "+t.Name+" to "+what, c.sess.User, s.be.ManagerArgv("auto-use", t.Name, strings.Join(in.Labels, ","), "--yes"))
+	s.jobReply(c, "switch carrier "+what, t.Name, id, err)
+}
+
+func (s *Server) apiPaths(c *call) {
+	if _, ok := s.tunnel(c.arg[0]); !ok {
+		c.fail(http.StatusNotFound, "no such tunnel")
+		return
+	}
+	mode, ps := s.be.Paths(c.arg[0])
+	if ps == nil {
+		ps = []Path{}
+	}
+	c.ok(map[string]any{"mode": mode, "paths": ps})
+}
+
+func (s *Server) apiBondMode(c *call) {
+	t, ok := s.tunnel(c.arg[0])
+	var in struct{ Mode string }
+	if !ok || c.json(&in) != nil || !map[string]bool{"balanced": true, "active-backup": true, "replicate": true}[in.Mode] {
+		c.fail(http.StatusBadRequest, "Mode is balanced, active-backup or replicate.")
+		return
+	}
+	if !strings.Contains(t.Carrier, "+") {
+		c.fail(http.StatusBadRequest, "This tunnel has one carrier; bond modes need two or more.")
+		return
+	}
+	id, err := s.jobs.run("bond", "Bond mode of "+t.Name+": "+in.Mode, c.sess.User, s.be.ManagerArgv("bond-mode", t.Name, in.Mode))
+	s.jobReply(c, "bond mode "+in.Mode, t.Name, id, err)
+}
+
+// apiMute takes one leg of a bond out of use (or back); live, no restart.
+func (s *Server) apiMute(c *call) {
+	t, ok := s.tunnel(c.arg[0])
+	var in struct {
+		Path string
+		Mute bool
+	}
+	if !ok || c.json(&in) != nil || !labelRe.MatchString(in.Path) {
+		c.fail(http.StatusBadRequest, "bad request")
+		return
+	}
+	verb := map[bool]string{true: "mute", false: "unmute"}[in.Mute]
+	id, err := s.jobs.run("bond", strings.ToUpper(verb[:1])+verb[1:]+" "+in.Path+" on "+t.Name, c.sess.User, s.be.ManagerArgv(verb, t.Name, in.Path))
+	s.jobReply(c, verb+" "+in.Path, t.Name, id, err)
 }
 
 func (s *Server) apiToken(c *call) {
@@ -329,7 +409,7 @@ var kharejCarriers = map[string]bool{"auto": true, "wss": true, "grpc": true, "t
 	"h2": true, "h2c": true, "udp": true, "icmp": true}
 
 func (s *Server) apiNew(c *call) {
-	var in struct{ Where, Token, Map, Name, Via, Carrier, Test string }
+	var in struct{ Where, Token, Map, Name, Via, Carrier, Test, Pick string }
 	if c.json(&in) != nil {
 		c.fail(http.StatusBadRequest, "bad request")
 		return
@@ -343,10 +423,8 @@ func (s *Server) apiNew(c *call) {
 		c.fail(http.StatusBadRequest, "Name: letters, digits, - and _, up to 32.")
 		return
 	}
-	switch in.Test {
-	case "", "normal", "fast", "anti", "reverse", "extended":
-	default:
-		c.fail(http.StatusBadRequest, "unknown test preset")
+	if !testPresets[in.Test] || !picks[in.Pick] {
+		c.fail(http.StatusBadRequest, "unknown test preset or pick")
 		return
 	}
 	iranArgs := func(tok string) []string {
@@ -356,6 +434,9 @@ func (s *Server) apiNew(c *call) {
 		}
 		if in.Test != "" {
 			a = append(a, "--test", in.Test)
+		}
+		if in.Pick != "" {
+			a = append(a, "--pick", in.Pick)
 		}
 		return append(a, "--yes")
 	}

@@ -542,6 +542,9 @@ wattun auto-test NAME  # re-run the Auto mode test
 wattun cdn-tune NAME   # re-tune a Cloudflare tunnel
 wattun auto-ip NAME IP # tell an auto tunnel Iran's IP (on Kharej)
 wattun bond-retest NAME        # bonded Iran tunnel: re-test its legs and add one that works again
+wattun auto-use NAME "tcp :443"            # switch an auto Iran tunnel to a tested variant by its result label, no re-test
+wattun auto-use NAME "tcp :443,udp :51820" # several labels of one kind (direct or reverse) = a bond
+wattun bond-mode NAME balanced|active-backup|replicate  # bonded tunnel: set bond-mode and restart
 wattun mute NAME PATH          # stop this end from sending on one bond leg, by hand
 wattun unmute NAME PATH        # put a muted bond leg back to work
 wattun bundle [amd64|arm64]    # build a signed offline install/update archive (e.g. on Kharej for Iran)
@@ -3487,9 +3490,17 @@ up at once; a pair that does not load leaves the old one in place):
 
 ### What the pages show
 
-- **Overview**: routes map (Kharej servers by IP), current download and upload, health gauge (enabled tunnels
-  that are up), watchdog heatmap for the last 24 hours with uptime %, outages, longest and ongoing outage, this
-  server (load, RAM, disk, clock, uptime), throughput for this visit, Kharej cards, tunnels table.
+- **Overview**: routes map, current download and upload, health gauge (enabled tunnels that are up), watchdog
+  heatmap for the last 24 hours with uptime %, outages, longest and ongoing outage, a speed test card (the last 7
+  runs of one Iran tunnel as a dot matrix, the latest result, Run test), this server (load, RAM, disk, clock,
+  uptime), throughput for this visit, Kharej cards, tunnels table. The first row fits one screen.
+- **Map.** The binary looks up where this server and each Kharej host are (`ipwho.is`, then `ipapi.co` when that
+  fails) through the update proxy, 20 s after start and then every 2 minutes for addresses it does not know yet;
+  answers are cached in `/var/lib/wattun/panel/geo.json` and a failed lookup is retried after an hour. Private and
+  loopback addresses are never sent. **This sends the public IPs of your servers to that service.** The map then
+  fits its view around the real points, so a US Kharej zooms the map out and a server outside Iran is drawn where it
+  is; a host with no answer falls back to Iran (this server) or a spot near Europe (Kharej). The land outline is a
+  coarse hand-drawn dot grid.
 - **Tunnels**: a tile per tunnel with the route, live rate and a 3-minute sparkline, latency, loss, users, the
   24-hour watchdog strip, public ports and quota meters. Start, restart or stop all from the top strip. A tile
   opens the drawer: live numbers, `/stats/history` (5 minutes), per-port use (bytes, rate, users, rate limit, quota
@@ -3518,9 +3529,25 @@ update or restart does not kill it, and the panel shows its end state after it c
 the exit code, or `lost` when it ended without one). `KEY=VALUE` lines in a job's log (`TOKEN=`, `TUNNEL=`) are its
 results; the page never prints a `TOKEN=` line, it offers a Show button.
 
-- **New tunnel.** "Here only, from a token" runs `wattun iran --token T --map M [--name N] [--test PRESET] --yes`.
-  "On Kharej and here" creates the tunnel on Kharej through a paired tunnel's scepter channel, then runs the same
-  command with the token Kharej returned.
+- **New tunnel.** "Here only, from a token" runs `wattun iran --token T --map M [--name N] [--test PRESET]
+  [--pick best|bond] --yes`. "On Kharej and here" creates the tunnel on Kharej through a paired tunnel's scepter
+  channel, then runs the same command with the token Kharej returned. `--pick bond` bonds every working direct
+  carrier (or every reverse one when fewer than two direct work).
+- **Job cards.** A speed test shows a waving dot matrix while it measures, then download and upload as large
+  numbers. A carrier test (new auto tunnel, or Re-test carriers) is a live board: one row per variant as the manager
+  probes it, sorted by speed, with failures and their reason, then the re-measure of the best ones and the variant
+  in use. The manager feeds it with `ATPLAN=N`, `ATROW=ok|LABEL|DOWN|UP|RTT` / `ATROW=fail|LABEL|WHY` and
+  `ATPICK=LABEL` lines (unattended runs only; one `ATPICK` per bonded leg). When the test is done you can tick one
+  row to switch to it, or several of one kind to bond them: that runs `wattun auto-use NAME "LABEL[,LABEL]" --yes`,
+  which rebuilds the variants from the tunnel's auto plan and applies them without testing again (no tuning pass;
+  the engine's auto values apply). Other jobs show their last steps, the current one pulsing; the raw log is one
+  click away.
+- **Re-test carriers** asks for the test preset and best or bond, then runs `wattun auto-test NAME --yes [--test
+  PRESET] [--pick best|bond]`. (Before this, `auto-test NAME --yes` still asked the preset and the pick on a
+  terminal and could not finish unattended.)
+- **Bonding.** A tunnel with a `+` carrier list shows a Bonding block in its drawer: the bond mode (balanced,
+  active-backup, replicate; `wattun bond-mode NAME MODE`, restarts the tunnel) and every leg from `/stats` with
+  its state, share of traffic and RTT, with Mute / Unmute (`wattun mute|unmute NAME PATH`, live, no restart).
 - **Kharej.** Per remote tunnel: start, stop, restart and new key. A new key restarts the tunnel on Kharej; the
   twin tunnel here (same name and host, or the only tunnel to that host) switches to it by itself. Per Kharej
   server: update, backup download, update status, audit log. All Kharej calls are serialized.

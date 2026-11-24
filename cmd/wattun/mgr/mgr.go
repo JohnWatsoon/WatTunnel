@@ -56,7 +56,7 @@ func Run(args []string) int {
 		cmd = args[0]
 	}
 	switch cmd {
-	case "kharej", "iran", "cdn-tune", "auto-test", "delete", "uninstall", "matrix", "auto-retest", "bond-retest", "auto-prune":
+	case "kharej", "iran", "cdn-tune", "auto-test", "auto-use", "bond-mode", "delete", "uninstall", "matrix", "auto-retest", "bond-retest", "auto-prune":
 		for _, a := range args {
 			if a == "--yes" {
 				NonInteractive = true
@@ -298,6 +298,19 @@ func runCommand(cmd string, args []string) int {
 			return 0
 		}
 		return dispatch("auto_test_cmd", posNI(args, 0))
+	case "auto-use":
+		if !NeedTunnel(posNI(args, 0)) {
+			return 1
+		}
+		if dispatch("mgr_lock") != 0 {
+			return 0
+		}
+		return dispatch("auto_use", posNI(args, 0), posNI(args, 1))
+	case "bond-mode":
+		if !NeedTunnel(posNI(args, 0)) {
+			return 1
+		}
+		return dispatch("bond_mode_cmd", posNI(args, 0), posNI(args, 1))
 	case "auto-ip":
 		if !NeedTunnel(name) {
 			return 1

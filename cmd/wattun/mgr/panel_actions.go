@@ -5,7 +5,9 @@ package mgr
 // prints (AGENTS.md: logic lives in TTY-free functions; managers and panel only call them).
 
 import (
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -282,4 +284,57 @@ func LatestVersion() string {
 		return ""
 	}
 	return strings.TrimSpace(loc[i+len("/tag/v"):])
+}
+
+// GeoLookup asks a public IP-location service where ADDR (an IP or a host name) is, through the update proxy.
+// ipwho.is first, ipapi.co when it fails. Only the address is sent.
+// PathInfo is one leg of a bonded tunnel as its /stats reports it.
+type PathInfo struct {
+	Name, RTT, Loss, Share string
+	Alive, Muted           bool
+}
+
+// BondPaths: the bond mode and the live legs of a tunnel (no legs when it is stopped or has one carrier).
+func BondPaths(n string) (mode string, out []PathInfo) {
+	for _, c := range tinfo(n).Cars {
+		out = append(out, PathInfo{Name: c.Name, RTT: c.RTT, Loss: c.Loss, Share: c.Share, Alive: c.Alive == "true", Muted: c.Muted == "true"})
+	}
+	return orStr(Cfg(n, "bond-mode"), "balanced"), out
+}
+
+func GeoLookup(addr string) (lat, lon float64, cc, city string, err error) {
+	ip := addr
+	if net.ParseIP(addr) == nil {
+		ips, lerr := net.LookupIP(addr)
+		if lerr != nil || len(ips) == 0 {
+			return 0, 0, "", "", fmt.Errorf("cannot resolve %s", addr)
+		}
+		ip = ips[0].String()
+	}
+	updateProxyEnv()
+	cl := updClient()
+	cl.Timeout = 12 * time.Second
+	var out struct {
+		Success     *bool   `json:"success"` // ipwho.is
+		Error       bool    `json:"error"`   // ipapi.co
+		Lat         float64 `json:"latitude"`
+		Lon         float64 `json:"longitude"`
+		CountryCode string  `json:"country_code"`
+		City        string  `json:"city"`
+	}
+	for _, u := range []string{"https://ipwho.is/" + ip, "https://ipapi.co/" + ip + "/json/"} {
+		r, gerr := cl.Get(u)
+		if gerr != nil {
+			err = gerr
+			continue
+		}
+		out.Success, out.Error, out.CountryCode = nil, false, ""
+		derr := json.NewDecoder(r.Body).Decode(&out)
+		r.Body.Close()
+		if derr == nil && !out.Error && (out.Success == nil || *out.Success) && out.CountryCode != "" {
+			return out.Lat, out.Lon, out.CountryCode, out.City, nil
+		}
+		err = fmt.Errorf("%s gave no location for %s", u[:strings.Index(u[8:], "/")+8], ip)
+	}
+	return 0, 0, "", "", err
 }

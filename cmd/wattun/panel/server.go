@@ -65,6 +65,7 @@ type Server struct {
 	hostAt time.Time
 	tick   int
 	ver    versionCache
+	geo    geoCache
 }
 
 type liveRow struct {
@@ -85,6 +86,7 @@ func New(cfg *Config, be Backend, dataDir string) *Server {
 		live: map[string]*liveRow{}, last: map[string]Counters{}, hub: newHub()}
 	s.wd = newWatchdog(filepath.Join(dataDir, "outages.jsonl"))
 	s.jobs, s.certs, s.tr, s.al = newJobs(""), &certStore{}, newTraffic(dataDir), newAlerts(dataDir)
+	s.geoLoad()
 	if dataDir != "" {
 		s.g.loadSessions(filepath.Join(dataDir, "sessions"))
 		s.jobs = newJobs(filepath.Join(dataDir, "jobs"))
@@ -166,6 +168,7 @@ func (s *Server) StartPollers() {
 	ctx := context.Background()
 	go s.pollLive(ctx)
 	go s.pollKharej(ctx)
+	go s.pollGeo(ctx)
 	if s.dataDir != "" {
 		go s.schedule(ctx)
 	}
@@ -444,7 +447,7 @@ func (s *Server) apiOverview(w http.ResponseWriter) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"host": s.be.Host(), "tunnels": tun, "kharej": kh, "twofa": s.conf().TOTP != "",
-		"watchdog": s.wd.summary(tunnelNames(tun), time.Now()), "alerts": s.al.list(), "latest": s.latestVersion(),
+		"watchdog": s.wd.summary(tunnelNames(tun), time.Now()), "alerts": s.al.list(), "latest": s.latestVersion(), "geo": s.geoAll(),
 	})
 }
 

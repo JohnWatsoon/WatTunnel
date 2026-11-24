@@ -21,6 +21,7 @@ func init() {
 	Register("auto_reopen", func(a ...string) int { return errRC(autoReopen(arg(a, 0))) })
 	Register("auto_retest", func(a ...string) int { return errRC(autoRetest(arg(a, 0))) })
 	Register("auto_test_cmd", func(a ...string) int { return errRC(autoTestCmd(arg(a, 0))) })
+	Register("auto_use", func(a ...string) int { return errRC(autoUse(arg(a, 0), arg(a, 1))) })
 	Register("auto_watch", func(a ...string) int { autoWatch(arg(a, 0)); return 0 })
 	Register("auto_optimize_all", func(a ...string) int { autoOptimizeAll(); return 0 })
 	Register("ac_matrix_cmd", func(a ...string) int { return b2i(MatrixCmd(arg(a, 0), Stdout, true)) })

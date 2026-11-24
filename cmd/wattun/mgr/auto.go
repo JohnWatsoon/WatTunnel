@@ -1946,6 +1946,9 @@ func autoTest(tok Token) {
 	}
 	autoVariants(tok)
 	n := len(av)
+	if NonInteractive {
+		fmt.Fprintf(Stdout, "ATPLAN=%d\n", n)
+	}
 	if atScreenSkipped != "" {
 		Warn("Skipped (needs newer wattun): " + atScreenSkipped)
 	}
@@ -1967,6 +1970,7 @@ func autoTest(tok Token) {
 		}
 		atMB = atProbeMB(bestRate, 1.5, atScreenCapMB) // H3: duration-based size
 		atProbe(i, w)
+		atEmit(i)
 		if ar[i].OK {
 			atMovedMB += 2 * atMB
 		}
@@ -1989,6 +1993,19 @@ func autoTest(tok Token) {
 			ar[i].Why = "skipped"
 		}
 		atAct = ""
+	}
+}
+
+// atEmit writes one line per probe for the web panel's job view (non-interactive runs only):
+// ATROW=ok|label|down|up|rtt or ATROW=fail|label|why. It prints even when atQuiet hides the table.
+func atEmit(i int) {
+	if !NonInteractive {
+		return
+	}
+	if ar[i].OK {
+		fmt.Fprintf(Stdout, "ATROW=ok|%s|%.1f|%.1f|%.0f\n", av[i].Label, ar[i].Down, ar[i].Up, ar[i].RTT)
+	} else {
+		fmt.Fprintf(Stdout, "ATROW=fail|%s|%s\n", av[i].Label, ar[i].Why)
 	}
 }
 
@@ -2214,6 +2231,9 @@ func autoIranFront(tok Token) (atChoice, error) {
 		return c, err
 	}
 	Ok("Selected: " + ch.Label)
+	if NonInteractive {
+		fmt.Fprintf(Stdout, "ATPICK=%s\n", ch.Label)
+	}
 	tune, _, _ := atTune(sel)
 	atTuneExtra(&ch, tune)
 	return ch, nil
@@ -2238,6 +2258,7 @@ func autoRefine(rank []int) []int {
 		}
 		atMB = mb
 		atProbe(i, 8)
+		atEmit(i)
 	}
 	atMB, atStreams = saved, savedStreams
 	return atRank(av, ar, "")
@@ -2597,7 +2618,10 @@ func autoTestCmd(name string) error {
 	atQuiet = false
 	atMB = 8
 	Hint("Current: " + autoCurrentKey(name) + " · live tunnel untouched")
-	preset, perr := atPresetAsk(false, "")
+	if NonInteractive { // the panel and scripts: which tunnel the result rows belong to
+		fmt.Fprintf(Stdout, "TUNNEL=%s\n", name)
+	}
+	preset, perr := atPresetAsk(NonInteractive, NI.Test)
 	if perr != nil {
 		Warn("Cancelled.")
 		return nil
@@ -2611,10 +2635,15 @@ func autoTestCmd(name string) error {
 		return fmt.Errorf("no carrier worked")
 	}
 	atTable(Stdout, av, ar, rank, atMB, atSecs)
-	sel, cerr := atChoose(rank, false, "")
+	sel, cerr := atChoose(rank, NonInteractive, NI.Pick)
 	if cerr != nil {
 		Warn("No change.")
 		return nil
+	}
+	if NonInteractive {
+		for _, i := range sel {
+			fmt.Fprintf(Stdout, "ATPICK=%s\n", av[i].Label)
+		}
 	}
 	ch, terr := atToT(sel)
 	if terr != nil {
@@ -2627,6 +2656,45 @@ func autoTestCmd(name string) error {
 	tune, tuneKeys, _ := atTune(sel)
 	atTuneExtra(&ch, tune)
 	return autoApply(name, ch, tuneKeys)
+}
+
+// autoUse applies tested variants by their result labels ("tcp :443", or several joined with "," for a bond)
+// without testing again: the variants come from the tunnel's auto plan, so the panel can switch to a row of a
+// finished test. No tuning pass; the engine's auto values apply.
+func autoUse(name, labels string) error {
+	if Role(name) != "Iran" || !fileExists(filepath.Join(P.Conf, name+".auto")) {
+		return fmt.Errorf("'%s' is not an auto Iran tunnel.", name)
+	}
+	tok, err := readAutoTok(name)
+	if err != nil || tok.Auto == "" {
+		return fmt.Errorf("%s.auto is not a valid auto token.", filepath.Join(P.Conf, name+".auto"))
+	}
+	want := strings.Split(labels, ",")
+	atTunnel = name
+	// the labels may come from any test preset; the first preset that has them all wins
+	for _, pr := range []string{"normal", "extended", "anti", "fast", "reverse"} {
+		atPreset = pr
+		autoVariants(tok)
+		var sel []int
+		for _, w := range want {
+			for i := range av {
+				if av[i].Label == strings.TrimSpace(w) {
+					sel = append(sel, i)
+					break
+				}
+			}
+		}
+		if len(sel) != len(want) {
+			continue
+		}
+		ch, terr := atToT(sel)
+		if terr != nil {
+			return terr
+		}
+		Ok("Switching " + name + " to " + ch.Label)
+		return autoApply(name, ch, nil)
+	}
+	return fmt.Errorf("'%s' is not a variant of this tunnel's auto plan.", labels)
 }
 
 // auto_retest — unattended (auto-heal or auto-optimize): same duration-based screening;
@@ -2658,6 +2726,9 @@ func autoRetest(name string) error {
 	}
 	cur := autoCurrentKey(name)
 	winner := rank[0]
+	if NonInteractive {
+		fmt.Fprintf(Stdout, "ATPICK=%s\n", av[winner].Label)
+	}
 	if avKey(av[winner]) == cur {
 		envLogger("wattun-heal", "retest of "+name+": current variant "+cur+" is already the top-ranked carrier, no switch")
 		os.Remove(filepath.Join(P.Run, name+".sla_triggered"))
