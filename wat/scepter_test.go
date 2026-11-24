@@ -2333,7 +2333,7 @@ func TestScepterDoctorFetchRPC(t *testing.T) {
 func TestScepterBackupExportChunked(t *testing.T) {
 	ops := newFakeOps(t)
 	ops.backupPad = scepterChunk * 2 // forces 3+ chunks through the real writeResp
-	c, _ := newScepterPair(t, CapManage, "", &fakeSource{}, ops)
+	c, _ := newScepterPair(t, CapFull, "", &fakeSource{}, ops) // backup.export needs full (Handoff 4 R5)
 	p, code := c.Call("backup.export", nil)
 	if code != CodeOK {
 		t.Fatalf("backup.export code %d", code)
