@@ -48,6 +48,9 @@ func TestShapedBondCarrier(t *testing.T) {
 		{[]string{"udp", "vxlan"}, "vxlan"},
 		{[]string{"sit", "6to4"}, "sit"},
 		{[]string{"tcp", "tls", "grpc", "dnscrypt-udp"}, "dnscrypt-udp"},
+		{[]string{"ptcp"}, ""},
+		{[]string{"udp", "spray"}, "spray"},
+		{[]string{"ptcp", "tcp"}, "ptcp"},
 	} {
 		if got := shapedBondCarrier(c.names); got != c.want {
 			t.Errorf("shapedBondCarrier(%v) = %q, want %q", c.names, got, c.want)
@@ -58,6 +61,12 @@ func TestShapedBondCarrier(t *testing.T) {
 		"fou-gre", "gue-ipip", "vxlan", "geneve", "dnscrypt-udp", "ntp-direct", "openvpn-dco", "srtp-direct"} {
 		if shapedBondCarrier([]string{"tcp", n}) != n {
 			t.Errorf("%s is not rejected inside a bond", n)
+		}
+	}
+	// the hop carriers must be in the -carrier table: they were missing and refused at start (3.4.3 - 3.6.0)
+	for _, n := range []string{"ptcp", "spray"} {
+		if !validCarrier[n] {
+			t.Errorf("%s is not a valid -carrier", n)
 		}
 	}
 }

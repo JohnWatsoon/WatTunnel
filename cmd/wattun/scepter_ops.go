@@ -477,7 +477,7 @@ func (o *fileScepterOps) checkCarrier(carrier string) (int, map[string]any) {
 		if !validCarrier[base] {
 			return wat.CodeBadRequest, map[string]any{"carrier": carrier}
 		}
-		if rawIPCarrier[base] && runtime.GOOS != "linux" {
+		if (rawIPCarrier[base] || hopCarrier[base]) && runtime.GOOS != "linux" {
 			return wat.CodeCarrierNeeds, map[string]any{"carrier": base, "ver": wat.Version, "need": "linux+CAP_NET_RAW"}
 		}
 	}

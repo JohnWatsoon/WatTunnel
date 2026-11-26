@@ -50,8 +50,13 @@ func nameSet(names []string) map[string]bool {
 // carrierNames is every -carrier name in a stable order (base carriers first, then the F19 shaped tables). The shaped
 // names come from wat, not a copy, so a shape the engine ships cannot stay rejected here (audit L6/F15).
 var carrierNames = append(append([]string{
-	"icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip",
+	"icmp", "udp", "tcp", "tls", "ws", "wss", "h2", "h2c", "grpc", "gre", "ipip", "ptcp", "spray",
 }, wat.RawShapedCarrierNames()...), wat.UDPShapedCarrierNames()...)
+
+// hopCarrier: the 3.4.3 raw-socket carriers that hop their 5-tuple (ptcp, spray). Linux + root, single carrier
+// only, and unlike the raw IP tier they do take -listen (a TCP port, a UDP port range). They were left out of
+// carrierNames when they landed, so the leg check refused them at start and Kharej refused to create them.
+var hopCarrier = nameSet([]string{"ptcp", "spray"})
 
 // rawIPCarrier: the carriers on a raw IP socket, which take a bare IP and run one session.
 var rawIPCarrier = nameSet(append([]string{"icmp", "gre", "ipip"}, wat.RawShapedCarrierNames()...))
@@ -433,7 +438,7 @@ func main() {
 	for i, n := range names {
 		base, _ := wat.LegDirection(n)
 		if !validCarrier[base] || seen[base] {
-			fmt.Fprintln(os.Stderr, "unknown -carrier (icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip|sit|6to4|xfrm-ipsec|etherip|l2tpv3|fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct, joined with + to bond; each at most once; a bond leg may carry an :up/:down suffix)")
+			fmt.Fprintln(os.Stderr, "unknown -carrier (icmp|udp|tcp|tls|ws|wss|h2|h2c|grpc|gre|ipip|ptcp|spray|sit|6to4|xfrm-ipsec|etherip|l2tpv3|fou-gre|gue-ipip|vxlan|geneve|dnscrypt-udp|ntp-direct|openvpn-dco|srtp-direct, joined with + to bond; each at most once; a bond leg may carry an :up/:down suffix)")
 			os.Exit(2)
 		}
 		seen[base] = true
@@ -728,7 +733,11 @@ func main() {
 				log.Fatalf("ptcp carrier: -reverse is not supported (the Kharej->Iran direction is unfiltered; use tcp there)")
 			}
 			if server {
-				lp, err := net.LookupPort("tcp", listen)
+				lport := listen // ":443" like every other carrier's -listen, or a bare "443"
+				if _, p, err := net.SplitHostPort(listen); err == nil {
+					lport = p
+				}
+				lp, err := net.LookupPort("tcp", lport)
 				if err != nil || lp < 1 {
 					log.Fatalf("ptcp carrier: -listen %q is not a TCP port", listen)
 				}
@@ -2299,7 +2308,7 @@ func shapedBondCarrier(names []string) string {
 		return ""
 	}
 	for _, n := range names {
-		if shapedRawCarrier[n] || shapedUDPCarrier[n] {
+		if shapedRawCarrier[n] || shapedUDPCarrier[n] || hopCarrier[n] {
 			return n
 		}
 	}
