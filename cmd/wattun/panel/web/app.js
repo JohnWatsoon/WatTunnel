@@ -279,7 +279,7 @@ function stopApp(){clearInterval(S.ovIv);if(S.es){S.es.close();S.es=null}}
 document.querySelectorAll('.nav button').forEach(b=>{if(b.dataset.ic)b.prepend(ico(b.dataset.ic));b.addEventListener('click',()=>{location.hash=b.dataset.v;b.classList.remove('hit');void b.offsetWidth;b.classList.add('hit')})});
 $('#gh').appendChild(ico('github'));
 // the active row's background slides to the row; re-measured when the rail/full sidebar switch moves the rows
-function placeInd(){const b=$('.nav button[aria-current]'),i=$('#navInd');if(!b||!b.offsetParent){i.classList.remove('on');return}i.style.setProperty('--y',b.offsetTop+'px');i.style.height=b.offsetHeight+'px';i.classList.add('on')}
+function placeInd(){const b=$('.nav button[aria-current]'),i=$('#navInd');if(!b||!b.offsetParent){i.classList.remove('on');return}i.style.setProperty('--y',b.offsetTop+'px');i.style.setProperty('--x',b.offsetLeft+'px');i.style.setProperty('--w',b.offsetWidth+'px');i.style.height=b.offsetHeight+'px';i.classList.add('on')}
 addEventListener('resize',placeInd);
 addEventListener('hashchange',()=>{if(!$('#app').hidden)setView(location.hash.slice(1))});
 const VIEWS={overview:['#vOverview','Overview'],tunnels:['#vTunnels','Tunnels'],kharej:['#vKharej','Kharej servers'],settings:['#vSettings','Settings']};
@@ -718,6 +718,46 @@ $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{meth
 if(!RM){let pe=null,raf=0;document.addEventListener('pointermove',e=>{pe=e;if(!raf)raf=requestAnimationFrame(()=>{raf=0;
   const t=pe.target.closest&&pe.target.closest('.btn.pri,.ksrv');if(!t)return;const r=t.getBoundingClientRect();
   t.style.setProperty('--mx',(pe.clientX-r.left).toFixed(0)+'px');t.style.setProperty('--my',(pe.clientY-r.top).toFixed(0)+'px')})},{passive:true})}
+/* phones: the bottom bar and the quick action button are liquid glass. A lens with a squircle bevel: the middle stays
+   clear, the rim bends what scrolls under it (Snell, IOR 3) and splits it slightly by colour (blue bends most); a hairline
+   catches a light that follows the pointer, the phone's tilt or the scroll. Only Chromium can bend the page
+   (backdrop-filter: url()); every other browser keeps the rim, tint and light over a faint blur. */
+(()=>{
+  const SV='http://www.w3.org/2000/svg',mq=matchMedia('(max-width:760px)'),de=document.documentElement;
+  if('userAgentData' in navigator)de.classList.add('lg-refract');
+  const host=document.createElementNS(SV,'svg');host.setAttribute('width','0');host.setAttribute('height','0');host.setAttribute('aria-hidden','true');host.setAttribute('class','lg-defs');
+  host.setAttribute('color-interpolation-filters','sRGB');document.body.appendChild(host);
+  const sq=x=>Math.pow(1-Math.pow(1-x,4),.25);
+  function profile(th,bz,n=128){const eta=1/3,o=new Float64Array(n);
+    for(let i=0;i<n;i++){const x=i/n,y=sq(x),dx=x<1?1e-4:-1e-4,d=(sq(x+dx)-y)/dx,m=Math.hypot(d,1),nx=-d/m,ny=-1/m,k=1-eta*eta*(1-ny*ny);
+      if(k<0)continue;const q=Math.sqrt(k),rx=-(eta*ny+q)*nx,ry=eta-(eta*ny+q)*ny;o[i]=rx*((y*bz+th)/ry)}return o}
+  // displacement map of a rounded rect, drawn at 2x: R/G = x/y shift around 128, pointing inward along the edge normal
+  function dmap(w,h,r,bz,th){const P=profile(th,bz),N=P.length;let mx=0;for(const v of P)mx=Math.max(mx,Math.abs(v));mx=mx||1;
+    const S=2,W=w*S,H=h*S,c=document.createElement('canvas');c.width=W;c.height=H;const x=c.getContext('2d'),im=x.createImageData(W,H),d=im.data;
+    for(let j=0;j<H;j++)for(let i=0;i<W;i++){const px=(i+.5)/S-w/2,py=(j+.5)/S-h/2,qx=Math.abs(px)-(w/2-r),qy=Math.abs(py)-(h/2-r);
+      let f,nx=0,ny=0;if(qx>0&&qy>0){const l=Math.hypot(qx,qy);f=r-l;nx=Math.sign(px)*qx/l;ny=Math.sign(py)*qy/l}
+      else if(qx>qy){f=r-qx;nx=Math.sign(px)}else{f=r-qy;ny=Math.sign(py)}
+      const o=(j*W+i)*4;d[o+2]=0;d[o+3]=255;
+      if(f<0||f>=bz){d[o]=d[o+1]=128;continue}
+      const v=P[Math.min(N-1,(f/bz*N)|0)]/mx,op=Math.min(1,f);d[o]=128+(-nx*v)*127*op;d[o+1]=128+(-ny*v)*127*op}
+    x.putImageData(im,0,0);return [c.toDataURL(),mx]}
+  function build(el,id){const w=el.offsetWidth,h=el.offsetHeight;if(!w||!h)return;const key=w+'x'+h;if(el.dataset.lg===key)return;el.dataset.lg=key;
+    const r=Math.min(h/2,w/2,parseFloat(getComputedStyle(el).borderTopLeftRadius)||h/2),bz=Math.min(r-1,14),[url,mx]=dmap(w,h,r,bz,18);
+    const old=host.querySelector('#'+id);if(old)old.remove();const f=document.createElementNS(SV,'filter');f.id=id;
+    ['x','y'].forEach(a=>f.setAttribute(a,'0'));f.setAttribute('width','100%');f.setAttribute('height','100%');
+    const sc=k=>(mx*k).toFixed(1),ch=(n,i)=>{const m=Array(20).fill(0);m[i*6]=1;m[18]=1;return `<feColorMatrix in="d${n}" type="matrix" values="${m.join(' ')}" result="c${n}"/>`};
+    f.innerHTML=`<feGaussianBlur in="SourceGraphic" stdDeviation="0.3" result="s"/><feImage href="${url}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none" result="m"/>`+
+      [['r',.94],['g',1],['b',1.06]].map(([n,k])=>`<feDisplacementMap in="s" in2="m" scale="${sc(k)}" xChannelSelector="R" yChannelSelector="G" result="d${n}"/>`).join('')+
+      ch('r',0)+ch('g',1)+ch('b',2)+`<feComposite in="cr" in2="cg" operator="arithmetic" k2="1" k3="1" result="rg"/><feComposite in="rg" in2="cb" operator="arithmetic" k2="1" k3="1"/>`;
+    host.appendChild(f);el.style.setProperty('--lg-filter','url(#'+id+')')}
+  const els=[['#nav','lgNav'],['#fab','lgFab']].map(([q,id])=>[$(q),id]).filter(([e])=>e);
+  if(de.classList.contains('lg-refract')){const ro=new ResizeObserver(()=>{if(mq.matches)els.forEach(([e,id])=>build(e,id))});els.forEach(([e])=>ro.observe(e))}
+  // the light: pointer (mouse), else the phone's tilt, else a slow sway with the scroll
+  if(RM)return;let a=-45,raf=0;const put=v=>{a=v;if(!raf)raf=requestAnimationFrame(()=>{raf=0;de.style.setProperty('--a',a.toFixed(1)+'deg')})};
+  addEventListener('pointermove',e=>{if(e.pointerType!=='mouse'||!mq.matches)return;const b=$('#nav').getBoundingClientRect();put(Math.atan2(e.clientX-(b.left+b.width/2),-(e.clientY-(b.top+b.height/2)))*180/Math.PI)},{passive:true});
+  let tilt=false;addEventListener('deviceorientation',e=>{if(e.gamma==null)return;tilt=true;put(-45+Math.max(-60,Math.min(60,e.gamma*2)))},{passive:true});
+  addEventListener('scroll',()=>{if(!tilt&&mq.matches)put(-45+Math.sin(scrollY/260)*40)},{passive:true});
+})();
 /* an element leaves as dust: its box breaks into specks that drift off and fade (toasts, mostly) */
 function dust(n){
   if(RM||!n.isConnected){n.remove();return}

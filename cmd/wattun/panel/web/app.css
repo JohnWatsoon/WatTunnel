@@ -841,3 +841,38 @@ td.ta .btn{margin-left:4px;--h:30px}
 .mx.fill{flex:1 1 0;min-height:56px;overflow:hidden;margin-top:18px;grid-template-columns:repeat(var(--n),9px);justify-content:space-between;align-content:space-between}
 #stCard .dcx{margin-top:8px}
 .c-map{display:flex;flex-direction:column}.c-map .routes{margin-top:auto;padding-top:6px}
+
+/* ---------- phones: the sidebar becomes a liquid glass bar at the bottom (app.js builds the lens) ---------- */
+.lg-defs{position:absolute;width:0;height:0;overflow:hidden}
+@media (max-width:760px){
+  .side{display:contents}
+  .sb-brand,.sb-g{display:none}
+  .sb-foot{flex-direction:row;flex-wrap:wrap;align-items:center;gap:10px;padding:8px 8px 4px;margin:0}
+  .sb-upd{order:2;width:100%}
+  .sb-host{flex:1;padding:0 4px}
+  .sb-row{border:0;padding:0;gap:4px}.sb-row .live{margin-right:6px}
+  #app .main{padding-bottom:104px}
+  .nav,.fab{position:fixed;bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:25;height:60px;isolation:isolate;
+    background:rgba(255,255,255,.06);box-shadow:0 10px 30px rgba(0,0,0,.35),inset 0 0 14px -4px rgba(255,255,255,.45);animation:barIn .8s .2s var(--spring) both}
+  .nav{left:14px;right:88px;margin:0;flex-direction:row;gap:0;padding:6px;border-radius:30px}
+  .fab{right:14px;width:60px;border-radius:30px;color:var(--fg);transition:transform .4s var(--spring)}
+  .fab:hover{transform:rotate(90deg)}
+  .nav:after,.fab:after{content:"";position:absolute;inset:0;z-index:-2;border-radius:inherit;pointer-events:none;
+    -webkit-backdrop-filter:blur(3px) saturate(1.6);backdrop-filter:blur(3px) saturate(1.6)}
+  .lg-refract .nav:after,.lg-refract .fab:after{backdrop-filter:var(--lg-filter,blur(3px) saturate(1.6))}
+  /* the hairline: brightest on the rim facing the light, a weaker one opposite */
+  .nav:before,.fab:before{content:"";position:absolute;inset:0;z-index:2;border-radius:inherit;padding:1px;pointer-events:none;opacity:.7;
+    background:linear-gradient(calc(var(--a,-45deg) + 180deg),#fff,rgba(255,255,255,0) 30% 70%,rgba(255,255,255,.6));
+    -webkit-mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
+  .nav button{flex:1;justify-content:center;height:48px;padding:0;border-radius:24px;color:rgba(255,255,255,.62)}
+  .nav button:before{display:none}
+  .nav .nl{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  .nav .ico{width:21px;height:21px}
+  .nav .cnt{display:none}.nav .cnt.bad{display:block;position:absolute;top:10px;left:calc(50% + 6px);width:7px;height:7px;padding:0;border-radius:50%;font-size:0;background:var(--red)}
+  .nav-ind{left:0;right:auto;top:6px;width:var(--w,48px);height:48px!important;border-radius:24px;transform:translateX(var(--x,0));
+    background:rgba(255,255,255,.1);box-shadow:inset 0 0 10px -3px rgba(255,255,255,.35)}
+  .toasts{bottom:calc(92px + env(safe-area-inset-bottom,0px));right:14px;left:14px;max-width:none}
+}
+/* transform only: an opacity animation would make the bar its own backdrop root and the lens would see nothing */
+@keyframes barIn{from{transform:translateY(110px)}to{transform:none}}
+@media (max-width:760px) and (prefers-reduced-transparency:reduce){.nav,.fab{background:#1d1d21}.nav:after,.fab:after{display:none}}
