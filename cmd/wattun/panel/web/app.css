@@ -79,14 +79,57 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--well);padding:2px
 
 /* app */
 #app .frame{padding:20px}
-.top{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:14px;animation:fade .6s .25s both}
-.top .brand{min-width:0}.top .who{justify-self:end}
-.brand{display:flex;align-items:center;gap:11px}
-.nav{display:flex;gap:2px;background:var(--card);border-radius:999px;padding:4px;flex-wrap:wrap;justify-self:center}
-.nav button{border:0;background:none;color:var(--mut);font-size:13px;border-radius:999px;padding:0 14px;height:34px;cursor:pointer;transition:color .2s,background .2s}
+/* sidebar: brand, the sections in two groups, and at the foot the update notice, this host, live state and the
+   account buttons. The active row's background is one element that slides between rows. */
+.shell{display:grid;grid-template-columns:236px minmax(0,1fr);gap:16px;max-width:1720px;margin:0 auto;align-items:start}
+.main{min-width:0;margin:0;max-width:none}
+.side{position:sticky;top:16px;height:calc(100vh - 32px);height:calc(100dvh - 32px);display:flex;flex-direction:column;background:var(--card);border-radius:20px;padding:16px 12px 12px;animation:sideIn .7s var(--ease) both}
+@keyframes sideIn{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:none}}
+.sb-brand{display:flex;align-items:center;gap:11px;padding:6px 10px 8px;color:var(--fg);text-decoration:none;font-weight:600;font-size:16px;letter-spacing:-.015em;border-radius:10px}
+.sb-brand .mk{transition:transform .5s var(--spring)}.sb-brand:hover .mk{transform:rotate(90deg)}
+.nav{position:relative;display:flex;flex-direction:column;gap:2px;margin-top:12px}
+.sb-g{font-size:12px;color:var(--dim);padding:16px 10px 8px}
+.nav button{position:relative;z-index:1;display:flex;align-items:center;gap:11px;height:38px;padding:0 10px;border:0;background:none;border-radius:11px;color:var(--mut);font-size:14px;cursor:pointer;text-align:left;transition:color .25s}
 .nav button:hover{color:var(--fg)}
-.nav button[aria-current]{background:var(--hov);color:var(--fg)}
-.who{display:flex;align-items:center;gap:12px}
+.nav button:before{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--hov);opacity:0;transform:scale(.96);transition:opacity .2s,transform .3s var(--ease);z-index:-1}
+.nav button:hover:not([aria-current]):before{opacity:.45;transform:none}
+.nav button[aria-current]{color:var(--fg)}
+.nav .ico{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transition:transform .45s var(--spring)}
+.nav button:hover .ico{transform:translateX(1px) scale(1.06)}
+.nav button.hit .ico{animation:pop .5s var(--spring)}
+.nl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cnt{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--dim);display:inline-flex;align-items:center;gap:6px}
+.cnt.bad:before{content:"";width:6px;height:6px;border-radius:50%;background:var(--red)}
+.nav-ind{position:absolute;left:0;right:0;top:0;height:38px;border-radius:11px;background:var(--hov);box-shadow:inset 0 1px 0 rgba(255,255,255,.05);transform:translateY(var(--y,0));transition:transform .5s var(--spring),opacity .3s;opacity:0;z-index:0;pointer-events:none}
+.nav-ind.on{opacity:1}
+.sb-foot{margin-top:auto;display:flex;flex-direction:column;gap:14px;padding-top:16px}
+.sb-upd{background:var(--well);border-radius:14px;padding:14px 14px 12px;animation:rise .7s var(--ease) both;position:relative;overflow:hidden}
+.sb-upd:before{content:"";position:absolute;left:0;right:0;top:0;height:1px;background:linear-gradient(90deg,transparent,rgba(212,243,106,.55),transparent);animation:sweep 3.2s ease-in-out infinite}
+@keyframes sweep{0%{transform:translateX(-100%)}60%,100%{transform:translateX(100%)}}
+.sb-ut{display:flex;align-items:center;gap:8px;font-size:13.5px}
+.sb-upd .btn{width:100%}
+.sb-host{display:flex;flex-direction:column;gap:3px;padding:0 10px;min-width:0}
+.sb-host .host{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-row{display:flex;align-items:center;gap:6px;padding:12px 4px 0 10px;border-top:1px solid var(--line)}
+.sb-row .live{margin-right:auto}
+.sb-row .av{background:transparent;transition:background .2s,color .2s,transform .3s var(--spring)}
+.sb-row .av:hover{background:var(--hov);transform:translateY(-1px)}
+.main>.pane.enter{animation:pageIn .5s var(--ease) both}
+.main>.pane.enter.up{animation-name:pageInUp}
+@keyframes pageIn{from{opacity:0;transform:translateY(10px);filter:blur(6px)}to{opacity:1;transform:none;filter:none}}
+@keyframes pageInUp{from{opacity:0;transform:translateY(-10px);filter:blur(6px)}to{opacity:1;transform:none;filter:none}}
+#vTitle.enter{animation:pageIn .45s var(--ease) both}
+/* between phone and desktop the sidebar is a rail of icons */
+@media (max-width:1180px) and (min-width:761px){
+  .shell{grid-template-columns:64px minmax(0,1fr)}
+  .side{padding:14px 8px 10px}
+  .sb-brand{justify-content:center;padding:6px 0 8px}.sb-brand span{display:none}
+  .nav button{justify-content:center;padding:0}.nl,.cnt{display:none}
+  .sb-g{font-size:0;padding:10px 0 6px}.sb-g:after{content:"";display:block;height:1px;background:var(--line);margin:0 10px}
+  .sb-upd{padding:6px}.sb-upd>:not(.btn){display:none}.sb-upd .btn{padding:0;height:36px;margin:0;justify-content:center;gap:0}.sb-upd .bl{display:none}
+  .sb-host{display:none}
+  .sb-row{flex-direction:column;padding:10px 0 0;gap:8px}.sb-row .live{margin:0;font-size:0;gap:0}
+}
 .live{display:inline-flex;align-items:center;gap:7px}
 .pulse{width:6px;height:6px;border-radius:50%;background:#55555d}
 .pulse.on{background:var(--green);animation:pl 2s infinite}
@@ -286,9 +329,7 @@ details summary{cursor:pointer}
 @media (max-width:760px){
   .grid,.grid.g2{grid-template-columns:minmax(0,1fr)}.s2,.s4{grid-column:auto}
   #app .frame{padding:12px 4px}
-  .top{grid-template-columns:minmax(0,1fr) auto;row-gap:12px}
-  .nav{grid-column:1/-1;grid-row:2;justify-self:stretch;width:100%;margin:0;overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none}
-  .nav button{flex:none}
+  .shell{display:block}
   .mapw{overflow:hidden;border-radius:12px}
   .big{font-size:44px}
   .routes{grid-template-columns:minmax(0,1fr)}

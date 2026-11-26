@@ -90,7 +90,15 @@ const ICO={play:['M7 4.5v15l12-7.5z'],stop:['M7 7h10v10H7z'],restart:['M20 12a8 
   unlink:['M9 17H7a5 5 0 0 1 0-10h2','M15 7h2a5 5 0 0 1 3.9 8.1','M8 12h3','M3 3l18 18'],
   power:['M12 3v9','M17.7 6.3a8 8 0 1 1-11.4 0'],pen:['M16.5 4.5a2.1 2.1 0 1 1 3 3L8 19l-4 1 1-4z'],
   share:['M5 12v7.5h14V12','M12 3v12','m8 7 4-4 4 4'],link:['M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1','M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1'],
-  shield:['M12 21s7.5-3.5 7.5-9.5V5.5L12 3 4.5 5.5v6C4.5 17.5 12 21 12 21z'],refresh:['M20 12a8 8 0 0 1-14.3 4.9','M4 12a8 8 0 0 1 14.3-4.9','M18 3v4.5h-4.5','M6 21v-4.5h4.5']};
+  shield:['M12 21s7.5-3.5 7.5-9.5V5.5L12 3 4.5 5.5v6C4.5 17.5 12 21 12 21z'],
+  grid:['M5 4h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z','M15 4h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z','M5 14h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z','M15 14h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z'],
+  route:['M3 19a3 3 0 1 0 6 0a3 3 0 1 0-6 0','M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15','M15 5a3 3 0 1 0 6 0a3 3 0 1 0-6 0'],
+  globe:['M2.5 12a9.5 9.5 0 1 0 19 0a9.5 9.5 0 1 0-19 0','M2.5 12h19','M12 2.5a14.5 14.5 0 0 1 0 19a14.5 14.5 0 0 1 0-19z'],
+  bars:['M3.5 3.5v15a2 2 0 0 0 2 2h15','M18 16.5V9','M13 16.5V5.5','M8 16.5v-3'],
+  server:['M5 3.5h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z','M5 13.5h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z','M7 7h.01','M7 17h.01'],
+  sliders:['M20 7h-9','M14 17H4','M14 17a3 3 0 1 0 6 0a3 3 0 1 0-6 0','M4 7a3 3 0 1 0 6 0a3 3 0 1 0-6 0'],
+  github:['M15 21.5v-3.8a4.4 4.4 0 0 0-1-3.2c3 0 6-2 6-5.5a5.4 5.4 0 0 0-1-3.5 4.6 4.6 0 0 0 0-3.5s-1 0-3 1.5a10.3 10.3 0 0 0-8 0C6 2 5 2 5 2a4.6 4.6 0 0 0 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5a4.4 4.4 0 0 0-1 3.2v3.8','M9 18c-4.5 2-5-2-7-2'],
+  logout:['M9 20.5H5.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H9','m16 16.5 4.5-4.5L16 7.5','M20.5 12H9'],refresh:['M20 12a8 8 0 0 1-14.3 4.9','M4 12a8 8 0 0 1 14.3-4.9','M18 3v4.5h-4.5','M6 21v-4.5h4.5']};
 function ico(n){const ns='http://www.w3.org/2000/svg',s=document.createElementNS(ns,'svg');s.setAttribute('viewBox','0 0 24 24');s.setAttribute('class','ico i-'+n);s.setAttribute('aria-hidden','true');
   ICO[n].forEach(d=>{const p=document.createElementNS(ns,'path');p.setAttribute('d',d);s.appendChild(p)});return s}
 // first match wins: the specific labels before the generic verbs
@@ -113,7 +121,7 @@ document.addEventListener('pointerdown',e=>{const b=e.target.closest&&e.target.c
 document.addEventListener('animationend',e=>{if(e.animationName==='pop'){const b=e.target.closest('.btn');if(b)b.classList.remove('hit')}});
 function busy(b,r){if(!r||typeof r.then!=='function')return r;b.classList.add('busy');b.setAttribute('aria-busy','true');
   const done=()=>{b.classList.remove('busy');b.removeAttribute('aria-busy')};r.then(done,done);return r}
-document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('.btn').forEach(decorate);const o=document.getElementById('out');if(o)o.replaceChildren(ico('power'))});
+document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('.btn').forEach(decorate);const o=document.getElementById('out');if(o)o.replaceChildren(ico('logout'))});
 function mb(bps){return bps/1048576}
 function fmtRate(bps){const v=mb(bps);return v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2)}
 function fmtDur(s){if(!s)return '–';if(s<60)return s+' s';if(s<3600)return Math.round(s/60)+' m';if(s<86400)return (s/3600).toFixed(1)+' h';return (s/86400).toFixed(1)+' d'}
@@ -228,13 +236,20 @@ function enterApp(){
   openLive();
 }
 function stopApp(){clearInterval(S.ovIv);if(S.es){S.es.close();S.es=null}}
-document.querySelectorAll('.nav button').forEach(b=>b.addEventListener('click',()=>{location.hash=b.dataset.v}));
+document.querySelectorAll('.nav button').forEach(b=>{if(b.dataset.ic)b.prepend(ico(b.dataset.ic));b.addEventListener('click',()=>{location.hash=b.dataset.v;b.classList.remove('hit');void b.offsetWidth;b.classList.add('hit')})});
+$('#gh').appendChild(ico('github'));
+// the active row's background slides to the row; re-measured when the rail/full sidebar switch moves the rows
+function placeInd(){const b=$('.nav button[aria-current]'),i=$('#navInd');if(!b||!b.offsetParent){i.classList.remove('on');return}i.style.setProperty('--y',b.offsetTop+'px');i.style.height=b.offsetHeight+'px';i.classList.add('on')}
+addEventListener('resize',placeInd);
 addEventListener('hashchange',()=>{if(!$('#app').hidden)setView(location.hash.slice(1))});
 const VIEWS={overview:['#vOverview','Overview'],tunnels:['#vTunnels','Tunnels'],kharej:['#vKharej','Kharej servers'],settings:['#vSettings','Settings']};
 function setView(v){
   if(!VIEWS[v])v='overview';S.view=v;
+  const order=Object.keys(VIEWS),prev=S.prevView;S.prevView=v;
   Object.entries(VIEWS).forEach(([k,[sel]])=>{$(sel).hidden=k!==v});
   document.querySelectorAll('.nav button').forEach(b=>{if(b.dataset.v===v)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
+  placeInd();
+  if(prev&&prev!==v){const pn=$(VIEWS[v][0]),t=$('#vTitle');[pn,t].forEach(e=>{e.classList.remove('enter','up');void e.offsetWidth;e.classList.add('enter')});if(order.indexOf(v)<order.indexOf(prev))pn.classList.add('up')}
   $('#vTitle').textContent=VIEWS[v][1];$('#hAct').hidden=v!=='overview';
   if(v==='overview'&&S.ov&&!S.mapStarted)startMap();
   if(v==='settings')loadSettings();
@@ -244,8 +259,20 @@ function setView(v){
 $('#out').addEventListener('click',async()=>{try{await api('logout',{method:'POST'})}catch(e){}showLogin()});
 
 async function loadOverview(){
-  if(!S.cli)try{const m=await api('me');if(m.ok)S.cli=m.j.cli}catch(e){}
+  if(!S.cli)try{const m=await api('me');if(m.ok){S.cli=m.j.cli;brand(m.j)}}catch(e){}
   try{const r=await api('overview');if(r.ok){S.ov=r.j;if(S.view==='overview'&&!S.mapStarted)startMap();render()}}catch(e){}
+}
+// the software's name and project page arrive only after sign-in (the login page does not say what this runs)
+function brand(m){if(!m.product)return;$('#brand').textContent=m.product;const g=$('#gh');g.href=m.repo;g.setAttribute('aria-label',m.product+' on GitHub');g.title='Project page';g.hidden=false}
+function newer(a,b){const x=a.split('.').map(Number),y=b.split('.').map(Number);for(let i=0;i<Math.max(x.length,y.length);i++){if((x[i]||0)!==(y[i]||0))return (x[i]||0)>(y[i]||0)}return false}
+function sideBar(ov){
+  const down=ov.tunnels.filter(t=>statusOf(t)[0]==='p-down').length,off=ov.kharej.filter(k=>!k.online).length;
+  const ct=$('#cTun');ct.textContent=ov.tunnels.length||'';ct.className='cnt n'+(down?' bad':'');ct.title=down?down+' down':'';
+  const ck=$('#cKh');ck.textContent=ov.kharej.length||'';ck.className='cnt n'+(off?' bad':'');ck.title=off?off+' unreachable':'';
+  const L=ov.latest,behind=L?[ov.host.version,...ov.kharej.filter(k=>k.online).map(k=>k.version)].filter(v=>v&&newer(L,v)).length:0;
+  $('#sbUpd').hidden=!behind;
+  if(behind){$('#sbUpdV').textContent=L;$('#sbUpdS').textContent=behind===1?'1 server runs an older one':behind+' servers run older ones'}
+  if(!S.navPlaced){S.navPlaced=true;placeInd()}
 }
 function openLive(){
   if(S.es)S.es.close();
@@ -277,6 +304,7 @@ function render(){
   $('#hName').textContent=ov.host.name||'server';
   const side={iran:'Iran',kharej:'Kharej',mixed:'Iran and Kharej'}[ov.host.role]||(ov.tunnels.some(t=>t.role==='Iran')?'Iran':ov.tunnels.length?'Kharej':'');
   $('#hMeta').textContent=(side?side+' · ':'')+ov.host.version;
+  sideBar(ov);
   // headline: what is wrong, in words
   const f=$('#find');f.textContent='';
   const down=ov.tunnels.filter(t=>statusOf(t)[0]==='p-down');
@@ -631,7 +659,7 @@ $('#pwBtn').addEventListener('click',async()=>{
 });
 $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{method:'POST'})}catch(e){}showLogin()});
 
-window.PANEL={api,el,$,S,busy,ico,flaps,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
+window.PANEL={api,el,$,S,busy,ico,newer,placeInd,flaps,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
 
 /* ---------- boot ---------- */
 markDots();

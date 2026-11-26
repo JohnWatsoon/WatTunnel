@@ -55,17 +55,37 @@
 </section>
 
 <section id="app" class="view" hidden>
-  <div class="frame">
+  <div class="shell">
+  <aside class="side" aria-label="Panel">
+    <a class="sb-brand" href="#overview"><div class="mk" aria-hidden="true"></div><span id="brand"></span></a>
+    <nav class="nav" id="nav" aria-label="Sections">
+      <i class="nav-ind" id="navInd" aria-hidden="true"></i>
+      <div class="sb-g">Network</div>
+      <button data-v="overview" data-ic="grid"><span class="nl">Overview</span></button>
+      <button data-v="tunnels" data-ic="route"><span class="nl">Tunnels</span><span class="cnt n" id="cTun"></span></button>
+      <button data-v="kharej" data-ic="globe"><span class="nl">Kharej servers</span><span class="cnt n" id="cKh"></span></button>
+      <button data-v="traffic" data-ic="bars"><span class="nl">Traffic</span></button>
+      <div class="sb-g">This server</div>
+      <button data-v="system" data-ic="server"><span class="nl">System</span></button>
+      <button data-v="settings" data-ic="sliders"><span class="nl">Settings</span></button>
+    </nav>
+    <div class="sb-foot">
+      <div class="sb-upd" id="sbUpd" hidden>
+        <div class="sb-ut"><i class="kdot warn" aria-hidden="true"></i><span>Version <b class="n" id="sbUpdV"></b> is out</span></div>
+        <div class="lab mt4" id="sbUpdS"></div>
+        <button class="btn pri sm mt10" id="sbUpdB" type="button" title="Update all"><span class="bl">Update all</span></button>
+      </div>
+      <div class="sb-host"><span class="host" id="hName"></span><span class="lab" id="hMeta"></span></div>
+      <div class="sb-row">
+        <span class="live lab"><i class="pulse" id="pulse"></i><span id="liveTxt">connecting</span></span>
+        <a class="av" id="gh" target="_blank" rel="noopener noreferrer" hidden></a>
+        <button class="av" id="out" type="button" aria-label="Sign out"></button>
+      </div>
+    </div>
+  </aside>
+  <div class="frame main">
     <i class="fl t"></i><i class="fl b"></i><i class="fl l"></i><i class="fl r"></i>
     <i class="cx a"></i><i class="cx b"></i><i class="cx c"></i><i class="cx d"></i>
-    <header class="top">
-      <div class="brand"><div class="mk" aria-hidden="true"></div><span class="host" id="hName"></span><span class="lab" id="hMeta"></span></div>
-      <nav class="nav" aria-label="Sections">
-        <button data-v="overview">Overview</button><button data-v="tunnels">Tunnels</button><button data-v="kharej">Kharej servers</button><button data-v="traffic">Traffic</button><button data-v="system">System</button><button data-v="settings">Settings</button>
-      </nav>
-      <div class="who"><span class="live lab"><i class="pulse" id="pulse"></i><span id="liveTxt">connecting</span></span><button class="av" id="out" aria-label="Sign out">⏻</button></div>
-    </header>
-
     <div class="head">
       <div><h1 id="vTitle">Overview</h1><div class="find" id="find"></div></div>
       <div class="hact" id="hAct"></div>
@@ -184,6 +204,7 @@
       </section>
       <div id="setMore" class="s2w setmore"></div>
     </main>
+  </div>
   </div>
   <button class="fab" id="fab" type="button" aria-label="Quick actions" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
   <div class="qa" id="qa" role="dialog" aria-label="Quick actions" hidden>

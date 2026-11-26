@@ -412,7 +412,10 @@ function liveKharej(){document.querySelectorAll('.ksrv').forEach(c=>{const k=S.o
 async function keyRotate(k,rt){const r=await act('kharej/'+enc(k.host)+'/keyrotate',{full:true,body:{name:rt.name},title:'New key for '+rt.name,danger:true,confirm:'Kharej makes a new key and restarts '+rt.name+'. Its twin here switches by itself; any other Iran server needs the new token.'});
   if(r){toast(r.local?r.local+' here uses the new key':'Kharej has the new key: paste the token where it is used',!r.ok);if(r.warning)toast(r.warning,true);if(r.token&&!r.local)info('New token for '+rt.name,tokenBox(r.token))}}
 async function kharejDelete(k,rt){const r=await act('kharej/'+enc(k.host)+'/delete',{full:true,danger:true,title:'Delete '+rt.name+' on '+k.host,confirm:'Deletes the tunnel, its key and config on Kharej. Iran tunnels that use it stop working.',fields:[{k:'confirm',label:'Type '+rt.name+' to confirm'}],body:{name:rt.name},ok:'Delete'});if(r){toast(rt.name+' deleted on '+k.host);P.loadOverview()}}
-function newer(a,b){const x=a.split('.').map(Number),y=b.split('.').map(Number);for(let i=0;i<Math.max(x.length,y.length);i++){if((x[i]||0)!==(y[i]||0))return (x[i]||0)>(y[i]||0)}return false}
+const newer=P.newer;
+// every server behind the newest release: Kharej first, then this one (the backend's update-all job)
+P.updateAll=()=>act('update-all',{full:true,title:'Update every server',ok:'Update all',confirm:'Each Kharej server that runs an older version updates itself (its tunnels restart, it rolls back by itself if the new version fails), then this server updates and this page reconnects.'});
+$('#sbUpdB').onclick=()=>P.updateAll();
 
 /* ================= TRAFFIC ================= */
 async function loadTraffic(){

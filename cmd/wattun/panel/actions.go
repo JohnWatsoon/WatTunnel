@@ -521,23 +521,29 @@ func runInto(argv []string, say func(string, ...any)) error {
 
 // via is the first running paired tunnel to HOST (the panel only reaches Kharej through one).
 func (s *Server) via(c *call, host string) (string, bool) {
+	v, code, msg := s.viaOf(host)
+	if v == "" {
+		c.fail(code, msg)
+	}
+	return v, v != ""
+}
+
+func (s *Server) viaOf(host string) (string, int, string) {
 	for _, k := range s.kharejSnap() {
 		if k.Host != host {
 			continue
 		}
 		for _, v := range k.Via {
 			if v == k.Link && k.Online { // the pairing link is hidden from the tunnel list; it answered the last poll
-				return v, true
+				return v, 0, ""
 			}
 			if t, ok := s.tunnel(v); ok && t.Active {
-				return v, true
+				return v, 0, ""
 			}
 		}
-		c.fail(http.StatusConflict, "No running tunnel reaches "+host+": start one, or use Kharej's own console.")
-		return "", false
+		return "", http.StatusConflict, "No running tunnel reaches " + host + ": start one, or use Kharej's own console."
 	}
-	c.fail(http.StatusNotFound, "no such Kharej server")
-	return "", false
+	return "", http.StatusNotFound, "no such Kharej server"
 }
 
 // kharejDo runs CMD on Kharej; TARGET is "host" or "host/tunnel" (the audit's target).
@@ -660,6 +666,63 @@ func (s *Server) apiUpdateHere(c *call) {
 	}
 	id, err := s.jobs.run("update", "Update this server", c.sess.User, s.be.ManagerArgv("update"))
 	s.jobReply(c, "update", "here", id, err)
+}
+
+// apiUpdateAll updates every server that runs an older version than the newest release: the reachable Kharej
+// servers first (each updates itself and rolls back on failure), then this one as its own job, since it restarts
+// this panel.
+func (s *Server) apiUpdateAll(c *call) {
+	if s.jobs.busy("update") {
+		c.fail(http.StatusConflict, "An update is already running.")
+		return
+	}
+	latest := s.latestVersion()
+	if latest == "" {
+		c.fail(http.StatusBadGateway, "The newest version is not known yet: GitHub did not answer. Try again in a minute.")
+		return
+	}
+	here := s.be.Host().Version
+	id, err := s.jobs.do("update-all", "Update every server to "+latest, c.sess.User, func(say func(string, ...any)) error {
+		for _, k := range s.kharejSnap() {
+			switch {
+			case !k.Online:
+				say("%s: unreachable, skipped. Update it from its own console.", k.Host)
+				continue
+			case k.Version != "" && !newer(latest, k.Version):
+				say("%s: already on %s.", k.Host, k.Version)
+				continue
+			}
+			via, _, msg := s.viaOf(k.Host)
+			if via == "" {
+				say("%s: %s", k.Host, msg)
+				continue
+			}
+			p, refused, err := s.be.KharejCall(via, "update.run", nil)
+			switch {
+			case err != nil:
+				say("%s: no answer (%v).", k.Host, err)
+			case refused != "":
+				say("%s: refused: %s", k.Host, refused)
+			default:
+				say("%s: updating to %v. Its tunnels restart; it is back in about two minutes.", k.Host, orAny(p["to"], latest))
+			}
+		}
+		if !newer(latest, here) {
+			say("This server is already on %s.", here)
+			return nil
+		}
+		say("This server updates now; the page reconnects by itself.")
+		_, err := s.jobs.run("update", "Update this server", c.sess.User, s.be.ManagerArgv("update"))
+		return err
+	})
+	s.jobReply(c, "update all", latest, id, err)
+}
+
+func orAny(v any, def string) any {
+	if v == nil || v == "" {
+		return def
+	}
+	return v
 }
 
 func (s *Server) apiRollback(c *call) {

@@ -22,7 +22,8 @@ func (c *call) body2r() *http.Request {
 
 func (s *Server) apiMe(c *call) {
 	cfg := s.conf()
-	c.ok(map[string]any{"user": cfg.User, "twofa": cfg.TOTP != "", "recovery_left": len(cfg.Recovery), "title": cfg.Title, "cli": cliName})
+	c.ok(map[string]any{"user": cfg.User, "twofa": cfg.TOTP != "", "recovery_left": len(cfg.Recovery), "title": cfg.Title, "cli": cliName,
+		"product": product, "repo": productRepo})
 }
 
 func (s *Server) apiOverviewR(c *call) { s.apiOverview(c.w) }

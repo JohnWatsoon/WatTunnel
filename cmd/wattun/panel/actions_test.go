@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +92,7 @@ func TestRouteTable(t *testing.T) {
 			t.Fatalf("%s: a full route needs a body for the password and code", k)
 		}
 	}
-	for _, must := range []string{"POST tunnels/*/delete", "POST kharej/*/update", "POST kharej/*/backup", "POST restore", "POST update"} {
+	for _, must := range []string{"POST tunnels/*/delete", "POST kharej/*/update", "POST kharej/*/backup", "POST restore", "POST update", "POST update-all"} {
 		found := false
 		for _, r := range routes {
 			if r.method+" "+r.pattern == must && r.tier == tierFull {
@@ -101,6 +102,29 @@ func TestRouteTable(t *testing.T) {
 		if !found {
 			t.Fatalf("%s must be full tier", must)
 		}
+	}
+}
+
+// Update all: the behind Kharej first, through its link, then this server as its own job; an up-to-date or
+// unreachable Kharej is skipped.
+func TestUpdateAll(t *testing.T) {
+	fakeCalls = nil
+	fakeKharej = []Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true, Version: "1.0.0"},
+		{Host: "5.6.7.8", Via: []string{"t1"}, Online: true, Version: "9.9.9"}, {Host: "9.9.9.9", Via: []string{"t1"}}}
+	defer func() { fakeKharej = nil }()
+	s, _ := newTestServer(t, "")
+	s.kh = fakeKharej
+	s.ver.latest = "9.9.9"
+	ck := signIn(t, s, "")
+	w := do(s, "POST", api+"update-all", `{"password":"correct horse battery"}`, xr, ck)
+	if w.Code != 200 {
+		t.Fatalf("update-all: %d %s", w.Code, w.Body)
+	}
+	for i := 0; i < 100 && slices.ContainsFunc(s.jobs.list(), func(j JobView) bool { return j.State == "running" }); i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := strings.Join(fakeCalls, ","); got != "kharej update.run,mgr update" {
+		t.Fatalf("calls: %s", got)
 	}
 }
 

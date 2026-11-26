@@ -34,6 +34,10 @@ const csp = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-
 // cliName is the console command the page names in its help text (sent only after sign-in).
 var cliName = "wattun"
 
+// product and repo name the software in the sidebar; like cliName they are sent only after sign-in, so the login
+// page does not say what this server runs
+const product, productRepo = "WatTunnel", "https://github.com/JohnWatsoon/WatTunnel"
+
 // Server is one running panel.
 type Server struct {
 	cfgMu   sync.Mutex
