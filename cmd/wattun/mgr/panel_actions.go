@@ -194,9 +194,22 @@ func SetPortLimit(name, port, rate, quota, period string) error {
 }
 
 // KharejCreate creates tunnel NAME (empty: Kharej picks) on Kharej through VIA, carrying CARRIER and allowing the
-// target PORTS ("18999,2000"), and returns the token for this side.
+// target PORTS ("18999,2000"), and returns the token for this side. CARRIER "reverse-tcp" (any rpool carrier) makes
+// Kharej dial this server instead, on a random free port here, for paths where Iran cannot reach Kharej.
 func KharejCreate(via, name, carrier, ports string) (string, error) {
-	p, refused, err := KharejCall(via, "tunnel.create", scepterCreateArgs(name, carrier, ports, nil, 0, ""))
+	var params map[string]string
+	if rc, ok := strings.CutPrefix(carrier, "reverse-"); ok {
+		ip := PublicIPCached()
+		if !IsRpool(rc) || ip == "" {
+			return "", fmt.Errorf("reverse needs one of tcp, tls, ws, wss, h2, h2c, grpc, udp and this server's public IP")
+		}
+		port, err := randOpenPort(p2Rproto(rc), nil)
+		if err != nil {
+			return "", err
+		}
+		carrier, params = rc, map[string]string{"reverse": "true", "peer": JoinHP(ip, strconv.Itoa(port))}
+	}
+	p, refused, err := KharejCall(via, "tunnel.create", scepterCreateArgs(name, carrier, ports, params, 0, ""))
 	if err != nil {
 		return "", err
 	}

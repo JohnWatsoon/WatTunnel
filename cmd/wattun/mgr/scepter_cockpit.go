@@ -863,13 +863,18 @@ func scepterWizardCreate(n string, cl ScepterClient, base scepterDoc) {
 	head := func(w io.Writer) {
 		Title(w, "New tunnel on Kharej and here", n)
 	}
-	cr := pickCarrier(false, head)
+	// auto: Kharej opens every carrier it can and this server tests them, the same plan the panel creates; a
+	// reverse pair cannot, since Kharej dials one carrier back here
+	cr := pickCarrier(Cfg(n, "reverse") != "true", head)
 	if cr == "" {
 		return
 	}
-	params, pok := scepterCreateParams(n, cr, "")
-	if !pok {
-		return
+	params := map[string]string{}
+	if cr != "auto" {
+		var pok bool
+		if params, pok = scepterCreateParams(n, cr, ""); !pok {
+			return
+		}
 	}
 	// Deliberately not asked here: reverse direction, FEC, bonding and the F19
 	// shaped knobs — edit them on the tunnel page (tunnel.edit) once the tunnel

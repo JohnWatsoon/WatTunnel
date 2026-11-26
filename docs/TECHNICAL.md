@@ -3597,8 +3597,11 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
 
 - **New tunnel.** "Here only, from a token" runs `wattun iran --token T --map M [--name N] [--test PRESET]
   [--pick best|bond] --yes`. "On Kharej and here" creates the tunnel on Kharej through a paired tunnel's scepter
-  channel, then runs the same command with the token Kharej returned. `--pick bond` bonds every working direct
-  carrier (or every reverse one when fewer than two direct work).
+  channel, then runs the same command with the token Kharej returned. The carrier list has auto, every direct
+  carrier (ptcp, spray, gre and ipip included), and "reverse" variants of tcp, tls, wss, ws, grpc, h2, h2c and udp:
+  Kharej then dials this server on a random free port, for paths where Iran cannot reach Kharej. The panel no longer
+  asks fastest-or-bond: the carrier test board lets you switch to any tested carrier or bond the ones you tick
+  (`--pick` stays on the CLI). The manager's "New tunnel on Kharej and here" offers auto too (not on a reverse pair).
 - **Job cards.** A speed test shows a waving dot matrix while it measures, then download and upload as large
   numbers. A carrier test (new auto tunnel, or Re-test carriers) is a live board: one row per variant as the manager
   probes it, sorted by speed, with failures and their reason, then the re-measure of the best ones and the variant

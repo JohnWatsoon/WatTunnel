@@ -417,7 +417,9 @@ func (s *Server) apiDelete(c *call) {
 // ---- new tunnel ----
 
 var kharejCarriers = map[string]bool{"auto": true, "wss": true, "grpc": true, "tcp": true, "tls": true, "ws": true,
-	"h2": true, "h2c": true, "udp": true, "icmp": true}
+	"h2": true, "h2c": true, "udp": true, "icmp": true, "ptcp": true, "spray": true, "gre": true, "ipip": true,
+	"reverse-tcp": true, "reverse-tls": true, "reverse-wss": true, "reverse-ws": true, "reverse-grpc": true,
+	"reverse-h2": true, "reverse-h2c": true, "reverse-udp": true}
 
 func (s *Server) apiNew(c *call) {
 	var in struct{ Where, Token, Map, Name, Via, Carrier, Test, Pick string }

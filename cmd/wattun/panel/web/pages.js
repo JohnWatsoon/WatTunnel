@@ -275,19 +275,21 @@ async function bulk(a){
   if(r){const bad=Object.entries(r.results).filter(([,v])=>v!=='ok');toast(bad.length?bad.map(([k,v])=>k+': '+v).join('; '):'Done',bad.length>0);P.loadOverview()}
 }
 const TESTF={k:'test',label:'Carrier test',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]};
-const PICK={k:'pick',label:'Then use, for auto',options:[['best','the fastest carrier'],['bond','a bond of every working carrier']],hint:'Either way, the results let you switch to any tested carrier or bond the ones you choose.'};
 P.newTunnel=()=>newTunnel();
+// the carrier test only runs for an auto tunnel: a token from Kharej may be one, a carrier picked here is not
+const testVis=inp=>{inp.test&&(inp.test.parentNode.hidden=inp.where&&inp.where.value==='both'&&inp.carrier&&inp.carrier.value!=='auto')};
 async function newTunnel(){
   const ov=S.ov||{tunnels:[],kharej:[]};const vias=(ov.kharej||[]).filter(k=>k.online);
   const fields=[{k:'where',label:'Where',options:vias.length?[['both','On Kharej and here, in one go'],['here','Here only, from a token']]:[['here','Here only, from a token']],
-      onchange:(v,inp)=>{const both=v==='both';['via','carrier'].forEach(k=>inp[k]&&(inp[k].parentNode.hidden=!both));inp.token&&(inp.token.parentNode.hidden=both)}},
+      onchange:(v,inp)=>{const both=v==='both';['via','carrier'].forEach(k=>inp[k]&&(inp[k].parentNode.hidden=!both));inp.token&&(inp.token.parentNode.hidden=both);testVis(inp)}},
     {k:'token',label:'Token from Kharej (wat1:...)',area:true,rows:3},
     {k:'via',label:'Kharej server',options:vias.map(k=>[k.host,k.host])},
-    {k:'carrier',label:'Carrier',options:[['auto','auto: test them all and keep the best'],['wss','wss: TLS websocket, the safe default'],['tls','tls'],['tcp','tcp'],['udp','udp'],['icmp','icmp (ping)'],['grpc','grpc'],['h2','h2'],['ws','ws'],['h2c','h2c']]},
+    {k:'carrier',label:'Carrier',options:[['auto','auto: test them all, keep the best'],['wss','wss: TLS websocket, the safe default'],['tls','tls'],['tcp','tcp'],['udp','udp'],['icmp','icmp: ping packets'],['grpc','grpc'],['h2','h2'],['ws','ws'],['h2c','h2c'],['ptcp','ptcp: fake TCP, raw socket'],['spray','spray: hops ports'],['gre','gre'],['ipip','ipip'],
+      ...['tcp','tls','wss','ws','grpc','h2','h2c','udp'].map(c=>['reverse-'+c,c+' reverse: Kharej dials here'])],
+      onchange:(v,inp)=>testVis(inp)},
     {k:'map',label:'Ports',ph:'39901:18999, 8443:443',hint:'public port here : port on Kharej, comma-separated'},
     {k:'name',label:'Name (empty = automatic)'},
-    {k:'test',label:'Carrier test, for auto',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]},
-    PICK];
+    {k:'test',label:'Carrier test',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]}];
   await act('new',{title:'New tunnel',fields,ok:'Create'});
 }
 
@@ -299,7 +301,7 @@ P.onDrawer=async(name,t)=>{
   const u=act2=>()=>act('tunnels/'+enc(name)+'/'+act2,act2==='stop'?{confirm:'Stop '+name+'? Its users lose the connection.',title:'Stop '+name,danger:true}:{}).then(r=>{if(r){toast(name+': '+act2+' done');P.loadOverview()}});
   grp('Run',[t.active?btn('Restart','sec',u('restart')):btn('Start','pri',u('start')),t.active&&btn('Stop','sec danger',u('stop'))]);
   grp('Test',[t.role==='Iran'&&btn('Speed test','sec',()=>act('tunnels/'+enc(name)+'/speedtest',{title:'Speed test of '+name,fields:[{k:'mb',label:'Megabytes each way',value:'10',mode:'numeric'}],ok:'Run'})),
-    t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches.',title:'Re-test carriers',fields:[TESTF,PICK],ok:'Start the test'}))]);
+    t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches.',title:'Re-test carriers',fields:[TESTF],ok:'Start the test'}))]);
   grp('Configure',[btn('Ports','sec',()=>editPorts(name,t)),btn('Limit a port','sec',()=>limitPort(name))]);
   if(/\+/.test(t.carrier||''))bondBlock(a,name);
   grp('Keys and pairing',[btn('Show token','sec',()=>showToken(name)),t.paired&&btn('Forget pairing','sec danger',()=>act('tunnels/'+enc(name)+'/pair-forget',{full:true,danger:true,title:'Forget the pairing of '+name,confirm:'Turns off the management channel of '+name+' (pairing: false) and restarts it. The tunnel keeps working; Kharej is then managed from its own console until you pair again.'}).then(r=>{if(r){toast('Pairing forgotten');P.loadOverview()}}))]);

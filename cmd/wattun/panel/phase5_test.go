@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -165,5 +166,9 @@ func TestUseAndBondValidation(t *testing.T) {
 	}
 	if w := do(s, "GET", api+"tunnels/t1/paths", "", xr, ck); w.Code != 200 || !strings.Contains(w.Body.String(), `"muted":true`) {
 		t.Fatalf("paths: %d %s", w.Code, w.Body)
+	}
+	// the retest job writes its rc file after the test body: wait, or TempDir cleanup races it on Windows
+	for i := 0; i < 100 && slices.ContainsFunc(s.jobs.list(), func(j JobView) bool { return j.State == "running" }); i++ {
+		time.Sleep(50 * time.Millisecond)
 	}
 }

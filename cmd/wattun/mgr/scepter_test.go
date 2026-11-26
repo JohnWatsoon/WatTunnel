@@ -847,9 +847,9 @@ func TestScepterWizardPortBusyReasksListen(t *testing.T) {
 	cl := &scriptClient{byCmd: map[string][]scriptAns{
 		"tunnel.create": {{r: busy}, {r: done}},
 	}}
-	// name default, udp (quick pick 2), listen default (empty), ports 443, send,
+	// name default, udp (quick pick 3, after auto), listen default (empty), ports 443, send,
 	// then the re-asked listen 18443
-	defer feed("\n2\n443\ny18443\n")()
+	defer feed("\n3\n443\ny18443\n")()
 	out := capture(t, func() { scepterWizardCreate("ir", cl, scepterDoc{StateSeq: 7}) })
 	sent := cl.cmds["tunnel.create"]
 	if len(sent) != 2 {
@@ -882,9 +882,9 @@ func TestScepterWizardCarrierNeedsRebuilds(t *testing.T) {
 	cl := &scriptClient{byCmd: map[string][]scriptAns{
 		"tunnel.create": {{r: needs}, {r: done}},
 	}}
-	// name default, tls (quick pick 4), listen 8443, sni old-sni.ir, ports 443,
+	// name default, tls (quick pick 5, after auto), listen 8443, sni old-sni.ir, ports 443,
 	// send, then re-pick tcp (quick pick 3) and Enter keeps the pre-filled 8443
-	defer feed("\n48443\nold-sni.ir\n443\ny3\n")()
+	defer feed("\n58443\nold-sni.ir\n443\ny3\n")()
 	out := capture(t, func() { scepterWizardCreate("ir", cl, scepterDoc{StateSeq: 7}) })
 	sent := cl.cmds["tunnel.create"]
 	if len(sent) != 2 {
@@ -1570,7 +1570,7 @@ func TestScepterAppliedGateOnCode(t *testing.T) {
 		{
 			"wizard create", func(cl ScepterClient) { scepterWizardCreate("ir", cl, scepterDoc{StateSeq: 7}) },
 			map[string][]scriptAns{"tunnel.create": {{r: internal}}},
-			"\n2\n\n443\ny", "created on Kharej",
+			"\n3\n\n443\ny", "created on Kharej",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
