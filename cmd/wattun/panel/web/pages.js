@@ -23,7 +23,7 @@ function dayLabel(iso){const d=new Date(iso+'T12:00:00');return d.toLocaleDateSt
 P.when=when;
 
 /* ---------- toasts ---------- */
-function toast(msg,bad){const t=el('div','toast'+(bad?' bad':''),msg);$('#toasts').appendChild(t);setTimeout(()=>t.remove(),bad?9000:4500)}
+function toast(msg,bad){const t=el('div','toast'+(bad?' bad':''),msg);$('#toasts').appendChild(t);setTimeout(()=>P.dust(t),bad?9000:4500)}
 P.toast=toast;
 
 /* ---------- dialog: fields + buttons, resolves with the values or null ---------- */
@@ -151,13 +151,20 @@ function chooser(w,list,tun,picks){
     row.onclick=e=>{if(e.target!==c){c.checked=!c.checked;c.onchange()}}});
   go.onclick=()=>{const labels=[...sel];act('tunnels/'+enc(tun)+'/use',{body:{labels},title:labels.length>1?'Bond '+labels.join(' + '):'Switch to '+labels[0],confirm:tun+' restarts on the new carrier'+(labels.length>1?'s':'')+'; open connections drop.',ok:'Switch'})};
 }
-// any other job: its steps, the current one pulsing
+// any other job: its steps, the current one a dot-matrix. Rows are updated in place, so a poll only animates the
+// line that is new (rebuilding them all replayed every entry animation and made the dialog stutter).
 function stepView(body){
   const steps=el('div','jsteps jsv');body.appendChild(steps);
-  return (lines,state)=>{steps.textContent='';const ls=lines.filter(l=>l.trim()).slice(-6);
-    if(!ls.length){const s=el('div','jstep '+(state==='running'?'now':'bad'));s.append(el('i'),el('span',null,state==='running'?'Starting …':'It stopped before printing anything.'));steps.appendChild(s);return}
-    ls.forEach((l,i,arr)=>{const last=i===arr.length-1;const k=last&&state==='running'?'now':last&&state!=='done'?'bad':'ok';
-      const s=el('div','jstep '+k);const m=el('i');if(k!=='now')m.appendChild(P.ico(k==='ok'?'check':'x'));s.append(m,el('span',null,l));steps.appendChild(s)})};
+  const row=(k,text,old)=>{const s=old||el('div','jstep');if(s.dataset.k===k&&s.dataset.t===text)return s;s.className='jstep '+k;s.dataset.k=k;s.dataset.t=text;
+    const m=el('i');if(k==='now')m.appendChild(P.dm('spiral',3,4));else m.appendChild(P.ico(k==='ok'?'check':'x'));s.replaceChildren(m,el('span',null,text));return s};
+  return (lines,state)=>{let ls=lines.filter(l=>l.trim()).slice(-6);let ks;
+    if(!ls.length){ls=[state==='running'?'Starting …':'It stopped before printing anything.'];ks=[state==='running'?'now':'bad']}
+    else ks=ls.map((l,i)=>{const last=i===ls.length-1;return last&&state==='running'?'now':last&&state!=='done'?'bad':'ok'});
+    const old=[...steps.children];
+    // the window slides when a 7th line arrives: drop from the top, then match the rest by position
+    while(old.length&&old.length>ls.length)old.shift().remove();
+    if(old.length&&old[0].dataset.t!==ls[0]&&old.findIndex(o=>o.dataset.t===ls[0])>0){const k=old.findIndex(o=>o.dataset.t===ls[0]);old.splice(0,k).forEach(o=>o.remove())}
+    ls.forEach((l,i)=>{const s=row(ks[i],l,old[i]);if(!old[i])steps.appendChild(s)})};
 }
 async function openJob(id){
   clearTimeout(jobT);
@@ -295,11 +302,42 @@ async function newTunnel(){
 }
 
 /* ---------- drawer: ports and actions ---------- */
+/* tunnel boot: while a start or restart comes up, the drawer shows its stages on a dot matrix that fills stage by
+   stage, a live rate trace, and the time; it folds away once traffic can flow, or turns red with the reason */
+function boot(name,t,verb){
+  $('#drawer .boot')&&$('#drawer .boot').remove();
+  const W=26,H=6,b=el('div','boot');const mx=el('div','bt-mx');const dots=[];
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=el('i');i.style.setProperty('--x',x);i.style.setProperty('--y',y);i.style.setProperty('--r',((x*7+y*13)%10)/10);mx.appendChild(i);dots.push(i)}
+  const st=el('div','bt-st');const stages=[verb==='restart'?'Restart sent':'Start sent','Unit running',t.role==='Iran'?'Session with Kharej':'Iran connected','Ready for traffic'];
+  const rows=stages.map(x=>{const r=el('div','bt-r');r.append(el('i'),el('span',null,x));st.appendChild(r);return r});
+  const NS='http://www.w3.org/2000/svg',g=document.createElementNS(NS,'svg');g.setAttribute('viewBox','0 0 260 40');g.setAttribute('preserveAspectRatio','none');g.setAttribute('class','bt-g');g.setAttribute('aria-hidden','true');
+  const pl=document.createElementNS(NS,'polyline');g.appendChild(pl);
+  const head=el('div','bt-h');const tt=el('span',null,(verb==='restart'?'Restarting ':'Starting ')+name);const tm=el('span','lab n','0.0 s');head.append(tt,tm);
+  b.append(head,mx,st,g);$('#dRoute').after(b);
+  // only state read after the start/restart answered counts: before that the overview and live feed still describe the old process
+  const t0=performance.now();let stage=0,ok=null,since3=0,iv,fresh=false,seen=0,lastT=null,at=0;const pts=[];
+  const set=k=>{if(k<=stage||performance.now()-at<450)return;stage=k;at=performance.now();rows.forEach((r,i)=>r.className='bt-r'+(i<k?' ok':i===k?' now':''));
+    const fill=Math.round(k/4*W);dots.forEach((d,i)=>d.classList.toggle('on',i%W<fill))};
+  set(0);rows[0].className='bt-r now';
+  const end=(good,msg)=>{clearInterval(iv);b.classList.add(good?'done':'fail');tm.textContent=((performance.now()-t0)/1000).toFixed(1)+' s';
+    if(good){at=0;set(4);tt.textContent=name+' is up';setTimeout(()=>{b.classList.add('fold');setTimeout(()=>b.remove(),600)},2200)}
+    else{tt.textContent=msg;rows.forEach((r,i)=>{if(i===stage)r.className='bt-r bad'})}};
+  iv=setInterval(()=>{const sec=(performance.now()-t0)/1000;tm.textContent=sec.toFixed(1)+' s';
+    if(!b.isConnected){clearInterval(iv);return}
+    const tv=(S.ov.tunnels||[]).find(x=>x.name===name)||{},l=S.live[name]||{},lt=(S.series[S.series.length-1]||{}).t;
+    if(ok&&lt!==lastT){lastT=lt;seen++}
+    if(ok)set(1);if(fresh&&tv.active)set(2);if(stage>=2&&seen>=2&&l.alive)set(3);
+    if(stage===3){since3=since3||sec;if(l.down>0||l.conns>0||sec-since3>2.5)end(true)}
+    pts.push(l.down||0);if(pts.length>80)pts.shift();const mxv=Math.max(.01,...pts);pl.setAttribute('points',pts.map((v,i)=>(i/Math.max(1,pts.length-1)*260).toFixed(1)+','+(38-v/mxv*34).toFixed(1)).join(' '));
+    if(ok&&sec%1<.26)P.loadOverview().then(()=>{fresh=true});
+    if(sec>40)end(false,name+' did not come up: the journal below says why')},250);
+  return r=>{if(!r){end(false,'The '+verb+' was refused');return}ok=true;lastT=(S.series[S.series.length-1]||{}).t}}
 P.onDrawer=async(name,t)=>{
   const a=$('#dActs');a.textContent='';
   const route=$('#dRoute');route.textContent='';const ln=el('i','t-line'+(t.active?' on':''));ln.appendChild(el('b'));route.append(el('span','t-end',S.ov.host.name||'here'),ln,el('span','t-end',t.peer||'–'));
   const grp=(title,items)=>{const g=el('div','agrp');g.appendChild(el('div','lab',title));const w=el('div','tools');items.filter(Boolean).forEach(x=>w.appendChild(x));g.appendChild(w);a.appendChild(g)};
-  const u=act2=>()=>act('tunnels/'+enc(name)+'/'+act2,act2==='stop'?{confirm:'Stop '+name+'? Its users lose the connection.',title:'Stop '+name,danger:true}:{}).then(r=>{if(r){toast(name+': '+act2+' done');P.loadOverview()}});
+  const u=act2=>()=>{const b=act2!=='stop'?boot(name,t,act2):null;
+    return act('tunnels/'+enc(name)+'/'+act2,act2==='stop'?{confirm:'Stop '+name+'? Its users lose the connection.',title:'Stop '+name,danger:true}:{}).then(r=>{if(b)b(r);if(r){if(!b)toast(name+': '+act2+' done');P.loadOverview()}})};
   grp('Run',[t.active?btn('Restart','sec',u('restart')):btn('Start','pri',u('start')),t.active&&btn('Stop','sec danger',u('stop'))]);
   grp('Test',[t.role==='Iran'&&btn('Speed test','sec',()=>act('tunnels/'+enc(name)+'/speedtest',{title:'Speed test of '+name,fields:[{k:'mb',label:'Megabytes each way',value:'10',mode:'numeric'}],ok:'Run'})),
     t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches.',title:'Re-test carriers',fields:[TESTF],ok:'Start the test'}))]);

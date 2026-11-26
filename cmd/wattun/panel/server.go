@@ -2,9 +2,13 @@ package panel
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -225,6 +229,16 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request, rest string) {
 	if rest == "index.html" {
 		b = []byte(strings.ReplaceAll(string(b), "{{TITLE}}", htmlEscape(s.conf().Title)))
 	}
+	// the files are ~180 KB of text that every visit fetched again over a slow link: answer a repeat visit with
+	// 304 (ETag, revalidated each time so an update is never served stale) and the first one gzipped
+	tag := `"` + etagOf(b) + `"`
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", tag)
+	w.Header().Set("Vary", "Accept-Encoding")
+	if r.Header.Get("If-None-Match") == tag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	switch path.Ext(rest) {
 	case ".html":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -237,7 +251,36 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request, rest string) {
 	case ".woff2":
 		w.Header().Set("Content-Type", "font/woff2")
 	}
+	if path.Ext(rest) != ".woff2" && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Write(gzipped(tag, b))
+		return
+	}
 	w.Write(b)
+}
+
+var (
+	gzMu    sync.Mutex
+	gzCache = map[string][]byte{} // by ETag: the files are embedded, so the set is small and fixed per binary
+)
+
+func etagOf(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:8]) }
+
+func gzipped(tag string, b []byte) []byte {
+	gzMu.Lock()
+	defer gzMu.Unlock()
+	if z, ok := gzCache[tag]; ok {
+		return z
+	}
+	var buf bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	zw.Write(b)
+	zw.Close()
+	if len(gzCache) > 64 { // a dev web dir or a changing title: never grow without bound
+		clear(gzCache)
+	}
+	gzCache[tag] = buf.Bytes()
+	return gzCache[tag]
 }
 
 func htmlEscape(s string) string {

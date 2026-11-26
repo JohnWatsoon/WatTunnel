@@ -2,6 +2,7 @@ package panel
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -343,5 +344,25 @@ func TestPagesUseOnlyExportedHelpers(t *testing.T) {
 		if loc := regexp.MustCompile(`(?:^|[^.\w])` + n + `\(`).FindIndex(pages); loc != nil {
 			t.Errorf("pages.js calls app.js-private %s() at byte %d; use P.%s", n, loc[0], n)
 		}
+	}
+}
+
+// A repeat visit gets 304 for an unchanged file, and a first one the text gzipped (the cold-open fix).
+func TestStaticRevalidatesAndGzips(t *testing.T) {
+	s, _ := newTestServer(t, "")
+	w := do(s, "GET", "/"+testPath+"/app.js", "", map[string]string{"Accept-Encoding": "gzip"})
+	tag := w.Header().Get("ETag")
+	if w.Code != 200 || tag == "" || w.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("first: %d etag=%q enc=%q", w.Code, tag, w.Header().Get("Content-Encoding"))
+	}
+	zr, err := gzip.NewReader(w.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := io.ReadAll(zr); !bytes.Contains(b, []byte("window.PANEL")) {
+		t.Fatal("gzip body is not app.js")
+	}
+	if w := do(s, "GET", "/"+testPath+"/app.js", "", map[string]string{"If-None-Match": tag}); w.Code != 304 || w.Body.Len() != 0 {
+		t.Fatalf("repeat: %d len=%d", w.Code, w.Body.Len())
 	}
 }

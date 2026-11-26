@@ -162,6 +162,9 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--well);padding:2px
 .btn.pri{background:var(--fg);color:#0b0b0c;box-shadow:inset 0 -2px 0 rgba(0,0,0,.12),inset 0 1px 0 #fff,0 8px 24px -12px rgba(255,255,255,.4)}
 .btn.pri:after{background:linear-gradient(105deg,transparent 30%,rgba(255,255,255,.9) 48%,transparent 66%);mix-blend-mode:soft-light}
 .btn.pri:hover{background:#fff;transform:translateY(-1px)}
+/* liquid: the face is a lens lit from the pointer; a press squashes it like a drop */
+.btn.pri:hover{background:radial-gradient(90px circle at var(--mx,50%) var(--my,50%),#fff,#e4e4ea 70%,#cfcfd6)}
+.btn.pri:active{transform:scale(1.03,.9);transition:transform .12s}
 .btn.sec{background:#1c1c1f;color:var(--fg);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.04)}
 .btn.sec .ico{color:var(--mut)}
 .btn.sec:hover{background:#242428;box-shadow:inset 0 0 0 1px rgba(255,255,255,.13),inset 0 1px 0 rgba(255,255,255,.06)}
@@ -395,11 +398,19 @@ details summary{cursor:pointer}
 .rowacts{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:8px}
 .chk{display:flex;gap:10px;align-items:center;font-size:13px;color:var(--mut);cursor:pointer}
 .btn.on{background:var(--fg);color:var(--bg)}
-dialog#dlg{background:var(--card);color:var(--fg);border:0;border-radius:20px;padding:22px;width:min(520px,calc(100vw - 32px));max-height:calc(100vh - 40px);overflow:auto}
-dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
+dialog#dlg{background:var(--card);color:var(--fg);border:0;border-radius:20px;padding:22px;width:min(520px,calc(100vw - 32px));max-height:calc(100vh - 40px);overflow:auto;
+  box-shadow:0 0 0 1px rgba(255,255,255,.06),0 30px 80px -20px rgba(0,0,0,.8);
+  opacity:0;transform:translateY(10px) scale(.97);transition:opacity .22s var(--ease),transform .4s var(--spring),overlay .3s allow-discrete,display .3s allow-discrete;scrollbar-width:thin}
+dialog#dlg[open]{opacity:1;transform:none}
+@starting-style{dialog#dlg[open]{opacity:0;transform:translateY(10px) scale(.97)}}
+dialog#dlg::backdrop{background:rgba(10,10,11,0);backdrop-filter:blur(0);transition:background .3s,backdrop-filter .3s,overlay .3s allow-discrete,display .3s allow-discrete}
+dialog#dlg[open]::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
+@starting-style{dialog#dlg[open]::backdrop{background:rgba(10,10,11,0);backdrop-filter:blur(0)}}
+#dlgB>*{animation:dlgIn .4s var(--ease) both}#dlgB>*:nth-child(2){animation-delay:.03s}#dlgB>*:nth-child(3){animation-delay:.06s}#dlgB>*:nth-child(n+4){animation-delay:.09s}
+@keyframes dlgIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 #dlgT{font-size:18px;font-weight:600;margin:0 0 14px}
 .dlg-b{justify-content:flex-end;margin-top:10px}
-.toasts{position:fixed;right:16px;bottom:16px;z-index:50;display:flex;flex-direction:column;gap:8px;max-width:min(420px,calc(100vw - 32px))}
+.toasts{position:fixed;right:24px;bottom:96px;z-index:50;display:flex;flex-direction:column;gap:8px;max-width:min(420px,calc(100vw - 32px))}
 .toast{background:var(--hov);color:var(--fg);border-radius:12px;padding:10px 14px;font-size:13px;animation:rise .4s var(--ease) both}
 .toast.bad{color:var(--red)}
 @media (max-width:900px){.s2w{grid-column:auto}}
@@ -445,8 +456,10 @@ dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
 .t-line{flex:1;height:1px;background:repeating-linear-gradient(90deg,#3a3a41 0 4px,transparent 4px 8px);position:relative;min-width:30px;font-style:normal}
 .t-line b{position:absolute;top:-2px;left:0;width:5px;height:5px;border-radius:50%;background:#5a5a62;display:none}
 .t-line.on{background:repeating-linear-gradient(90deg,#2f5a43 0 4px,transparent 4px 8px)}
-.t-line.on b{display:block;background:var(--green);box-shadow:0 0 10px var(--green);animation:pkt 1.8s linear infinite}
-@keyframes pkt{from{left:0}to{left:calc(100% - 5px)}}
+.t-line{container-type:inline-size}
+/* the packet goes there and back, easing into each end (transform only: no layout per frame) */
+.t-line.on b{display:block;background:var(--green);box-shadow:0 0 10px var(--green);animation:pkt 2.2s cubic-bezier(.65,0,.35,1) infinite alternate}
+@keyframes pkt{0%{transform:translateX(0) scaleX(1)}6%{transform:translateX(0) scaleX(.7)}50%{transform:translateX(calc(50cqw - 2.5px)) scaleX(1.8)}94%{transform:translateX(calc(100cqw - 5px)) scaleX(.7)}100%{transform:translateX(calc(100cqw - 5px)) scaleX(1)}}
 .t-rate{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 .t-spark{display:block;width:100%;height:54px;margin:-4px 0}
 .t-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
@@ -487,6 +500,14 @@ dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
 .pairc .k-via,.pairc .k-acts{margin-top:12px}
 .ksrv{display:flex;flex-direction:column;gap:14px}
 .ksrv.off{opacity:.8}
+/* foil: a pale light follows the pointer across the card and the rim catches a thin band of colour near it */
+.ksrv:before,.ksrv:after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .4s var(--ease)}
+.ksrv:before{background:radial-gradient(420px circle at var(--mx,50%) var(--my,0),rgba(255,255,255,.045),transparent 45%)}
+.ksrv:after{padding:1px;background:conic-gradient(from 0deg at var(--mx,50%) var(--my,0),#7ee8fa,#c39bff,#ff9ac2,#ffe08a,#9cf5b5,#7ee8fa);
+  mask:radial-gradient(240px circle at var(--mx,50%) var(--my,0),#000,transparent 70%) intersect,linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
+.ksrv:hover:before{opacity:1}.ksrv:hover:after{opacity:.6}
+.dust{position:fixed;z-index:60;pointer-events:none}
+.toast.dusting{opacity:0;transform:translateX(12px) scale(.98);filter:blur(2px);transition:opacity .25s,transform .3s var(--ease),filter .25s}
 .k-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .chip.upd{background:#2a2a12;color:var(--lime)}
 .caps{display:flex;gap:2px;background:var(--well);border-radius:999px;padding:3px}
@@ -549,6 +570,30 @@ dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
 .arc-t{text-align:center;margin-top:-22px;display:flex;flex-direction:column;gap:5px}
 .arc .mid{font-size:22px}
 .arcs.sm{gap:6px}.arcs.sm .arc{padding:10px 8px 8px;border-radius:12px}.arcs.sm .arc svg{max-width:120px}.arcs.sm .arc-t{margin-top:-16px;gap:3px}.arcs.sm .mid{font-size:17px}.arcs.sm .lab{font-size:10.5px}
+/* tunnel boot (pages.js boot()) */
+.boot{background:var(--well);border-radius:16px;padding:14px 16px 12px;margin:0 0 16px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px 18px;align-items:center;
+  animation:bootIn .5s var(--spring) both;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);transition:opacity .4s,transform .5s var(--ease),max-height .6s var(--ease),margin .6s,padding .6s;max-height:320px}
+@keyframes bootIn{from{opacity:0;transform:translateY(-8px) scale(.98)}to{opacity:1;transform:none}}
+.bt-h{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;font-size:14px;font-weight:500}
+.bt-mx{display:grid;grid-template-columns:repeat(26,5px);gap:3px}
+.bt-mx i{width:5px;height:5px;border-radius:50%;background:#2a2a30;animation:btScan 1.6s calc(var(--x)*45ms + var(--r)*200ms) infinite ease-in-out}
+.bt-mx i.on{background:var(--fg);animation:btOn .5s calc(var(--y)*40ms) var(--spring) both}
+@keyframes btScan{0%,100%{background:#2a2a30}40%{background:#5a5a64}}
+@keyframes btOn{0%{transform:scale(.4);background:#8a8a94}100%{transform:none;background:var(--fg)}}
+.bt-st{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bt-r{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dim);transition:color .3s}
+.bt-r i{width:8px;height:8px;border-radius:50%;background:#33333a;flex:none;transition:background .3s,transform .4s var(--spring)}
+.bt-r.now{color:var(--fg)}.bt-r.now i{background:var(--fg);animation:pl 1.4s infinite}
+.bt-r.ok{color:var(--mut)}.bt-r.ok i{background:var(--green);transform:scale(1.15)}
+.bt-r.bad{color:#ff9a9d}.bt-r.bad i{background:var(--red)}
+.bt-g{grid-column:1/-1;width:100%;height:40px}.bt-g polyline{fill:none;stroke:var(--fg);stroke-width:1.5;stroke-linejoin:round;vector-effect:non-scaling-stroke;opacity:.8}
+.boot.done .bt-mx i.on{background:var(--green);animation:btDone .6s calc(var(--x)*18ms) var(--spring) both}
+.boot.done .bt-g polyline{stroke:var(--green)}
+@keyframes btDone{0%{transform:scale(1)}50%{transform:scale(1.5)}100%{transform:none}}
+.boot.fail{box-shadow:inset 0 0 0 1px rgba(255,93,98,.3)}.boot.fail .bt-mx i{animation:none;background:#3a2023}.boot.fail .bt-mx i.on{background:var(--red)}
+.boot.fail .bt-h span:first-child{color:#ff9a9d}
+.boot.fold{opacity:0;transform:translateY(-6px);max-height:0;margin:0;padding-top:0;padding-bottom:0}
+@media (max-width:560px){.boot{grid-template-columns:minmax(0,1fr)}.bt-mx{grid-template-columns:repeat(26,minmax(0,1fr))}.bt-mx i{width:100%;height:auto;aspect-ratio:1}}
 .dclock{display:flex;flex-direction:column}
 .dc-w{display:grid;place-items:center;padding:4px 0 2px}.dc-w svg{width:100%;max-width:260px;overflow:visible}
 .dc-in{fill:var(--well)}
@@ -602,8 +647,7 @@ dialog#dlg::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12px)}
 .jstep i{width:21px;height:21px;border-radius:50%;flex:none;display:grid;place-items:center;background:rgba(62,224,138,.12);color:var(--green);position:relative}
 .jstep i svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
 .jstep.ok span{color:var(--mut)}
-.jstep.now{color:var(--fg)}.jstep.now i{background:none;box-shadow:inset 0 0 0 2px var(--line2)}
-.jstep.now i:before{content:"";position:absolute;inset:0;border-radius:50%;border:2px solid transparent;border-top-color:var(--fg);animation:spin .8s linear infinite}
+.jstep.now{color:var(--fg)}.jstep.now i{background:rgba(255,255,255,.06);color:var(--fg)}
 .jstep.bad{color:#ff9a9d}.jstep.bad i{background:rgba(255,93,98,.14);color:var(--red)}
 /* the job's progress line: runs while it runs, fills green or red at the end */
 .jbar{height:2px;border-radius:2px;background:var(--line);overflow:hidden;position:relative;margin:-4px 0 4px}
@@ -765,6 +809,12 @@ td.ta .btn{margin-left:4px;--h:30px}
 .qt .lab{display:block;margin-top:6px}
 .qx{width:46px;height:46px;border-radius:50%;border:0;background:var(--fg);color:#0a0a0b;cursor:pointer;display:grid;place-items:center;animation:tileIn .5s .25s var(--spring) both;transition:transform .35s var(--spring)}
 .qx:hover{transform:rotate(90deg)}
+/* closing plays the opening backwards: tiles drop away last-first, then the veil clears */
+.qa.closing{animation:fadeOut .32s .12s var(--ease) both;pointer-events:none}
+.qa.closing .qt{animation:tileOut .3s var(--ease) both;animation-delay:var(--o,0s)}
+.qa.closing .qx{animation:tileOut .25s var(--ease) both}
+@keyframes fadeOut{to{opacity:0}}
+@keyframes tileOut{to{opacity:0;transform:translateY(14px) scale(.94);filter:blur(4px)}}
 .qx svg{width:16px;height:16px;stroke-width:2}
 @media (max-width:760px){.qtiles{grid-template-columns:repeat(2,minmax(0,1fr));width:100%}.qt{height:132px}.hact{width:100%}.hact .btn{flex:1}}
 

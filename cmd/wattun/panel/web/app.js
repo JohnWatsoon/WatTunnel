@@ -299,7 +299,8 @@ function setView(v){
 $('#out').addEventListener('click',async()=>{try{await api('logout',{method:'POST'})}catch(e){}showLogin()});
 
 async function loadOverview(){
-  if(!S.cli)try{const m=await api('me');if(m.ok){S.cli=m.j.cli;brand(m.j)}}catch(e){}
+  // the first load asks both at once (one round trip on a slow link, not two)
+  if(!S.cli)api('me').then(m=>{if(m.ok){S.cli=m.j.cli;brand(m.j)}}).catch(()=>{});
   try{const r=await api('overview');if(r.ok){S.ov=r.j;if(S.view==='overview'&&!S.mapStarted)startMap();render()}}catch(e){}
 }
 // the software's name and project page arrive only after sign-in (the login page does not say what this runs)
@@ -390,7 +391,15 @@ function openQuick(){const qa=$('#qa'),box=$('#qaTiles');box.textContent='';
   quick().forEach(([ic,t,sub,fn],i)=>{const b=el('button','qt');b.type='button';b.style.setProperty('--d',(i*0.05+0.03).toFixed(2)+'s');
     const tx=el('span',null,t);tx.appendChild(el('span','lab',sub));b.append(ico(ic),tx);b.onclick=()=>{closeQuick();fn()};box.appendChild(b)});
   qa.hidden=false;$('#fab').setAttribute('aria-expanded','true');const f=box.querySelector('.qt');if(f)f.focus()}
-function closeQuick(){const qa=$('#qa');if(!qa||qa.hidden)return;qa.hidden=true;$('#fab').setAttribute('aria-expanded','false');$('#fab').focus()}
+// the dialog follows its content's height smoothly (a job's lines, an error, a second step) instead of jumping
+{const dlg=$('#dlg');let lastH=0;
+  new ResizeObserver(()=>{if(!dlg.open){lastH=0;return}const h=dlg.offsetHeight;
+    if(lastH&&Math.abs(h-lastH)>2&&!RM)dlg.animate([{height:lastH+'px'},{height:h+'px'}],{duration:300,easing:'cubic-bezier(.16,1,.3,1)'});lastH=h}).observe($('#dlgF'));
+  dlg.addEventListener('close',()=>{lastH=0})}
+function closeQuick(){const qa=$('#qa');if(!qa||qa.hidden||qa.classList.contains('closing'))return;
+  const t=[...qa.querySelectorAll('.qt')];t.forEach((x,i)=>x.style.setProperty('--o',((t.length-1-i)*0.035).toFixed(3)+'s'));
+  qa.classList.add('closing');$('#fab').setAttribute('aria-expanded','false');$('#fab').focus();
+  setTimeout(()=>{qa.hidden=true;qa.classList.remove('closing')},RM?0:460)}
 document.addEventListener('DOMContentLoaded',()=>{const f=$('#fab');if(!f)return;f.onclick=openQuick;$('#qaX').onclick=closeQuick;
   $('#qa').addEventListener('click',e=>{if(e.target.id==='qa')closeQuick()});document.addEventListener('keydown',e=>{if(e.key==='Escape')closeQuick()})});
 function sparkCells(name){if(!S.ov)return el('div','spk');
@@ -705,7 +714,26 @@ $('#pwBtn').addEventListener('click',async()=>{
 });
 $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{method:'POST'})}catch(e){}showLogin()});
 
-window.PANEL={api,el,$,S,busy,ico,dm,dd,DM_KINDS,newer,placeInd,flaps,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
+/* the light under the pointer: primary buttons bend it like liquid, Kharej cards catch it like foil (--mx/--my in px) */
+if(!RM){let pe=null,raf=0;document.addEventListener('pointermove',e=>{pe=e;if(!raf)raf=requestAnimationFrame(()=>{raf=0;
+  const t=pe.target.closest&&pe.target.closest('.btn.pri,.ksrv');if(!t)return;const r=t.getBoundingClientRect();
+  t.style.setProperty('--mx',(pe.clientX-r.left).toFixed(0)+'px');t.style.setProperty('--my',(pe.clientY-r.top).toFixed(0)+'px')})},{passive:true})}
+/* an element leaves as dust: its box breaks into specks that drift off and fade (toasts, mostly) */
+function dust(n){
+  if(RM||!n.isConnected){n.remove();return}
+  const r=n.getBoundingClientRect(),cv=document.createElement('canvas'),d=devicePixelRatio||1,W=r.width+160,H=r.height+80;
+  cv.width=W*d;cv.height=H*d;cv.className='dust';cv.style.left=(r.left-40)+'px';cv.style.top=(r.top-60)+'px';cv.style.width=W+'px';cv.style.height=H+'px';
+  document.body.appendChild(cv);const x=cv.getContext('2d');x.scale(d,d);
+  const col=getComputedStyle(n).color,ps=[];
+  for(let i=0;i<Math.min(420,r.width*r.height/40);i++){const px=40+Math.random()*r.width,py=60+Math.random()*r.height;
+    ps.push({x:px,y:py,vx:.6+Math.random()*1.8,vy:-(.2+Math.random()*1.1),d:(px-40)/r.width*260+Math.random()*120,s:1+Math.random()*1.6})}
+  n.classList.add('dusting');const t0=performance.now();
+  (function f(now){const t=now-t0;x.clearRect(0,0,W,H);x.fillStyle=col;let live=0;
+    for(const p of ps){const k=t-p.d;if(k<0){live++;continue}const a=1-k/700;if(a<=0)continue;live++;
+      x.globalAlpha=a*.85;x.fillRect(p.x+p.vx*k/16,p.y+p.vy*k/16-k*k/90000,p.s,p.s)}
+    if(t>220&&n.isConnected)n.remove();
+    if(live&&t<1600)requestAnimationFrame(f);else cv.remove()})(t0)}
+window.PANEL={dust,api,el,$,S,busy,ico,dm,dd,DM_KINDS,newer,placeInd,flaps,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
 
 /* ---------- boot ---------- */
 markDots();
