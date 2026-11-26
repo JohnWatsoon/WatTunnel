@@ -170,7 +170,10 @@ func (s *Server) apiCACert(c *call) {
 
 func (s *Server) apiCertACME(c *call) {
 	var in struct{ Domain string }
-	if c.json(&in) != nil || strings.TrimSpace(in.Domain) == "" || strings.ContainsAny(in.Domain, " /\n") ||
+	if c.json(&in) == nil && strings.TrimSpace(in.Domain) == "" {
+		in.Domain = s.be.Host().IP // nothing typed: this server's own public IP, which the panel already knows
+	}
+	if strings.TrimSpace(in.Domain) == "" ||strings.ContainsAny(in.Domain, " /\n") ||
 		(strings.Contains(in.Domain, ":") && net.ParseIP(strings.TrimSpace(in.Domain)) == nil) {
 		c.fail(http.StatusBadRequest, "Give the domain name that points at this server.")
 		return
@@ -198,6 +201,11 @@ func (s *Server) startACME(user, domain string) (string, error) {
 		s.cfg.CertFile, s.cfg.KeyFile, s.cfg.CertKind, s.cfg.ACMEName = work.CertFile, work.KeyFile, work.CertKind, work.ACMEName
 		err := s.cfg.Save()
 		s.cfgMu.Unlock()
+		if err == nil {
+			// a browser that was told to accept the old self-signed certificate keeps saying "Not secure" for this
+			// address until it restarts, although the new one is valid (checked 2026-11-26 with a fresh Chrome)
+			say("Done. If the browser still says Not secure, close it fully and open the panel again: it remembers that you accepted the old certificate.")
+		}
 		return err
 	})
 }

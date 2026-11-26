@@ -48,8 +48,12 @@ func signIn(t *testing.T, s *Server, code string) *http.Cookie {
 func TestFullTierNeedsFreshPasswordAndCode(t *testing.T) {
 	s, _ := newTestServer(t, "")
 	ck := signIn(t, s, "")
-	if w := do(s, "POST", api+"tunnels/t1/token", `{}`, xr, ck); w.Code != 403 || !strings.Contains(w.Body.String(), "need2fa") {
-		t.Fatalf("no 2FA: %d %s", w.Code, w.Body)
+	// 2FA off: the password alone, asked again
+	if w := do(s, "POST", api+"tunnels/t1/token", `{}`, xr, ck); w.Code != 403 || !strings.Contains(w.Body.String(), "reauth") {
+		t.Fatalf("no 2FA, no password: %d %s", w.Code, w.Body)
+	}
+	if w := do(s, "POST", api+"tunnels/t1/token", `{"password":"correct horse battery"}`, xr, ck); w.Code != 200 {
+		t.Fatalf("no 2FA, password: %d %s", w.Code, w.Body)
 	}
 	sec := NewTOTPSecret()
 	s2, _ := newTestServer(t, sec)

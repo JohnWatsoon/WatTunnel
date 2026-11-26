@@ -273,6 +273,7 @@ function statusOf(t){
 }
 function render(){
   const ov=S.ov;if(!ov)return;
+  syncDrawer();
   $('#hName').textContent=ov.host.name||'server';
   const side={iran:'Iran',kharej:'Kharej',mixed:'Iran and Kharej'}[ov.host.role]||(ov.tunnels.some(t=>t.role==='Iran')?'Iran':ov.tunnels.length?'Kharej':'');
   $('#hMeta').textContent=(side?side+' · ':'')+ov.host.version;
@@ -563,14 +564,21 @@ function startMap(){
 }
 
 /* ---------- tunnel drawer ---------- */
-async function openDrawer(name){
-  S.drawer=name;$('#drawer').hidden=false;const t=S.ov.tunnels.find(x=>x.name===name)||{};
-  $('#dName').textContent=name;$('#dSub').textContent=[t.role,t.carrier,t.reverse?'reverse':'',t.uptime?'up '+t.uptime:''].filter(Boolean).join(' · ');
+// drawerHead fills the parts of the open drawer that follow the tunnel's state; S.dKey remembers what the action
+// buttons were built for, so a start or stop (here, from the quick menu or by the watchdog) rebuilds them
+function drawerHead(t){
+  $('#dName').textContent=t.name;$('#dSub').textContent=[t.role,t.carrier,t.reverse?'reverse':'',t.uptime?'up '+t.uptime:''].filter(Boolean).join(' · ');
   const info=$('#dInfo');info.textContent='';
   const kv=(k,v)=>{const d=el('div','kv');d.append(el('span',null,k),el('span','n',v));info.appendChild(d)};
   if(t.peer)kv('Kharej',t.peer);kv('Ports',(t.ports||[]).join(', ')||'–');kv('Paired',t.paired?'yes':'no');kv('Starts at boot',t.enabled?'yes':'no');
   const [pc,pw]=statusOf(t);const pl=$('#dPill');pl.textContent='';const pp=el('span','pill '+pc);pp.append(el('i'),pw);pl.appendChild(pp);
-  drawerLive();$('#dX').focus();if(window.PANEL&&PANEL.onDrawer)PANEL.onDrawer(name,t);
+  const key=[t.active,t.enabled,t.paired,t.carrier].join('/');
+  if(S.dKey!==key){S.dKey=key;if(window.PANEL&&PANEL.onDrawer)PANEL.onDrawer(t.name,t)}
+}
+function syncDrawer(){if(!S.drawer||!S.ov)return;const t=S.ov.tunnels.find(x=>x.name===S.drawer);if(t)drawerHead(t)}
+async function openDrawer(name){
+  S.drawer=name;S.dKey=null;$('#drawer').hidden=false;const t=S.ov.tunnels.find(x=>x.name===name)||{name};
+  drawerHead(t);drawerLive();$('#dX').focus();
   const [h,l]=await Promise.all([api('tunnels/'+encodeURIComponent(name)+'/history').catch(()=>null),api('tunnels/'+encodeURIComponent(name)+'/logs?n=200').catch(()=>null)]);
   if(S.drawer!==name)return;
   drawHist(h&&h.ok&&Array.isArray(h.j)?h.j:[]);

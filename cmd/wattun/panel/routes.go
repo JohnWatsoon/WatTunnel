@@ -4,8 +4,8 @@ package panel
 // scepter command or a manager function": the table test walks this list).
 //   read   any signed-in session
 //   manage any signed-in session; the change is audited
-//   full   2FA must be on, and the request carries the password and a fresh 2FA code (features §2): a stolen
-//          session cookie never reaches a full action, a stolen password without the phone neither.
+//   full   the request carries the password again, plus a fresh 2FA code when 2FA is on (features §2): a stolen
+//          session cookie never reaches a full action; with 2FA on, a stolen password without the phone neither.
 
 import (
 	"encoding/json"
@@ -185,7 +185,8 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, path, ip strin
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
 }
 
-// reauth checks the password and a fresh 2FA code carried in a full-tier request. Failures count toward the ban
+// reauth checks the password, and a fresh 2FA code when 2FA is on, carried in a full-tier request. With 2FA off it
+// asked for a code the owner never set up (3.6.1: it refused outright, so the panel's own buttons were dead). Failures count toward the ban
 // like a failed sign-in (a stolen cookie must not brute-force the password here) and answer 403, not 401, so
 // the page asks again instead of signing out.
 func (s *Server) reauth(c *call) bool {
@@ -198,8 +199,13 @@ func (s *Server) reauth(c *call) bool {
 	defer s.cfgMu.Unlock()
 	cfg := s.cfg
 	if cfg.TOTP == "" {
-		writeJSON(c.w, http.StatusForbidden, map[string]any{"error": "Turn on two-factor sign-in first (Settings). Without it this action is only available on the server's console.", "need2fa": true})
-		return false
+		if !checkPassword(cfg, cfg.User, in.Pass) {
+			s.g.fail(c.ip)
+			s.audit(c, "reauth", "", "refused")
+			writeJSON(c.w, http.StatusForbidden, map[string]any{"error": "The password is wrong.", "reauth": true})
+			return false
+		}
+		return true
 	}
 	step, codeOK := VerifyTOTP(cfg.TOTP, in.Code, time.Now(), cfg.TOTPLast)
 	if !checkPassword(cfg, cfg.User, in.Pass) || !codeOK {

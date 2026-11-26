@@ -32,7 +32,7 @@ function ask(title,{text,fields=[],ok='Go ahead',danger=false,full=false,err='',
     if(text)b.appendChild(el('p','note',text));
     if(body)b.appendChild(body);
     const all=fields.slice();
-    if(full)all.push({k:'password',label:'Password',type:'password'},{k:'code',label:'Code from your authenticator app',mode:'numeric'});
+    if(full){all.push({k:'password',label:'Password',type:'password'});if(S.ov&&S.ov.twofa)all.push({k:'code',label:'Code from your authenticator app',mode:'numeric'})}
     const inputs={};
     all.forEach(f=>{const w=el('div','fld');const id='dlg_'+f.k;let i;
       if(f.check){w.className='chk';i=el('input');i.type='checkbox';i.id=id;i.checked=!!f.value;const l=el('label',null,f.label);l.htmlFor=id;w.append(i,l);b.appendChild(w);inputs[f.k]=i;return}
@@ -67,7 +67,6 @@ async function act(path,opts={}){
     if(r.ok){if(r.j.job)openJob(r.j.job);return r.j}
     if(r.status===409&&r.j.lastlink){const v=await ask('Last link to '+r.j.host,{text:r.j.error,fields:[{k:'confirm',label:'Type the tunnel name'}],danger:true});if(!v)return null;body.confirm=v.confirm;continue}
     if(r.status===403&&r.j.reauth){const v=await ask(opts.title||'Confirm',{full:true,err:r.j.error});if(!v)return null;Object.assign(body,v);continue}
-    if(r.status===403&&r.j.need2fa){toast('Turn on two-factor sign-in first (Settings). Actions that show a key or cannot be undone need it.',true);return null}
     toast(r.j.error||('Failed ('+r.status+').'),true);return null;
   }
   return null;
@@ -588,7 +587,7 @@ async function certPick(k){
   if(k==='ca')return done(await act('settings/cert/ca',{full:true,title:'Make the private CA',confirm:'Makes a CA that can only vouch for this server\'s own IPs, and a certificate from it. Download the CA afterwards and install it on your phone.'}));
   if(k==='owner'){const v=await ask('Use your own certificate',{full:true,fields:[{k:'cert',label:'Certificate (PEM)',area:true,rows:5},{k:'key',label:'Private key (PEM)',area:true,rows:5}],ok:'Use it'});if(!v)return;
     return done(await act('settings/cert',{body:v}))}
-  if(k==='acme'){const v=await ask('Certificate from Let\'s Encrypt',{full:true,text:'Give a domain that points at this server, or this server\'s public IP (IP certificates last 6 days and renew by themselves). Port 80 opens for a few seconds during the check; it is refused if something else uses it. If it fails, the current certificate stays.',fields:[{k:'domain',label:'Domain or IP',value:S.ov&&S.ov.host.ip||''}],ok:'Get it'});if(!v)return;
+  if(k==='acme'){const ip=S.ov&&S.ov.host.ip||'';const v=await ask('Certificate from Let’s Encrypt',{full:true,text:'For '+(ip||'this server’s IP')+', unless you give a domain that points here. IP certificates last 6 days and renew by themselves. Port 80 opens for a few seconds during the check. If it fails, the current certificate stays.',fields:[{k:'domain',label:'Domain (optional)',ph:ip,hint:'Empty: this server’s IP'}],ok:'Get it'});if(!v)return;
     await act('settings/cert/acme',{body:v})}
 }
 
