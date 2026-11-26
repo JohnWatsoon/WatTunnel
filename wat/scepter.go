@@ -1445,10 +1445,18 @@ func intentTTLClamp(ttl int) int {
 // (informational — the response's own ver is authoritative for the version decision, made by DialScepter).
 func cmdHello(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
 	uuid, caps := ss.cred()
-	return map[string]any{
+	p := map[string]any{
 		"ver": Version, "v": scepterV, "caps": CapName(caps), "uuid": uuid, "state_seq": ss.StateSeq(),
-	}, CodeOK
+	}
+	if ScepterHostInfo != nil {
+		p["host"] = ScepterHostInfo() // 3.6.1: an extra key, which an older cockpit ignores
+	}
+	return p, CodeOK
 }
+
+// ScepterHostInfo, when set by the binary, adds this host's load, cores, memory, disk and uptime to the hello
+// answer so the cockpit can show them.
+var ScepterHostInfo func() map[string]any
 
 func cmdPing(ss *ScepterState, req ScepterRequest) (map[string]any, int) {
 	return map[string]any{"pong": true}, CodeOK

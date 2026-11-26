@@ -2585,7 +2585,7 @@ outcomes-only for replay.
 
 | Command | Args | Capability | Notes |
 |---|---|---|---|
-| `scepter.hello` | — | tunnel | versions, caps, state_seq (the pairing hello) |
+| `scepter.hello` | — | tunnel | versions, caps, state_seq (the pairing hello); since 3.6.1 also `host`: load1, cpus, mem_pct, disk_pct, uptime_s, which the Iran panel draws on the Kharej card (an older cockpit ignores the key) |
 | `scepter.ping` | — | tunnel | keepalive |
 | `state.get` | — | tunnel | the state document |
 | `tunnels.list` | — | tunnel | the tunnels array |

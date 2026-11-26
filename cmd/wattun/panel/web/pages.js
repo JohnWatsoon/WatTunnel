@@ -362,14 +362,17 @@ function renderKharejPage(still){
     const c=el('section','card ksrv'+(k.online?'':' off'));c.style.animationDelay=(0.1+i*0.08)+'s';c.dataset.host=k.host;
     const top=el('div','k-top');top.appendChild(pill(k.online?'p-up':'p-down',k.online?'online':'unreachable'));
     if(k.version){const vc=el('span','chip n','v'+k.version);top.appendChild(vc);if(latest&&newer(latest,k.version))top.appendChild(el('span','chip upd','v'+latest+' is out'))}
-    top.appendChild(el('span','grow'));
-    const caps=el('div','caps');caps.title='what this pairing may do on Kharej';const ti=TIERS.indexOf(k.caps);TIERS.forEach((x,j)=>{const s=el('span',j<=ti?'on':'',x);caps.appendChild(s)});top.appendChild(caps);c.appendChild(top);
+    top.appendChild(el('span','grow'));if(k.res&&k.res.uptime_s)top.appendChild(el('span','lab','up '+P.fmtDur(k.res.uptime_s)));
+    if(k.caps)top.title='This pairing may: '+TIERS.slice(0,TIERS.indexOf(k.caps)+1).join(', ');c.appendChild(top);
     const fl=P.flaps(k,'big',24,0.04);c.appendChild(fl);
     // the link: this server to Kharej, packets at the live rate
     const link=el('div','k-link');const a1=el('div','kl-end');a1.append(el('span','kl-dot me'),el('span',null,S.ov.host.name||'this server'));
     const mid=el('div','kl-mid');const line=el('i','t-line wide'+(k.online?' on':''));line.appendChild(el('b'));const st=el('div','kl-st');st.dataset.k='kst';mid.append(line,st);
     const a2=el('div','kl-end r');a2.append(el('span',null,k.host),el('span','kl-dot '+(k.online?'ok':'bad')));link.append(a1,mid,a2);c.appendChild(link);
-    const via=el('div','k-via');via.appendChild(el('span','lab','through'));k.via.forEach(n=>{if(n===k.link){via.appendChild(el('span','pchip','pairing link'));return}const b=el('button','pchip lnk',n);b.type='button';b.onclick=()=>P.openDrawer(n);via.appendChild(b)});
+    // load, memory and disk of that server (Kharej 3.6.1+ sends them with its hello)
+    if(k.online&&k.res){const r=k.res,ar=el('div','arcs sm');ar.append(arc('load · '+r.cpus+(r.cpus===1?' core':' cores'),r.cpus?Math.min(100,r.load1/r.cpus*100):0,r.load1.toFixed(2),85),arc('memory',r.mem_pct,r.mem_pct.toFixed(0)+'%',90),arc('disk',r.disk_pct,r.disk_pct.toFixed(0)+'%',90));c.appendChild(ar)}
+    // the tunnels here that lead to it (the pairing link stays out of sight: it is not a tunnel to manage)
+    const via=el('div','k-via');const mine=k.via.filter(n=>n!==k.link);if(mine.length)via.appendChild(el('span','lab','tunnels here'));mine.forEach(n=>{const b=el('button','pchip lnk',n);b.type='button';b.onclick=()=>P.openDrawer(n);via.appendChild(b)});
     if(!k.online&&k.error)via.appendChild(el('span','lab bad',k.error));if(k.seen)via.appendChild(el('span','lab grow r','seen '+when(k.seen)));c.appendChild(via);
     const list=el('div','k-tuns');
     (k.tunnels||[]).forEach(rt=>{const row=el('div','ktr');const ok=rt.health==='ok',act2=rt.state==='active';
@@ -386,12 +389,13 @@ function renderKharejPage(still){
         btn('Update status','sec ic push',async()=>{const r=await api('kharej/'+enc(k.host)+'/status');const pre=el('pre','log',r.ok?JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Update status of '+k.host,pre)}),
         btn('Audit','sec ic',async()=>{const r=await api('kharej/'+enc(k.host)+'/audit');const pre=el('pre','log',r.ok?(r.j.logs||[]).join('\n')||JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Audit of '+k.host,pre)}),
         btn('Rotate pairing','sec ic',()=>act('kharej/'+enc(k.host)+'/pair-rotate',{full:true,title:'New pairing credential for '+k.host,confirm:'Kharej makes a new pairing credential; '+k.via.join(', ')+' switch to it and restart. The old one keeps working for 5 minutes.'}).then(r=>r&&toast('Pairing rotated'))));
-      c.appendChild(t)}
-    if(k.link){const t=el('div','k-acts');t.appendChild(btn('Remove','sec danger',()=>act('kharej/'+enc(k.host)+'/remove',{full:true,danger:true,title:'Remove Kharej '+k.host,confirm:'Deletes the pairing link to '+k.host+'. Your tunnels to it keep running; they are no longer managed from here. Add it again with its pairing token.'}).then(r=>{if(r)setTimeout(()=>P.loadOverview(),1500)})));c.appendChild(t)}
+      if(k.link)t.appendChild(removeBtn(k));c.appendChild(t)}
+    else if(k.link){const t=el('div','k-acts');t.appendChild(removeBtn(k));c.appendChild(t)}
     g.appendChild(c);
   });
   v.appendChild(g);liveKharej();
 }
+function removeBtn(k){return btn('Remove','sec sm danger',()=>act('kharej/'+enc(k.host)+'/remove',{full:true,danger:true,title:'Remove Kharej '+k.host,confirm:'Deletes the pairing link to '+k.host+'. Your tunnels to it keep running; they are no longer managed from here. Add it again with its pairing token.'}).then(r=>{if(r)setTimeout(()=>P.loadOverview(),1500)}))}
 // Iran: pair with one more Kharej from its pairing token (wattun add-kharej as a job; the carrier board shows the test)
 P.addKharej=()=>addKharej();
 function addKharej(){return act('kharej-add',{full:true,title:'Add Kharej',ok:'Add',fields:[{k:'token',label:'Pairing token from Kharej (wat1:...)',area:true,rows:3,hint:'On the Kharej server: '+(S.cli||'wattun')+', then t. Or its panel: Kharej servers.'},
@@ -419,6 +423,26 @@ P.updateAll=()=>act('update-all',{full:true,title:'Update every server',ok:'Upda
 $('#sbUpdB').onclick=()=>P.updateAll();
 
 /* ================= TRAFFIC ================= */
+function dayClock(hours){
+  const hc=card('dclock','Time of day','last 24 h over the day before');
+  const now=Math.floor(Date.now()/3600000)*3600,byT={};hours.forEach(h=>byT[h.t]=h.d+h.u);
+  const cur=[],prev=[];for(let i=0;i<24;i++){const t=now-i*3600;const hr=new Date(t*1000).getHours();cur[hr]=byT[t]||0;prev[hr]=byT[t-86400]||0}
+  const max=Math.max(1,...cur,...prev),C=130,R0=48,RL=74,nowH=new Date(now*1000).getHours();
+  const svg=svgEl('svg',{viewBox:'0 0 260 260',role:'img','aria-label':'Traffic per hour of the day'});
+  svg.appendChild(svgEl('circle',{cx:C,cy:C,r:R0-8,class:'dc-in'}));
+  for(let hr=0;hr<24;hr++){const a=hr/24*2*Math.PI-Math.PI/2,cs=Math.cos(a),sn=Math.sin(a);
+    const sp=(v,cls,w)=>{if(!v)return document.createComment('');const r=R0+Math.max(3,v/max*RL);const l=svgEl('line',{x1:C+cs*R0,y1:C+sn*R0,x2:C+cs*r,y2:C+sn*r,class:cls,'stroke-width':w});l.style.setProperty('--i',hr);return l};
+    const gr=svgEl('g',{class:'dc-h'+(hr===nowH?' now':'')});gr.append(sp(prev[hr],'dc-p',7),sp(cur[hr],'dc-c',3.4));
+    const tt=svgEl('title',{});tt.textContent=String(hr).padStart(2,'0')+':00 · last 24 h '+P.fmtBytes(cur[hr])+' · the day before '+P.fmtBytes(prev[hr]);gr.appendChild(tt);svg.appendChild(gr)}
+  [0,6,12,18].forEach(hr=>{const a=hr/24*2*Math.PI-Math.PI/2,r=R0+RL+14;const t=svgEl('text',{x:C+Math.cos(a)*r,y:C+Math.sin(a)*r+3.5,'text-anchor':'middle',class:'dc-t'});t.textContent=String(hr).padStart(2,'0');svg.appendChild(t)});
+  const tot=cur.reduce((a,x)=>a+x,0),tp=svgEl('text',{x:C,y:C+2,'text-anchor':'middle',class:'dc-v'});tp.textContent=P.fmtBytes(tot);svg.appendChild(tp);
+  const tl=svgEl('text',{x:C,y:C+17,'text-anchor':'middle',class:'dc-t'});tl.textContent='last 24 h';svg.appendChild(tl);
+  const w=el('div','dc-w');w.appendChild(svg);hc.appendChild(w);
+  const busy=cur.indexOf(Math.max(...cur)),quiet=cur.indexOf(Math.min(...cur)),hh=h=>String(h).padStart(2,'0')+':00';
+  const f=el('div','dc-f');
+  if(tot){[['busiest',hh(busy),P.fmtBytes(cur[busy])],['quietest',hh(quiet),P.fmtBytes(cur[quiet])],['vs the day before',(()=>{const p=prev.reduce((a,x)=>a+x,0);return p?((tot>=p?'+':'−')+Math.abs((tot-p)*100/p).toFixed(0)+'%'):'–'})(),'']].forEach(([l,v,sub])=>{const d=el('div');d.append(el('div','lab',l),el('div','n dc-n',v));if(sub)d.appendChild(el('div','lab',sub));f.appendChild(d)})}
+  else f.appendChild(el('div','empty','Nothing moved in the last 24 hours.'));
+  hc.appendChild(f);return hc}
 async function loadTraffic(){
   const v=$('#vTraffic');if(!v.childElementCount)loading(v,'rail');
   const [r,sp]=await Promise.all([api('traffic?days=30'),api('speedtests')]);if(S.view!=='traffic')return;
@@ -440,13 +464,9 @@ async function loadTraffic(){
   const tc=el('div','tc');tc.appendChild(svg);hero.appendChild(tc);
   const lg=el('div','chips mt14');names.forEach(nm=>{const c=el('span','chip');const i=el('i');i.style.background=colOf(nm);c.append(i,nm);lg.appendChild(c)});hero.appendChild(lg);
   g.appendChild(hero);
-  // 48 hours as a dot field
-  const hc=card('','Last 48 hours','per hour');const hf=el('div','hfield');const hmax=Math.max(1,...hours.map(h=>h.d+h.u));
-  const byT={};hours.forEach(h=>byT[h.t]=h);const now=Math.floor(Date.now()/3600000)*3600;
-  for(let i=47;i>=0;i--){const t=now-i*3600;const h=byT[t];const v=h?(h.d+h.u)/hmax:0;const c=el('i');c.style.setProperty('--v',v.toFixed(3));c.title=when(t)+' · '+(h?P.fmtBytes(h.d+h.u):'nothing');hf.appendChild(c)}
-  hc.appendChild(hf);const hx=el('div','hx2');['−48 h','−36','−24','−12','now'].forEach(x=>hx.appendChild(el('span',null,x)));hc.appendChild(hx);
-  const peakH=hours.reduce((a,h)=>(h.d+h.u)>(a?a.d+a.u:-1)?h:a,null);if(peakH)hc.appendChild(el('div','lab mt14','busiest hour: '+when(peakH.t)+' · '+P.fmtBytes(peakH.d+peakH.u)));
-  g.appendChild(hc);
+  // a day as a clock: one spoke per hour of the day, the last 24 hours bright over the 24 before them, so the busy
+  // and quiet times of day read at a glance
+  g.appendChild(dayClock(hours));
   // share per tunnel
   const sc=card('s2','Who used it','30 days, per tunnel');const all=Math.max(1,sum('month'));
   Object.entries(tot).sort((a,b)=>((b[1].month||[0,0])[0]+(b[1].month||[0,0])[1])-((a[1].month||[0,0])[0]+(a[1].month||[0,0])[1])).forEach(([nm,x])=>{const m=x.month||[0,0];const pct=(m[0]+m[1])*100/all;
@@ -493,10 +513,13 @@ async function loadSystem(){
   // versions
   const vr=card('s2','Versions',latest?'latest release '+latest:'release check pending');const vl=el('div','vlist');
   const vrow=(name,ver,on)=>{const r=el('div','vrow');const behind=latest&&ver&&newer(latest,ver);r.append(el('i','kdot '+(on?(behind?'warn':'ok'):'off')),el('span','vn',name),el('span','n',ver?'v'+ver:'–'),el('span','lab',!on?'unreachable':behind?'update available':'up to date'));vl.appendChild(r)};
-  vrow('this server',h.version,true);S.ov.kharej.forEach(k=>vrow(k.host,k.version,k.online));vr.appendChild(vl);
-  const vt=el('div','tools mt14');vt.append(btn('Update this server','pri',()=>act('update',{full:true,title:'Update this server',confirm:'Downloads the latest release, checks its signature, swaps the binary and restarts the tunnels and this panel. Open connections drop for a few seconds.'})),
-    btn('Roll back','sec danger',()=>act('rollback',{full:true,title:'Roll back',confirm:'Goes back to the previous version and restarts the tunnels and this panel.',danger:true})));
-  vr.append(vt,el('p','note mt14','Update Kharej first (Kharej servers page), then this server. The page reconnects by itself.'));g.appendChild(vr);
+  vrow('this server',h.version,true);S.ov.kharej.forEach(k=>vrow(k.host,k.version,k.online));vr.appendChild(vl);vr.classList.add('vcard');
+  const behind=latest?[h.version,...S.ov.kharej.filter(k=>k.online).map(k=>k.version)].filter(x=>x&&newer(latest,x)).length:0;
+  const vt=el('div','tools vfoot');
+  vt.append(btn(behind?'Update all ('+behind+')':'Update all','pri',()=>P.updateAll()),
+    btn('Update this server','sec',()=>act('update',{full:true,title:'Update this server',confirm:'Downloads the latest release, checks its signature, swaps the binary and restarts the tunnels and this panel. Open connections drop for a few seconds.'})),
+    btn('Roll back','sec ic danger push',()=>act('rollback',{full:true,title:'Roll back',confirm:'Goes back to the previous version and restarts the tunnels and this panel.',danger:true})));
+  vr.append(el('p','note',behind?'Update all does the Kharej servers first, then this one; the page reconnects by itself.':'Every server runs the newest release.'),vt);g.appendChild(vr);
   // backups
   const bk=card('s2','Backups','settings and keys of this server',btn('Back up now','pri',async()=>{if(await act('backups'))setTimeout(loadSystem,1500)}));
   const tl=el('div','btl');const list=b.ok?b.j.backups:[];

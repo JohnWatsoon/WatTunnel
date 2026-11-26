@@ -122,6 +122,7 @@ type Kharej struct {
 	Tunnels []RemoteTunnel `json:"tunnels"`
 	Err     string         `json:"error,omitempty"`
 	Seen    int64          `json:"seen,omitempty"` // unix seconds of the last good answer
+	Res     *Host          `json:"res,omitempty"`  // its load, memory, disk, uptime (Kharej 3.6.1+)
 }
 
 type RemoteTunnel struct {

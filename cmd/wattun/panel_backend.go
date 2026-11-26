@@ -34,8 +34,16 @@ func runPanel(file string) error {
 type mgrBackend struct{}
 
 func (mgrBackend) Host() panel.Host {
-	h := panel.Host{Version: wat.Version, CPUs: runtime.NumCPU(), IP: mgr.PublicIPCached(), Role: mgr.ServerSide()}
+	h := panel.Host{Version: wat.Version, IP: mgr.PublicIPCached(), Role: mgr.ServerSide()}
 	h.Name, _ = os.Hostname()
+	hostRes(&h)
+	h.ClockNTP = clockSynced()
+	return h
+}
+
+// hostRes fills the cheap /proc numbers: uptime, load, cores, memory and disk use.
+func hostRes(h *panel.Host) {
+	h.CPUs = runtime.NumCPU()
 	if b, err := os.ReadFile("/proc/uptime"); err == nil {
 		f, _ := strconv.ParseFloat(strings.Fields(string(b) + " 0")[0], 64)
 		h.Uptime = int64(f)
@@ -63,8 +71,16 @@ func (mgrBackend) Host() panel.Host {
 		}
 	}
 	h.DiskPct = diskUsedPct("/")
-	h.ClockNTP = clockSynced()
-	return h
+}
+
+// Kharej's answer to scepter.hello carries these, so the Iran panel can draw its gauges (3.6.1; an older Kharej
+// leaves them out and the card shows none)
+func init() {
+	wat.ScepterHostInfo = func() map[string]any {
+		var h panel.Host
+		hostRes(&h)
+		return map[string]any{"load1": h.Load1, "cpus": h.CPUs, "mem_pct": h.MemPct, "disk_pct": h.DiskPct, "uptime_s": h.Uptime}
+	}
 }
 
 var (
@@ -252,6 +268,10 @@ func askKharej(k *panel.Kharej, via string) error {
 	}
 	k.Version, _ = r.Params["ver"].(string)
 	k.Caps, _ = r.Params["caps"].(string)
+	if m, ok := r.Params["host"].(map[string]any); ok {
+		f := func(k string) float64 { v, _ := m[k].(float64); return v }
+		k.Res = &panel.Host{Load1: f("load1"), CPUs: int(f("cpus")), MemPct: f("mem_pct"), DiskPct: f("disk_pct"), Uptime: int64(f("uptime_s"))}
+	}
 	r, err = cl.Call("tunnels.list", nil)
 	if err != nil {
 		return err

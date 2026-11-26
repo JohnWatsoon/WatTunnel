@@ -528,7 +528,9 @@ function gaugeBase(){
   svg.innerHTML=s;
 }
 function gauge(frac,ups,total){
-  const N=46;$('#gauge').querySelectorAll('line').forEach((ln,i)=>{const f=i/(N-1);const on=total&&f<=frac+1e-9;const col=f<.35?'#ff5d62':f<.6?'#ff7a33':f<.8?'#d4f36a':'#3ee08a';ln.setAttribute('stroke',on?col:getComputedStyle(document.body).getPropertyValue('--line').trim()||'#26262a')});
+  // one colour for the whole arc, from the state: all up is green, half or more up is orange, less is red
+  const N=46,col=frac>=1?'#3ee08a':frac>=.5?'#ff7a33':'#ff5d62',off=getComputedStyle(document.body).getPropertyValue('--line').trim()||'#26262a';
+  $('#gauge').querySelectorAll('line').forEach((ln,i)=>{const on=total&&i/(N-1)<=frac+1e-9;ln.setAttribute('stroke',on?col:off)});
   $('#gNum').textContent=total?ups+'/'+total:'–';$('#gLab').textContent=!total?'no tunnels':ups===total?'all up':(total-ups)+' need attention';
 }
 function chart(){
