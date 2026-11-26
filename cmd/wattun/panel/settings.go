@@ -173,7 +173,7 @@ func (s *Server) apiCertACME(c *call) {
 	if c.json(&in) == nil && strings.TrimSpace(in.Domain) == "" {
 		in.Domain = s.be.Host().IP // nothing typed: this server's own public IP, which the panel already knows
 	}
-	if strings.TrimSpace(in.Domain) == "" ||strings.ContainsAny(in.Domain, " /\n") ||
+	if strings.TrimSpace(in.Domain) == "" || strings.ContainsAny(in.Domain, " /\n") ||
 		(strings.Contains(in.Domain, ":") && net.ParseIP(strings.TrimSpace(in.Domain)) == nil) {
 		c.fail(http.StatusBadRequest, "Give the domain name that points at this server.")
 		return
