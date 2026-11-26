@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -232,19 +233,29 @@ func (s *Server) runSpeedTest(t Tunnel, mb int, auto bool, say func(string, ...a
 	return nil
 }
 
-func (s *Server) apiSpeedTest(c *call) {
-	var in struct{ MB int }
-	c.json(&in)
-	if in.MB <= 0 || in.MB > 500 {
-		in.MB = 10
+// speedMB reads {"mb": N} from a speed-test request. The dialog's field sends the number as a string ("100"):
+// decoding into an int failed silently and every test ran the 10 MB default.
+func speedMB(body []byte) int {
+	var in struct {
+		MB json.Number `json:"mb"`
 	}
+	json.Unmarshal(body, &in)
+	mb, err := strconv.Atoi(in.MB.String())
+	if err != nil || mb <= 0 || mb > 500 {
+		return 10
+	}
+	return mb
+}
+
+func (s *Server) apiSpeedTest(c *call) {
+	mb := speedMB(c.body)
 	t, ok := s.tunnel(c.arg[0])
 	if !ok || t.Role != "Iran" {
 		c.fail(http.StatusBadRequest, "The speed test runs on Iran tunnels of this server.")
 		return
 	}
 	id, err := s.jobs.do("speedtest", "Speed test of "+t.Name, c.sess.User, func(say func(string, ...any)) error {
-		return s.runSpeedTest(t, in.MB, false, say)
+		return s.runSpeedTest(t, mb, false, say)
 	})
 	s.jobReply(c, "speed test", t.Name, id, err)
 }

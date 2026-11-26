@@ -255,3 +255,11 @@ func TestOwnerCertRejectsMismatch(t *testing.T) {
 		t.Fatal("config changed on failure")
 	}
 }
+
+func TestSpeedMBTakesStringOrNumber(t *testing.T) {
+	for body, want := range map[string]int{`{"mb":"100"}`: 100, `{"mb":250}`: 250, `{"mb":"x"}`: 10, `{}`: 10, `{"mb":9000}`: 10} {
+		if got := speedMB([]byte(body)); got != want {
+			t.Errorf("%s: got %d, want %d", body, got, want)
+		}
+	}
+}

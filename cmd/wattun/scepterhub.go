@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/JohnWatsoon/WatTunnel/cmd/wattun/mgr"
 	"github.com/JohnWatsoon/WatTunnel/wat"
 )
 
@@ -135,7 +137,7 @@ func serveScepterSock(path string, h *scepterHub) (io.Closer, error) {
 
 func serveScepterConn(conn net.Conn, h *scepterHub) {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(2 * time.Minute)) // a call waits behind at most a few 30 s calls
+	conn.SetDeadline(time.Now().Add(6 * time.Minute)) // a call waits behind a few others; an auto create alone takes up to 4 min (wat.ScepterCallWait)
 	br := bufio.NewReaderSize(conn, 64<<10)
 	line, err := br.ReadSlice('\n')
 	if err != nil {
@@ -171,6 +173,24 @@ func keepClaim(path string, c *wat.ScepterClient, logf func(string, ...any)) {
 	logf("scepter: paired — this Iran now holds its own credential (%s); the token alone no longer manages Kharej", path)
 }
 
+func init() {
+	mgr.ScepterSockCall = func(cfgPath, cmd, argsJSON string) ([]byte, bool, error) {
+		args, id, err := parseScepterCallArgs(argsJSON)
+		if err != nil {
+			return nil, true, err
+		}
+		var b bytes.Buffer
+		err = scepterCallSock(scepterSockPath(cfgPath), cmd, args, id, &b)
+		if errors.Is(err, errNoSock) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, true, fmt.Errorf("scepter-call: %w", err)
+		}
+		return b.Bytes(), true, nil
+	}
+}
+
 // errNoSock: no unit listens on the socket (not running, or an older binary without one).
 var errNoSock = errors.New("no running unit socket")
 
@@ -181,7 +201,7 @@ func scepterCallSock(path, cmd string, args map[string]any, id string, w io.Writ
 		return errNoSock
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Minute))
+	conn.SetDeadline(time.Now().Add(6 * time.Minute)) // the unit side's own deadline (serveScepterConn)
 	b, _ := json.Marshal(scepterSockReq{Cmd: cmd, Args: args, ID: id})
 	if _, err := conn.Write(append(b, '\n')); err != nil {
 		return err

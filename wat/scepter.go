@@ -2632,10 +2632,11 @@ func (c *ScepterClient) CallRaw(cmd string, args map[string]any, id string, w io
 	if werr != nil {
 		return CodeInternal, werr
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	wait := ScepterCallWait(cmd, args)
+	deadline := time.Now().Add(wait)
 	// the stream has no read deadline: a peer that never answers would block ReadSlice forever, so the
 	// timeout resets the stream (the caller must re-dial; the session itself is untouched)
-	stop := time.AfterFunc(30*time.Second, c.st.Reset)
+	stop := time.AfterFunc(wait, c.st.Reset)
 	defer stop.Stop()
 	var nChunks, got int
 	for {
@@ -2671,6 +2672,16 @@ func (c *ScepterClient) CallRaw(cmd string, args map[string]any, id string, w io
 		}
 		return resp.Code, nil
 	}
+}
+
+// ScepterCallWait is how long CallRaw waits for an answer: 30 s, except tunnel.create with carrier auto, which runs
+// Kharej's whole auto wizard (bounded at 3 minutes there). The flat 30 s reset the stream mid-run ("wat: stream
+// reset" after ~29 s) while Kharej went on to make the tunnel, and Iran never got its token.
+func ScepterCallWait(cmd string, args map[string]any) time.Duration {
+	if c, _ := args["carrier"].(string); cmd == "tunnel.create" && c == "auto" {
+		return 4 * time.Minute
+	}
+	return 30 * time.Second
 }
 
 // scepterCallSeq disambiguates command ids inside one process (nanoseconds alone can repeat on Windows clocks).

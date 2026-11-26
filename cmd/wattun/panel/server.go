@@ -499,18 +499,22 @@ func (s *Server) apiLogs(c *call) {
 
 // ---- live data ----
 
-// pollLive samples every tunnel's /stats once a second, turns byte totals into rates (down = what users
-// receive: bytes in on Iran, bytes out on Kharej — the dashboard's rule, mgr/home.go sampleTunnel) and pushes one
-// SSE frame to every open page.
+// pollLive samples every tunnel's /stats once a second while a page is open, turns byte totals into rates (down
+// = what users receive: bytes in on Iran, bytes out on Kharej — the dashboard's rule, mgr/home.go sampleTunnel)
+// and pushes one SSE frame to every open page. With no page open it samples every 5 s: enough for the watchdog
+// and the traffic totals, which work on deltas.
 func (s *Server) pollLive(ctx context.Context) {
-	t := time.NewTicker(time.Second)
-	defer t.Stop()
 	for {
 		s.sample(time.Now())
+		every := time.Second
+		if s.hub.count() == 0 {
+			every = 5 * time.Second
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-time.After(every):
+		case <-s.hub.joined:
 		}
 	}
 }
@@ -573,10 +577,14 @@ func (s *Server) pollKharej(ctx context.Context) {
 		s.khMu.Lock()
 		s.kh = kh
 		s.khMu.Unlock()
+		every := 15 * time.Second
+		if s.hub.count() == 0 {
+			every = time.Minute // nobody looks: keep it fresh enough for the first page load
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(15 * time.Second):
+		case <-time.After(every):
 		}
 	}
 }
@@ -610,17 +618,28 @@ func (s *Server) apiLive(w http.ResponseWriter, r *http.Request) {
 }
 
 type hub struct {
-	mu   sync.Mutex
-	subs map[chan []byte]bool
+	mu     sync.Mutex
+	subs   map[chan []byte]bool
+	joined chan struct{} // a page opened: the sampler leaves its idle pace at once
 }
 
-func newHub() *hub { return &hub{subs: map[chan []byte]bool{}} }
+func newHub() *hub { return &hub{subs: map[chan []byte]bool{}, joined: make(chan struct{}, 1)} }
+
+func (h *hub) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
 
 func (h *hub) sub() chan []byte {
 	ch := make(chan []byte, 4)
 	h.mu.Lock()
 	h.subs[ch] = true
 	h.mu.Unlock()
+	select {
+	case h.joined <- struct{}{}:
+	default:
+	}
 	return ch
 }
 

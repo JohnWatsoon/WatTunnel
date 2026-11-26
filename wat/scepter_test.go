@@ -3687,3 +3687,12 @@ func TestScepterWatcherTwoMissRule(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestScepterCallWaitAutoCreate(t *testing.T) {
+	if w := ScepterCallWait("tunnel.create", map[string]any{"carrier": "auto"}); w < 3*time.Minute {
+		t.Fatalf("auto create waits %v: Kharej's wizard may run 3 min", w)
+	}
+	if w := ScepterCallWait("tunnels.list", nil); w != 30*time.Second {
+		t.Fatalf("list waits %v", w)
+	}
+}

@@ -575,6 +575,11 @@ On Kharej, `ports:` is an allowlist of target ports. Leave it out to allow any p
 
 - It turns on automatically for Iran tunnels. To turn it off: `wattun` → `s` → `h`.
 - It never restarts a tunnel you stopped yourself.
+- It runs every minute and reads every unit's state in one `systemctl list-units` call. On an auto Kharej, the
+  slow half (legacy migration, and finding Iran's address from every helper's `/stats` for the reverse
+  companion) runs every 5 minutes, or every minute for a tunnel made in the last 10 minutes. Before 3.6.1 a
+  pass on an auto Kharej with 75 units cost 45-52 s of CPU every minute on a 1-core server; now about 7 s,
+  and 33 s for the 5-minute pass.
 
 **Monitoring.** Each tunnel serves a small HTTP API on `127.0.0.1` only. Never expose it.
 
@@ -2826,7 +2831,13 @@ raw response line as JSONL on stdout — chunk pieces included, exactly as the p
 is 0 once the command was answered (the machine code rides the JSON; the Go manager parses stdout) and 1 on a
 transport failure (reason on stderr). A top-level `"id"` in `-scepter-args` becomes the command id, so a
 retried call is answered from the server journal at-most-once. This is what the Go manager shells out to
-(its `scepterDial` seam) and what a script or the future panel can drive directly.
+(its `scepterDial` seam) and what a script or the future panel can drive directly. The manager and the web
+panel first try the running unit's control socket in-process and start the one-shot only when no unit
+listens (3.6.1: a 15 MB child per call cost about a second of CPU on a 1-core server).
+
+An answer is awaited 30 s, except `tunnel.create` with carrier `auto`: Kharej runs its whole auto wizard
+for that (up to 3 minutes), so the caller waits 4 minutes (3.6.1, Iran side only). Before, the stream was
+reset at 30 s ("wat: stream reset") while Kharej went on to make the tunnel without Iran getting its token.
 
 ### The scepter latch (fallback listener)
 
@@ -3568,7 +3579,12 @@ up at once; a pair that does not load leaves the old one in place):
   thresholds and schedules, and for this browser only: Persian (Jalali) calendar for dates and browser
   notifications. The panel is dark only.
 
-Live numbers come from each tunnel's `/stats` once a second and reach the page as server-sent events. An outage
+Live numbers come from each tunnel's `/stats` once a second while a page is open (every 5 s with none, which
+still feeds the watchdog and the traffic totals) and reach the page as server-sent events. Unit states come from
+one `systemctl show` for every tunnel, cached 3 s and dropped on each start, stop or port change; Kharej is asked
+every 15 s while a page is open (every minute otherwise) through the unit's control socket, with no process
+started. Before 3.6.1 the panel ran three systemctl processes per tunnel every second and a 15 MB one-shot per
+Kharej question, which kept the panel and systemd near 50 % CPU each on a 1-core server. An outage
 is a tunnel that is enabled or running but not up; stopping a tunnel by hand is not an outage.
 
 ### Actions and jobs

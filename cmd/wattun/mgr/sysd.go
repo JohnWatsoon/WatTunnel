@@ -2,9 +2,11 @@ package mgr
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -149,21 +151,87 @@ func UptimeOf(name string) string {
 	}
 	for _, lay := range layouts {
 		if t, err := time.Parse(lay, raw); err == nil {
-			s := int(time.Since(t).Seconds())
-			if s < 0 {
-				return ""
-			}
-			switch {
-			case s >= 86400:
-				return fmt.Sprintf("%dd %dh", s/86400, s%86400/3600)
-			case s >= 3600:
-				return fmt.Sprintf("%dh %dm", s/3600, s%3600/60)
-			default:
-				return fmt.Sprintf("%dm", s/60)
-			}
+			return FmtUptime(int(time.Since(t).Seconds()))
 		}
 	}
 	return ""
+}
+
+// FmtUptime renders seconds as uptime_of does: "3d 4h" / "2h 14m" / "5m", "" for a negative value.
+func FmtUptime(s int) string {
+	switch {
+	case s < 0:
+		return ""
+	case s >= 86400:
+		return fmt.Sprintf("%dd %dh", s/86400, s%86400/3600)
+	case s >= 3600:
+		return fmt.Sprintf("%dh %dm", s/3600, s%3600/60)
+	default:
+		return fmt.Sprintf("%dm", s/60)
+	}
+}
+
+// UnitState is one unit's systemd state as UnitStates reads it.
+type UnitState struct {
+	Active, Enabled bool
+	Uptime          string // FmtUptime of the time since it went active, "" when down or unknown
+}
+
+// UnitStates asks systemd about every unit in ONE `systemctl show`. The web panel samples once a second: three
+// systemctl processes per tunnel per second (is-active, is-enabled, show) kept PID 1 and the panel near 50 % CPU
+// each on a 1-core server.
+func UnitStates(units []string) map[string]UnitState {
+	out := make(map[string]UnitState, len(units))
+	if len(units) == 0 || runtime.GOOS != "linux" {
+		return out
+	}
+	b, err := exec.Command("systemctl", append([]string{"show", "--no-pager",
+		"-p", "ActiveState,UnitFileState,ActiveEnterTimestampMonotonic"}, units...)...).Output()
+	if err != nil {
+		return out
+	}
+	return parseUnitStates(string(b), units, uptimeSec())
+}
+
+// parseUnitStates reads `systemctl show` output: one blank-line separated block per unit, in argument order.
+// boot is the current monotonic time in seconds (/proc/uptime), which ActiveEnterTimestampMonotonic counts in µs.
+func parseUnitStates(s string, units []string, boot float64) map[string]UnitState {
+	out := make(map[string]UnitState, len(units))
+	blocks := strings.Split(strings.TrimSpace(strings.ReplaceAll(s, "\r", "")), "\n\n")
+	for i, blk := range blocks {
+		if i >= len(units) {
+			break
+		}
+		kv := map[string]string{}
+		for _, l := range strings.Split(blk, "\n") {
+			if k, v, ok := strings.Cut(l, "="); ok {
+				kv[k] = v
+			}
+		}
+		var st UnitState
+		switch kv["ActiveState"] {
+		case "active", "reloading":
+			st.Active = true
+		}
+		switch kv["UnitFileState"] {
+		case "enabled", "enabled-runtime", "static", "alias", "indirect", "generated", "transient":
+			st.Enabled = true
+		}
+		if us, err := strconv.ParseFloat(kv["ActiveEnterTimestampMonotonic"], 64); st.Active && err == nil && us > 0 && boot > 0 {
+			st.Uptime = FmtUptime(int(boot - us/1e6))
+		}
+		out[units[i]] = st
+	}
+	return out
+}
+
+func uptimeSec() float64 {
+	b, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+	f, _ := strconv.ParseFloat(strings.Fields(string(b) + " 0")[0], 64)
+	return f
 }
 
 func trimEOL(s string) string {

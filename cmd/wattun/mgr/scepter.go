@@ -233,7 +233,7 @@ var scepterDial = func(tunnel string) (ScepterClient, error) {
 // within its own deadlines (30 s pairing hello + 30 s response wait), so this
 // only kills a wedged child; a healthy call returns in well under a second
 // once the tunnel is up.
-const scepterCallTimeout = 65 * time.Second
+const scepterCallTimeout = 5 * time.Minute // above wat.ScepterCallWait for an auto create (4 min) plus the dial
 
 // scepterCLI is the real ScepterClient: every Call runs
 // `wattun -config NAME.yml -scepter-call CMD -scepter-args JSON` and parses
@@ -250,6 +250,11 @@ func (c scepterCLI) Call(cmd string, args map[string]any) (ScepterResult, error)
 	return scepterParseCall(out)
 }
 
+// ScepterSockCall, set by the binary, runs one call through the running unit's control socket in-process
+// (what -scepter-call does first anyway). ok=false: no unit listens, fall back to the -scepter-call child.
+// Spawning the 15 MB binary per call cost ~1 s of CPU on a 1-core server, every 15 s from the web panel.
+var ScepterSockCall func(cfgPath, cmd, argsJSON string) (out []byte, ok bool, err error)
+
 // scepterExec runs one -scepter-call and returns its stdout (raw JSONL). The
 // engine's own stderr reaches the user untouched — "pairing needs 3.5.0 on
 // both ends" is exactly what an old peer must be told.
@@ -260,6 +265,11 @@ func scepterExec(tunnel, cmd string, args map[string]any) ([]byte, error) {
 	aj, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
+	}
+	if ScepterSockCall != nil { // the running unit's control socket: no new process, no new session
+		if out, ok, err := ScepterSockCall(filepath.Join(P.Conf, tunnel+".yml"), cmd, string(aj)); ok {
+			return out, err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), scepterCallTimeout)
 	defer cancel()

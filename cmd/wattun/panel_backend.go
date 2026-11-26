@@ -63,19 +63,48 @@ func (mgrBackend) Host() panel.Host {
 		}
 	}
 	h.DiskPct = diskUsedPct("/")
-	if out, err := exec.Command("timedatectl", "show", "-p", "NTPSynchronized", "--value").Output(); err == nil {
-		h.ClockNTP = strings.TrimSpace(string(out)) == "yes"
-	}
+	h.ClockNTP = clockSynced()
 	return h
 }
 
+var (
+	ntpMu sync.Mutex
+	ntpAt time.Time
+	ntpOK bool
+)
+
+// clockSynced asks timedatectl at most every 5 minutes: the overview reads Host every 10 s.
+func clockSynced() bool {
+	ntpMu.Lock()
+	defer ntpMu.Unlock()
+	if time.Since(ntpAt) > 5*time.Minute {
+		out, err := exec.Command("timedatectl", "show", "-p", "NTPSynchronized", "--value").Output()
+		ntpOK, ntpAt = err == nil && strings.TrimSpace(string(out)) == "yes", time.Now()
+	}
+	return ntpOK
+}
+
+// Tunnels is read by the 1 s live sampler, the overview and most actions: it is cached for tunnelsTTL and
+// reads every unit's state in one systemctl call (see mgr.UnitStates). An action drops the cache (dropTunnels)
+// so the page shows a start or stop at once.
 func (mgrBackend) Tunnels() []panel.Tunnel {
+	tunMu.Lock()
+	defer tunMu.Unlock()
+	if time.Since(tunAt) < tunnelsTTL {
+		return tunCache
+	}
+	names := mgr.Tunnels()
+	units := make([]string, len(names))
+	for i, n := range names {
+		units[i] = mgr.Unit(n)
+	}
+	st := mgr.UnitStates(units)
 	var out []panel.Tunnel
-	for _, n := range mgr.Tunnels() {
+	for _, n := range names {
+		u := st[mgr.Unit(n)]
 		t := panel.Tunnel{
 			Name: n, Role: mgr.Role(n), Carrier: mgr.Cfg(n, "carrier"), Reverse: mgr.IsReverse(n),
-			Active: mgr.IsActive(mgr.Unit(n)), Enabled: mgr.IsEnabled(mgr.Unit(n)), Paired: mgr.IsPaired(n),
-			Uptime: mgr.UptimeOf(n),
+			Active: u.Active, Enabled: u.Enabled, Paired: mgr.IsPaired(n), Uptime: u.Uptime,
 		}
 		if t.Role == "Iran" {
 			t.Peer = mgr.Cfg(n, "peer")
@@ -85,7 +114,22 @@ func (mgrBackend) Tunnels() []panel.Tunnel {
 		}
 		out = append(out, t)
 	}
+	tunCache, tunAt = out, time.Now()
 	return out
+}
+
+const tunnelsTTL = 3 * time.Second
+
+var (
+	tunMu    sync.Mutex
+	tunAt    time.Time
+	tunCache []panel.Tunnel
+)
+
+func dropTunnels() {
+	tunMu.Lock()
+	tunAt = time.Time{}
+	tunMu.Unlock()
 }
 
 func (mgrBackend) Stats(name string) (panel.Counters, bool) {
@@ -160,11 +204,18 @@ func (mgrBackend) Kharej() []panel.Kharej {
 			k.Via = append(k.Via, n)
 		}
 	}
+	var units []string
+	for _, k := range byHost {
+		for _, via := range k.Via {
+			units = append(units, mgr.Unit(via))
+		}
+	}
+	st := mgr.UnitStates(units)
 	out := []panel.Kharej{}
 	for _, h := range order {
 		k := byHost[h]
 		for _, via := range k.Via {
-			if !mgr.IsActive(mgr.Unit(via)) {
+			if !st[mgr.Unit(via)].Active {
 				continue
 			}
 			if err := askKharej(k, via); err != nil {
@@ -222,6 +273,7 @@ func askKharej(k *panel.Kharej, via string) error {
 // ---- actions (phase 2): the console's own functions ----
 
 func (mgrBackend) Unit(name, action string) error {
+	defer dropTunnels()
 	u := mgr.Unit(name)
 	switch action {
 	case "start":
@@ -234,7 +286,10 @@ func (mgrBackend) Unit(name, action string) error {
 	return fmt.Errorf("unknown action %q", action)
 }
 
-func (mgrBackend) SetPorts(name string, specs []string) error { return mgr.SetPorts(name, specs) }
+func (mgrBackend) SetPorts(name string, specs []string) error {
+	defer dropTunnels()
+	return mgr.SetPorts(name, specs)
+}
 
 func (mgrBackend) SetLimit(name, port, rate, quota, period string) error {
 	return mgr.SetPortLimit(name, port, rate, quota, period)

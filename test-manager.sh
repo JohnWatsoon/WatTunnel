@@ -2492,5 +2492,17 @@ EOF
   exit "$fail"
 ) || fail=1
 
+# heal's one-call unit snapshot: list-units answers every state, an unlisted unit is inactive, and an empty
+# answer falls back to asking systemctl per unit
+(
+  systemctl() { case "$1" in list-units) printf '%s\n' "${WAT_PREFIX}@a.service loaded active running x" "${WAT_PREFIX}@b.service loaded failed failed x" ;; is-active) [ "${3:-$2}" = "${WAT_PREFIX}@c" ] ;; *) return 1 ;; esac; }
+  units_snapshot
+  chk "snapshot: listed active" "$(u_active a && echo y || echo n)/$(u_state b)/$(u_state c)" "y/failed/inactive"
+  systemctl() { case "$1" in is-active) [ "${3:-$2}" = "${WAT_PREFIX}@c" ] ;; *) return 0 ;; esac; }
+  units_snapshot
+  chk "snapshot: empty list asks per unit" "$U_SNAP/$(u_active c && echo y || echo n)" "0/y"
+  exit "$fail"
+) || fail=1
+
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

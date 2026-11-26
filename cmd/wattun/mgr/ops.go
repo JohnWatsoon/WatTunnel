@@ -847,10 +847,22 @@ func heal() {
 			healRetest(n)
 		}
 	}
-	autoMigrateAll(false)
+	// the slow half (migration, the Iran-IP sync over every helper's /stats) every 5 minutes, as the bash heal does;
+	// a tunnel made in the last 10 minutes without its companion is synced every pass
+	stamp := filepath.Join(P.Run, "heal.slow")
+	st, err := os.Stat(stamp)
+	slow := err != nil || time.Since(st.ModTime()) > 4*time.Minute
+	if slow {
+		_ = os.WriteFile(stamp, nil, 0o644)
+		_ = os.Chtimes(stamp, time.Now(), time.Now())
+		autoMigrateAll(false)
+	}
 	for _, n := range ManagedTunnels() {
 		if Role(n) == "Kharej" && IsAutoKharej(n) {
-			autoSyncCompanion(n)
+			if yml, err := os.Stat(filepath.Join(P.Conf, n+".yml")); slow ||
+				!fileExists(filepath.Join(P.Conf, n+"-r.yml")) && err == nil && time.Since(yml.ModTime()) < 10*time.Minute {
+				autoSyncCompanion(n)
+			}
 			healAutoHelpers(n)
 		}
 	}
