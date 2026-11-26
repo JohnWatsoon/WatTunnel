@@ -98,6 +98,7 @@ const ICO={play:['M7 4.5v15l12-7.5z'],stop:['M7 7h10v10H7z'],restart:['M20 12a8 
   server:['M5 3.5h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z','M5 13.5h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z','M7 7h.01','M7 17h.01'],
   sliders:['M20 7h-9','M14 17H4','M14 17a3 3 0 1 0 6 0a3 3 0 1 0-6 0','M4 7a3 3 0 1 0 6 0a3 3 0 1 0-6 0'],
   github:['M15 21.5v-3.8a4.4 4.4 0 0 0-1-3.2c3 0 6-2 6-5.5a5.4 5.4 0 0 0-1-3.5 4.6 4.6 0 0 0 0-3.5s-1 0-3 1.5a10.3 10.3 0 0 0-8 0C6 2 5 2 5 2a4.6 4.6 0 0 0 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5a4.4 4.4 0 0 0-1 3.2v3.8','M9 18c-4.5 2-5-2-7-2'],
+  chev:['m6 9 6 6 6-6'],
   logout:['M9 20.5H5.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H9','m16 16.5 4.5-4.5L16 7.5','M20.5 12H9'],refresh:['M20 12a8 8 0 0 1-14.3 4.9','M4 12a8 8 0 0 1 14.3-4.9','M18 3v4.5h-4.5','M6 21v-4.5h4.5']};
 function ico(n){const ns='http://www.w3.org/2000/svg',s=document.createElementNS(ns,'svg');s.setAttribute('viewBox','0 0 24 24');s.setAttribute('class','ico i-'+n);s.setAttribute('aria-hidden','true');
   ICO[n].forEach(d=>{const p=document.createElementNS(ns,'path');p.setAttribute('d',d);s.appendChild(p)});return s}
@@ -119,8 +120,47 @@ new MutationObserver(ms=>{for(const m of ms){const t=m.target;if(t.nodeType===1&
 // press: the socket pops; a click handler that returns a promise keeps the ring turning until it settles
 document.addEventListener('pointerdown',e=>{const b=e.target.closest&&e.target.closest('.btn');if(!b||b.disabled)return;b.classList.remove('hit');void b.offsetWidth;b.classList.add('hit')});
 document.addEventListener('animationend',e=>{if(e.animationName==='pop'){const b=e.target.closest('.btn');if(b)b.classList.remove('hit')}});
+/* dot-matrix loaders: one N×N grid of dots, each dot carries its column, row, distance from the centre, angle and
+   spiral order as CSS variables; the kind picks which one drives the delay (app.css .dm-*). Different waits get
+   different shapes: a button strobes, a page scans, a job climbs, a boot spirals. */
+const DM_KINDS=['strobe','drift','ladder','spiral','ring','orbit','drop','bars','rail','halo','radar','checker'];
+function dm(kind,n=3,size){const w=el('span','dm dm-'+kind);w.setAttribute('aria-hidden','true');w.style.setProperty('--n',n);if(size)w.style.setProperty('--s',size+'px');
+  const c=(n-1)/2,maxd=Math.hypot(c,c)||1,ord=spiralOrder(n);
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++){const i=el('i');const st=i.style;
+    st.setProperty('--x',(x/(n-1||1)).toFixed(3));st.setProperty('--y',(y/(n-1||1)).toFixed(3));
+    st.setProperty('--d',(Math.hypot(x-c,y-c)/maxd).toFixed(3));st.setProperty('--a',((Math.atan2(y-c,x-c)/(2*Math.PI)+1)%1).toFixed(3));
+    st.setProperty('--o',(ord[y*n+x]/(n*n)).toFixed(3));st.setProperty('--c',(x+y)%2);st.setProperty('--r',((x*7+y*13)%10/10).toFixed(1));w.appendChild(i)}
+  return w}
+function spiralOrder(n){const o=new Array(n*n);let x=0,y=0,dx=1,dy=0,t=0,l=0,r=n-1,b=n-1;for(let k=0;k<n*n;k++){o[y*n+x]=k;
+  if(dx===1&&x===r){dx=0;dy=1;t++}else if(dy===1&&y===b){dx=-1;dy=0;r--}else if(dx===-1&&x===l){dx=0;dy=-1;b--}else if(dy===-1&&y===t){dx=1;dy=0;l++}x+=dx;y+=dy}return o}
+/* dropdowns: the native select stays (it holds the value, fires change, and a form or code reads it as before)
+   but is hidden; a button shows the choice and opens a popover list (top layer, so it also floats over dialogs).
+   Arrows move, Enter picks, Escape or a click outside closes. Returns a wrapper to place instead of the select. */
+function dd(sel){
+  const w=el('div','dd'),b=el('button','dd-b'),lab=el('span','dd-l'),list=el('div','dd-p');
+  b.type='button';b.setAttribute('aria-haspopup','listbox');b.setAttribute('aria-expanded','false');b.append(lab,ico('chev'));
+  list.setAttribute('popover','auto');list.setAttribute('role','listbox');sel.classList.add('nsel');sel.tabIndex=-1;sel.setAttribute('aria-hidden','true');
+  w.append(sel,b,list);
+  const sync=()=>{lab.textContent=sel.selectedOptions[0]?sel.selectedOptions[0].textContent:''};
+  const opts=()=>[...list.querySelectorAll('.dd-o')];
+  const pick=o=>{sel.value=o.value;sync();sel.dispatchEvent(new Event('change'));list.hidePopover();b.focus()};
+  const place=()=>{const r=b.getBoundingClientRect(),up=innerHeight-r.bottom<260&&r.top>innerHeight-r.bottom;list.classList.toggle('up',up);
+    list.style.left=r.left+'px';list.style.minWidth=r.width+'px';list.style.top=up?'auto':r.bottom+6+'px';list.style.bottom=up?(innerHeight-r.top+6)+'px':'auto'};
+  const open=()=>{list.textContent='';[...sel.options].forEach((o,k)=>{const it=el('button','dd-o'+(o.selected?' on':''));it.type='button';it.setAttribute('role','option');it.setAttribute('aria-selected',String(o.selected));
+      it.style.setProperty('--k',k);it.append(el('span',null,o.textContent),ico('check'));it.onclick=()=>pick(o);list.appendChild(it)});
+    list.showPopover();place();(list.querySelector('.on')||list.firstChild).focus({preventScroll:true})};
+  b.onclick=()=>list.matches(':popover-open')?list.hidePopover():open();
+  b.onkeydown=e=>{if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();open()}};
+  list.onkeydown=e=>{const a=opts(),k=a.indexOf(document.activeElement);if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();a[(k+(e.key==='ArrowDown'?1:-1)+a.length)%a.length].focus()}else if(e.key==='Tab')list.hidePopover()};
+  list.addEventListener('toggle',e=>{const on=e.newState==='open';b.setAttribute('aria-expanded',String(on));w.classList.toggle('open',on)});
+  addEventListener('scroll',()=>{if(list.matches(':popover-open'))place()},true);
+  sel.addEventListener('change',sync);
+  const lb=sel.id&&document.querySelector('label[for="'+sel.id+'"]');if(lb){lb.htmlFor='';lb.onclick=()=>b.focus();b.setAttribute('aria-label',lb.textContent)}else b.setAttribute('aria-label',sel.getAttribute('aria-label')||'');
+  sync();return w}
+// busy: the button's icon turns into a small strobing matrix while the action runs, and the label stays
 function busy(b,r){if(!r||typeof r.then!=='function')return r;b.classList.add('busy');b.setAttribute('aria-busy','true');
-  const done=()=>{b.classList.remove('busy');b.removeAttribute('aria-busy')};r.then(done,done);return r}
+  const m=dm(b.dataset.dm||'strobe',3);m.classList.add('bdm');b.prepend(m);
+  const done=()=>{b.classList.remove('busy');b.removeAttribute('aria-busy');m.remove()};r.then(done,done);return r}
 document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('.btn').forEach(decorate);const o=document.getElementById('out');if(o)o.replaceChildren(ico('logout'))});
 function mb(bps){return bps/1048576}
 function fmtRate(bps){const v=mb(bps);return v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2)}
@@ -638,16 +678,20 @@ async function loadSettings(){
   $('#tfChip').textContent=on?'on':'off';$('#tfOff').hidden=on;$('#tfOnBox').hidden=!on;
   $('#tfLeft').textContent=on?r.j.recovery_left+' recovery codes left.':'';
 }
-$('#tfStart').addEventListener('click',async()=>{
-  const r=await api('settings/2fa/setup',{method:'POST'});if(!r.ok)return;
+$('#tfStart').addEventListener('click',()=>busy($('#tfStart'),tfStart()));
+async function tfStart(){
+  const r=await api('settings/2fa/setup',{method:'POST'});if(!r.ok){PANEL.toast(r.j.error||'Could not start the setup.',true);return}
   $('#tfQR').innerHTML=r.j.svg;$('#tfKey').textContent=r.j.secret;$('#tfSetup').hidden=false;$('#tfStart').hidden=true;$('#tfCode').focus();
-});
-$('#tfOn').addEventListener('click',async()=>{
-  const r=await api('settings/2fa/enable',{method:'POST',body:{code:$('#tfCode').value.trim()}});
+}
+$('#tfOn').addEventListener('click',()=>busy($('#tfOn'),tfOn()));
+$('#tfCode').addEventListener('keydown',e=>{if(e.key==='Enter')$('#tfOn').click()});
+async function tfOn(){
+  const code=$('#tfCode').value.trim();if(!/^\d{6}$/.test(code)){$('#tfErr').textContent='Type the 6 digits the app shows.';return}
+  const r=await api('settings/2fa/enable',{method:'POST',body:{code}});
   if(!r.ok){$('#tfErr').textContent=r.j.error||'Failed.';return}
   $('#tfErr').textContent='';$('#tfSetup').hidden=true;$('#tfStart').hidden=false;$('#tfCode').value='';
-  await loadSettings();$('#tfRec').hidden=false;$('#tfRecList').textContent=r.j.recovery.join('\n');loadOverview();
-});
+  await loadSettings();$('#tfRec').hidden=false;$('#tfRecList').textContent=r.j.recovery.join('\n');loadOverview();PANEL.toast('Two-factor sign-in is on. Keep the recovery codes.');
+}
 $('#tfOffBtn').addEventListener('click',async()=>{
   const r=await api('settings/2fa/disable',{method:'POST',body:{pass:$('#tfOffPass').value,code:$('#tfOffCode').value.trim()}});
   if(!r.ok){$('#tfOffErr').textContent=r.j.error||'Failed.';return}
@@ -659,7 +703,7 @@ $('#pwBtn').addEventListener('click',async()=>{
 });
 $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{method:'POST'})}catch(e){}showLogin()});
 
-window.PANEL={api,el,$,S,busy,ico,newer,placeInd,flaps,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
+window.PANEL={api,el,$,S,busy,ico,dm,dd,DM_KINDS,newer,placeInd,flaps,render,loadOverview,fmtBytes,fmtDur,fmtRate,mb,openDrawer,closeDrawer,VIEWS,setView,statusOf,sparkCells,gaugeArc:null};
 
 /* ---------- boot ---------- */
 markDots();

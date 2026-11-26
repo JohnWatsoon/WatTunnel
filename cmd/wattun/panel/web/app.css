@@ -141,62 +141,104 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--well);padding:2px
 .head h1{font-size:26px;font-weight:500;letter-spacing:-.025em;margin:0}
 .find{margin-top:7px;color:var(--mut);font-size:14px;min-height:20px}
 .find b{color:var(--red);font-weight:500}.find em{color:var(--orange);font-style:normal}.find .ok{color:var(--green)}
-/* buttons: the socket. The icon sits in a round socket at the left end, like a plug in a jack; on hover the socket
-   inverts (it lights up), on press it pops, while the action runs a ring turns around it (.busy, set by btn()).
-   pri = the one action of a view (off-white, black socket), sec = a surface step with a hairline,
-   danger = red ink whose socket fills red on hover, ic = the socket alone (label in aria-label/title) */
-.btn{--h:38px;--sk:26px;--skbg:rgba(255,255,255,.07);--skfg:currentColor;
-  display:inline-flex;align-items:center;justify-content:center;gap:9px;height:var(--h);padding:0 17px;border-radius:999px;border:0;cursor:pointer;
-  font-size:13px;font-weight:500;letter-spacing:-.005em;white-space:nowrap;position:relative;isolation:isolate;overflow:hidden;
-  transition:background-color .2s var(--ease),color .2s var(--ease),box-shadow .2s var(--ease),transform .25s var(--spring)}
-.btn:has(>.ico){padding-left:calc((var(--h) - var(--sk))/2);padding-right:16px}
-.btn .ico{width:var(--sk);height:var(--sk);padding:calc(var(--sk)*.22);flex:none;border-radius:50%;background:var(--skbg);color:var(--skfg);
-  fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;overflow:visible;
-  box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);transition:background-color .22s var(--ease),color .22s var(--ease),transform .4s var(--spring)}
+/* buttons: soft rounded rectangles (not pills), 42px tall, icon bare beside the label. The icon says what happens
+   next on hover, pops on press, and while the action runs it becomes a strobing dot matrix (.busy, set by busy()).
+   pri = the one action of a view (off-white), sec = a surface step with a hairline, danger = red ink,
+   ic = the icon alone (label in aria-label/title), sm = dense rows */
+.ico{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;overflow:visible}
+.btn{--h:42px;--r:14px;
+  display:inline-flex;align-items:center;justify-content:center;gap:10px;height:var(--h);padding:0 18px;border-radius:var(--r);border:0;cursor:pointer;
+  font-size:14px;font-weight:500;letter-spacing:-.005em;white-space:nowrap;position:relative;isolation:isolate;overflow:hidden;
+  transition:background-color .2s var(--ease),color .2s var(--ease),box-shadow .25s var(--ease),transform .3s var(--spring)}
+.btn:has(>.ico){padding-left:15px}
+.btn .ico{width:18px;height:18px;flex:none;stroke-width:1.7;transition:transform .45s var(--spring),opacity .2s}
 /* a soft sheen crosses the button once on hover */
 .btn:after{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;border-radius:inherit;
   background:linear-gradient(105deg,transparent 30%,rgba(255,255,255,.07) 48%,transparent 66%);transform:translateX(-110%)}
 .btn:hover:after{transform:translateX(110%);transition:transform .75s var(--ease)}
-.btn:active{transform:scale(.965)}
+.btn:active{transform:scale(.97)}
 .btn:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
 .btn:disabled{opacity:.42;cursor:default;transform:none}.btn:disabled:after{display:none}
-.btn.pri{background:var(--fg);color:#0b0b0c;--skbg:#0b0b0c;--skfg:var(--fg);box-shadow:inset 0 -2px 0 rgba(0,0,0,.14),0 6px 20px -10px rgba(255,255,255,.35)}
+.btn.pri{background:var(--fg);color:#0b0b0c;box-shadow:inset 0 -2px 0 rgba(0,0,0,.12),inset 0 1px 0 #fff,0 8px 24px -12px rgba(255,255,255,.4)}
 .btn.pri:after{background:linear-gradient(105deg,transparent 30%,rgba(255,255,255,.9) 48%,transparent 66%);mix-blend-mode:soft-light}
-.btn.pri:hover{background:#fff}
-.btn.pri .ico{box-shadow:none}
-.btn.sec{background:var(--well);color:var(--fg);box-shadow:inset 0 0 0 1px rgba(255,255,255,.065)}
-.btn.sec:hover{background:var(--hov);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
-.btn.sec:hover .ico{--skbg:var(--fg);--skfg:#0b0b0c;box-shadow:none}
-.btn.danger,.btn.sec.danger{color:#ff8f93;background:rgba(255,93,98,.06);box-shadow:inset 0 0 0 1px rgba(255,93,98,.16);--skbg:rgba(255,93,98,.13)}
-.btn.danger:hover,.btn.sec.danger:hover{background:rgba(255,93,98,.12);color:#ffb3b6}
-.btn.danger:hover .ico{--skbg:var(--red);--skfg:#fff;box-shadow:none}
+.btn.pri:hover{background:#fff;transform:translateY(-1px)}
+.btn.sec{background:#1c1c1f;color:var(--fg);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.04)}
+.btn.sec .ico{color:var(--mut)}
+.btn.sec:hover{background:#242428;box-shadow:inset 0 0 0 1px rgba(255,255,255,.13),inset 0 1px 0 rgba(255,255,255,.06)}
+.btn.sec:hover .ico{color:var(--fg)}
+.btn.danger,.btn.sec.danger{color:#ff8f93;background:rgba(255,93,98,.07);box-shadow:inset 0 0 0 1px rgba(255,93,98,.18)}
+.btn.danger .ico{color:inherit}
+.btn.danger:hover,.btn.sec.danger:hover{background:rgba(255,93,98,.14);color:#ffb3b6}
 /* the icon says what happens next */
 .btn:hover .i-arrow{transform:translateX(3px)}.btn:hover .i-restart,.btn:hover .i-refresh,.btn:hover .i-rotate{transform:rotate(-160deg)}
 .btn:hover .i-plus{transform:rotate(90deg)}.btn:hover .i-down{transform:translateY(2px)}.btn:hover .i-up,.btn:hover .i-share{transform:translateY(-2px)}
 .btn:hover .i-play{transform:translateX(1px) scale(1.08)}.btn:hover .i-trash{transform:rotate(-12deg)}.btn:hover .i-key{transform:rotate(-30deg)}
 .btn:hover .i-gauge{transform:rotate(12deg)}.btn:hover .i-stop{transform:scale(.86)}.btn:hover .i-check{transform:scale(1.12)}
-/* press: the socket pops; busy: a ring runs around the socket and the button holds still */
+.btn:hover .i-eye{transform:scaleY(.82)}.btn:hover .i-pen{transform:rotate(-14deg) translateY(-1px)}.btn:hover .i-link{transform:rotate(-20deg)}
+.btn:hover .i-box{transform:translateY(-1px)}.btn:hover .i-list{transform:translateX(2px)}.btn:hover .i-copy{transform:translate(-1px,-1px)}
+.btn:hover .i-shield{transform:scale(1.1)}.btn:hover .i-unlink{transform:rotate(12deg)}.btn:hover .i-power,.btn:hover .i-logout{transform:translateX(2px)}
 @keyframes pop{0%{transform:scale(.72)}60%{transform:scale(1.12)}100%{transform:scale(1)}}
 @keyframes spin{to{transform:rotate(360deg)}}
 .btn.hit .ico{animation:pop .45s var(--spring)}
 .btn.busy{pointer-events:none}
-.btn.busy .ico{opacity:.5}
-.btn.busy:before{content:"";position:absolute;z-index:1;left:calc((var(--h) - var(--sk))/2 - 2px);top:calc(50% - var(--sk)/2 - 2px);
-  width:calc(var(--sk) + 4px);height:calc(var(--sk) + 4px);border-radius:50%;box-sizing:border-box;
-  border:2px solid transparent;border-top-color:currentColor;border-right-color:currentColor;animation:spin .7s linear infinite}
-.btn.busy:not(:has(>.ico)){color:transparent}.btn.busy:not(:has(>.ico)):before{left:calc(50% - 9px);top:calc(50% - 9px);width:18px;height:18px;border-top-color:var(--fg);border-right-color:var(--fg)}
-.btn.pri.busy:not(:has(>.ico)):before{border-top-color:#0b0b0c;border-right-color:#0b0b0c}
+.btn.busy>.ico{display:none}
+.btn.busy:not(:has(>.ico)){padding-left:15px}
+.bdm{--s:4px;margin:0 1px}
 @media (prefers-reduced-motion:reduce){.btn .ico,.btn:after{transition:none}.btn:hover .ico{transform:none}.btn:hover:after{transform:translateX(-110%)}.btn.hit .ico{animation:none}}
-.btn.sm{--h:32px;--sk:22px;padding:0 13px;font-size:12.5px;gap:7px}.btn.sm:has(>.ico){padding-right:13px}
-/* icon only: the whole button is the socket */
-.btn.ic{--h:32px;width:var(--h);padding:0;font-size:0;gap:0;background:transparent;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07);color:var(--mut)}
+.btn.sm{--h:36px;--r:12px;padding:0 14px;font-size:13px;gap:8px}.btn.sm:has(>.ico){padding-left:12px}.btn.sm .ico{width:16px;height:16px}
+/* icon only */
+.btn.ic{--h:38px;--r:12px;width:var(--h);padding:0;font-size:0;gap:0;background:transparent;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07);color:var(--mut)}
 .btn.ic:has(>.ico){padding:0}
-.btn.ic .ico{--sk:32px;background:transparent;box-shadow:none;padding:8px}
-.btn.ic:hover{background:var(--fg);color:#0b0b0c;box-shadow:none}.btn.ic:hover .ico{--skbg:transparent;--skfg:#0b0b0c}
+.btn.ic:hover{background:#242428;color:var(--fg);box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
 .btn.ic.danger{color:var(--mut);background:transparent;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07)}
-.btn.ic.danger:hover{background:var(--red);color:#fff}.btn.ic.danger:hover .ico{--skfg:#fff}
-.btn.ic.busy:before{left:-2px;top:-2px;width:calc(var(--h) + 4px);height:calc(var(--h) + 4px)}
+.btn.ic.danger:hover{background:rgba(255,93,98,.14);color:#ff8f93;box-shadow:inset 0 0 0 1px rgba(255,93,98,.3)}
+.btn.ic.busy{padding:0}
 .btn.ic:after{display:none}
+
+/* dropdowns (dd() in app.js) */
+.dd{position:relative;min-width:0}
+.nsel{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}
+.dd-b{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;height:42px;padding:0 12px 0 14px;border:0;border-radius:12px;background:var(--well);color:var(--fg);font-size:14px;text-align:left;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);transition:box-shadow .2s,background .2s}
+.dd-b:hover{box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.dd.open .dd-b{box-shadow:inset 0 0 0 1px rgba(255,255,255,.22);background:#1f1f23}
+.dd-l{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dd-b .ico{width:16px;height:16px;flex:none;color:var(--mut);transition:transform .35s var(--spring)}
+.dd.open .dd-b .ico{transform:rotate(180deg)}
+.dd-p{position:fixed;inset:auto;margin:0;padding:6px;max-height:min(320px,50vh);overflow:auto;border:0;border-radius:14px;background:rgba(28,28,31,.96);color:var(--fg);
+  box-shadow:0 0 0 1px rgba(255,255,255,.08),0 18px 48px -12px rgba(0,0,0,.7);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  opacity:0;transform:translateY(-6px) scale(.97);transform-origin:top center;
+  transition:opacity .18s var(--ease),transform .3s var(--spring),display .3s allow-discrete,overlay .3s allow-discrete;scrollbar-width:thin}
+.dd-p.up{transform-origin:bottom center;transform:translateY(6px) scale(.97)}
+.dd-p:popover-open{opacity:1;transform:none}
+@starting-style{.dd-p:popover-open{opacity:0;transform:translateY(-6px) scale(.97)}.dd-p.up:popover-open{transform:translateY(6px) scale(.97)}}
+.dd-o{display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;min-height:38px;padding:0 10px 0 12px;border:0;border-radius:10px;background:none;color:var(--mut);font-size:13.5px;text-align:left;cursor:pointer;animation:ddIn .32s calc(var(--k,0)*14ms) var(--ease) both}
+.dd-o:hover,.dd-o:focus-visible{background:var(--hov);color:var(--fg);outline:0}
+.dd-o.on{color:var(--fg)}
+.dd-o .ico{width:15px;height:15px;flex:none;opacity:0;transform:scale(.6);transition:opacity .2s,transform .3s var(--spring)}
+.dd-o.on .ico{opacity:1;transform:none}
+@keyframes ddIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.tools .dd{min-width:180px}
+
+/* dot-matrix loaders (dm() in app.js): one keyframe set, the kind chooses which per-dot variable times it */
+.dm{--n:3;--s:5px;--g:calc(var(--s)*.55);--t:1.3s;display:inline-grid;grid-template-columns:repeat(var(--n),var(--s));gap:var(--g);flex:none;vertical-align:middle}
+.dm i{width:var(--s);height:var(--s);border-radius:50%;background:currentColor;opacity:.16;animation:dmBlink var(--t) var(--k,0s) infinite cubic-bezier(.4,0,.2,1)}
+@keyframes dmBlink{0%,100%{opacity:.16;transform:scale(.8)}35%{opacity:1;transform:scale(1.05)}60%{opacity:.35;transform:scale(.9)}}
+@keyframes dmSoft{0%,100%{opacity:.18}50%{opacity:.9}}
+@keyframes dmBar{0%,100%{opacity:.18;transform:scale(.7)}50%{opacity:1;transform:scale(1)}}
+.dm-strobe i{--k:calc((var(--x) + var(--y)) * -.32s);--t:.9s}
+.dm-drift i{--k:calc(var(--r) * -1.3s);animation-name:dmSoft;--t:1.6s}
+.dm-ladder i{--k:calc((1 - var(--y)) * -.6s - var(--x) * .12s);--t:1.1s}
+.dm-spiral i{--k:calc(var(--o) * -1.4s);--t:1.4s}
+.dm-ring i{--k:calc(var(--d) * -.8s);--t:1.2s}
+.dm-orbit i{--k:calc(var(--a) * -1.2s);--t:1.2s}
+.dm-orbit i:nth-child(odd){animation-direction:reverse}
+.dm-drop i{--k:calc(var(--y) * .5s - var(--x) * .2s);--t:1.2s}
+.dm-bars i{--k:calc(var(--x) * -.37s - var(--r) * .3s);animation-name:dmBar;--t:.8s}
+.dm-rail i{--k:calc(var(--x) * -1s);--t:1.4s}
+.dm-halo i{--k:calc((1 - var(--d)) * -.9s);animation-name:dmSoft;--t:1.5s}
+.dm-radar i{--k:calc(var(--a) * -1.6s);--t:1.6s}
+.dm-checker i{--k:calc(var(--c) * -.6s);--t:1.2s}
+@media (prefers-reduced-motion:reduce){.dm i{animation:none;opacity:.5}}
 .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
 .grid.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .s2{grid-column:span 2}.s4{grid-column:1/-1}

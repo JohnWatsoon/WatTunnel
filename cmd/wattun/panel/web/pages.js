@@ -24,6 +24,7 @@ P.when=when;
 
 /* ---------- toasts ---------- */
 function toast(msg,bad){const t=el('div','toast'+(bad?' bad':''),msg);$('#toasts').appendChild(t);setTimeout(()=>t.remove(),bad?9000:4500)}
+P.toast=toast;
 
 /* ---------- dialog: fields + buttons, resolves with the values or null ---------- */
 function ask(title,{text,fields=[],ok='Go ahead',danger=false,full=false,err='',body}={}){
@@ -40,7 +41,7 @@ function ask(title,{text,fields=[],ok='Go ahead',danger=false,full=false,err='',
       if(f.options){i=el('select');f.options.forEach(([v,t])=>{const o=el('option',null,t);o.value=v;i.appendChild(o)})}
       else if(f.area){i=el('textarea');i.rows=f.rows||3;i.spellcheck=false}
       else{i=el('input');i.type=f.type||'text';if(f.mode)i.inputMode=f.mode;i.autocomplete=f.type==='password'?'current-password':'off';i.spellcheck=false}
-      i.id=id;if(f.value!=null)i.value=f.value;if(f.ph)i.placeholder=f.ph;w.append(l,i);if(f.hint)w.appendChild(el('div','lab mt4',f.hint));b.appendChild(w);inputs[f.k]=i;
+      i.id=id;if(f.value!=null)i.value=f.value;if(f.ph)i.placeholder=f.ph;w.append(l,f.options?P.dd(i):i);if(f.hint)w.appendChild(el('div','lab mt4',f.hint));b.appendChild(w);inputs[f.k]=i;
       if(f.onchange)i.addEventListener('change',()=>f.onchange(i.value,inputs))});
     Object.values(inputs).forEach(i=>i.dispatchEvent(new Event('change')));
     const a=$('#dlgA');a.textContent='';
@@ -277,11 +278,11 @@ async function bulk(a){
 const TESTF={k:'test',label:'Carrier test',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]};
 P.newTunnel=()=>newTunnel();
 // the carrier test only runs for an auto tunnel: a token from Kharej may be one, a carrier picked here is not
-const testVis=inp=>{inp.test&&(inp.test.parentNode.hidden=inp.where&&inp.where.value==='both'&&inp.carrier&&inp.carrier.value!=='auto')};
+const testVis=inp=>{inp.test&&(inp.test.closest(".fld").hidden=inp.where&&inp.where.value==='both'&&inp.carrier&&inp.carrier.value!=='auto')};
 async function newTunnel(){
   const ov=S.ov||{tunnels:[],kharej:[]};const vias=(ov.kharej||[]).filter(k=>k.online);
   const fields=[{k:'where',label:'Where',options:vias.length?[['both','On Kharej and here, in one go'],['here','Here only, from a token']]:[['here','Here only, from a token']],
-      onchange:(v,inp)=>{const both=v==='both';['via','carrier'].forEach(k=>inp[k]&&(inp[k].parentNode.hidden=!both));inp.token&&(inp.token.parentNode.hidden=both);testVis(inp)}},
+      onchange:(v,inp)=>{const both=v==='both';['via','carrier'].forEach(k=>inp[k]&&(inp[k].closest(".fld").hidden=!both));inp.token&&(inp.token.closest(".fld").hidden=both);testVis(inp)}},
     {k:'token',label:'Token from Kharej (wat1:...)',area:true,rows:3},
     {k:'via',label:'Kharej server',options:vias.map(k=>[k.host,k.host])},
     {k:'carrier',label:'Carrier',options:[['auto','auto: test them all, keep the best'],['wss','wss: TLS websocket, the safe default'],['tls','tls'],['tcp','tcp'],['udp','udp'],['icmp','icmp: ping packets'],['grpc','grpc'],['h2','h2'],['ws','ws'],['h2c','h2c'],['ptcp','ptcp: fake TCP, raw socket'],['spray','spray: hops ports'],['gre','gre'],['ipip','ipip'],
@@ -419,7 +420,7 @@ $('#sbUpdB').onclick=()=>P.updateAll();
 
 /* ================= TRAFFIC ================= */
 async function loadTraffic(){
-  const v=$('#vTraffic');if(!v.childElementCount)loading(v);
+  const v=$('#vTraffic');if(!v.childElementCount)loading(v,'rail');
   const [r,sp]=await Promise.all([api('traffic?days=30'),api('speedtests')]);if(S.view!=='traffic')return;
   v.textContent='';const g=el('div','grid trg');
   const days=r.ok?r.j.days:[];const tot=r.ok?r.j.totals:{};const hours=r.ok?r.j.hours:[];
@@ -457,7 +458,7 @@ async function loadTraffic(){
   // speed tests
   const rows=sp.ok?sp.j.rows:[];const iran=S.ov?S.ov.tunnels.filter(t=>t.role==='Iran'):[];
   const sel=el('select');sel.setAttribute('aria-label','Tunnel');iran.forEach(t=>{const o=el('option',null,t.name);o.value=t.name;sel.appendChild(o)});
-  const tl=el('div','tools');tl.append(sel,btn('Run a test','pri',()=>sel.value&&act('tunnels/'+enc(sel.value)+'/speedtest',{body:{mb:10}}).then(()=>{})));
+  const tl=el('div','tools');tl.append(P.dd(sel),btn('Run a test','pri',()=>sel.value&&act('tunnels/'+enc(sel.value)+'/speedtest',{body:{mb:10}}).then(()=>{})));
   const spc=card('s3','Speed tests','download, MB/s',tl);
   const latest={};rows.forEach(x=>{if(!latest[x.name])latest[x.name]=x});
   const lt=el('div','sp-latest');Object.values(latest).slice(0,4).forEach(x=>{const d=el('div','sp-l');const dot=el('i');dot.style.background=colOf(x.name);const h=el('div','lab');h.append(dot,x.name);const v=el('div','mid n');v.appendChild(split(x.down?x.down.toFixed(1):'–',x.down?'MB/s':''));d.append(h,v,el('div','lab','↑ '+(x.up?x.up.toFixed(1):'–')+' · '+when(x.t)));lt.appendChild(d)});spc.appendChild(lt);
@@ -482,7 +483,7 @@ function arc(label,pct,text,warn){
     svg.appendChild(svgEl('line',{x1:60+52*Math.cos(a),y1:62-52*Math.sin(a),x2:60+43*Math.cos(a),y2:62-43*Math.sin(a),stroke:col,'stroke-width':2.6,'stroke-linecap':'round'}))}
   const t=el('div','arc-t');t.append(el('div','mid n',text),el('div','lab',label));w.append(svg,t);return w}
 async function loadSystem(){
-  const v=$('#vSystem');if(!v.childElementCount)loading(v);
+  const v=$('#vSystem');if(!v.childElementCount)loading(v,'radar');
   const [b,al,jb,au,ov]=await Promise.all([api('backups'),api('alerts'),api('jobs'),api('audit'),api('overview')]);if(S.view!=='system')return;
   if(ov.ok)S.ov=ov.j;const h=S.ov.host;const latest=S.ov.latest;v.textContent='';const g=el('div','grid sysg');
   // vitals
@@ -634,7 +635,7 @@ $('#stBtn').addEventListener('click',async()=>{
 });
 
 /* ---------- loading state: a waving dot matrix while a page fetches ---------- */
-function loading(v){v.textContent='';const c=el('section','card loadc');const mx=el('div','mx line');matrix(mx,new Array(14).fill(0),3,true);c.append(mx,el('div','lab','loading'));v.appendChild(c)}
+function loading(v,kind){v.textContent='';const c=el('section','card loadc');c.append(P.dm(kind||'rail',5,6),el('div','lab','loading'));v.appendChild(c)}
 
 /* ---------- browser notifications ---------- */
 const seenAlerts=new Set();let alertsPrimed=false;

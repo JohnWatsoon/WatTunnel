@@ -27,6 +27,7 @@ const (
 	cookieName   = "sid" // generic on purpose: no product name in any pre-login byte
 	recoveryLen  = 10
 	recoveryKeep = 10
+	recoveryCost = 6
 )
 
 // RandToken returns n random bytes, URL-safe base64.
@@ -53,7 +54,9 @@ func NewRecoveryCodes() (plain, hashed []string) {
 		for j := range b {
 			b[j] = alpha[int(b[j])%len(alpha)]
 		}
-		h, _ := bcrypt.GenerateFromPassword(b, bcrypt.DefaultCost)
+		// cost 6, not the default 10: ten of them at cost 10 took seconds on a throttled 1-core VPS (2FA "Turn on"
+		// looked dead), and a 10-character random code (~50 bits) needs no slow hash to resist an offline search
+		h, _ := bcrypt.GenerateFromPassword(b, recoveryCost)
 		plain, hashed = append(plain, string(b[:5])+"-"+string(b[5:])), append(hashed, string(h))
 	}
 	return
