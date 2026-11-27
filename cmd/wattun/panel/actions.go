@@ -203,10 +203,26 @@ type speedRun struct {
 
 func (s *Server) runSpeedTest(t Tunnel, mb int, auto bool, say func(string, ...any)) error {
 	run := speedRun{T: time.Now().Unix(), Name: t.Name, Carrier: t.Carrier, MB: mb, Auto: auto}
+	// a stopped or unlinked tunnel cannot be measured: say so now instead of after a minute of "connection refused"
+	if !t.Active {
+		return fmt.Errorf("%s is stopped: start it, then run the test", t.Name)
+	}
+	if c, ok := s.be.Stats(t.Name); ok && !c.Alive {
+		return fmt.Errorf("%s has no session with Kharej right now: the test needs a live link (Re-test carriers, or check the journal)", t.Name)
+	}
 	var errs []string
 	for _, dir := range []string{"down", "up"} {
 		say("%s: %d MB %s ...", t.Name, mb, map[string]string{"down": "download", "up": "upload"}[dir])
+		end := s.speedProgress(t.Name, dir, say)
 		r, err := s.be.SpeedTest(t.Name, dir, mb)
+		end()
+		if err != nil || !r.OK {
+			// the usual cause of "session closed" / "connection refused" mid-test: the tunnel was stopped or restarted
+			if now, ok := s.tunnel(t.Name); ok && !now.Active {
+				errs = append(errs, dir+": "+t.Name+" was stopped during the test")
+				break
+			}
+		}
 		switch {
 		case err != nil:
 			errs = append(errs, err.Error())
@@ -231,6 +247,43 @@ func (s *Server) runSpeedTest(t Tunnel, mb int, auto bool, say func(string, ...a
 	}
 	say("RESULT=%.2f/%.2f", run.Down, run.Up)
 	return nil
+}
+
+// speedProgress says, once a second while one direction runs, the rate the tunnel moves in that direction and
+// the MB so far, as PROG=dir|MB/s|MB (the dialog draws it; the rate includes any user traffic at the time).
+func (s *Server) speedProgress(name, dir string, say func(string, ...any)) (end func()) {
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		prev, ok := s.be.Stats(name)
+		if !ok {
+			return
+		}
+		pick := func(c Counters) float64 {
+			if dir == "down" {
+				return c.BytesIn
+			}
+			return c.BytesOut
+		}
+		start, last := pick(prev), time.Now()
+		tk := time.NewTicker(time.Second)
+		defer tk.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tk.C:
+			}
+			c, ok := s.be.Stats(name)
+			if !ok || pick(c) < pick(prev) {
+				continue
+			}
+			now := time.Now()
+			say("PROG=%s|%.2f|%.1f", dir, (pick(c)-pick(prev))/now.Sub(last).Seconds()/1048576, (pick(c)-start)/1048576)
+			prev, last = c, now
+		}
+	}()
+	return func() { close(stop); <-done } // no PROG line after the result
 }
 
 // speedMB reads {"mb": N} from a speed-test request. The dialog's field sends the number as a string ("100"):

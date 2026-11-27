@@ -158,9 +158,17 @@ function dd(sel){
   const lb=sel.id&&document.querySelector('label[for="'+sel.id+'"]');if(lb){lb.htmlFor='';lb.onclick=()=>b.focus();b.setAttribute('aria-label',lb.textContent)}else b.setAttribute('aria-label',sel.getAttribute('aria-label')||'');
   sync();return w}
 // busy: the button's icon turns into a small strobing matrix while the action runs, and the label stays
-function busy(b,r){if(!r||typeof r.then!=='function')return r;b.classList.add('busy');b.setAttribute('aria-busy','true');
-  const m=dm(b.dataset.dm||'strobe',3);m.classList.add('bdm');b.prepend(m);
-  const done=()=>{b.classList.remove('busy');b.removeAttribute('aria-busy');m.remove()};r.then(done,done);return r}
+/* a running button keeps its dot matrix across re-renders: the views rebuild every poll, so the state is held by
+   the button's identity (its section and label), and every new button with that identity comes up busy too */
+const BUSY=new Set();
+function bkey(b){const h=b.closest('[data-host],[id]');return (h?h.dataset.host||h.id:'')+'|'+b.textContent.trim()}
+function busyOn(b){if(b.classList.contains('busy'))return;b.classList.add('busy');b.setAttribute('aria-busy','true');
+  const m=dm(b.dataset.dm||'strobe',3);m.classList.add('bdm');b.prepend(m)}
+function busyOff(b){b.classList.remove('busy');b.removeAttribute('aria-busy');const m=b.querySelector(':scope>.bdm');if(m)m.remove()}
+function busy(b,r){if(!r||typeof r.then!=='function')return r;const k=bkey(b);BUSY.add(k);busyOn(b);
+  const done=()=>{BUSY.delete(k);document.querySelectorAll('.btn.busy').forEach(x=>{if(bkey(x)===k)busyOff(x)})};r.then(done,done);return r}
+new MutationObserver(ms=>{if(!BUSY.size)return;for(const m of ms)for(const n of m.addedNodes){if(n.nodeType!==1)continue;
+  (n.matches('.btn')?[n]:n.querySelectorAll('.btn')).forEach(b=>{if(BUSY.has(bkey(b)))busyOn(b)})}}).observe(document.documentElement,{childList:true,subtree:true});
 document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('.btn').forEach(decorate);const o=document.getElementById('out');if(o)o.replaceChildren(ico('logout'))});
 function mb(bps){return bps/1048576}
 function fmtRate(bps){const v=mb(bps);return v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2)}
@@ -339,8 +347,11 @@ function statusOf(t){
   if(l&&l.loss>=5)return ['p-slow','Lossy'];
   return ['p-up','Up'];
 }
+// while a dialog is open the page behind it stays still: redrawing it under the dialog's 12 px backdrop blur every
+// second made the dialog stutter. The view catches up when the dialog closes.
+const modal=()=>{const d=$('#dlg');return d&&d.open};
 function render(){
-  const ov=S.ov;if(!ov)return;
+  const ov=S.ov;if(!ov)return;if(modal()){S.stale=true;return}
   syncDrawer();
   $('#hName').textContent=ov.host.name||'server';
   const side={iran:'Iran',kharej:'Kharej',mixed:'Iran and Kharej'}[ov.host.role]||(ov.tunnels.some(t=>t.role==='Iran')?'Iran':ov.tunnels.length?'Kharej':'');
@@ -394,8 +405,8 @@ function openQuick(){const qa=$('#qa'),box=$('#qaTiles');box.textContent='';
 // the dialog follows its content's height smoothly (a job's lines, an error, a second step) instead of jumping
 {const dlg=$('#dlg');let lastH=0;
   new ResizeObserver(()=>{if(!dlg.open){lastH=0;return}const h=dlg.offsetHeight;
-    if(lastH&&Math.abs(h-lastH)>2&&!RM)dlg.animate([{height:lastH+'px'},{height:h+'px'}],{duration:300,easing:'cubic-bezier(.16,1,.3,1)'});lastH=h}).observe($('#dlgF'));
-  dlg.addEventListener('close',()=>{lastH=0})}
+    if(lastH&&Math.abs(h-lastH)>8&&!RM)dlg.animate([{height:lastH+'px'},{height:h+'px'}],{duration:300,easing:'cubic-bezier(.16,1,.3,1)'});lastH=h}).observe($('#dlgF'));
+  dlg.addEventListener('close',()=>{lastH=0;if(S.stale){S.stale=false;render()}})}
 function closeQuick(){const qa=$('#qa');if(!qa||qa.hidden||qa.classList.contains('closing'))return;
   const t=[...qa.querySelectorAll('.qt')];t.forEach((x,i)=>x.style.setProperty('--o',((t.length-1-i)*0.035).toFixed(3)+'s'));
   qa.classList.add('closing');$('#fab').setAttribute('aria-expanded','false');$('#fab').focus();
@@ -507,7 +518,7 @@ function odo(e,val){
   const cs=e.querySelectorAll('.c');let k=0;str.split('').forEach(ch=>{if(/\d/.test(ch)){cs[k].style.transform='translateY(-'+ch+'em)';k++}});
 }
 function renderLive(down,up){
-  if(!S.ov)return;
+  if(!S.ov||modal())return;
   odo($('#odo'),mb(down));$('#upNow').textContent=mb(up).toFixed(1);$('#peak').textContent=mb(S.peak).toFixed(1);
   // health counts the tunnels meant to run; one stopped by hand is not a problem
   const want=S.ov.tunnels.filter(t=>t.enabled||t.active);const ups=want.filter(t=>statusOf(t)[0]==='p-up').length;
@@ -610,7 +621,7 @@ function startMap(){
   map.t0=performance.now();setTimeout(()=>{S.mapShown=true;document.querySelectorAll('.tip').forEach(t=>t.classList.add('on'))},RM?0:2100);
   const draw=(now)=>{
     requestAnimationFrame(draw);
-    if(document.hidden||$('#vOverview').hidden||!map.pts)return;
+    if(document.hidden||$('#vOverview').hidden||!map.pts||modal())return;
     const {x,w,h}=map.g;const t=(now-map.t0)/1000;x.clearRect(0,0,w,h);
     const kh=map.pl.kh;
     const intro=RM?1:Math.min(1,t/1.5);const r=map.pitch*0.24;
@@ -721,7 +732,8 @@ if(!RM){let pe=null,raf=0;document.addEventListener('pointermove',e=>{pe=e;if(!r
 /* phones: the bottom bar and the quick action button are liquid glass. A lens with a squircle bevel: the middle stays
    clear, the rim bends what scrolls under it (Snell, IOR 3) and splits it slightly by colour (blue bends most); a hairline
    catches a light that follows the pointer, the phone's tilt or the scroll. Only Chromium can bend the page
-   (backdrop-filter: url()); every other browser keeps the rim, tint and light over a faint blur. */
+   (backdrop-filter: url()); every other browser keeps the rim, tint and light over a light frost. A 3 px frost under the lens keeps text
+   that scrolls beneath from reading as sharp as the page around it. */
 (()=>{
   const SV='http://www.w3.org/2000/svg',mq=matchMedia('(max-width:760px)'),de=document.documentElement;
   if('userAgentData' in navigator)de.classList.add('lg-refract');
@@ -746,7 +758,7 @@ if(!RM){let pe=null,raf=0;document.addEventListener('pointermove',e=>{pe=e;if(!r
     const old=host.querySelector('#'+id);if(old)old.remove();const f=document.createElementNS(SV,'filter');f.id=id;
     ['x','y'].forEach(a=>f.setAttribute(a,'0'));f.setAttribute('width','100%');f.setAttribute('height','100%');
     const sc=k=>(mx*k).toFixed(1),ch=(n,i)=>{const m=Array(20).fill(0);m[i*6]=1;m[18]=1;return `<feColorMatrix in="d${n}" type="matrix" values="${m.join(' ')}" result="c${n}"/>`};
-    f.innerHTML=`<feGaussianBlur in="SourceGraphic" stdDeviation="0.3" result="s"/><feImage href="${url}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none" result="m"/>`+
+    f.innerHTML=`<feGaussianBlur in="SourceGraphic" stdDeviation="3" result="s"/><feImage href="${url}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none" result="m"/>`+
       [['r',.94],['g',1],['b',1.06]].map(([n,k])=>`<feDisplacementMap in="s" in2="m" scale="${sc(k)}" xChannelSelector="R" yChannelSelector="G" result="d${n}"/>`).join('')+
       ch('r',0)+ch('g',1)+ch('b',2)+`<feComposite in="cr" in2="cg" operator="arithmetic" k2="1" k3="1" result="rg"/><feComposite in="rg" in2="cb" operator="arithmetic" k2="1" k3="1"/>`;
     host.appendChild(f);el.style.setProperty('--lg-filter','url(#'+id+')')}

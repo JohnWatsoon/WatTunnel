@@ -103,9 +103,14 @@ function speedView(body){
   const tile=(lab)=>{const d=el('div','js-t');const l=el('div','lab',lab);const v=el('div','big2 n','··');d.append(l,v);return {d,l,v}};
   const dn=tile('download'),up=tile('upload');r.append(dn.d,up.d);w.append(mx,r);body.appendChild(w);matrix(mx,null,9,true);
   return (lines,state)=>{
-    let D=null,U=null,now='';lines.forEach(l=>{let m=/^(down|up): ([\d.]+) MB\/s in ([\d.]+) s/.exec(l);if(m){if(m[1]==='down')D=[+m[2],+m[3]];else U=[+m[2],+m[3]]}
-      m=/: \d+ MB (download|upload) \.\.\./.exec(l);if(m)now=m[1]});
-    const set=(t,x,word)=>{t.v.textContent='';if(x){t.v.appendChild(split(x[0].toFixed(1),'MB/s'));t.l.textContent=word+' · '+x[1].toFixed(1)+' s'}else t.v.textContent=state==='running'&&now===word?'measuring':'··';t.d.classList.toggle('now',state==='running'&&now===word&&!x)};
+    // PROG=dir|MB/s|MB: the live rate while a direction runs (panel 3.6.1)
+    let D=null,U=null,now='',tot=0;const P_={};lines.forEach(l=>{let m=/^(down|up): ([\d.]+) MB\/s in ([\d.]+) s/.exec(l);if(m){if(m[1]==='down')D=[+m[2],+m[3]];else U=[+m[2],+m[3]]}
+      m=/: (\d+) MB (download|upload) \.\.\./.exec(l);if(m){now=m[2];tot=+m[1]}m=/^PROG=(down|up)\|([\d.]+)\|([\d.]+)/.exec(l);if(m)P_[m[1]==='down'?'download':'upload']=[+m[2],+m[3]]});
+    const set=(t,x,word)=>{const p=state==='running'&&now===word?P_[word]:null,txt=x?'x'+x[0]+x[1]:p?'p'+p[0]+p[1]:'w'+(state==='running'&&now===word);
+      if(t.v.dataset.s===txt)return;t.v.dataset.s=txt;t.v.textContent='';t.v.classList.toggle('wait',!x&&!p);
+      if(x){t.v.appendChild(split(x[0].toFixed(1),'MB/s'));t.l.textContent=word+' · '+x[1].toFixed(1)+' s'}
+      else if(p){t.v.appendChild(split(p[0].toFixed(2),'MB/s'));t.l.textContent=word+' · '+Math.min(p[1],tot||p[1]).toFixed(1)+(tot?' of '+tot:'')+' MB'}
+      else t.v.textContent=state==='running'&&now===word?'measuring':'··';t.d.classList.toggle('now',state==='running'&&now===word&&!x)};
     set(dn,D,'download');set(up,U,'upload');
     if(state!=='running'){const top=Math.max(D?D[0]:0,U?U[0]:0,1);const h=x=>x?Math.max(1,Math.round(x[0]/top*9)):null;const a=h(D),b=h(U);matrix(mx,[a,a,a,a,null,b,b,b,b],9,false)}
   };
@@ -174,7 +179,7 @@ async function openJob(id){
     if(!r||!r.ok){misses++;v.st.lastChild.textContent=misses>3?'waiting for the panel to come back':'running';jobT=setTimeout(tick,2000);return}
     misses=0;const j=r.j;$('#dlgT').textContent=j.title;
     const all=(j.log||[]).map(strip).filter(l=>j.kind!=='pair'||!/^TUNNEL=/.test(l)); /* a pairing link is hidden: no carrier switch on it */const shown=all.filter(l=>!/^[A-Z_]+=/.test(l));
-    if(j.kind==='speedtest'){spd=spd||speedView(v.body);spd(shown,j.state)}
+    if(j.kind==='speedtest'){spd=spd||speedView(v.body);spd(all,j.state)}
     else{car=car||carrierView(v.body);steps=steps||stepView(v.body);
       // the board takes over as soon as the manager reports carriers; until then the plain steps
       if(car(all,j.state))v.body.classList.add('has-car');else steps(shown,j.state)}

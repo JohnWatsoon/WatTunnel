@@ -2627,7 +2627,10 @@ Rejection codes appended for write intents (numbers are the contract, the panel 
 tunnel or a local listener; target-port overlap is deliberately fine, several tunnels may forward to the same
 local service), `12 carrier_needs` (`{"carrier","ver","need"}` — a raw-socket carrier off Linux, or a name
 this binary does not ship). `4 rate_limited` also covers the per-pair **create** bucket (5 at once, then
-1 per 10 s) and the per-host tunnel cap (64 units, `{"resource":"tunnels","cap":64}`); `3 stale`, `2 denied`
+1 per 10 s) and the per-host tunnel cap: 64 tunnels, `{"resource":"tunnels","cap":64,"have":N}`, where an auto
+tunnel's hidden `NAME-e-*` helpers count with their parent (3.6.1; before, every unit counted, so four auto
+tunnels filled the cap), and 256 units in all, helpers included (`{"resource":"units","cap":256,"have":N}`).
+Iran 3.6.1+ names the resource in its error instead of "too many commands"; `3 stale`, `2 denied`
 (with `{"need":tier}`) and `1 bad_request` are unchanged. Name rules are byte-for-byte the manager's:
 1-32 chars of `[A-Za-z0-9_-]` (the name becomes `wattun@NAME` and `NAME.yml`). Params keys must be config
 keys this binary parses; the keys the ops write themselves (`mode`, `key`, `carrier`, `ports`, `limits`,

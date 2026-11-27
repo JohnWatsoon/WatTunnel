@@ -291,3 +291,21 @@ func TestSpeedMBTakesStringOrNumber(t *testing.T) {
 		}
 	}
 }
+
+// a stopped tunnel fails the speed test at once with the reason, without calling the backend's test
+func TestSpeedTestStoppedTunnel(t *testing.T) {
+	s, _ := newTestServer(t, "")
+	err := s.runSpeedTest(Tunnel{Name: "t1", Role: "Iran"}, 10, false, func(string, ...any) {})
+	if err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("got %v", err)
+	}
+	var lines []string
+	if err := s.runSpeedTest(Tunnel{Name: "t1", Role: "Iran", Active: true}, 10, false, func(f string, a ...any) {
+		lines = append(lines, fmt.Sprintf(f, a...))
+	}); err != nil {
+		t.Fatalf("live tunnel: %v", err)
+	}
+	if !strings.HasPrefix(lines[len(lines)-1], "RESULT=") {
+		t.Fatalf("last line %q, want RESULT= (no PROG line after the result)", lines[len(lines)-1])
+	}
+}

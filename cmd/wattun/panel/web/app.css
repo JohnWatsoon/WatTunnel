@@ -162,9 +162,8 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--well);padding:2px
 .btn.pri{background:var(--fg);color:#0b0b0c;box-shadow:inset 0 -2px 0 rgba(0,0,0,.12),inset 0 1px 0 #fff,0 8px 24px -12px rgba(255,255,255,.4)}
 .btn.pri:after{background:linear-gradient(105deg,transparent 30%,rgba(255,255,255,.9) 48%,transparent 66%);mix-blend-mode:soft-light}
 .btn.pri:hover{background:#fff;transform:translateY(-1px)}
-/* liquid: the face is a lens lit from the pointer; a press squashes it like a drop */
+/* liquid: the face is a lens lit from the pointer */
 .btn.pri:hover{background:radial-gradient(90px circle at var(--mx,50%) var(--my,50%),#fff,#e4e4ea 70%,#cfcfd6)}
-.btn.pri:active{transform:scale(1.03,.9);transition:transform .12s}
 .btn.sec{background:#1c1c1f;color:var(--fg);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07),inset 0 1px 0 rgba(255,255,255,.04)}
 .btn.sec .ico{color:var(--mut)}
 .btn.sec:hover{background:#242428;box-shadow:inset 0 0 0 1px rgba(255,255,255,.13),inset 0 1px 0 rgba(255,255,255,.06)}
@@ -224,7 +223,7 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--well);padding:2px
 
 /* dot-matrix loaders (dm() in app.js): one keyframe set, the kind chooses which per-dot variable times it */
 .dm{--n:3;--s:5px;--g:calc(var(--s)*.55);--t:1.3s;display:inline-grid;grid-template-columns:repeat(var(--n),var(--s));gap:var(--g);flex:none;vertical-align:middle}
-.dm i{width:var(--s);height:var(--s);border-radius:50%;background:currentColor;opacity:.16;animation:dmBlink var(--t) var(--k,0s) infinite cubic-bezier(.4,0,.2,1)}
+span.dm>i{width:var(--s);height:var(--s);border-radius:50%;background:currentColor;opacity:.16;animation:dmBlink var(--t) var(--k,0s) infinite cubic-bezier(.4,0,.2,1)}
 @keyframes dmBlink{0%,100%{opacity:.16;transform:scale(.8)}35%{opacity:1;transform:scale(1.05)}60%{opacity:.35;transform:scale(.9)}}
 @keyframes dmSoft{0%,100%{opacity:.18}50%{opacity:.9}}
 @keyframes dmBar{0%,100%{opacity:.18;transform:scale(.7)}50%{opacity:1;transform:scale(1)}}
@@ -400,7 +399,7 @@ details summary{cursor:pointer}
 .btn.on{background:var(--fg);color:var(--bg)}
 dialog#dlg{background:var(--card);color:var(--fg);border:0;border-radius:20px;padding:22px;width:min(520px,calc(100vw - 32px));max-height:calc(100vh - 40px);overflow:auto;
   box-shadow:0 0 0 1px rgba(255,255,255,.06),0 30px 80px -20px rgba(0,0,0,.8);
-  opacity:0;transform:translateY(10px) scale(.97);transition:opacity .22s var(--ease),transform .4s var(--spring),overlay .3s allow-discrete,display .3s allow-discrete;scrollbar-width:thin}
+  opacity:0;transform:translateY(10px) scale(.97);transition:opacity .22s var(--ease),transform .4s var(--spring),overlay .3s allow-discrete,display .3s allow-discrete;scrollbar-width:thin;scrollbar-gutter:stable}
 dialog#dlg[open]{opacity:1;transform:none}
 @starting-style{dialog#dlg[open]{opacity:0;transform:translateY(10px) scale(.97)}}
 dialog#dlg::backdrop{background:rgba(10,10,11,0);backdrop-filter:blur(0);transition:background .3s,backdrop-filter .3s,overlay .3s allow-discrete,display .3s allow-discrete}
@@ -644,11 +643,11 @@ dialog#dlg[open]::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12
 .jsteps{display:flex;flex-direction:column;margin:16px 0 6px;position:relative}
 .jstep{display:flex;gap:12px;align-items:center;font-size:13.5px;color:var(--mut);padding:7px 0;position:relative;animation:stepIn .45s var(--ease) both}
 .jstep:not(:last-child):after{content:"";position:absolute;left:10px;top:calc(50% + 13px);height:calc(100% - 26px);width:1px;background:var(--line2)}
-.jstep i{width:21px;height:21px;border-radius:50%;flex:none;display:grid;place-items:center;background:rgba(62,224,138,.12);color:var(--green);position:relative}
-.jstep i svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.jstep>i{width:21px;height:21px;border-radius:50%;flex:none;display:grid;place-items:center;background:rgba(62,224,138,.12);color:var(--green);position:relative}
+.jstep>i svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
 .jstep.ok span{color:var(--mut)}
-.jstep.now{color:var(--fg)}.jstep.now i{background:rgba(255,255,255,.06);color:var(--fg)}
-.jstep.bad{color:#ff9a9d}.jstep.bad i{background:rgba(255,93,98,.14);color:var(--red)}
+.jstep.now{color:var(--fg)}.jstep.now>i{background:rgba(255,255,255,.06);color:var(--fg)}
+.jstep.bad{color:#ff9a9d}.jstep.bad>i{background:rgba(255,93,98,.14);color:var(--red)}
 /* the job's progress line: runs while it runs, fills green or red at the end */
 .jbar{height:2px;border-radius:2px;background:var(--line);overflow:hidden;position:relative;margin:-4px 0 4px}
 .jbar i{position:absolute;inset:0;background:var(--fg);transform-origin:left;transition:background .3s}
@@ -733,7 +732,7 @@ dialog#dlg.wide{width:min(720px,calc(100vw - 32px))}
 .js-r{display:grid;grid-template-columns:1fr 1fr;gap:12px;flex:1;min-width:0}
 .js-t{background:var(--card);border-radius:14px;padding:16px;transition:box-shadow .3s}
 .js-t .big2{margin-top:10px;font-size:32px}
-.js-t.now{box-shadow:inset 0 0 0 1px var(--blue)}.js-t.now .big2{color:var(--blue);font-size:18px;animation:blink 1.4s infinite}
+.js-t.now{box-shadow:inset 0 0 0 1px var(--blue)}.js-t.now .big2{color:var(--blue)}.js-t.now .big2.wait{font-size:18px;animation:blink 1.4s infinite}
 @keyframes blink{50%{opacity:.35}}
 .jcar{display:flex;flex-direction:column;gap:14px}
 .jc-top{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap}
@@ -853,13 +852,13 @@ td.ta .btn{margin-left:4px;--h:30px}
   .sb-row{border:0;padding:0;gap:4px}.sb-row .live{margin-right:6px}
   #app .main{padding-bottom:104px}
   .nav,.fab{position:fixed;bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:25;height:60px;isolation:isolate;
-    background:rgba(255,255,255,.06);box-shadow:0 10px 30px rgba(0,0,0,.35),inset 0 0 14px -4px rgba(255,255,255,.45);animation:barIn .8s .2s var(--spring) both}
+    background:linear-gradient(rgba(255,255,255,.07),rgba(255,255,255,.04)),rgba(18,18,22,.32);box-shadow:0 10px 30px rgba(0,0,0,.35),inset 0 0 14px -4px rgba(255,255,255,.45);animation:barIn .8s .2s var(--spring) both}
   .nav{left:14px;right:88px;margin:0;flex-direction:row;gap:0;padding:6px;border-radius:30px}
   .fab{right:14px;width:60px;border-radius:30px;color:var(--fg);transition:transform .4s var(--spring)}
   .fab:hover{transform:rotate(90deg)}
   .nav:after,.fab:after{content:"";position:absolute;inset:0;z-index:-2;border-radius:inherit;pointer-events:none;
-    -webkit-backdrop-filter:blur(3px) saturate(1.6);backdrop-filter:blur(3px) saturate(1.6)}
-  .lg-refract .nav:after,.lg-refract .fab:after{backdrop-filter:var(--lg-filter,blur(3px) saturate(1.6))}
+    -webkit-backdrop-filter:blur(9px) saturate(1.6);backdrop-filter:blur(9px) saturate(1.6)}
+  .lg-refract .nav:after,.lg-refract .fab:after{backdrop-filter:var(--lg-filter,blur(9px) saturate(1.6)) saturate(1.5)}
   /* the hairline: brightest on the rim facing the light, a weaker one opposite */
   .nav:before,.fab:before{content:"";position:absolute;inset:0;z-index:2;border-radius:inherit;padding:1px;pointer-events:none;opacity:.7;
     background:linear-gradient(calc(var(--a,-45deg) + 180deg),#fff,rgba(255,255,255,0) 30% 70%,rgba(255,255,255,.6));

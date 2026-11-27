@@ -4293,11 +4293,12 @@ auto_plan_intro() { # plan-d -> human lines for the test screen ("standard carri
 # uninstall, heal, prune and widen still manage them.
 is_auto_ext() { [ -f "$CONF/$1.autoext" ]; }
 auto_ext_names() { # parent -> its extended unit names ($parent-e-<shape>); only units whose .autoext names this parent
-  local f b
+  local f b p
   for f in "$CONF/$1-e-"*.yml; do
     [ -e "$f" ] || continue
     b=${f##*/}; b=${b%.yml}
-    [ "$(cat "$CONF/$b.autoext" 2>/dev/null)" = "$1" ] || continue # M1: a user tunnel named NAME-e-* is not a child
+    p=''; [ -f "$CONF/$b.autoext" ] && read -r p <"$CONF/$b.autoext" # read, not $(cat): no fork per helper
+    [ "$p" = "$1" ] || continue # M1: a user tunnel named NAME-e-* is not a child
     echo "$b"
   done
   return 0
@@ -4400,10 +4401,15 @@ bin_ver_ok() { # min-version -> 1 when the installed wattun is new enough (empty
   ver_ge "$(bin_ver || true)" "$1" 2>/dev/null && echo 1
   return 0
 }
+declare -A AUTO_KH_C=() # is_auto_kharej answers cached for one heal pass only (HEAL_PASS=1): a token's carrier does not
+                        # change under it, and the sed|base64 pair cost ~50 ms a call on a loaded 1-core host, ~100 calls
+                        # per pass. The interactive menu lives long and may recreate a tunnel, so it never caches.
 is_auto_kharej() { # name : does NAME.token carry carrier "auto"?
-  local raw
-  [ -f "$CONF/$1.token" ] || return 1
-  raw=$(sed 's/^wat1://' "$CONF/$1.token" | base64 -d 2>/dev/null) || return 1
+  local raw k="$CONF/$1.token"
+  [ -f "$k" ] || return 1
+  if [ "${HEAL_PASS:-0}" = 1 ] && [ -n "${AUTO_KH_C[$k]:-}" ]; then [ "${AUTO_KH_C[$k]}" = auto ]; return; fi
+  raw=$(sed 's/^wat1://' "$k" | base64 -d 2>/dev/null) || return 1
+  AUTO_KH_C[$k]=${raw%%|*}
   [ "${raw%%|*}" = auto ]
 }
 companion_of() { # name -> parent name when NAME is an auto reverse companion (NAME-r)
@@ -4653,21 +4659,26 @@ companion_create() { # name ip [no_start=0]
 }
 auto_detect_iran_ip() { # name [cdn] -> prints first usable Iran client IP (prefers non-CDN clients)
   local n=$1 cdn=${2:-} u s cl obj car ip='' cdn_ip=''
+  # bash regexes, no grep/sed/cut per line: heal runs this for every helper of every auto tunnel, and the forks
+  # cost a 1-core Kharej with 5 auto tunnels about 15 s of CPU per pass
+  local re_cl='"clients": *\[([^]]*)\]' re_obj='\{[^{}]*\}' re_car='"carrier": *"([^"]*)"' re_ip='"ip": *"([^"]*)"'
   for u in "$n" $(auto_ext_names "$n"); do
     u_active "$u" || continue
     s=$(stats "$u") || continue
-    cl=$(grep -o '"clients": *\[[^]]*\]' <<<"$s")
-    while IFS= read -r obj; do
-      [ -n "$obj" ] || continue
-      car=$(grep -o '"carrier": *"[^"]*"' <<<"$obj" | head -1 | cut -d'"' -f4)
-      ip=$(grep -o '"ip": *"[^"]*"' <<<"$obj" | head -1 | cut -d'"' -f4)
+    [[ $s =~ $re_cl ]] || continue
+    cl=${BASH_REMATCH[1]}
+    while [[ $cl =~ $re_obj ]]; do
+      obj=${BASH_REMATCH[0]}; cl=${cl#*"$obj"}
+      car=''; ip=''
+      [[ $obj =~ $re_car ]] && car=${BASH_REMATCH[1]}
+      [[ $obj =~ $re_ip ]] && ip=${BASH_REMATCH[1]}
       { ipv4_ok "$ip" || ipv6_ok "$ip"; } || { ip=''; continue; }
       if is_cdn_carrier "$car"; then
         [ -z "$cdn" ] && [ -z "$cdn_ip" ] && cdn_ip=$ip
       else
         printf '%s' "$ip"; return 0
       fi
-    done < <(sed 's/},[[:space:]]*{/}\n{/g' <<<"$cl")
+    done
   done
   [ -n "$cdn_ip" ] && printf '%s' "$cdn_ip"
   return 0
@@ -10019,6 +10030,7 @@ u_enabled() { # the wants/ symlink answers without systemd; anything else (a dis
 }
 heal() { # restart Iran tunnels whose link is down or breaches SLA 3 checks in a row
   local n cnt f st cyc sla_f b_f slow=0
+  HEAL_PASS=1
   mkdir -p "$RUN"
   units_snapshot
   # the web panel: restarted only when it is on (panel.conf) and its unit failed; a panel that is off stays off

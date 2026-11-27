@@ -58,6 +58,9 @@ import (
 // config (memDefaults). // shortcut: static count, no per-unit memory math yet — raise when a fleet needs it
 const scepterMaxTunnels = 64
 
+// scepterUnitsPerTunnel bounds every unit, auto helpers included, at this many per allowed tunnel.
+const scepterUnitsPerTunnel = 4
+
 // scepterVerify is how long a unit op waits for the liveness verify: systemd start/stop is sub-second, 6 s
 // covers a loaded host.
 const scepterVerify = 6 * time.Second
@@ -230,8 +233,8 @@ func (o *fileScepterOps) refuseSelf(name string) (map[string]any, int) {
 // createAuto: carrier "auto" is the manager's Kharej auto tunnel (every carrier at once plus the test plan in its
 // token), so Kharej runs its own manager unattended and hands back the token; Iran then tests and picks (3.6.1).
 func (o *fileScepterOps) createAuto(name, ports string) (map[string]any, int) {
-	if n := o.tunnelCount(); n >= o.maxTunnels {
-		return map[string]any{"resource": "tunnels", "cap": o.maxTunnels}, wat.CodeRateLimited
+	if p := o.capFull(16); p != nil { // an auto tunnel brings up to 15 helpers
+		return p, wat.CodeRateLimited
 	}
 	bin, err := os.Executable()
 	if err != nil {
@@ -290,8 +293,8 @@ func (o *fileScepterOps) Create(spec wat.ScepterTunnelSpec) (map[string]any, int
 		func(k string) string { return spec.Params[k] }, spec.Params["metrics"])); code != wat.CodeOK {
 		return p, code
 	}
-	if n := o.tunnelCount(); n >= o.maxTunnels {
-		return map[string]any{"resource": "tunnels", "cap": o.maxTunnels}, wat.CodeRateLimited
+	if p := o.capFull(1); p != nil {
+		return p, wat.CodeRateLimited
 	}
 	metrics := o.pickMetricsPort(name) // best effort: a busy host creates without a private /stats
 	yml := scepterTunnelYML(spec, ports, metrics)
@@ -362,9 +365,35 @@ func (o *fileScepterOps) suggestName() string {
 	return fmt.Sprintf("tunnel-%d", time.Now().Unix()%100000)
 }
 
+// tunnelCount counts tunnels toward the cap: an auto tunnel's hidden helpers (NAME-e-*, marked by a .autoext
+// sidecar) belong to their parent and do not count, or four auto tunnels (14 units each) filled a 64 cap and
+// every later create was refused. unitCount is every unit, helpers included; scepterMaxUnits bounds that.
 func (o *fileScepterOps) tunnelCount() int {
 	m, _ := filepath.Glob(filepath.Join(o.conf, "*.yml"))
+	n := 0
+	for _, f := range m {
+		if _, err := os.Stat(strings.TrimSuffix(f, ".yml") + ".autoext"); err != nil {
+			n++
+		}
+	}
+	return n
+}
+
+func (o *fileScepterOps) unitCount() int {
+	m, _ := filepath.Glob(filepath.Join(o.conf, "*.yml"))
 	return len(m)
+}
+
+// capFull answers a create that would pass either cap (extra = the units this create adds), in the shape
+// Iran reads: resource "tunnels", the cap, and how many there are (have, 3.6.1+).
+func (o *fileScepterOps) capFull(extra int) map[string]any {
+	if n := o.tunnelCount(); n >= o.maxTunnels {
+		return map[string]any{"resource": "tunnels", "cap": o.maxTunnels, "have": n}
+	}
+	if u := o.unitCount(); u+extra > o.maxTunnels*scepterUnitsPerTunnel {
+		return map[string]any{"resource": "units", "cap": o.maxTunnels * scepterUnitsPerTunnel, "have": u}
+	}
+	return nil
 }
 
 // scepterTunnelYML composes the tunnel.create yml body: a provenance comment line 1 (the sweep and every
@@ -1029,7 +1058,7 @@ func (o *fileScepterOps) openProbe(carrier string, ttlS int) (*scepterProbe, int
 	// F7 (2026-11-22): probes are units too — their ymls live in the conf dir, so tunnelCount already counts
 	// them, but nothing here ever CHECKED, and sustained test.open held probe units far past the cap the
 	// create path respects. Same answer shape as tunnel.create's cap (rate_limited, resource=probes).
-	if o.tunnelCount() >= o.maxTunnels {
+	if o.capFull(1) != nil {
 		return nil, wat.CodeRateLimited, fmt.Sprintf("tunnel cap %d reached (probes count toward it)", o.maxTunnels)
 	}
 	name := fmt.Sprintf("probe-%d", o.now().Unix())

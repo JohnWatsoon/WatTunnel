@@ -1906,3 +1906,30 @@ func TestFileScepterOpsResetLimits(t *testing.T) {
 		t.Fatalf("dead metrics: %d", code)
 	}
 }
+
+// an auto tunnel's helpers (NAME-e-*, .autoext sidecar) do not count as tunnels toward the cap, but every unit
+// counts toward the unit bound
+func TestScepterCapIgnoresAutoHelpers(t *testing.T) {
+	o, _, dir := testOps2(t)
+	o.maxTunnels = 2
+	w := func(n string) { os.WriteFile(filepath.Join(dir, n), []byte("mode: server\n"), 0o600) }
+	w("a.yml")
+	for i := 0; i < 5; i++ {
+		u := fmt.Sprintf("a-e-%d", i)
+		w(u + ".yml")
+		os.WriteFile(filepath.Join(dir, u+".autoext"), []byte("a\n"), 0o600)
+	}
+	if n := o.tunnelCount(); n != 1 {
+		t.Fatalf("tunnelCount = %d, want 1 (helpers excluded)", n)
+	}
+	if p := o.capFull(1); p != nil {
+		t.Fatalf("one tunnel of 2 refused: %v", p)
+	}
+	if p := o.capFull(3); p == nil || p["resource"] != "units" { // 6 units + 3 > 2*4
+		t.Fatalf("unit bound not enforced: %v", p)
+	}
+	w("b.yml")
+	if p := o.capFull(1); p == nil || p["resource"] != "tunnels" || p["have"] != 2 {
+		t.Fatalf("tunnel cap: %v", p)
+	}
+}

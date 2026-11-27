@@ -412,6 +412,27 @@ func scepterCodeHint(code int, p map[string]any) string {
 	case scepterCodeStale:
 		return "the intent was built on an outdated state — retry on the fresh one"
 	case scepterCodeRate:
+		// code 4 is every "not now / not more": the resource says which (a cap is not a rate)
+		num := func(k string) int { f, _ := p[k].(float64); return int(f) }
+		switch str("resource") {
+		case "tunnels":
+			if h := num("have"); h > 0 {
+				return fmt.Sprintf("Kharej already holds %d tunnels (its cap is %d) — delete unused ones there first", h, num("cap"))
+			}
+			return fmt.Sprintf("Kharej holds its maximum of %d tunnel units (an auto tunnel counts 14 on older Kharej versions) — delete unused tunnels there, or update Kharej", num("cap"))
+		case "units":
+			return fmt.Sprintf("Kharej runs %d units, its limit is %d (auto tunnels run up to 15 each) — delete unused tunnels there first", num("have"), num("cap"))
+		case "create":
+			return "Kharej takes 5 new tunnels in a row, then one every 10 s — wait a few seconds and retry"
+		case "probe":
+			return "Kharej allows 3 carrier tests in a row, then one every 30 s — wait a moment and retry"
+		case "carrier.change":
+			return "Kharej takes 5 tunnel changes in a row, then one every 10 s — wait a few seconds and retry"
+		case "auto.test":
+			return "Kharej runs 2 auto tests in a row, then one a minute — wait and retry"
+		case "pair.rotate":
+			return "the pairing was rotated moments ago — wait 5 minutes and retry"
+		}
 		return "too many commands too fast — wait a moment and retry"
 	case scepterCodeUnknownCmd:
 		return "this Kharej does not know the command (needs wattun 3.5.0 there)"
