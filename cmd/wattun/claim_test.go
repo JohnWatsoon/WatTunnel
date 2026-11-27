@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,5 +130,27 @@ func TestPairingPollerReclaim(t *testing.T) {
 	pl.check()
 	if u, _ := st.PairingInfo(); u != "" {
 		t.Fatalf("a tombstone must disarm: %s", u)
+	}
+}
+
+// 4.0.0: every legacy unit of one Iran can claim on the same restart; concurrent addClaim must keep every line.
+func TestAddClaimConcurrent(t *testing.T) {
+	cp := claimsPath(filepath.Join(t.TempDir(), "ir.yml"))
+	base, _ := wat.ParsePairingLine(testPairingLine("full"))
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		p := *base
+		p.UUID[0] = byte(i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := addClaim(cp, p.Line()); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := len(readClaims(cp)); n != 20 {
+		t.Fatalf("concurrent claims kept %d of 20", n)
 	}
 }

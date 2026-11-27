@@ -2456,12 +2456,17 @@ that Iran, as with field 10. Nothing to paste: update both servers and the panel
 - Only a configured unit (`-config`) derives it. A throw-away probe (auto-test, the matrix) never claims Kharej.
 - The first Iran's claim binds the whole Kharej (`.pairing` is server-wide; the other units adopt it within
   5 s, and Iran proves the claimed credential from `.pairing.claims` on every tunnel to that host). A second Iran
-  with the same PSK is refused; to move the Kharej to another Iran, use `wattun pair-token` and `add-kharej`.
+  with the same PSK is refused with "Kharej refused this server (another Iran manages it, or its pairing was
+  revoked)"; to move the Kharej to another Iran, use `wattun pair-token` and `add-kharej`. Iran keeps
+  `.pairing.claims` append-only (one line per claim, deduplicated by uuid on read), so units that claim on the
+  same restart never drop each other's line. A unit that loses the claim race on one Kharej proves the winner's
+  credential on its next keep-alive (30 s).
 - `pairing: false` in the tunnel yml opts out. A `revoked` tombstone in `.pairing` keeps every unit unpaired.
 - Security: anyone who holds an old tunnel token can be the first to claim that Kharej (owner decision
   2026-11-27). Update Iran before or together with Kharej so your own Iran claims first.
-- Mixed versions: an old Kharej sees one refused stream per Iran tunnel start, the tunnel itself is untouched; an
-  old Iran never opens sid 0, so a new Kharej just waits.
+- Mixed versions: against an old Kharej the hello is refused every 30 s per tunnel, quietly on both ends, and
+  forwarding is untouched (checked against 3.4.2). Once that Kharej is updated, the running Iran unit claims
+  on its next keep-alive, no Iran restart. An old Iran never opens sid 0, so a new Kharej just waits.
 - The Go manager and the panel count these tunnels as paired (`IsPaired`), but route a Kharej's calls through a
   link or an explicit pair to the same host first (`ExplicitPaired`, `scepterChannelFor`), and the fleet shows
   one row per Kharej host (`fleetPairs`).

@@ -107,7 +107,8 @@ func claimsPath(cfgPath string) string {
 	return dirOf(cfgPath) + "/.pairing.claims"
 }
 
-// readClaims returns every credential in the claims store; unreadable lines are skipped.
+// readClaims returns every credential in the claims store, one per uuid (the last line wins, in its place);
+// unreadable lines are skipped.
 func readClaims(path string) []*wat.PairingConfig {
 	if path == "" {
 		return nil
@@ -116,29 +117,40 @@ func readClaims(path string) []*wat.PairingConfig {
 	if err != nil {
 		return nil
 	}
-	var out []*wat.PairingConfig
+	var all []*wat.PairingConfig
+	last := map[[16]byte]int{}
 	for _, line := range strings.Split(string(b), "\n") {
 		if p, err := wat.ParsePairingLine(strings.TrimSpace(line)); err == nil {
+			last[p.UUID] = len(all)
+			all = append(all, p)
+		}
+	}
+	var out []*wat.PairingConfig
+	for i, p := range all {
+		if last[p.UUID] == i {
 			out = append(out, p)
 		}
 	}
 	return out
 }
 
-// addClaim appends a claimed credential (deduplicated by uuid) to the claims store, atomically, 0600.
+// addClaim appends a claimed credential to the claims store (0600). One O_APPEND write per claim: since 4.0.0
+// every legacy unit of an Iran may claim on the same restart, and a read-merge-rewrite would drop a line
+// another unit wrote in between; readClaims dedupes.
 func addClaim(path, line string) error {
 	np, err := wat.ParsePairingLine(line)
 	if err != nil {
 		return err
 	}
-	var lines []string
-	for _, p := range readClaims(path) {
-		if p.UUID != np.UUID {
-			lines = append(lines, p.Line())
-		}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
 	}
-	lines = append(lines, np.Line())
-	return atomicWriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	_, err = f.WriteString(np.Line() + "\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 func dirOf(path string) string {

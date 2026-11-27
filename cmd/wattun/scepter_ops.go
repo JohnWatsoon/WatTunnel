@@ -32,6 +32,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -2013,6 +2014,10 @@ func runScepterCall(tun *tunnel, cmd, argsJSON, claimsFile string) int {
 		return 1
 	}
 	c, err := wat.DialScepter(tun.pick(), readClaims(claimsFile)...) // a claimed box proves its own credential (Handoff 4 R2)
+	if errors.Is(err, wat.ErrScepterDenied) {
+		fmt.Fprintf(os.Stderr, "scepter-call: %v\n", err)
+		return 1
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scepter-call: %v (pairing needs %s on both ends)\n", err, wat.Version)
 		return 1

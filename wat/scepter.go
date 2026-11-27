@@ -2585,6 +2585,10 @@ func scepterPeerVerOK(ver string) bool {
 	return ver != "" && !OlderVersion(ver, scepterMinScepterVer)
 }
 
+// ErrScepterDenied is a hello Kharej refused for its proof: since 4.0.0 (every tunnel pairs) that mostly means
+// another Iran claimed this Kharej first, or its pairing was revoked.
+var ErrScepterDenied = errors.New("scepter: Kharej refused this server (another Iran manages it, or its pairing was revoked); to move it here run 'wattun pair-token' on Kharej, then 'wattun add-kharej' here")
+
 // helloExchange runs the pairing hello and version check shared by DialScepter and the latch dial
 // (latch.go). On failure the stream is reset and the error says why (mixed-version rule: old peer = no retry).
 func (c *ScepterClient) helloExchange(sess *Session, extra ...*PairingConfig) error {
@@ -2595,6 +2599,10 @@ func (c *ScepterClient) helloExchange(sess *Session, extra ...*PairingConfig) er
 		}
 	}
 	hello, code := c.call("scepter.hello", map[string]any{"ver": Version, "caps": CapName(sess.cfg.Pairing.Caps), "proofs": proofs}, "hello", 0, 30*time.Second)
+	if code == CodeDenied {
+		c.st.Reset()
+		return ErrScepterDenied
+	}
 	if code != CodeOK {
 		c.st.Reset()
 		return fmt.Errorf("scepter: hello rejected (code %d)", code)
