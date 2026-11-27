@@ -156,7 +156,6 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--well);padding:2px
 .btn:after{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;border-radius:inherit;
   background:linear-gradient(105deg,transparent 30%,rgba(255,255,255,.07) 48%,transparent 66%);transform:translateX(-110%)}
 .btn:hover:after{transform:translateX(110%);transition:transform .75s var(--ease)}
-.btn:active{transform:scale(.97)}
 .btn:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
 .btn:disabled{opacity:.42;cursor:default;transform:none}.btn:disabled:after{display:none}
 .btn.pri{background:var(--fg);color:#0b0b0c;box-shadow:inset 0 -2px 0 rgba(0,0,0,.12),inset 0 1px 0 #fff,0 8px 24px -12px rgba(255,255,255,.4)}
@@ -906,3 +905,25 @@ td.ta .btn{margin-left:4px;--h:30px}
 .rl-c span{height:1.1em}
 @keyframes rlSpin{from{transform:translateY(-9.9em);filter:blur(1.5px)}to{filter:none}}
 @media (prefers-reduced-motion:reduce){.rl-c{animation:none}}
+
+/* carrier test: preset chip, End test, Skip on the running row */
+.jc-meta{display:flex;align-items:center;gap:8px;margin-left:auto}
+.jc-pre{font-size:12px}
+.jc-row.pend .jc-lab b{color:var(--fg);font-weight:500}
+
+/* ---------- buttons: liquid fill from the pointer, holographic rim on primaries, a ripple on press ---------- */
+/* the fill pours in from where the pointer entered and drains back out (app.js keeps --mx/--my on every button) */
+.btn:before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
+  clip-path:circle(0 at var(--mx,50%) var(--my,50%));transition:clip-path .6s var(--ease)}
+.btn:hover:before{clip-path:circle(150% at var(--mx,50%) var(--my,50%))}
+.btn.sec:before,.btn.ic:before{background:radial-gradient(140px circle at var(--mx,50%) var(--my,50%),rgba(255,255,255,.17),rgba(255,255,255,.05) 70%)}
+.btn.danger:before,.btn.sec.danger:before,.btn.ic.danger:before{background:radial-gradient(140px circle at var(--mx,50%) var(--my,50%),rgba(255,93,98,.32),rgba(255,93,98,.1) 70%)}
+/* primaries: a holographic foil that shifts its colours with the pointer, under the label */
+.btn.pri:before{background:conic-gradient(from calc(var(--mxn,0) * 1turn) at var(--mx,50%) var(--my,50%),#7ee8fa,#c39bff,#ff9ac2,#ffe08a,#9cf5b5,#7ee8fa);
+  opacity:.55;mix-blend-mode:multiply}
+.btn.pri.danger:before{background:radial-gradient(120px circle at var(--mx,50%) var(--my,50%),rgba(255,255,255,.35),transparent 70%);mix-blend-mode:normal;opacity:1}
+.btn:disabled:before,.btn.busy:before{display:none}
+.rip{position:absolute;left:var(--rx);top:var(--ry);width:var(--rs);height:var(--rs);margin:calc(var(--rs) / -2) 0 0 calc(var(--rs) / -2);border-radius:50%;
+  background:currentColor;opacity:.28;pointer-events:none;z-index:-1;transform:scale(0);animation:rip .65s cubic-bezier(.2,.7,.3,1) forwards}
+@keyframes rip{to{transform:scale(1);opacity:0}}
+@media (prefers-reduced-motion:reduce){.btn:before{transition:none}.rip{display:none}}

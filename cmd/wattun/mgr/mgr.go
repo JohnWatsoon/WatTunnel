@@ -69,8 +69,8 @@ func Run(args []string) int {
 	if cmd == "auto-retest" && len(args) > 1 && args[1] == "--yes" {
 		NonInteractive = true
 	}
-	// unattended kharej/iran flags (bash 10201: ni_parse "${@:2}" || exit 1)
-	if cmd == "kharej" || cmd == "iran" || cmd == "add-kharej" {
+	// unattended flags (bash 10201: ni_parse "${@:2}" || exit 1); auto-test takes --test and --pick from the panel's re-test
+	if cmd == "kharej" || cmd == "iran" || cmd == "add-kharej" || cmd == "auto-test" {
 		if err := niParse(args[1:]); err != nil {
 			return 1
 		}

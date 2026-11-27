@@ -3609,7 +3609,14 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
   numbers. A carrier test (new auto tunnel, or Re-test carriers) is a live board: one row per variant as the manager
   probes it, sorted by speed, with failures and their reason, then the re-measure of the best ones and the variant
   in use. The manager feeds it with `ATPLAN=N`, `ATROW=ok|LABEL|DOWN|UP|RTT` / `ATROW=fail|LABEL|WHY` and
-  `ATPICK=LABEL` lines (unattended runs only; one `ATPICK` per bonded leg). When the test is done you can tick one
+  `ATPICK=LABEL` lines (unattended runs only; one `ATPICK` per bonded leg), plus `ATPRESET=normal|fast|anti|reverse|extended`
+  (the card shows it as a chip) and `ATNOW=LABEL` before each probe (the row "testing LABEL"). While it runs, the
+  card's buttons sit next to Close: **Skip LABEL** ends the probe running now (its row reads "skipped"), and **End
+  test** stops the screening and ranks what was measured. Both post `POST jobs/ID/ctl {"cmd":"skip","label":L}` or
+  `{"cmd":"stop"}` (manage tier); the panel appends the line to `DATA/jobs/ID.ctl`, and the manager (env
+  `WAT_AT_CTL`) polls it every 0.5 s during a probe and between probes. A skip counts only for the label it names.
+  An ended re-test switches nothing: pick from the table. An ended new tunnel is created on the best carrier
+  measured so far, and the table lets you switch. When the test is done you can tick one
   row to switch to it, or several of one kind to bond them: that runs `wattun auto-use NAME "LABEL[,LABEL]" --yes`,
   which rebuilds the variants from the tunnel's auto plan and applies them without testing again (no tuning pass;
   the engine's auto values apply). Other jobs show their last steps, the current one pulsing; the raw log is one

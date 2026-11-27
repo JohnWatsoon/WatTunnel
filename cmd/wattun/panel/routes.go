@@ -101,6 +101,7 @@ var routes = []route{
 	{"POST", "restore/preview", tierManage, 12 << 20, (*Server).apiRestorePreview},
 	{"GET", "jobs", tierRead, 0, (*Server).apiJobs},
 	{"GET", "jobs/*", tierRead, 0, (*Server).apiJob},
+	{"POST", "jobs/*/ctl", tierManage, 0, (*Server).apiJobCtl},
 
 	// phase 3: traffic, alerts, schedules
 	{"GET", "traffic", tierRead, 0, (*Server).apiTraffic},

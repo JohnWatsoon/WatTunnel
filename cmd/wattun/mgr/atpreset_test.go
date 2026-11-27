@@ -99,3 +99,14 @@ func TestNIParseTestFlag(t *testing.T) {
 	})
 	niReset()
 }
+
+// The panel's "Re-test carriers" runs `auto-test NAME --yes --test reverse`: the preset must reach NI.Test
+// (it was parsed only for kharej/iran, so every re-test ran the normal grid).
+func TestAutoTestTakesTestFlag(t *testing.T) {
+	t.Cleanup(func() { NI = niOpts{} })
+	t.Setenv("WAT_CONF", t.TempDir())
+	Run([]string{"auto-test", "no-such-tunnel", "--yes", "--test", "reverse", "--pick", "bond"})
+	if NI.Test != "reverse" || NI.Pick != "bond" {
+		t.Fatalf("NI.Test=%q NI.Pick=%q, want reverse/bond", NI.Test, NI.Pick)
+	}
+}

@@ -138,15 +138,26 @@ function speedView(body){
   };
 }
 // carrier test: a live board, one row per carrier as the manager tests it (ATROW lines), the winner marked
-function carrierView(body){
-  const w=el('div','jcar');const top=el('div','jc-top');const cnt=el('div','jc-cnt');const prog=el('div','jc-prog');top.append(cnt,prog);
+const PRESETS={normal:'standard carriers',fast:'anti-censor fast',anti:'anti-censor grid',reverse:'reverse only',extended:'extended (shaped too)'};
+function carrierView(body,id){
+  const w=el('div','jcar');const top=el('div','jc-top');const cnt=el('div','jc-cnt');const prog=el('div','jc-prog');
+  // the preset this run tests, and the way out: End test keeps what was measured and goes on to the choice
+  const meta=el('div','jc-meta');const pre=el('span','chip jc-pre');const end=el('button','btn sec','End test');end.type='button';meta.append(pre);
+  top.append(cnt,meta,prog);
   const list=el('div','jc-list');w.append(top,list);body.appendChild(w);
-  const seen=new Set();let tun='';
-  const pend=el('div','jc-row pend');const pl=el('span','jc-lab lab');const pmx=el('div','mx line');matrix(pmx,new Array(12).fill(0),1,true);pend.append(el('span','jc-rank'),pl,pmx);
+  const seen=new Set();let tun='',now='';
+  const ctl=(cmd,b)=>P.busy(b,act('jobs/'+id+'/ctl',{body:{cmd,label:now}}));
+  end.onclick=()=>ctl('stop',end);
+  const pend=el('div','jc-row pend');const pl=el('span','jc-lab lab');const pmx=el('div','mx line');matrix(pmx,new Array(12).fill(0),1,true);
+  const skip=el('button','btn sec','Skip');skip.type='button';skip.onclick=()=>ctl('skip',skip);
+  pend.append(el('span','jc-rank'),pl,pmx);
+  $('#dlgA').prepend(skip,end); // next to Close, one row of buttons
   return (lines,state)=>{
-    let plan=0;const picks=new Set();const rows=new Map();
+    let plan=0,preset='';const picks=new Set();const rows=new Map();now='';
     lines.forEach(l=>{let m=/^ATPLAN=(\d+)/.exec(l);if(m)plan=+m[1];m=/^ATPICK=(.+)$/.exec(l);if(m)picks.add(m[1].trim());m=/^TUNNEL=(.+)$/.exec(l);if(m)tun=m[1].trim();
-      m=/^ATROW=(ok|fail)\|([^|]*)\|(.*)$/.exec(l);if(m){const f=m[3].split('|');rows.set(m[2],m[1]==='ok'?{ok:true,down:+f[0],up:+f[1],rtt:+f[2]}:{ok:false,why:f.join('|')})}});
+      m=/^ATPRESET=(\w+)/.exec(l);if(m)preset=m[1];m=/^ATNOW=(.+)$/.exec(l);if(m)now=m[1].trim();
+      m=/^ATROW=(ok|fail)\|([^|]*)\|(.*)$/.exec(l);if(m){const f=m[3].split('|');rows.set(m[2],m[1]==='ok'?{ok:true,down:+f[0],up:+f[1],rtt:+f[2]}:{ok:false,why:f.join('|')});if(m[2]===now)now=''}});
+    pre.textContent=preset?PRESETS[preset]||preset:'';pre.hidden=!preset;end.hidden=state!=='running';
     if(!plan&&!rows.size)return false;
     const done=rows.size,ok=[...rows.values()].filter(r=>r.ok).length;
     cnt.textContent='';cnt.append(el('span','big2 n',String(ok)),el('span','lab',' working of '+done+' tested'+(plan?' · '+plan+' planned':'')));
@@ -162,7 +173,9 @@ function carrierView(body){
       if(picks.has(lab))row.appendChild(el('span','chip jc-pick',picks.size>1?'bonded':'in use'));
       list.insertBefore(row,pend.parentNode===list?pend:null)});
     if(state==='done'&&tun&&!w.querySelector('.jc-use'))chooser(w,list,tun,picks);
-    if(state==='running'){pl.textContent=plan&&done>=plan?'re-measuring the best ones':'testing the next carrier';if(pend.parentNode!==list)list.appendChild(pend)}else pend.remove();
+    if(state==='running'){const re=plan&&done>=plan;pl.textContent='';
+      if(now)pl.append(re?'re-measuring ':'testing ',el('b',null,now));else pl.textContent=re?'re-measuring the best ones':'starting the next carrier';
+      skip.hidden=!now;skip.textContent='Skip '+now;if(pend.parentNode!==list)list.appendChild(pend)}else{pend.remove();skip.hidden=true}
     return true;
   };
 }
@@ -202,7 +215,7 @@ async function openJob(id){
     misses=0;const j=r.j;$('#dlgT').textContent=j.title;
     const all=(j.log||[]).map(strip).filter(l=>j.kind!=='pair'||!/^TUNNEL=/.test(l)); /* a pairing link is hidden: no carrier switch on it */const shown=all.filter(l=>!/^[A-Z_]+=/.test(l));
     if(j.kind==='speedtest'){spd=spd||speedView(v.body);spd(all,j.state)}
-    else{car=car||carrierView(v.body);steps=steps||stepView(v.body);
+    else{car=car||carrierView(v.body,id);steps=steps||stepView(v.body);
       // the board takes over as soon as the manager reports carriers; until then the plain steps
       if(car(all,j.state))v.body.classList.add('has-car');else steps(shown,j.state)}
     const atEnd=v.pre.scrollTop+v.pre.clientHeight>=v.pre.scrollHeight-8;v.pre.textContent=shown.join('\n')||'…';if(atEnd)v.pre.scrollTop=v.pre.scrollHeight;

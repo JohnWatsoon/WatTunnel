@@ -536,14 +536,14 @@ func (s *Server) apiNew(c *call) {
 				kports = append(kports, p)
 			}
 		}
-		id, err := s.jobs.do("create", "New tunnel on Kharej and here", c.sess.User, func(say func(string, ...any)) error {
+		id, err := s.jobs.doID("create", "New tunnel on Kharej and here", c.sess.User, func(id string, say func(string, ...any)) error {
 			say("Creating the tunnel on Kharej (%s, ports %s) ...", in.Carrier, strings.Join(kports, ","))
 			tok, err := s.be.KharejCreate(viaName, in.Name, in.Carrier, strings.Join(kports, ","))
 			if err != nil {
 				return err
 			}
 			say("Kharej made it. Writing this side and starting it ...")
-			return runInto(s.be.ManagerArgv(iranArgs(tok)...), say)
+			return runInto(s.be.ManagerArgv(iranArgs(tok)...), say, "WAT_AT_CTL="+s.jobs.path(id, "ctl"))
 		})
 		s.jobReply(c, "new tunnel (both sides)", in.Name, id, err)
 	default:
@@ -552,9 +552,9 @@ func (s *Server) apiNew(c *call) {
 }
 
 // runInto runs ARGV unattended and copies its output lines through say.
-func runInto(argv []string, say func(string, ...any)) error {
+func runInto(argv []string, say func(string, ...any), env ...string) error {
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = append(os.Environ(), "NONINTERACTIVE=1", "NO_COLOR=1", "WAT_NO_ANIM=1")
+	cmd.Env = append(append(os.Environ(), "NONINTERACTIVE=1", "NO_COLOR=1", "WAT_NO_ANIM=1"), env...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -796,6 +796,30 @@ func (s *Server) apiJob(c *call) {
 		return
 	}
 	c.ok(v)
+}
+
+// apiJobCtl: the carrier test's buttons. skip ends the probe of LABEL (the one running now); stop ends the test,
+// and the manager ranks what it measured so far and goes on as if the plan ended there.
+func (s *Server) apiJobCtl(c *call) {
+	var in struct{ Cmd, Label string }
+	if c.json(&in) != nil || (in.Cmd != "skip" && in.Cmd != "stop") || len(in.Label) > 96 || strings.ContainsAny(in.Label, "\r\n") {
+		c.fail(http.StatusBadRequest, "bad request")
+		return
+	}
+	line := in.Cmd
+	if in.Cmd == "skip" {
+		if in.Label == "" {
+			c.fail(http.StatusBadRequest, "which carrier?")
+			return
+		}
+		line += " " + in.Label
+	}
+	if err := s.jobs.ctl(c.arg[0], line); err != nil {
+		c.fail(http.StatusConflict, err.Error())
+		return
+	}
+	s.audit(c, "carrier test "+in.Cmd, in.Label, "ok")
+	c.ok(map[string]bool{"ok": true})
 }
 
 // ---- backups of this server ----

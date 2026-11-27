@@ -19,6 +19,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // =====================================================================================
@@ -1988,7 +1990,7 @@ func autoTest(tok Token) (done func()) {
 	autoVariants(tok)
 	n := len(av)
 	if NonInteractive {
-		fmt.Fprintf(Stdout, "ATPLAN=%d\n", n)
+		fmt.Fprintf(Stdout, "ATPRESET=%s\nATPLAN=%d\n", atPreset, n)
 	}
 	if atScreenSkipped != "" {
 		Warn("Skipped (needs newer wattun): " + atScreenSkipped)
@@ -2005,9 +2007,24 @@ func autoTest(tok Token) (done func()) {
 			ar[i] = result{Why: "skipped"}
 			continue
 		}
+		atNowEmit(i)
+		if h := atCtlPoll(av[i].Label); h != 0 { // a command that came between two probes
+			ar[i] = result{Why: "skipped"}
+			atEmit(i)
+			if h == atCtlStop {
+				atStop = true
+			}
+			continue
+		}
 		w := atWaitFor(av[i])
 		atMB = atProbeMB(bestRate, 1.5, atScreenCapMB) // H3: duration-based size
 		atProbe(i, w)
+		if h := atCtlHit.Swap(0); h != 0 {
+			ar[i] = result{Why: "skipped"}
+			if h == atCtlStop {
+				atStop = true
+			}
+		}
 		atEmit(i)
 		if ar[i].OK {
 			atMovedMB += 2 * atMB
@@ -2033,6 +2050,76 @@ func autoTest(tok Token) (done func()) {
 		atAct = ""
 	}
 	return done
+}
+
+// The web panel's carrier-test buttons (3.6.1): the panel appends "skip LABEL" or "stop" to the job's control file
+// (WAT_AT_CTL); a probe in progress polls it and ends early, and the loop reads it between probes.
+const (
+	atCtlSkip int32 = 1
+	atCtlStop int32 = 2
+)
+
+var (
+	atCtlPath = os.Getenv("WAT_AT_CTL")
+	atCtlSeen int          // complete lines already acted on
+	atCtlHit  atomic.Int32 // set by atWatch for the probe it watched
+)
+
+// atCtlPoll: the newest command among the lines the panel added since the last poll. A skip counts only when it
+// names LABEL, the probe running now, so a late click cannot skip the next carrier.
+func atCtlPoll(label string) int32 {
+	if atCtlPath == "" {
+		return 0
+	}
+	b, err := os.ReadFile(atCtlPath)
+	if err != nil {
+		return 0
+	}
+	hit := int32(0)
+	lines := strings.SplitAfter(string(b), "\n")
+	for ; atCtlSeen < len(lines) && strings.HasSuffix(lines[atCtlSeen], "\n"); atCtlSeen++ {
+		switch l := strings.TrimSpace(lines[atCtlSeen]); {
+		case l == "stop":
+			hit = atCtlStop
+		case l == "skip "+label && hit == 0:
+			hit = atCtlSkip
+		}
+	}
+	return hit
+}
+
+// atWatch polls the control file while one probe runs and kills the probe client on a command for it. The returned
+// func stops the watcher and waits for it, so atCtlSeen is never read by two goroutines at once.
+func atWatch(label string, proc clientProc) (stop func()) {
+	if atCtlPath == "" {
+		return func() {}
+	}
+	quit, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-t.C:
+				if h := atCtlPoll(label); h != 0 {
+					atCtlHit.Store(h)
+					_ = proc.Kill()
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(quit); <-done }
+}
+
+// atNowEmit names the probe that starts now, for the panel's "testing ..." row and its skip button.
+func atNowEmit(i int) {
+	if NonInteractive {
+		fmt.Fprintf(Stdout, "ATNOW=%s\n", av[i].Label)
+	}
 }
 
 // atEmit writes one line per probe for the web panel's job view (non-interactive runs only):
@@ -2098,6 +2185,7 @@ func atProbe(i, waitSecs int) {
 		return
 	}
 	defer proc.Kill()
+	defer atWatch(av[i].Label, proc)()
 	if !atWaitAlive(mp, waitSecs) {
 		ar[i].Why = fmt.Sprintf("no link in %d s", waitSecs)
 		return
@@ -2179,6 +2267,10 @@ func atFailed() ([]int, bool) {
 
 // at_none — nothing worked.
 func atNone() {
+	if atStop { // ended from the panel before a probe finished: nothing is wrong with Kharej
+		Warn("The test was ended before any carrier finished; nothing changed.")
+		return
+	}
 	Err(fmt.Sprintf("No carrier reached %s", orNone(atAddr)))
 	if atTunnel != "" {
 		if s, err := statsOf(atTunnel); err == nil && get(s, "alive") == "true" {
@@ -2289,7 +2381,7 @@ func autoIranFront(tok Token) (atChoice, error) {
 
 // auto_refine — re-measure the top 3 with 16 streams and a sustained run, re-rank.
 func autoRefine(rank []int) []int {
-	if len(rank) == 0 {
+	if len(rank) == 0 || atStop { // the panel ended the test: rank what the screening measured, no re-measure
 		return rank
 	}
 	top := rank
@@ -2305,7 +2397,17 @@ func autoRefine(rank []int) []int {
 			mb = atFinalMBMin
 		}
 		atMB = mb
+		was := ar[i]
+		atNowEmit(i)
 		atProbe(i, atWaitFor(av[i]))
+		if h := atCtlHit.Swap(0); h != 0 { // skipped or stopped from the panel: keep the screening result
+			ar[i] = was
+			atEmit(i)
+			if h == atCtlStop {
+				break
+			}
+			continue
+		}
 		atEmit(i)
 	}
 	atMB, atStreams = saved, savedStreams
@@ -2680,9 +2782,16 @@ func autoTestCmd(name string) error {
 	rank := autoRefine(atRank(av, ar, ""))
 	if len(rank) == 0 {
 		atNone()
+		if atStop {
+			return nil
+		}
 		return fmt.Errorf("no carrier worked")
 	}
 	atTable(Stdout, av, ar, rank, atMB, atSecs)
+	if atStop && NonInteractive { // ended from the panel: the user picks from the partial table there, nothing switches here
+		Hint("Test ended early: " + name + " keeps its carrier; pick one from the table.")
+		return nil
+	}
 	sel, cerr := atChoose(rank, NonInteractive, NI.Pick)
 	if cerr != nil {
 		Warn("No change.")

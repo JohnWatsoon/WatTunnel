@@ -727,8 +727,14 @@ $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{meth
 
 /* the light under the pointer: primary buttons bend it like liquid, Kharej cards catch it like foil (--mx/--my in px) */
 if(!RM){let pe=null,raf=0;document.addEventListener('pointermove',e=>{pe=e;if(!raf)raf=requestAnimationFrame(()=>{raf=0;
-  const t=pe.target.closest&&pe.target.closest('.btn.pri,.ksrv');if(!t)return;const r=t.getBoundingClientRect();
-  t.style.setProperty('--mx',(pe.clientX-r.left).toFixed(0)+'px');t.style.setProperty('--my',(pe.clientY-r.top).toFixed(0)+'px')})},{passive:true})}
+  const t=pe.target.closest&&pe.target.closest('.btn,.ksrv');if(!t)return;const r=t.getBoundingClientRect();
+  t.style.setProperty('--mx',(pe.clientX-r.left).toFixed(0)+'px');t.style.setProperty('--my',(pe.clientY-r.top).toFixed(0)+'px');
+  t.style.setProperty('--mxn',((pe.clientX-r.left)/Math.max(1,r.width)).toFixed(3))})},{passive:true});
+  // a press sends a ripple out from the finger instead of squashing the button
+  document.addEventListener('pointerdown',e=>{const b=e.target.closest&&e.target.closest('.btn');if(!b||b.disabled)return;const r=b.getBoundingClientRect();
+    b.style.setProperty('--mx',(e.clientX-r.left).toFixed(0)+'px');b.style.setProperty('--my',(e.clientY-r.top).toFixed(0)+'px');
+    const s=document.createElement('span');s.className='rip';s.style.setProperty('--rx',(e.clientX-r.left)+'px');s.style.setProperty('--ry',(e.clientY-r.top)+'px');
+    s.style.setProperty('--rs',(Math.hypot(r.width,r.height)*2)+'px');b.appendChild(s);setTimeout(()=>s.remove(),700)},{passive:true})}
 /* phones: the bottom bar and the quick action button are liquid glass. A lens with a squircle bevel: the middle stays
    clear, the rim bends what scrolls under it (Snell, IOR 3) and splits it slightly by colour (blue bends most); a hairline
    catches a light that follows the pointer, the phone's tilt or the scroll. Only Chromium can bend the page

@@ -77,7 +77,7 @@ func (j *jobs) writeMeta(m jobMeta) error {
 // run starts ARGV as a job. env adds KEY=VALUE pairs (plus every WAT_* of the panel, so a sandbox prefix carries).
 func (j *jobs) run(kind, title, user string, argv []string, env ...string) (string, error) {
 	m := j.newMeta(kind, title, user)
-	env = append(env, "NONINTERACTIVE=1", "NO_COLOR=1", "WAT_NO_ANIM=1")
+	env = append(env, "NONINTERACTIVE=1", "NO_COLOR=1", "WAT_NO_ANIM=1", "WAT_AT_CTL="+j.path(m.ID, "ctl"))
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "WAT_") {
 			env = append(env, e)
@@ -136,6 +136,11 @@ func (j *jobs) run(kind, title, user string, argv []string, env ...string) (stri
 
 // do runs FN inside the panel as a job; FN writes its progress lines through say. An error fails the job.
 func (j *jobs) do(kind, title, user string, fn func(say func(format string, a ...any)) error) (string, error) {
+	return j.doID(kind, title, user, func(_ string, say func(string, ...any)) error { return fn(say) })
+}
+
+// doID is do for a job that passes its ID on (the carrier test's control file is named after it).
+func (j *jobs) doID(kind, title, user string, fn func(id string, say func(format string, a ...any)) error) (string, error) {
 	m := j.newMeta(kind, title, user)
 	if err := j.writeMeta(m); err != nil {
 		return "", err
@@ -160,7 +165,7 @@ func (j *jobs) do(kind, title, user string, fn func(say func(format string, a ..
 					rc = 1
 				}
 			}()
-			if err := fn(say); err != nil {
+			if err := fn(m.ID, say); err != nil {
 				say("error: %v", err)
 				rc = 1
 			}
@@ -180,6 +185,23 @@ func (j *jobs) setRunning(id string, on bool) {
 		delete(j.running, id)
 	}
 	j.mu.Unlock()
+}
+
+// ctl hands a running carrier test one command ("skip LABEL" or "stop"): the manager polls ID.ctl (WAT_AT_CTL)
+// and acts on the lines it has not seen yet.
+func (j *jobs) ctl(id, line string) error {
+	if v, ok := j.get(id); !ok || v.State != "running" {
+		return fmt.Errorf("that job is not running")
+	}
+	f, err := os.OpenFile(j.path(id, "ctl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(line + "\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 func validJobID(id string) bool {
@@ -294,7 +316,7 @@ func (j *jobs) busy(kind string) bool {
 func (j *jobs) prune() {
 	ids := j.ids()
 	for i := 0; i < len(ids)-jobsKeep; i++ {
-		for _, ext := range []string{"json", "log", "rc"} {
+		for _, ext := range []string{"json", "log", "rc", "ctl"} {
 			os.Remove(j.path(ids[i], ext))
 		}
 	}
