@@ -979,7 +979,12 @@ func (c sysdCall) String() string { return strings.Join(c.Args, " ") }
 // deleteSequence: the systemctl calls in bash order — hidden helpers first
 // (NAME-r companion, NAME-e-* listeners), then autowatch, then the tunnel itself.
 func deleteSequence(n string) []sysdCall {
-	var calls []sysdCall
+	// the parent goes first: auto-heal restarts the helpers of an active, enabled parent (4.0.4)
+	calls := []sysdCall{
+		{[]string{"stop", P.Prefix + "-autowatch-" + n + ".service"}},
+		{[]string{"reset-failed", P.Prefix + "-autowatch-" + n + ".service"}},
+		{[]string{"disable", "--now", Unit(n)}},
+	}
 	drop := func(u string) { calls = append(calls, sysdCall{[]string{"disable", "--now", Unit(u)}}) }
 	if cfgFileExists(n + "-r") {
 		drop(n + "-r")
@@ -987,11 +992,6 @@ func deleteSequence(n string) []sysdCall {
 	for _, u := range extListenerNames(n) {
 		drop(u)
 	}
-	calls = append(calls,
-		sysdCall{[]string{"stop", P.Prefix + "-autowatch-" + n + ".service"}},
-		sysdCall{[]string{"reset-failed", P.Prefix + "-autowatch-" + n + ".service"}},
-		sysdCall{[]string{"disable", "--now", Unit(n)}},
-	)
 	return calls
 }
 

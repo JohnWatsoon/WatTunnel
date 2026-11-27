@@ -228,12 +228,12 @@ func TestDeleteSequence(t *testing.T) {
 		out = append(out, c.String())
 	}
 	want := []string{
-		"disable --now wattun@t1-r",
-		"disable --now wattun@t1-e-geneve",
-		"disable --now wattun@t1-e-vxlan",
 		"stop wattun-autowatch-t1.service",
 		"reset-failed wattun-autowatch-t1.service",
 		"disable --now wattun@t1",
+		"disable --now wattun@t1-r",
+		"disable --now wattun@t1-e-geneve",
+		"disable --now wattun@t1-e-vxlan",
 	}
 	if strings.Join(out, "|") != strings.Join(want, "|") {
 		t.Errorf("sequence = %v\nwant %v", out, want)
@@ -284,10 +284,10 @@ func TestRunDeleteCallsSystemctlInOrder(t *testing.T) {
 		out = append(out, c.String())
 	}
 	want := []string{
-		"disable --now wattun@t2-r",
 		"stop wattun-autowatch-t2.service",
 		"reset-failed wattun-autowatch-t2.service",
 		"disable --now wattun@t2",
+		"disable --now wattun@t2-r",
 	}
 	if strings.Join(out, "|") != strings.Join(want, "|") {
 		t.Errorf("calls = %v\nwant %v", out, want)
