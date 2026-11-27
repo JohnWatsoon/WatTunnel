@@ -95,11 +95,11 @@ func TestNewerVersion(t *testing.T) {
 
 func TestDeleteAlsoOnKharej(t *testing.T) {
 	fakePaired, fakeCalls = true, nil
-	fakeKharej = []Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true}}
-	defer func() { fakePaired, fakeKharej = false, nil }()
+	setFakeKharej([]Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true}})
+	defer func() { fakePaired = false; setFakeKharej(nil) }()
 	sec := NewTOTPSecret()
 	s, _ := newTestServer(t, sec)
-	s.kh = fakeKharej
+	s.kh = fakeBE{}.Kharej()
 	ck := signIn(t, s, codeAt(sec, time.Now()))
 	body := fmt.Sprintf(`{"password":"correct horse battery","code":%q,"confirm":"t1","kharej":"t1"}`, codeAt(sec, time.Now().Add(30*time.Second)))
 	if w := do(s, "POST", api+"tunnels/t1/delete", body, xr, ck); w.Code != 200 {
@@ -112,10 +112,10 @@ func TestDeleteAlsoOnKharej(t *testing.T) {
 
 func TestKharejTunnelAction(t *testing.T) {
 	fakePaired, fakeCalls = true, nil
-	fakeKharej = []Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true}}
-	defer func() { fakePaired, fakeKharej = false, nil }()
+	setFakeKharej([]Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true}})
+	defer func() { fakePaired = false; setFakeKharej(nil) }()
 	s, _ := newTestServer(t, "")
-	s.kh = fakeKharej
+	s.kh = fakeBE{}.Kharej()
 	ck := signIn(t, s, "")
 	if w := do(s, "POST", api+"kharej/1.2.3.4/tunnel", `{"name":"k1","action":"restart"}`, xr, ck); w.Code != 200 || len(fakeCalls) != 1 {
 		t.Fatalf("%d %s %v", w.Code, w.Body, fakeCalls)

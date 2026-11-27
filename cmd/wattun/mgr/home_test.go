@@ -785,6 +785,13 @@ func TestHomeHeadStaticWhenNonInteractive(t *testing.T) {
 	NonInteractive = true
 	defer func() { NonInteractive = false }()
 	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	// ir has no token, so it is auto-linked (4.0.0) and its head shows a Kharej row: settle that row's cache so no
+	// background probe lands between the two renders.
+	resetPairCache()
+	t.Cleanup(resetPairCache)
+	pairMu.Lock()
+	pairFail["ir"], pairAt = "settled", time.Now()
+	pairMu.Unlock()
 	ti := &tunnelInfo{State: "up", RTT: 20}
 	render := func() string {
 		var b strings.Builder

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -36,12 +37,24 @@ func (fakeBE) Tunnels() []Tunnel {
 func (fakeBE) Stats(string) (Counters, bool) { return Counters{Alive: true, BytesIn: 1000}, true }
 func (fakeBE) History(string) []byte         { return []byte(`[]`) }
 func (fakeBE) Logs(string, int) []string     { return []string{"a"} }
-func (fakeBE) Kharej() []Kharej              { return fakeKharej }
-func (fakeBE) Pairing() (string, string)     { return "", "" }
+func (fakeBE) Kharej() []Kharej {
+	fakeKhMu.Lock()
+	defer fakeKhMu.Unlock()
+	return fakeKharej
+}
+
+// setFakeKharej guards fakeKharej: refreshKharej reads it from a goroutine that can outlive the test that set it.
+func setFakeKharej(k []Kharej) {
+	fakeKhMu.Lock()
+	fakeKharej = k
+	fakeKhMu.Unlock()
+}
+func (fakeBE) Pairing() (string, string) { return "", "" }
 
 // fake action state: what the actions called (the panel must only ever call these)
 var (
 	fakeKharej []Kharej
+	fakeKhMu   sync.Mutex
 	fakePaired bool
 	fakeCalls  []string
 )

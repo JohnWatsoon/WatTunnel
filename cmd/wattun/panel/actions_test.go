@@ -109,11 +109,11 @@ func TestRouteTable(t *testing.T) {
 // unreachable Kharej is skipped.
 func TestUpdateAll(t *testing.T) {
 	fakeCalls = nil
-	fakeKharej = []Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true, Version: "1.0.0"},
-		{Host: "5.6.7.8", Via: []string{"t1"}, Online: true, Version: "9.9.9"}, {Host: "9.9.9.9", Via: []string{"t1"}}}
-	defer func() { fakeKharej = nil }()
+	setFakeKharej([]Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true, Version: "1.0.0"},
+		{Host: "5.6.7.8", Via: []string{"t1"}, Online: true, Version: "9.9.9"}, {Host: "9.9.9.9", Via: []string{"t1"}}})
+	defer setFakeKharej(nil)
 	s, _ := newTestServer(t, "")
-	s.kh = fakeKharej
+	s.kh = fakeBE{}.Kharej()
 	s.ver.latest = "9.9.9"
 	ck := signIn(t, s, "")
 	w := do(s, "POST", api+"update-all", `{"password":"correct horse battery"}`, xr, ck)
@@ -130,10 +130,10 @@ func TestUpdateAll(t *testing.T) {
 
 func TestLastLinkGuard(t *testing.T) {
 	fakePaired, fakeCalls = true, nil
-	fakeKharej = []Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true}}
-	defer func() { fakePaired, fakeKharej = false, nil }()
+	setFakeKharej([]Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true}})
+	defer func() { fakePaired = false; setFakeKharej(nil) }()
 	s, _ := newTestServer(t, "")
-	s.kh = fakeKharej
+	s.kh = fakeBE{}.Kharej()
 	ck := signIn(t, s, "")
 	w := do(s, "POST", api+"tunnels/t1/stop", `{}`, xr, ck)
 	if w.Code != 409 || !strings.Contains(w.Body.String(), "last link") || len(fakeCalls) != 0 {
