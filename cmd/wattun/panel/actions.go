@@ -713,6 +713,10 @@ func (s *Server) apiNew(c *call) {
 		id, err := s.jobs.doID("create", "New tunnel on Kharej and here", c.sess.User, func(id string, say func(string, ...any)) error {
 			say("Creating the tunnel on Kharej (%s, ports %s) ...", in.Carrier, strings.Join(kports, ","))
 			tok, err := s.be.KharejCreate(viaName, in.Name, in.Carrier, strings.Join(kports, ","), in.Domain)
+			if err != nil && strings.Contains(err.Error(), "already used on Kharej") {
+				// usually the Kharej half of a tunnel deleted here only
+				return fmt.Errorf("%v. Pick another name, or delete %s on Kharej first (Servers, the Kharej card, Delete on that row)", err, in.Name)
+			}
 			if err != nil {
 				return err
 			}

@@ -516,7 +516,7 @@ async function showToken(name){const r=await act('tunnels/'+enc(name)+'/token',{
   const b=el('div');b.appendChild(el('p','note','Anyone with this token can connect to the Kharej side. Paste it only into your own servers.'));b.appendChild(tokenBox(r.token,r.svg));info('Token of '+name,b)}
 async function deleteTunnel(name,t){
   const k=S.ov.kharej.find(x=>x.via.includes(name));const twin=k&&(k.tunnels||[]).find(x=>x.name===name);
-  const fields=[];if(twin)fields.push({k:'alsoK',label:'Also delete '+twin.name+' on '+k.host,check:true});
+  const fields=[];if(twin)fields.push({k:'alsoK',label:'Also delete '+twin.name+' on '+k.host,check:true,value:true});
   const v=await ask('Delete '+name,{full:true,danger:true,ok:'Delete',fields,text:'Stops '+name+' and deletes its config, key and token on this server.'+(k&&!twin?' Its Kharej side stays (no tunnel of the same name there).':'')});
   if(!v)return;const body={password:v.password,code:v.code};if(v.alsoK)body.kharej=twin.name;
   const r=await act('tunnels/'+enc(name)+'/delete',{body});if(r)P.closeDrawer();
