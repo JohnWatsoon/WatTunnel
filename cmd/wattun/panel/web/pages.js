@@ -430,24 +430,24 @@ async function settingsBlock(name,t){
   if(S.drawer!==name)return;
   if(!r||!r.ok||!r.j.options){w.appendChild(el('div','empty','Could not read the settings.'));return}
   const st=r.j,pend={},opts=st.options;
-  const top=el('div','sgrid');w.appendChild(top);
+  const top=el('div','ogrp');top.appendChild(el('div','og-t','General'));w.appendChild(top);
   // start at boot: a switch, applied at once (no restart)
-  const bw=el('div','swell bootw'),sw=el('button','tgl'+(st.boot?' on':''));sw.type='button';sw.setAttribute('role','switch');sw.setAttribute('aria-checked',st.boot);sw.setAttribute('aria-label','Start at boot');sw.appendChild(el('i'));
-  const bt=el('div','sw-txt'),bl=el('span','lab');bt.append(el('b',null,'Start at boot'),bl);
+  const bw=el('div','orow inl'),sw=el('button','tgl'+(st.boot?' on':''));sw.type='button';sw.setAttribute('role','switch');sw.setAttribute('aria-checked',st.boot);sw.setAttribute('aria-label','Start at boot');sw.appendChild(el('i'));
+  const bt=el('div','or-l'),bl=el('div','lab');bt.append(el('div','or-n','Start at boot'),bl);
   const bpaint=()=>{sw.classList.toggle('on',st.boot);sw.setAttribute('aria-checked',st.boot);bl.textContent=st.boot?'comes back after a reboot':'stays down after a reboot'};bpaint();
   sw.onclick=()=>P.busy(sw,act('tunnels/'+enc(name)+'/boot',{body:{on:!st.boot}}).then(x=>{if(x){st.boot=!st.boot;bpaint();P.loadOverview()}}));
   bw.append(bt,sw);top.appendChild(bw);
   // anti-censorship: one preset, applied on the end that dials
   if(st.presets&&st.presets.length){
-    const aw=el('div','swell acw'),hd=el('div','sw-txt');
-    hd.append(el('b',null,'Anti-censorship'),el('span','lab',st.ac_where==='kharej'?'Reverse tunnel: Kharej dials, so the preset is set there':'now: '+(st.ac_now||'none')));
-    const ch=el('div','ochips tiles');
+    const aw=el('div','orow'),hd=el('div','or-l');
+    hd.append(el('div','or-n','Anti-censorship'),el('div','lab',st.ac_where==='kharej'?'Reverse tunnel: Kharej dials, so the preset is set there':'now: '+(st.ac_now||'none')));
+    const ch=el('div','ochips wrap');
     st.presets.forEach(p=>{const b=el('button','och'+(st.ac_where==='here'&&acMatch(st.ac_now,p.value)?' on':''),p.label);b.type='button';if(p.hint)b.title=p.hint;
       b.onclick=()=>act('tunnels/'+enc(name)+'/ac-preset',{body:{preset:p.value},title:'Anti-censorship: '+p.label,confirm:(p.hint?p.hint[0].toUpperCase()+p.hint.slice(1)+'. ':'')+(st.ac_where==='kharej'?'Kharej applies it and restarts its side; it rolls back if the tunnel does not come up.':name+' restarts with it; open connections drop for a few seconds.'),ok:'Apply'}).then(x=>{if(x){toast('Preset '+p.label+(x.job?' is being applied':' applied on Kharej'));setTimeout(()=>{if(S.drawer===name)settingsBlock(name,t)},x.job?6000:1500)}});
       ch.appendChild(b)});
     aw.append(hd,ch);
-    if(st.ac_where==='here')aw.appendChild(btn('Test what passes the filter','sec',()=>act('tunnels/'+enc(name)+'/ac-test')));
-    top.appendChild(aw)}else top.classList.add('one');
+    if(st.ac_where==='here'){const tb=btn('Test what passes the filter','sec',()=>act('tunnels/'+enc(name)+'/ac-test'));tb.classList.add('ortest');aw.appendChild(tb)}
+    top.appendChild(aw)}
   // the option groups
   const rows=[];
   const draw=()=>{

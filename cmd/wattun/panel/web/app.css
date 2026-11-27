@@ -981,10 +981,9 @@ td.ta .btn{margin-left:4px;--h:30px}
 .och:hover{background:var(--hov);color:var(--fg)}
 .och.on{color:var(--fg);background:var(--well);box-shadow:inset 0 0 0 1px var(--green)}
 .och.pend{color:#0a0a0b;background:var(--lime)}
-.ochips.tiles{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));grid-auto-columns:auto;background:none;padding:0;gap:6px;overflow:visible}
-.ochips.tiles .och{background:var(--card);height:36px;border-radius:12px}
-.ochips.tiles .och:hover{background:var(--hov)}
-.ochips.tiles .och.on{background:var(--card)}
+.ochips.wrap{display:flex;flex-wrap:wrap}
+.orow.inl{grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.orow .ortest{justify-self:start}
 .ocust{display:inline-flex;align-items:center;gap:6px;padding:0 3px}
 .ocust input{width:100px;height:30px;border-radius:9px;border:1px solid var(--line2);background:var(--well);color:var(--fg);font:400 12.5px var(--mono);padding:0 12px;outline:0}
 .ocust input:focus{border-color:var(--fg)}
