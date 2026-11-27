@@ -875,3 +875,34 @@ td.ta .btn{margin-left:4px;--h:30px}
 /* transform only: an opacity animation would make the bar its own backdrop root and the lens would see nothing */
 @keyframes barIn{from{transform:translateY(110px)}to{transform:none}}
 @media (max-width:760px) and (prefers-reduced-transparency:reduce){.nav,.fab{background:#1d1d21}.nav:after,.fab:after{display:none}}
+
+/* ---------- swipe to confirm (dangerous actions, pages.js swipe()) ---------- */
+.swipe{position:relative;flex:1;min-width:220px;height:48px;border-radius:16px;background:rgba(255,93,98,.08);box-shadow:inset 0 0 0 1px rgba(255,93,98,.22);overflow:hidden;
+  display:flex;align-items:center;justify-content:center;user-select:none;-webkit-user-select:none;touch-action:none}
+.sw-t{font-size:14px;font-weight:500;color:#ff9a9d;padding-left:40px;pointer-events:none;
+  background:linear-gradient(100deg,#ff9a9d 40%,#fff 50%,#ff9a9d 60%) 0 0/250% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:swShine 2.4s linear infinite}
+@keyframes swShine{from{background-position:100% 0}to{background-position:-50% 0}}
+.sw-fill{position:absolute;left:0;top:0;bottom:0;width:48px;border-radius:16px;background:linear-gradient(90deg,rgba(255,93,98,.1),rgba(255,93,98,.45))}
+.sw-k{position:absolute;left:4px;top:4px;width:40px;height:40px;border:0;border-radius:12px;background:var(--red);color:#fff;display:grid;place-items:center;cursor:grab;
+  box-shadow:0 6px 16px -6px rgba(255,93,98,.8),inset 0 1px 0 rgba(255,255,255,.25);touch-action:none}
+.sw-k .ico{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.sw-k:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.swipe.drag .sw-k{cursor:grabbing}
+.swipe.back .sw-k,.swipe.back .sw-fill,.swipe.done .sw-k,.swipe.done .sw-fill{transition:transform .42s var(--spring),width .42s var(--spring)}
+.swipe.done{box-shadow:inset 0 0 0 1px var(--red)}.swipe.done .sw-fill{background:var(--red)}
+.swipe.nudge .sw-k{animation:swNudge .6s var(--spring)}
+@keyframes swNudge{30%{transform:translateX(26px)}100%{transform:none}}
+@media (prefers-reduced-motion:reduce){.sw-t{animation:none;-webkit-text-fill-color:#ff9a9d}}
+
+/* ---------- the running step shimmers like work in progress (job dialog) ---------- */
+.jstep.now>span{background:linear-gradient(100deg,var(--mut) 35%,#fff 50%,var(--mut) 65%) 0 0/250% 100%;-webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;animation:swShine 2.2s linear infinite}
+@media (prefers-reduced-motion:reduce){.jstep.now>span{animation:none;-webkit-text-fill-color:var(--fg)}}
+
+/* ---------- rolling digits (pages.js roll()) ---------- */
+.roll{display:inline-flex;align-items:baseline}
+.rl{display:inline-block;height:1.1em;line-height:1.1em;overflow:hidden;vertical-align:bottom}
+.rl-c{display:flex;flex-direction:column;transform:translateY(calc(var(--d) * -1.1em));animation:rlSpin calc(.9s + var(--i) * .12s) cubic-bezier(.2,.9,.2,1.04) both}
+.rl-c span{height:1.1em}
+@keyframes rlSpin{from{transform:translateY(-9.9em);filter:blur(1.5px)}to{filter:none}}
+@media (prefers-reduced-motion:reduce){.rl-c{animation:none}}

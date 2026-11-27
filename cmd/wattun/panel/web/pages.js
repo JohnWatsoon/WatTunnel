@@ -45,13 +45,35 @@ function ask(title,{text,fields=[],ok='Go ahead',danger=false,full=false,err='',
       if(f.onchange)i.addEventListener('change',()=>f.onchange(i.value,inputs))});
     Object.values(inputs).forEach(i=>i.dispatchEvent(new Event('change')));
     const a=$('#dlgA');a.textContent='';
-    const cancel=el('button','btn sec','Cancel');cancel.type='button';const go=el('button','btn pri'+(danger?' danger':''),ok);go.type='submit';a.append(cancel,go);
+    const cancel=el('button','btn sec','Cancel');cancel.type='button';const go=danger?swipe(ok):el('button','btn pri','');if(!danger){go.textContent=ok;go.type='submit'}a.append(cancel,go);
     let settled=false;const done=v=>{if(settled)return;settled=true;d.oncancel=null;d.close();res(v)};
     cancel.onclick=()=>done(null);d.onclose=null;d.oncancel=e=>{e.preventDefault();done(null)};
     $('#dlgF').onsubmit=e=>{e.preventDefault();const v={};Object.entries(inputs).forEach(([k,i])=>{v[k]=i.type==='checkbox'?i.checked:i.value.trim()});done(v)};
-    if(!d.open)d.showModal();const first=Object.values(inputs).find(i=>i.type!=='checkbox');(first||go).focus();
+    if(!d.open)d.showModal();const first=Object.values(inputs).find(i=>i.type!=='checkbox');(first||go.querySelector('button')||go).focus();
   });
 }
+/* a dangerous action is confirmed by sliding, not by a click that lands by habit: drag the knob to the end. The knob
+   is a real button, so Enter or Space on it confirms from the keyboard. */
+function swipe(label){
+  const w=el('div','swipe');const fill=el('i','sw-fill');const t=el('span','sw-t','Slide to '+(label==='Go ahead'?'confirm':label.toLowerCase()));const k=el('button','sw-k');k.type='button';
+  k.setAttribute('aria-label',label+' (slide, or press Enter)');k.appendChild(P.ico('arrow'));w.append(fill,t,k);
+  let x0=null,x=0;const max=()=>w.clientWidth-k.offsetWidth-8;
+  const put=v=>{x=Math.max(0,Math.min(max(),v));k.style.transform='translateX('+x+'px)';fill.style.width=(x+k.offsetWidth+4)+'px';t.style.opacity=String(1-x/max()*.9)};
+  const fire=()=>{w.classList.add('done');put(max());setTimeout(()=>$('#dlgF').requestSubmit(),220)};
+  k.addEventListener('pointerdown',e=>{if(w.classList.contains('done'))return;x0=e.clientX-x;k.setPointerCapture(e.pointerId);w.classList.add('drag')});
+  k.addEventListener('pointermove',e=>{if(x0!==null)put(e.clientX-x0)});
+  const up=()=>{if(x0===null)return;x0=null;w.classList.remove('drag');if(x>=max()*.86)fire();else{w.classList.add('back');put(0);setTimeout(()=>w.classList.remove('back'),420)}};
+  k.addEventListener('pointerup',up);k.addEventListener('pointercancel',up);
+  k.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();fire()}});
+  k.addEventListener('click',e=>{e.preventDefault();if(!x&&!w.classList.contains('done')){w.classList.remove('nudge');void w.offsetWidth;w.classList.add('nudge')}});
+  return w}
+// digits roll into place like a counter (speed results): each digit is a column of 0-9 that spins to its value
+function roll(v,unit){const w=el('span','sv roll');const s=String(v);let dec=false;
+  [...s].forEach((ch,i)=>{if(ch==='.'){dec=true;w.appendChild(el('span','dim','.'));return}
+    if(!/\d/.test(ch)){w.appendChild(document.createTextNode(ch));return}
+    const c=el('span','rl'+(dec?' dim':''));const col=el('span','rl-c');for(let d=0;d<=9;d++)col.appendChild(el('span',null,String(d)));
+    col.style.setProperty('--d',ch);col.style.setProperty('--i',i);c.appendChild(col);w.appendChild(c)});
+  if(unit)w.appendChild(el('span','unit',unit));w.setAttribute('aria-label',s+(unit?' '+unit:''));return w}
 function info(title,body){const d=$('#dlg');$('#dlgT').textContent=title;$('#dlgE').textContent='';const b=$('#dlgB');b.textContent='';b.appendChild(body);
   const a=$('#dlgA');a.textContent='';const c=el('button','btn sec','Close');c.type='button';c.onclick=()=>d.close();a.appendChild(c);$('#dlgF').onsubmit=e=>e.preventDefault();d.onclose=null;d.oncancel=null;if(!d.open)d.showModal()}
 
@@ -108,7 +130,7 @@ function speedView(body){
       m=/: (\d+) MB (download|upload) \.\.\./.exec(l);if(m){now=m[2];tot=+m[1]}m=/^PROG=(down|up)\|([\d.]+)\|([\d.]+)/.exec(l);if(m)P_[m[1]==='down'?'download':'upload']=[+m[2],+m[3]]});
     const set=(t,x,word)=>{const p=state==='running'&&now===word?P_[word]:null,txt=x?'x'+x[0]+x[1]:p?'p'+p[0]+p[1]:'w'+(state==='running'&&now===word);
       if(t.v.dataset.s===txt)return;t.v.dataset.s=txt;t.v.textContent='';t.v.classList.toggle('wait',!x&&!p);
-      if(x){t.v.appendChild(split(x[0].toFixed(1),'MB/s'));t.l.textContent=word+' · '+x[1].toFixed(1)+' s'}
+      if(x){t.v.appendChild(roll(x[0].toFixed(1),'MB/s'));t.l.textContent=word+' · '+x[1].toFixed(1)+' s'}
       else if(p){t.v.appendChild(split(p[0].toFixed(2),'MB/s'));t.l.textContent=word+' · '+Math.min(p[1],tot||p[1]).toFixed(1)+(tot?' of '+tot:'')+' MB'}
       else t.v.textContent=state==='running'&&now===word?'measuring':'··';t.d.classList.toggle('now',state==='running'&&now===word&&!x)};
     set(dn,D,'download');set(up,U,'upload');
