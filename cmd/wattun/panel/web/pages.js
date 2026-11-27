@@ -381,6 +381,7 @@ P.onDrawer=async(name,t)=>{
   grp('Run',[t.active?btn('Restart','sec',u('restart')):btn('Start','pri',u('start')),t.active&&btn('Stop','sec danger',u('stop'))]);
   grp('Test',[t.role==='Iran'&&btn('Speed test','sec',()=>act('tunnels/'+enc(name)+'/speedtest',{title:'Speed test of '+name,fields:[{k:'mb',label:'Megabytes each way',value:'10',mode:'numeric'}],ok:'Run'})),
     t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches; pick bond to join the best ones.',title:'Re-test carriers',fields:[TESTF],ok:'Start the test'})),
+    t.role==='Iran'&&btn('Change carrier','sec',()=>changeCarrier(name)),
     btn('Diagnose','sec',()=>act('tunnels/'+enc(name)+'/diagnose'))]);
   grp('Configure',[btn('Ports','sec',()=>editPorts(name,t)),btn('Limit a port','sec',()=>limitPort(name))]);
   if(/\+/.test(t.carrier||''))bondBlock(a,name);
@@ -404,6 +405,14 @@ async function bondBlock(a,name){
     row.append(el('i','kdot '+(p.muted?'off':p.alive?'ok':'bad')),el('span','leg-n',p.name),el('span','lab n',p.muted?'muted':p.alive?(p.share?p.share+' % of traffic':'up')+(p.rtt?' · '+p.rtt+' ms':''):'down'));
     row.appendChild(btn(p.muted?'Unmute':'Mute','sec sm',()=>act('tunnels/'+enc(name)+'/mute',{body:{path:p.name,mute:!p.muted}}).then(x=>{if(x)setTimeout(()=>P.openDrawer(name),2500)})));
     legs.appendChild(row)});
+}
+// Change carrier: the tunnel's last carrier test, as the job showed it, with the same picker; no new test (4.0.2)
+async function changeCarrier(name){
+  const r=await api('tunnels/'+enc(name)+'/carriers').catch(()=>null);
+  if(!r||!r.ok||!r.j.rows.length){toast('No saved carrier test for '+name+' yet. Run Re-test carriers once; later switches use its results.',true);return}
+  const body=el('div');info('Change the carrier of '+name,body);
+  body.appendChild(el('p','note','From the test of '+when(r.j.at)+'. Tick one to switch, or several of one kind to bond them; nothing is tested again.'));
+  carrierView(body,'')(['TUNNEL='+name,'ATPRESET='+(r.j.preset||'')].concat(r.j.rows.map(x=>'ATROW='+x),(r.j.use||[]).map(x=>'ATPICK='+x)),'done');
 }
 // Settings: the console's Advanced page as presets. A click only marks a change; the bar at the bottom applies them
 // all with one restart (keys both ends must share go to Kharej first, on the server side).

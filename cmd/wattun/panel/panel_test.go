@@ -58,6 +58,9 @@ func (fakeBE) ApplySettings(n string, set map[string]string) error {
 	return nil
 }
 func (fakeBE) SetBoot(string, bool) error { return nil }
+func (fakeBE) Carriers(string) (int64, string, []string, []string) {
+	return 0, "", nil, nil
+}
 func (fakeBE) ACPreset(n, p string) ([]string, error) {
 	return []string{"preset", n, p}, nil
 }

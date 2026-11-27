@@ -102,6 +102,12 @@ func isShapedCarrierName(c string) bool {
 	return false
 }
 
+// isExtCarrier: a plan entry Kharej runs as a hidden single-carrier helper (NAME-e-<c>), never a bond leg:
+// the 13 shapes, and ptcp/spray (4.0.2), which the engine refuses to bond.
+func isExtCarrier(c string) bool {
+	return isShapedRaw(c) || isShapedUDP(c) || c == "ptcp" || c == "spray"
+}
+
 func binVerOK(min string) bool { return verGE(engineVer(), min) }
 
 func carrierOkHere(c string) bool { return binVerOK(carrierMinVer(c)) }
@@ -272,7 +278,7 @@ func autoPlanStandard(d string) string {
 	var out []string
 	for _, c := range strings.Split(d, ",") {
 		n := strings.SplitN(c, ":", 2)[0]
-		if isShapedRaw(n) || isShapedUDP(n) {
+		if isExtCarrier(n) {
 			continue
 		}
 		out = append(out, n)
@@ -285,7 +291,7 @@ func autoPlanExtNames(d string) string {
 	var out []string
 	for _, c := range strings.Split(d, ",") {
 		n := strings.SplitN(c, ":", 2)[0]
-		if isShapedRaw(n) || isShapedUDP(n) {
+		if isExtCarrier(n) {
 			out = append(out, n)
 		}
 	}
@@ -497,7 +503,42 @@ func autoExtPlanEntries(excl []string) (entries, note string) {
 		out = append(out, fmt.Sprintf("%s:%d", c, q))
 	}
 	out = append(out, strings.Fields(shapedRawList)...)
+	// ptcp and spray (4.0.2): single-carrier like the shapes, so Kharej runs them as helpers too. ptcp takes a
+	// TCP port; spray a UDP base port and the 999 above it, which must not cover a port in use.
+	if carrierOkHere("ptcp") {
+		if q, err := envRandOpenPort("tcp", used); err == nil {
+			used = append(used, strconv.Itoa(q))
+			out = append(out, fmt.Sprintf("ptcp:%d", q))
+		} else {
+			note += "  ptcp: no free TCP port, skipped.\n"
+		}
+		if q := sprayBase(used); q > 0 {
+			out = append(out, fmt.Sprintf("spray:%d", q))
+		} else {
+			note += "  spray: no free range of 1000 UDP ports, skipped.\n"
+		}
+	}
 	return strings.Join(out, ","), note
+}
+
+// sprayBase picks a UDP base port whose range of 1000 (the spray carrier's) holds no port in USED (0 = none).
+func sprayBase(used []string) int {
+	for try := 0; try < 20; try++ {
+		q, err := envRandOpenPort("udp", used)
+		if err != nil || q > 65535-999 {
+			continue
+		}
+		clash := false
+		for _, u := range used {
+			if n := atoi(u); n >= q && n <= q+999 {
+				clash = true
+			}
+		}
+		if !clash {
+			return q
+		}
+	}
+	return 0
 }
 
 // helperKeysYml — the shared server settings block auto_ext_write_units and
@@ -583,8 +624,8 @@ func autoExtWriteUnits(name, entries string, mapsBlock []string) error {
 			return err
 		}
 		os.WriteFile(filepath.Join(P.Conf, u+".autoext"), []byte(name+"\n"), 0o600)
-		if p != "" {
-			fw = append(fw, p+"/udp")
+		if f := extFWSpec(c, p); f != "" {
+			fw = append(fw, f)
 		}
 	}
 	if len(fw) > 0 {
@@ -1229,7 +1270,7 @@ func autoPlanLists(plan string) (apD, apR []string) {
 	apD, apR = []string{"icmp"}, []string{"icmp"}
 	for _, c := range strings.Split(planPart(plan, "d"), ",") {
 		n := strings.SplitN(c, ":", 2)[0]
-		if isShapedRaw(n) || isShapedUDP(n) || n == "icmp" || n == "" {
+		if isExtCarrier(n) || n == "icmp" || n == "" {
 			continue
 		}
 		apD = append(apD, n)
@@ -1245,13 +1286,31 @@ func autoPlanLists(plan string) (apD, apR []string) {
 	return
 }
 
+// extFWSpec is the firewall rule a helper on carrier C listening on port P needs ("" for the raw shapes):
+// ptcp one TCP port, spray its 1000 UDP ports (ufw writes a range with ':', firewalld with '-').
+func extFWSpec(c, p string) string {
+	switch {
+	case p == "" || isShapedRaw(c):
+		return ""
+	case c == "ptcp":
+		return p + "/tcp"
+	case c == "spray":
+		sep := ":"
+		if fwKind() == "firewalld" {
+			sep = "-"
+		}
+		return fmt.Sprintf("%s%s%d/udp", p, sep, atoi(p)+999)
+	}
+	return p + "/udp"
+}
+
 // auto_drop_unit — stop, disable and delete one internal helper unit (F17 keeps a port
 // another tunnel also owns).
 func autoDropUnit(u string) {
 	_ = Disable(Unit(u))
 	p := portOf(Cfg(u, "listen"))
-	if p != "" && isAutoExt(u) && isShapedUDP(Cfg(u, "carrier")) {
-		envFWClose(p + "/udp")
+	if f := extFWSpec(Cfg(u, "carrier"), p); f != "" && isAutoExt(u) {
+		envFWClose(f)
 	}
 	for _, s := range stateFiles(u) {
 		os.Remove(s)
@@ -1432,7 +1491,7 @@ func autoReopen(n string) error {
 		var extD []string
 		for _, c := range strings.Split(d, ",") {
 			cn := strings.SplitN(c, ":", 2)[0]
-			if isShapedRaw(cn) || isShapedUDP(cn) {
+			if isExtCarrier(cn) {
 				extD = append(extD, c)
 			}
 		}
@@ -1720,6 +1779,10 @@ type atChoice struct {
 
 func atToT(sel []int) (atChoice, error) {
 	var c atChoice
+	atPicks = atPicks[:0]
+	for _, i := range sel {
+		atPicks = append(atPicks, av[i].Label)
+	}
 	if len(sel) > 1 {
 		if av[sel[0]].Kind == "r" {
 			var cars, extra []string
@@ -1907,8 +1970,8 @@ func atRows(rank []int, spec string) ([]int, error) {
 		return nil, fmt.Errorf("%s", msg)
 	}
 	for c := range cars { // B4: a shaped row cannot be joined
-		if isShapedRaw(c) || isShapedUDP(c) {
-			return nil, fmt.Errorf("Cannot join: shaped carriers are single-carrier only.")
+		if isExtCarrier(c) {
+			return nil, fmt.Errorf("Cannot join: shaped, ptcp and spray carriers are single-carrier only.")
 		}
 	}
 	return sel, nil
@@ -1970,6 +2033,7 @@ func autoCurrentKey(name string) string {
 // screening (deleting the key on return made every re-measure fail "no link" and picked a slower carrier).
 func autoTest(tok Token) (done func()) {
 	done = func() {}
+	atDone = nil
 	if kd, err := atPrep(tok.Key); err == nil { // the probes dial with the tunnel key
 		atKeyFile, atTok = kd.dir+"/key", tok
 		done = func() { atKeyFile = ""; kd.cleanup() }
@@ -2125,14 +2189,66 @@ func atNowEmit(i int) {
 // atEmit writes one line per probe for the web panel's job view (non-interactive runs only):
 // ATROW=ok|label|down|up|rtt or ATROW=fail|label|why. It prints even when atQuiet hides the table.
 func atEmit(i int) {
-	if !NonInteractive {
+	row := fmt.Sprintf("fail|%s|%s", av[i].Label, ar[i].Why)
+	if ar[i].OK {
+		row = fmt.Sprintf("ok|%s|%.1f|%.1f|%.0f", av[i].Label, ar[i].Down, ar[i].Up, ar[i].RTT)
+	}
+	atDone = append(atDone, row)
+	if NonInteractive {
+		fmt.Fprintln(Stdout, "ATROW="+row)
+	}
+}
+
+// atPicks: the result labels of the last choice (atToT), kept as NAME.atuse once it is applied, so the panel marks
+// which tested rows the tunnel runs on.
+var atPicks []string
+
+func atSaveUse(name string) {
+	if len(atPicks) > 0 && name != "" {
+		atomicWrite(filepath.Join(P.Conf, name+".atuse"), []byte(strings.Join(atPicks, "\n")+"\n"), 0o600)
+	}
+}
+
+// AutoInUse is the result labels tunnel NAME runs on (atSaveUse), nil when unknown.
+func AutoInUse(name string) []string {
+	b, err := os.ReadFile(filepath.Join(P.Conf, name+".atuse"))
+	if err != nil {
+		return nil
+	}
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
+// atDone: the rows of the test running now (atEmit's lines), kept as NAME.atres once the tunnel is known, so the
+// panel can switch to a tested carrier later without testing again (4.0.2).
+var atDone []string
+
+// atSaveResults keeps the finished test's rows for tunnel NAME: a header line "t=<unix> preset=<p>", then one
+// ATROW body per probe. Nothing tested (a switch by label): the previous results stay.
+func atSaveResults(name string) {
+	if len(atDone) == 0 || name == "" {
 		return
 	}
-	if ar[i].OK {
-		fmt.Fprintf(Stdout, "ATROW=ok|%s|%.1f|%.1f|%.0f\n", av[i].Label, ar[i].Down, ar[i].Up, ar[i].RTT)
-	} else {
-		fmt.Fprintf(Stdout, "ATROW=fail|%s|%s\n", av[i].Label, ar[i].Why)
+	b := fmt.Sprintf("t=%d preset=%s\n%s\n", time.Now().Unix(), atPreset, strings.Join(atDone, "\n"))
+	atomicWrite(filepath.Join(P.Conf, name+".atres"), []byte(b), 0o600)
+}
+
+// AutoResults reads tunnel NAME's last carrier test (atSaveResults): when it ran and its rows as ATROW bodies.
+func AutoResults(name string) (at int64, preset string, rows []string) {
+	b, err := os.ReadFile(filepath.Join(P.Conf, name+".atres"))
+	if err != nil {
+		return 0, "", nil
 	}
+	ls := strings.Split(strings.TrimSpace(string(b)), "\n")
+	for _, f := range strings.Fields(ls[0]) {
+		k, v, _ := strings.Cut(f, "=")
+		switch k {
+		case "t":
+			at, _ = strconv.ParseInt(v, 10, 64)
+		case "preset":
+			preset = v
+		}
+	}
+	return at, preset, ls[1:]
 }
 
 // at_probe — one throw-away client probe via the adapters.
@@ -2653,11 +2769,13 @@ func autoApply(name string, ch atChoice, tuneKeys []string) error {
 	// AT_QUIET=1 applies without waiting unless AT_VERIFY=1 (auto_retest verifies and rolls back).
 	if atQuiet && !atVerify {
 		os.Remove(bak)
+		atSaveUse(name)
 		return nil
 	}
 	if linkAlive(name) {
 		Ok(fmt.Sprintf("CONNECTED — %s", ch.Label))
 		os.Remove(bak)
+		atSaveUse(name)
 		return nil
 	}
 	Warn("Not connected yet; restoring the previous config.")
@@ -2780,6 +2898,7 @@ func autoTestCmd(name string) error {
 	defer autoTest(tok)()
 	atProbeLiveTunnel(name, 8)
 	rank := autoRefine(atRank(av, ar, ""))
+	atSaveResults(name)
 	if len(rank) == 0 {
 		atNone()
 		if atStop {
@@ -2877,6 +2996,7 @@ func autoRetest(name string) error {
 	defer autoTest(tok)()
 	atProbeLiveTunnel(name, atScreenMBStart)
 	rank := atRank(av, ar, "")
+	atSaveResults(name)
 	if len(rank) == 0 {
 		envLogger("wattun-heal", "retest of "+name+": no connection type works right now")
 		return nil

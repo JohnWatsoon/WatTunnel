@@ -1126,6 +1126,8 @@ func wizardIranWith(tok, name string) bool {
 	atomicWrite(filepath.Join(P.Conf, name+".yml"), []byte(iranYML(p)), 0o600)
 	if autoTok != "" { // kept so auto-test / auto-heal can test again later (bash 3704)
 		atomicWrite(filepath.Join(P.Conf, name+".auto"), []byte(autoTok+"\n"), 0o600)
+		atSaveResults(name)
+		atSaveUse(name)
 	}
 	p2StartUnit(name)
 	if t.Carrier == "icmp" && t.Rev == "1" {

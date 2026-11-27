@@ -1052,7 +1052,7 @@ func deleteNow(n string) {
 	}
 	bondRetestDisable(n) // the bond-retest timer belongs to this tunnel
 	for _, u := range units {
-		for _, ext := range []string{".yml", ".ech", ".key", ".token", ".auto", ".autoext"} {
+		for _, ext := range []string{".yml", ".ech", ".key", ".token", ".auto", ".autoext", ".atres", ".atuse"} {
 			os.Remove(filepath.Join(P.Conf, u+ext))
 		}
 	}
@@ -1158,6 +1158,8 @@ func changeKey(n string) {
 	keepres := IsPoolList(t.Carrier) && t.Rev != "1"
 	atomicWrite(filepath.Join(P.Conf, n+".key"), []byte(t.Key+"\n"), 0o600)
 	os.Remove(filepath.Join(P.Conf, n+".auto")) // a stale auto plan would let heal switch back
+	os.Remove(filepath.Join(P.Conf, n+".atres"))
+	os.Remove(filepath.Join(P.Conf, n+".atuse"))
 	// the token decides how the pair connects; drop every stale field instead of leaving a mismatch
 	drop := []string{"carrier", "peer", "path", "udp-dns", "sni", "host", "icmp-type", "reverse", "listen", "ech-cache"}
 	if !keepres {

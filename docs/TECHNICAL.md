@@ -1524,6 +1524,10 @@ direct variant (a bare peer for the raw tier, `addr:port` for the UDP tier) and 
 are no reverse or count-based tuning variants for them. The extended listeners are hidden from the tunnel list and
 aggregated into `NAME`: heal restarts a down one, port/key/limit changes propagate from `NAME`, and delete/uninstall
 remove them with their state files and UDP firewall rules. An older Iran ignores their plan entries.
+Since 4.0.2 the same helpers also carry **ptcp** (one random TCP port, `ptcp:P`) and **spray** (`spray:P`, the 1000 UDP
+ports P..P+999, opened as one range) when Kharej's engine is 3.4.3+. The engine refuses to bond either, so they are
+never legs of the main unit. Iran tests them in every preset (they are not shapes); like any carrier they need Linux
+and root on both ends. An auto tunnel made before 4.0.2 has no such entries: re-create it on Kharej to gain them.
 
 **Auto tuning (3.3.0).** After the type (or the bond) is chosen, the manager tries the settings that change its speed,
 one setting at a time, starting from the engine auto values and keeping a value only when it beats the best so far by
@@ -3659,6 +3663,12 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
   which rebuilds the variants from the tunnel's auto plan and applies them without testing again (no tuning pass;
   the engine's auto values apply). Other jobs show their last steps, the current one pulsing; the raw log is one
   click away.
+- **Change carrier** (Iran auto tunnels, 4.0.2) opens the last carrier test again, from
+  `GET /api/tunnels/NAME/carriers` (`{at, preset, rows, use}`): the same table, the rows the tunnel runs on marked
+  *in use*, and the same tick-and-Switch, so changing the carrier needs no new test. The manager keeps every finished
+  test's rows in `NAME.atres` and the labels in use in `NAME.atuse` (both 0600 next to `NAME.yml`; a new key or a
+  delete removes them). With no saved test the button says to run Re-test carriers once. Labels may hold
+  parentheses since 4.0.2 (before, `l2tpv3 (shape only)` failed with `bad carrier label`).
 - **Re-test carriers** asks for the test preset and best or bond, then runs `wattun auto-test NAME --yes [--test
   PRESET] [--pick best|bond]`. (Before this, `auto-test NAME --yes` still asked the preset and the pick on a
   terminal and could not finish unattended.)

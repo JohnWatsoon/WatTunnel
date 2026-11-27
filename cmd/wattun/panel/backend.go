@@ -42,6 +42,9 @@ type Backend interface {
 	Settings(name string) any                               // JSON: options, boot, where anti-censorship runs
 	ApplySettings(name string, set map[string]string) error // both-ends keys on Kharej first, then here, one restart
 	SetBoot(name string, on bool) error
+	// Carriers: the last carrier test of an auto Iran tunnel (unix time, preset, ATROW bodies) and the result
+	// labels it runs on (4.0.2).
+	Carriers(name string) (at int64, preset string, rows, inUse []string)
 	ACPreset(name, preset string) (argv []string, err error) // argv: run here as a job; nil: done on Kharej
 }
 

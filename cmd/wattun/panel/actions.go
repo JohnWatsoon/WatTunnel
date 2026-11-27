@@ -362,7 +362,7 @@ func (s *Server) apiRetest(c *call) {
 var (
 	testPresets = map[string]bool{"": true, "normal": true, "fast": true, "anti": true, "reverse": true, "extended": true}
 	picks       = map[string]bool{"": true, "best": true, "bond": true}
-	labelRe     = regexp.MustCompile(`^[A-Za-z0-9 :./_+-]{1,48}$`)
+	labelRe     = regexp.MustCompile(`^[A-Za-z0-9 :./_+()-]{1,64}$`) // "l2tpv3 (shape only)"
 )
 
 // apiUse switches an auto Iran tunnel to rows of a finished carrier test (two or more = a bond), no re-test.
@@ -465,6 +465,20 @@ func (s *Server) apiDiagnose(c *call) {
 	}
 	id, err := s.jobs.run("diagnose", "Diagnose "+c.arg[0], c.sess.User, s.be.ManagerArgv("test", c.arg[0]))
 	s.jobReply(c, "diagnose", c.arg[0], id, err)
+}
+
+// apiCarriers is the tunnel's last carrier test, kept by the manager, so a switch needs no new test (4.0.2).
+func (s *Server) apiCarriers(c *call) {
+	t, ok := s.tunnel(c.arg[0])
+	if !ok || t.Role != "Iran" {
+		c.fail(http.StatusNotFound, "no such Iran tunnel")
+		return
+	}
+	at, preset, rows, use := s.be.Carriers(t.Name)
+	if rows == nil {
+		rows = []string{}
+	}
+	c.ok(map[string]any{"at": at, "preset": preset, "rows": rows, "use": use})
 }
 
 func (s *Server) apiPaths(c *call) {

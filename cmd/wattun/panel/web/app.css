@@ -741,14 +741,14 @@ dialog#dlg.wide{width:min(720px,calc(100vw - 32px))}
 .jc-prog i{width:10px;height:10px;border-radius:3px;background:#232327;transition:background .3s}
 .jc-prog i.ok{background:var(--green)}.jc-prog i.bad{background:var(--red)}.jc-prog i.now{background:var(--blue);animation:blink 1s infinite}
 .jc-list{display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto}
-.jc-row{display:grid;grid-template-columns:22px minmax(0,150px) 1fr auto auto;gap:12px;align-items:center;background:var(--bg2,#151517);border-radius:12px;padding:10px 14px;font-size:13px}
+.jc-row{display:grid;grid-template-columns:22px minmax(96px,150px) minmax(0,1fr) auto auto;gap:12px;align-items:center;background:var(--bg2,#151517);border-radius:12px;padding:10px 14px;font-size:13px}
 .jc-row.new{animation:rise .35s ease both}
 .jc-row.win{box-shadow:inset 0 0 0 1px var(--green)}
 .jc-row.fail{color:var(--mut)}.jc-row.fail .jc-lab{text-decoration:line-through;text-decoration-color:var(--red)}
 .jc-row.pend{grid-template-columns:22px auto 1fr}
 .jc-rank{color:var(--mut);text-align:center}
 .jc-lab{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.jc-bar{display:flex;gap:3px}.jc-bar i{width:7px;height:7px;border-radius:50%;background:#232327}.jc-bar i.on{background:var(--blue)}
+.jc-bar{display:flex;gap:3px;min-width:0;overflow:hidden}.jc-bar i{flex:none;width:7px;height:7px;border-radius:50%;background:#232327}.jc-bar i.on{background:var(--blue)}
 .win .jc-bar i.on{background:var(--green)}
 .jc-v{color:var(--mut);white-space:nowrap}.jc-v b{color:var(--fg);font-weight:500}
 .jc-why{grid-column:3/5;color:var(--red);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -760,7 +760,7 @@ dialog#dlg.wide{width:min(720px,calc(100vw - 32px))}
 
 /* carrier board: choose after the test */
 .jc-use{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid #232327;padding-top:12px}
-.jc-row.pickable{cursor:pointer;grid-template-columns:16px 22px minmax(0,150px) 1fr auto auto}
+.jc-row.pickable{cursor:pointer;grid-template-columns:16px 22px minmax(96px,150px) minmax(0,1fr) auto auto}
 .jc-row.sel{box-shadow:inset 0 0 0 1px var(--blue)}
 .jc-chk{accent-color:var(--blue);margin:0}
 /* drawer: bonding */

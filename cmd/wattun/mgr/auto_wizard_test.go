@@ -105,4 +105,55 @@ func TestWizardKharejAutoEndToEnd(t *testing.T) {
 	if len(fw) == 0 {
 		t.Errorf("no firewall rules opened: %v", fw)
 	}
+	// 4.0.2: ptcp and spray are planned as hidden helpers (the engine refuses to bond them), never main legs
+	for _, c := range []string{"ptcp", "spray"} {
+		if !strings.Contains(tok.Auto, ","+c+":") {
+			t.Errorf("plan = %q, want a %s entry", tok.Auto, c)
+		}
+		if strings.Contains(yml, "+"+c) {
+			t.Errorf("main yml bonds %s: %s", c, yml)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "ci1-e-"+c+".yml")); err != nil {
+			t.Errorf("no %s helper: %v", c, err)
+		}
+	}
+	var tcp, rng bool
+	for _, f := range fw {
+		tcp = tcp || strings.HasSuffix(f, "/tcp")
+		rng = rng || strings.ContainsAny(strings.TrimSuffix(f, "/udp"), ":-")
+	}
+	if !tcp || !rng {
+		t.Errorf("firewall %v: want a TCP port for ptcp and a UDP range for spray", fw)
+	}
+}
+
+// 4.0.2: the last test's rows and the carriers in use survive for a switch without a new test.
+func TestAutoResultsRoundTrip(t *testing.T) {
+	oldP := P
+	P.Conf = t.TempDir()
+	defer func() { P = oldP; atDone, atPicks = nil, nil }()
+	if _, _, rows := AutoResults("x"); rows != nil {
+		t.Fatalf("rows before a test = %v", rows)
+	}
+	atDone = []string{"ok|tls reverse|22.6|16.6|170", "ok|l2tpv3 (shape only)|16.3|6.8|97", "fail|grpc :8443|no link"}
+	atPicks = []string{"tls reverse", "l2tpv3 (shape only)"}
+	atSaveResults("x")
+	atSaveUse("x")
+	at, _, rows := AutoResults("x")
+	if at == 0 || strings.Join(rows, "|") != strings.Join(atDone, "|") {
+		t.Errorf("at %d rows %q", at, rows)
+	}
+	if u := AutoInUse("x"); strings.Join(u, ",") != "tls reverse,l2tpv3 (shape only)" {
+		t.Errorf("in use = %q", u)
+	}
+}
+
+func TestSprayBaseSkipsUsed(t *testing.T) {
+	old := envRandOpenPort
+	defer func() { envRandOpenPort = old }()
+	tries := []int{40000, 64800, 42000}
+	envRandOpenPort = func(string, []string) (int, error) { q := tries[0]; tries = tries[1:]; return q, nil }
+	if q := sprayBase([]string{"40500"}); q != 42000 { // 40000 covers 40500, 64800 overflows
+		t.Errorf("sprayBase = %d, want 42000", q)
+	}
 }

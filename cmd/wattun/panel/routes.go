@@ -71,6 +71,7 @@ var routes = []route{
 	{"POST", "tunnels/*/use", tierManage, 0, (*Server).apiUse},
 	{"GET", "tunnels/*/paths", tierRead, 0, (*Server).apiPaths},
 	{"GET", "tunnels/*/settings", tierRead, 0, (*Server).apiTunnelSettings},
+	{"GET", "tunnels/*/carriers", tierRead, 0, (*Server).apiCarriers},
 	{"PUT", "tunnels/*/settings", tierManage, 0, (*Server).apiTunnelSettingsSet},
 	{"POST", "tunnels/*/boot", tierManage, 0, (*Server).apiBoot},
 	{"POST", "tunnels/*/ac-preset", tierManage, 0, (*Server).apiACPreset},

@@ -647,8 +647,8 @@ func uninstallAll() bool {
 		if !isAutoExt(n) {
 			continue
 		}
-		if p := lastColon(Cfg(n, "listen")); p != "" && isShapedUDP(Cfg(n, "carrier")) {
-			fwClose(p + "/udp")
+		if f := extFWSpec(Cfg(n, "carrier"), lastColon(Cfg(n, "listen"))); f != "" {
+			fwClose(f)
 		}
 	}
 	kreplyRestore()

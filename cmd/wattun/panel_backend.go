@@ -454,6 +454,11 @@ func (mgrBackend) ApplySettings(name string, set map[string]string) error {
 
 func (mgrBackend) SetBoot(name string, on bool) error { return mgr.SetBoot(name, on) }
 
+func (mgrBackend) Carriers(name string) (int64, string, []string, []string) {
+	at, pr, rows := mgr.AutoResults(name)
+	return at, pr, rows, mgr.AutoInUse(name)
+}
+
 func (mgrBackend) ACPreset(name, preset string) ([]string, error) {
 	kharejMu.Lock()
 	defer kharejMu.Unlock()
