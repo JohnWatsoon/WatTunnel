@@ -869,6 +869,34 @@ if systemctl is-active -q wattun-panel 2>/dev/null; then systemctl restart wattu
 # Non-interactive installs turn it on only when asked (WAT_PANEL=1); the interactive Iran wizard asks below.
 if [ "${WAT_PANEL:-0}" = 1 ] && ! [ -f "$CONF/panel.conf" ]; then "$BIN" panel on || warn "Web panel could not start (wattun panel on)."; echo; fi
 
+# ---- coming from before 3.6.0: what is new, and the one step left on each side ----
+# Tunnels made before 3.5 carry no pairing in their token, so the panel and "Update all" cannot reach their Kharej
+# until Kharej's pairing token is added on Iran. Shown once, on the update that crosses 3.6.0.
+upgrade_side() {
+  local s; s=$(sed -n 's/^side=//p' "$CONF/.manager.conf" 2>/dev/null | tail -1)
+  if [ -z "$s" ]; then
+    grep -qs '^mode: *server' "$CONF"/*.yml && s=kharej
+    grep -qs '^mode: *client' "$CONF"/*.yml && s=${s:+mixed}${s:-iran}
+  fi
+  printf '%s' "$s"
+}
+if [ -n "${OLD:-}" ] && [ "$(printf '%s\n%s\n' "$OLD" 3.6.0 | sort -V | head -1)" = "$OLD" ] && [ "$OLD" != 3.6.0 ]; then
+  echo
+  ok "Updated from $OLD: tunnels keep running as they were"
+  case "$(upgrade_side)" in
+    kharej)
+      hint "New: the Iran server can now watch, test and update this Kharej from its web panel."
+      hint "One step links them: paste this server's pairing token on Iran (wattun add-kharej, or the panel's Add Kharej)."
+      if [ -t 0 ] && [ -t 1 ]; then echo; "$BIN" pair-token || warn "No pairing token yet. Later: wattun pair-token"
+      else hint "Show it with: wattun pair-token"; fi ;;
+    iran|mixed)
+      hint "New: a web panel for this server: wattun panel on"
+      hint "To manage and update Kharej from here, update Kharej too, run 'wattun pair-token' there and paste it here:"
+      hint "  wattun add-kharej   (or Add Kharej in the panel)" ;;
+    *) hint "New: a web panel (wattun panel on on the Iran server) and Kharej pairing (wattun pair-token on Kharej)." ;;
+  esac
+fi
+
 # ---- summary & post-install status card ----
 total=0; running=0; stale_names=''
 is_stale() {
