@@ -332,7 +332,7 @@ func TestPairLinesStates(t *testing.T) {
 	homeTestHost(t)
 	InitColor(false, 8)
 	t.Setenv("COLUMNS", "80")
-	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	os.WriteFile(filepath.Join(P.Conf, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: false\n"), 0o600)
 	render := func() string {
 		var b strings.Builder
 		pairLines(&b)

@@ -268,6 +268,19 @@ func parseTokenKey(raw []byte) ([]byte, *tokenPair, error) {
 	return []byte(f[2]), tp, nil
 }
 
+// legacyPair arms a tunnel whose key carries no field 10 (every tunnel made before 3.5, and plain-PSK tunnels
+// since) as if its token said `pair=full` (owner decision 2026-11-27, 4.0.0: an updated pair links itself, no
+// token to paste). Both ends hold the same PSK, so both derive the same credential; Kharej's claim on the first
+// proven hello then binds it to that Iran, as with field 10. Wire safety: streams were numbered from 1 before
+// 3.5 too, so an old Iran never sends sid 0 to a new Kharej; a new Iran's one hello to an old Kharej is a
+// refused stream, and the client does not retry it within the process. `pairing: false` still opts out.
+func legacyPair(tok *tokenPair, psk []byte) *tokenPair {
+	if tok != nil || len(psk) == 0 {
+		return tok
+	}
+	return &tokenPair{field10: "pair=full", key: string(psk)}
+}
+
 // scepterOrigin marks where the attached credential came from — it decides the revocation surface.
 type scepterOrigin int
 
@@ -325,7 +338,7 @@ func scepterAttach(pairingKey, pairPath string, tok *tokenPair, logf func(string
 	if p == nil { // a lookalike field ("pairxyz"): not a pairing credential (L5-strict), silently none
 		return nil, scepterNone, nil
 	}
-	logf("scepter: pairing derived from token field 10 (pairing %s, capability %s)", p.UUIDString(), wat.CapName(p.Caps))
+	logf("scepter: pairing derived from the tunnel token (pairing %s, capability %s)", p.UUIDString(), wat.CapName(p.Caps))
 	return p, scepterFromToken, nil
 }
 

@@ -533,34 +533,59 @@ func IsPaired(name string) bool {
 	return Cfg(name, "pairing") == "true" || tokenPairCaps(name) != 0
 }
 
+// ExplicitPaired is IsPaired without the 4.0.0 legacy rule: `pairing: true`, or a token that carries field 10.
+// A channel through it is known to reach a 3.5+ Kharej, so it goes before a legacy tunnel to the same host.
+func ExplicitPaired(name string) bool {
+	if !IsPaired(name) {
+		return false
+	}
+	_, legacy := tokenPair(name)
+	return Cfg(name, "pairing") == "true" || !legacy
+}
+
 // tokenPairCaps reads the tunnel's token field 10 and returns its capability
 // mask, 0 when there is none. Exactly the engine's ParsePairingTokenField gate
 // (wat/scepter.go, L5-strict): only "pair" or "pair=<tier>" marks a credential,
 // a lookalike ("pairxyz") is not one — the field must survive byte-for-byte.
 func tokenPairCaps(name string) ScepterCaps {
+	c, _ := tokenPair(name)
+	return c
+}
+
+// tokenPair is tokenPairCaps plus whether the caps come from the legacy rule: a token without field 10 (or no
+// token at all: a pre-3.5 tunnel keeps only its PSK) pairs at full since 4.0.0, because the engine derives
+// pair=full from the PSK both ends share (cmd/wattun/pairing.go legacyPair).
+func tokenPair(name string) (ScepterCaps, bool) {
+	if _, err := os.Stat(filepath.Join(P.Conf, name+".yml")); err != nil {
+		return 0, false // no such tunnel
+	}
+	legacy := tierBits(capName["full"])
 	raw, err := os.ReadFile(filepath.Join(P.Conf, name+".token"))
 	if err != nil {
-		return 0
+		return legacy, true
 	}
 	t, err := ReadToken(strings.TrimSpace(string(raw)))
 	if err != nil {
-		return 0
+		return 0, false
 	}
 	f := t.Pair
-	if f == "" || !strings.HasPrefix(f, "pair") {
-		return 0
+	if f == "" {
+		return legacy, true
+	}
+	if !strings.HasPrefix(f, "pair") {
+		return 0, false
 	}
 	if rest := f[len("pair"):]; rest != "" && rest[0] != '=' {
-		return 0 // a lookalike field (a future pair* extension): not a pairing credential
+		return 0, false // a lookalike field (a future pair* extension): not a pairing credential
 	}
 	if _, v, ok := strings.Cut(f, "="); ok {
 		bit, valid := capName[v]
 		if !valid {
-			return 0 // the engine refuses an unknown tier, so no pair
+			return 0, false // the engine refuses an unknown tier, so no pair
 		}
-		return tierBits(bit)
+		return tierBits(bit), false
 	}
-	return CapTunnel
+	return CapTunnel, false
 }
 
 // PairedBadge is the fleet/tunnel-view mark of a paired Iran tunnel; "" when

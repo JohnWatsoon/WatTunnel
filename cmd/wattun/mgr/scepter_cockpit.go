@@ -347,7 +347,7 @@ func scepterFleet() {
 	sel := 0 // outside the redraw loop: the highlight must survive ticks and moves (round-2 finding, 2026-11-22)
 	tweens := map[string]*fleetTween{}
 	for {
-		names := pairedTunnels()
+		names := fleetPairs()
 		if len(names) == 0 {
 			Page("Kharej servers", "none paired yet")
 			GradBand(Stdout, uiW())
@@ -357,7 +357,7 @@ func scepterFleet() {
 				return
 			}
 			ClearScreen()
-			if !addKharejCmd() || len(pairedTunnels()) == 0 {
+			if !addKharejCmd() || len(fleetPairs()) == 0 {
 				Pause()
 				return
 			}
@@ -2533,6 +2533,29 @@ func vScepterLimits(s string) bool {
 
 // pairedIranTunnels: the paired tunnels this server dials as Iran (a Kharej's own token carries the pair field
 // too, so IsPaired alone would list the Kharej side).
+// fleetPairs is one paired tunnel per Kharej host, a link or explicit pair before a legacy tunnel (4.0.0 pairs
+// every old tunnel, so a Kharej with ten tunnels would otherwise fill the fleet with ten rows).
+func fleetPairs() []string {
+	var out []string
+	at := map[string]int{}
+	for _, n := range pairedTunnels() {
+		h := PairHost(n)
+		if h == "" || Cfg(n, "reverse") == "true" {
+			out = append(out, n) // no host to group by (a reverse tunnel names this server)
+			continue
+		}
+		i, seen := at[h]
+		switch {
+		case !seen:
+			at[h] = len(out)
+			out = append(out, n)
+		case !ExplicitPaired(out[i]) && ExplicitPaired(n):
+			out[i] = n
+		}
+	}
+	return out
+}
+
 func pairedIranTunnels() []string {
 	var out []string
 	for _, n := range pairedTunnels() {
@@ -2583,16 +2606,23 @@ func scepterNewBoth(pairs []string) {
 // else a paired direct Iran tunnel dialing the same host (a tunnel made by "On Kharej and here" carries no
 // pairing of its own, Handoff 4 R7). "" = no channel; an explicit pairing: false stays off.
 func scepterChannelFor(name string) string {
-	if IsPaired(name) {
+	if ExplicitPaired(name) {
 		return name
+	}
+	self := ""
+	if IsPaired(name) { // legacy (4.0.0): its own channel works, but an explicit pair to the same host is known to answer
+		self = name
 	}
 	host := scepterPeerHost(name)
 	if host == "" || Role(name) != "Iran" || Cfg(name, "pairing") == "false" {
-		return ""
+		return self
 	}
 	rev := Cfg(name, "reverse") == "true"
 	var revPairs []string
 	for _, p := range pairedIranTunnels() {
+		if p == name || !ExplicitPaired(p) {
+			continue
+		}
 		switch {
 		case IsLink(p) && !rev && linkHost(p) == host: // a link names its Kharej in its token, whatever carrier it uses
 			return p
@@ -2607,5 +2637,5 @@ func scepterChannelFor(name string) string {
 	if rev && len(revPairs) == 1 {
 		return revPairs[0]
 	}
-	return ""
+	return self
 }

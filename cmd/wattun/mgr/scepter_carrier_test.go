@@ -698,7 +698,7 @@ func TestChangeTypePairedRoutesRemote(t *testing.T) {
 		t.Error("the dead-end message must not appear on a paired tunnel")
 	}
 	// unpaired twin: the honest dead-end stays
-	writeTestYml(t, dir, "plain", "mode: client\ncarrier: tcp\npeer: 198.51.100.7:4443\n")
+	writeTestYml(t, dir, "plain", "mode: client\ncarrier: tcp\npeer: 198.51.100.7:4443\npairing: false\n")
 	out2 := capture(t, func() { changeType("plain") })
 	if !strings.Contains(out2, "Kharej fixed this type") {
 		t.Errorf("unpaired [c] keeps the honest dead-end:\n%s", out2)
@@ -733,14 +733,15 @@ func TestScepterCreatedToken(t *testing.T) {
 }
 
 // Handoff 4 R7: a tunnel made by "On Kharej and here" has no pairing of its own; its K row rides the paired
-// direct tunnel that dials the same Kharej host. Other hosts, reverse tunnels and pairing: false get none.
+// direct tunnel that dials the same Kharej host. Another host falls back to its own legacy channel (4.0.0
+// pairs every old tunnel); pairing: false gets none.
 func TestScepterChannelForSibling(t *testing.T) {
 	dir := scepterCarrierTestConf(t)
 	writeTestYml(t, dir, "pair", "mode: client\ncarrier: udp\npeer: 198.51.100.9:4443\npairing: true\n")
 	writeTestYml(t, dir, "made", "mode: client\ncarrier: wss\npeer: 198.51.100.9:8443\n")
 	writeTestYml(t, dir, "other", "mode: client\ncarrier: udp\npeer: 203.0.113.1:4443\n")
 	writeTestYml(t, dir, "off", "mode: client\ncarrier: udp\npeer: 198.51.100.9:5000\npairing: false\n")
-	for n, want := range map[string]string{"pair": "pair", "made": "pair", "other": "", "off": ""} {
+	for n, want := range map[string]string{"pair": "pair", "made": "pair", "other": "other", "off": ""} {
 		if got := scepterChannelFor(n); got != want {
 			t.Errorf("scepterChannelFor(%s) = %q, want %q", n, got, want)
 		}
@@ -784,7 +785,7 @@ func TestScepterChannelForReverseSibling(t *testing.T) {
 		t.Fatalf("single reverse pair: %q", got)
 	}
 	writeTestYml(t, dir, "rp2", "mode: client\ncarrier: tcp\npeer: 203.0.113.5:27500\nreverse: true\npairing: true\n")
-	if got := scepterChannelFor("made"); got != "" {
-		t.Fatalf("two reverse pairs are ambiguous: %q", got)
+	if got := scepterChannelFor("made"); got != "made" {
+		t.Fatalf("two reverse pairs are ambiguous: made rides its own legacy channel, got %q", got)
 	}
 }

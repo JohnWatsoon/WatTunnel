@@ -2446,6 +2446,26 @@ by the Go manager never paired. 3.6.1 makes the pairing a thing of its own:
   from 3.6.0 makes its link the first time `t` is pressed. A Kharej whose pairing was claimed by an older
   tunnel token keeps that pair; rotating the pairing token reopens it for the new link.
 
+### Auto-link: old tunnels pair by themselves (4.0.0)
+
+**Both ends need the 4.0.0 build.** A tunnel whose key carries no field 10 (every tunnel made before 3.5, and a
+plain PSK) is paired as if its token said `pair=full`: both ends hold the same PSK, so both derive the same
+credential (`legacyPair` in `cmd/wattun/pairing.go`), and Kharej's claim on the first proven hello binds it to
+that Iran, as with field 10. Nothing to paste: update both servers and the panel and "Update all" reach Kharej.
+
+- Only a configured unit (`-config`) derives it. A throw-away probe (auto-test, the matrix) never claims Kharej.
+- The first Iran's claim binds the whole Kharej (`.pairing` is server-wide; the other units adopt it within
+  5 s, and Iran proves the claimed credential from `.pairing.claims` on every tunnel to that host). A second Iran
+  with the same PSK is refused; to move the Kharej to another Iran, use `wattun pair-token` and `add-kharej`.
+- `pairing: false` in the tunnel yml opts out. A `revoked` tombstone in `.pairing` keeps every unit unpaired.
+- Security: anyone who holds an old tunnel token can be the first to claim that Kharej (owner decision
+  2026-11-27). Update Iran before or together with Kharej so your own Iran claims first.
+- Mixed versions: an old Kharej sees one refused stream per Iran tunnel start, the tunnel itself is untouched; an
+  old Iran never opens sid 0, so a new Kharej just waits.
+- The Go manager and the panel count these tunnels as paired (`IsPaired`), but route a Kharej's calls through a
+  link or an explicit pair to the same host first (`ExplicitPaired`, `scepterChannelFor`), and the fleet shows
+  one row per Kharej host (`fleetPairs`).
+
 ### The pairing credential: rides the token; watp1: is the explicit/rotate form
 
 A credential is `{pairing UUID, 32-byte key, capability, version}`. Capabilities are cumulative tiers:
@@ -2461,7 +2481,8 @@ automatically and writes `latch-port` (default 20443, collision-checked) into th
 takes the pasted token as its only step. Precedence: an explicit `pairing: false` beats everything; a stored
 `.pairing` file overrides the token-derived credential (the file is the rotate/revoke store — one written
 LATER overrides the token-derived base, and the revoke poller watches it in that mode); no credential anywhere
-= exactly the pre-3.5 behavior (sid 0 is never opened and never accepted). The derived credential feeds the
+= exactly the pre-3.5 behavior (sid 0 is never opened and never accepted). Since 4.0.0 a key without field 10
+counts as `pair=full` (see "Auto-link"), so "no credential" needs `pairing: false` or a revoke tombstone. The derived credential feeds the
 latch exactly like a stored one.
 
 The explicit `watp1:` line stays documented as the rotate/attach form (what the manager consoles drive):

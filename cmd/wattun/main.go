@@ -399,6 +399,9 @@ func main() {
 	if terr != nil {
 		log.Fatal(terr)
 	}
+	if *cfgPath != "" { // only a configured unit: a throw-away probe (auto-test, matrix) must never claim Kharej's pairing
+		tokPair = legacyPair(tokPair, k)
+	}
 	if len(k) == 0 || (*mode != "client" && *mode != "server") {
 		fmt.Fprintln(os.Stderr, "usage: wattun -mode client|server -key SECRET [-peer IP -map l:s,...]")
 		os.Exit(2)

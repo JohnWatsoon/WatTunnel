@@ -199,7 +199,9 @@ func (mgrBackend) Logs(name string, n int) []string {
 func (mgrBackend) Kharej() []panel.Kharej {
 	byHost := map[string]*panel.Kharej{}
 	var order []string
-	for _, n := range mgr.ManagedTunnels() {
+	names := mgr.ManagedTunnels()
+	sort.SliceStable(names, func(i, j int) bool { return mgr.ExplicitPaired(names[i]) && !mgr.ExplicitPaired(names[j]) }) // ask through a 3.5+ pair before a legacy one
+	for _, n := range names {
 		if mgr.Role(n) != "Iran" || !mgr.IsPaired(n) {
 			continue
 		}

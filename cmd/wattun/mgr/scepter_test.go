@@ -239,7 +239,7 @@ func TestPairedBadge(t *testing.T) {
 	P.Conf = dir
 	defer func() { P.Conf = old }()
 	ir := "mode: client\ncarrier: udp\npeer: 198.51.100.7:4443\n"
-	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte(ir), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte(ir+"pairing: false\n"), 0o600)
 	os.WriteFile(filepath.Join(dir, "irp.yml"), []byte(ir+"pairing: true\n"), 0o600)
 	os.WriteFile(filepath.Join(dir, "kh.yml"), []byte("mode: server\ncarrier: udp\npairing: true\n"), 0o600)
 	if got := PairedBadge("ir"); got != "" {
@@ -264,7 +264,7 @@ func TestScepterScreenStubTransport(t *testing.T) {
 	old := P.Conf
 	P.Conf = dir
 	defer func() { P.Conf = old }()
-	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: false\n"), 0o600)
 	// an unpaired tunnel refuses at the dial — the honest answer, no rows
 	out := capture(t, func() { scepterRead("ir", "state.get", "the state document") })
 	if !strings.Contains(out, "state.get") || !strings.Contains(out, "not paired") {
@@ -619,7 +619,10 @@ func TestScepterFleetScreen(t *testing.T) {
 	defer func() { P.Conf = old }()
 	os.WriteFile(filepath.Join(dir, "a.yml"), []byte("mode: client\ncarrier: udp\npairing: true\n"), 0o600)
 	os.WriteFile(filepath.Join(dir, "b.yml"), []byte("mode: client\ncarrier: tcp\npairing: true\n"), 0o600)
-	os.WriteFile(filepath.Join(dir, "c.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "c.yml"), []byte("mode: client\ncarrier: udp\npairing: false\n"), 0o600)
+	// d (legacy, no token) and e (explicit) reach one Kharej host: one row, through e
+	os.WriteFile(filepath.Join(dir, "d.yml"), []byte("mode: client\ncarrier: udp\npeer: 198.51.100.4:4443\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "e.yml"), []byte("mode: client\ncarrier: tcp\npeer: 198.51.100.4:5000\npairing: true\n"), 0o600)
 	// a answers with a real document; b's channel is down — the row says so
 	doc := ScepterResult{Code: scepterCodeOK, Params: map[string]any{
 		"ver": "3.5.0", "state_seq": float64(4), "uptime_s": float64(90), "event_cursor": float64(2),
@@ -637,13 +640,16 @@ func TestScepterFleetScreen(t *testing.T) {
 	out := capture(t, scepterFleet)
 	// the fleet shows the pair summary (version, seq, tunnel COUNT), not the
 	// remote tunnel names — those open through the pair screen
-	for _, want := range []string{"a", "3.5.0", "1 tunnel(s)", "b", "unreachable"} {
+	for _, want := range []string{"a", "3.5.0", "1 tunnel(s)", "b", "unreachable", "e", "3 paired"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fleet output missing %q:\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "c\n") || strings.Contains(out, " c ") {
 		t.Errorf("the unpaired tunnel must not be a fleet row:\n%s", out)
+	}
+	if strings.Contains(out, " d ") {
+		t.Errorf("a legacy tunnel to a host an explicit pair already reaches must not be its own row:\n%s", out)
 	}
 }
 
@@ -654,7 +660,7 @@ func TestScepterFleetScreenEmpty(t *testing.T) {
 	old := P.Conf
 	P.Conf = dir
 	defer func() { P.Conf = old }()
-	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\n"), 0o600)
+	os.WriteFile(filepath.Join(dir, "ir.yml"), []byte("mode: client\ncarrier: udp\npairing: false\n"), 0o600)
 	defer feed("0")()
 	out := capture(t, scepterFleet)
 	if !strings.Contains(out, "none paired") || !strings.Contains(out, "press t") {
@@ -1041,16 +1047,22 @@ func TestIsPairedTokenField(t *testing.T) {
 		"pairxyz":     false, // a lookalike is not the pair field (L5-strict)
 		"pairing":     false,
 		"pair=root":   false, // the engine refuses an unknown tier
-		"":            false,
+		"":            true,  // 4.0.0: a token without field 10 pairs at full from its PSK (legacyPair)
 	} {
 		mint(f10)
 		if got := IsPaired("ir"); got != want {
 			t.Errorf("IsPaired(field 10 %q) = %v, want %v", f10, got, want)
 		}
+		if got := ExplicitPaired("ir"); got != (want && f10 != "") {
+			t.Errorf("ExplicitPaired(field 10 %q) = %v", f10, got)
+		}
 	}
 	os.Remove(filepath.Join(dir, "ir.token"))
-	if IsPaired("ir") {
-		t.Error("no token and no pairing key must not be IsPaired")
+	if !IsPaired("ir") || ExplicitPaired("ir") || tokenPairCaps("ir") != tierBits(capName["full"]) {
+		t.Error("no token (a pre-3.5 tunnel) must pair at full through the legacy rule, not explicitly")
+	}
+	if !ExplicitPaired("irtrue") {
+		t.Error("pairing: true is explicit")
 	}
 	if IsPaired("kh") {
 		t.Error("a Kharej config is never an Iran pair")

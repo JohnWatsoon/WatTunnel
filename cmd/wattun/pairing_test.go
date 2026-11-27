@@ -425,7 +425,7 @@ func TestScepterAttachTokenDerived(t *testing.T) {
 	if err != nil || p == nil || origin != scepterFromToken || wat.CapName(p.Caps) != "manage" {
 		t.Fatalf("token-derived attach: %v %v %v", p, origin, err)
 	}
-	if len(logs) != 1 || !strings.Contains(logs[0], "scepter: pairing derived from token field 10 (pairing ") ||
+	if len(logs) != 1 || !strings.Contains(logs[0], "scepter: pairing derived from the tunnel token (pairing ") ||
 		!strings.Contains(logs[0], "capability manage)") {
 		t.Fatalf("derivation log line: %v", logs)
 	}
@@ -617,5 +617,29 @@ func TestPairingPollerSeed(t *testing.T) {
 	pl.check() // the seeded state (old) vs disk (new): the rotation is a change on the very first check
 	if _, caps := st.PairingInfo(); wat.CapName(caps) != "full" {
 		t.Fatalf("the startup-gap rotation must be reloaded on the first check: caps %d", caps)
+	}
+}
+
+// 4.0.0 auto-link: a key with no field 10 (a pre-3.5 tunnel, or a plain PSK) pairs as pair=full on both ends;
+// a real field 10 and an empty key are left alone, and pairing: false still opts out.
+func TestLegacyPair(t *testing.T) {
+	if legacyPair(nil, nil) != nil {
+		t.Fatal("no key, no pairing")
+	}
+	own := &tokenPair{field10: "pair=manage", key: "kk"}
+	if legacyPair(own, []byte("kk")) != own {
+		t.Fatal("a token's own field 10 wins")
+	}
+	lp := legacyPair(nil, []byte("psk-1"))
+	p, origin, err := scepterAttach("", filepath.Join(t.TempDir(), ".pairing"), lp, func(string, ...any) {})
+	if err != nil || p == nil || origin != scepterFromToken || wat.CapName(p.Caps) != "full" {
+		t.Fatalf("legacy attach: %v %v %v", p, origin, err)
+	}
+	q, _, _ := scepterAttach("", filepath.Join(t.TempDir(), ".pairing"), legacyPair(nil, []byte("psk-1")), func(string, ...any) {})
+	if q == nil || q.UUIDString() != p.UUIDString() {
+		t.Fatal("both ends must derive the same credential from the shared PSK")
+	}
+	if p, _, _ := scepterAttach("false", "", lp, func(string, ...any) {}); p != nil {
+		t.Fatal("pairing: false opts a legacy tunnel out")
 	}
 }

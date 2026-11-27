@@ -1604,7 +1604,7 @@ func pairStatus() []string {
 	c, st := pairLoad()
 	switch st {
 	case 2:
-		return []string{KV(11, "pairing", GRY+"waiting"+RST+GRY+" (the first Iran that connects with a pairing token pairs itself)"+RST)}
+		return []string{KV(11, "pairing", GRY+"waiting"+RST+GRY+" (the first updated Iran tunnel that connects pairs itself, old tokens too)"+RST)}
 	case 3:
 		return []string{KV(11, "pairing", RED+"revoked"+RST+GRY+" (no Iran can manage this server — allow a new Iran to pair)"+RST)}
 	case 1:
@@ -1899,7 +1899,7 @@ func scepterReopen() {
 	if st == 1 && !pairReadable() {
 		return
 	}
-	if !Confirm("Allow a new Iran to pair? The current pairing ends; the next Iran that connects with a pairing token takes over.", false) {
+	if !Confirm("Allow a new Iran to pair? The current pairing ends; the next updated Iran tunnel that connects takes over.", false) {
 		return
 	}
 	id := "revoked"
@@ -1910,7 +1910,7 @@ func scepterReopen() {
 		return
 	}
 	_ = os.Remove(pairStorePath())
-	Ok("Pairing open: the next Iran that connects with this server's pairing token pairs itself.")
+	Ok("Pairing open: the next updated Iran tunnel that connects to this server pairs itself.")
 }
 
 // ---- auto-heal timer (bash heal_enable / heal_disable / ensure_heal_timer) ----

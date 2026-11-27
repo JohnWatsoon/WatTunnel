@@ -1273,7 +1273,7 @@ pairing_status() {
     return 0
   fi
   if ! pairing_active; then
-    say "  $(kv pairing "${GRY}waiting${RST} ${GRY}(the first Iran that connects with a pairing token pairs itself)${RST}")"
+    say "  $(kv pairing "${GRY}waiting${RST} ${GRY}(the first updated Iran tunnel that connects pairs itself, old tokens too)${RST}")"
     return 0
   fi
   if ! pairing_load; then
@@ -1378,11 +1378,11 @@ scepter_reopen() { # Handoff 4 R2: delete the store - the next Iran that connect
   if [ "$NONINTERACTIVE" = 1 ]; then
     [ "${NI_YES:-0}" = 1 ] || { err "scepter reopen without a terminal needs --yes"; return 1; }
   else
-    confirm "Allow a new Iran to pair? The current pairing ends; the next Iran that connects with a pairing token takes over." n || return 0
+    confirm "Allow a new Iran to pair? The current pairing ends; the next updated Iran tunnel that connects takes over." n || return 0
   fi
   pairing_audit pair_reopened "$(pairing_get uuid)" || return 1
   rm -f "$PAIR_STORE"
-  ok "Pairing open: the next Iran that connects with this server's pairing token pairs itself."
+  ok "Pairing open: the next updated Iran tunnel that connects to this server pairs itself."
   return 0
 }
 scepter_menu() { # Kharej's local Scepter console: status, pair, rotate, revoke, audit tail.
