@@ -6,7 +6,7 @@
 
 **Encrypted Iran ↔ Kharej port forwarding that keeps working when the network is filtered, even when only ping gets through.**
 
-[![Release](https://img.shields.io/badge/release-v3.4.2-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
+[![Release](https://img.shields.io/badge/release-v4.0.0-blue?style=flat-square)](https://github.com/JohnWatsoon/WatTunnel/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go)](go.mod)
 ![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20windows-lightgrey?style=flat-square)
@@ -125,6 +125,14 @@ auto-heal failover at any time without port conflicts or manual carrier toggles.
 finalized tunnels reopen automatically on update.
 
 ## Scepter: pair once, manage from Iran
+
+**4.0.0: old tunnels link Kharej by themselves (update both servers).** Tunnels made before 3.5 carry no pairing
+in their token. Once both servers run 4.0.0, each of them pairs as if its token said `pair=full`: the first Iran
+that connects claims that Kharej, and the web panel and "Update all" reach it with no token to paste. Updating Iran
+first is fine: it links within 30 seconds of Kharej's update, with no restart. `pairing: false` in a tunnel's
+config keeps it out. Anyone who holds an old tunnel token could claim that Kharej first, so update Iran before or
+together with Kharej. To give a Kharej to a different Iran, use `wattun pair-token` there and `wattun add-kharej`
+on the new Iran.
 
 **3.6.1: pairing in one step (both servers need 3.6.1).** The installer asks for the role. On Kharej it shows
 the **pairing token** right away; later, `wattun` and then `t` on the dashboard shows it again, with a Rotate
