@@ -911,23 +911,55 @@ td.ta .btn{margin-left:4px;--h:30px}
 .jc-pre{font-size:12px}
 .jc-row.pend .jc-lab b{color:var(--fg);font-weight:500}
 
-/* ---------- buttons: a ripple on press; a few rare buttons carry their own effect (fx-orbit, fx-burst) ---------- */
+/* ---------- buttons: a ripple on press; three rare buttons carry their own effect (fx-holo, fx-dust, fx-aurora) ---------- */
 .rip{position:absolute;left:var(--rx);top:var(--ry);width:var(--rs);height:var(--rs);margin:calc(var(--rs) / -2) 0 0 calc(var(--rs) / -2);border-radius:50%;
   background:currentColor;opacity:.28;pointer-events:none;z-index:-1;transform:scale(0);animation:rip .65s cubic-bezier(.2,.7,.3,1) forwards}
 @keyframes rip{to{transform:scale(1);opacity:0}}
 @media (prefers-reduced-motion:reduce){.rip{display:none}}
-/* fx-orbit: a comet of light runs round the border, always, slowly; faster and brighter under the pointer */
+
+/* fx-holo (New tunnel): a dark card face cut with hairline contour rings; the rings light up in a spectrum around the
+   pointer and the face tilts toward it. At rest the lit spot drifts slowly across. */
+@property --hx{syntax:'<percentage>';inherits:true;initial-value:20%}
+.btn.fx-holo{--px:var(--hx);--py:30%;background:#0c0c0f;color:#f5f5f7;transform-style:preserve-3d;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.1),inset 0 1px 0 rgba(255,255,255,.1),0 12px 32px -14px rgba(139,92,255,.7);
+  animation:holo-drift 7s ease-in-out infinite alternate}
+.btn.fx-holo .ico{color:#f5f5f7}
+.btn.fx-holo:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:-1;opacity:.4;transition:opacity .3s var(--ease);
+  background:linear-gradient(110deg,#ff5fd0 0%,#9a6bff 22%,#4d8dff 42%,#36dcc6 62%,#9dff7a 80%,#ffd85a 100%);
+  -webkit-mask:repeating-radial-gradient(circle at var(--px) var(--py),rgba(0,0,0,.85) 0 .6px,transparent 1.1px 3.4px),radial-gradient(70px circle at var(--px) var(--py),#000,transparent 100%);
+  -webkit-mask-composite:source-in;
+  mask:repeating-radial-gradient(circle at var(--px) var(--py),rgba(0,0,0,.85) 0 .6px,transparent 1.1px 3.4px),radial-gradient(70px circle at var(--px) var(--py),#000,transparent 100%);
+  mask-composite:intersect}
+.btn.fx-holo>*,.btn.fx-holo{text-shadow:0 0 10px #0c0c0f,0 0 3px #0c0c0f}
+.btn.fx-holo:after{background:radial-gradient(60px circle at var(--px) var(--py),rgba(255,255,255,.1),transparent 70%);transform:none;opacity:0;transition:opacity .3s}
+.btn.fx-holo:hover{--px:var(--mx,50%);--py:var(--my,50%);animation:none;transform:perspective(420px) rotateX(var(--tx,0deg)) rotateY(var(--ty,0deg)) translateY(-1px)}
+.btn.fx-holo:hover:before{opacity:1}.btn.fx-holo:hover:after{opacity:1}
+@keyframes holo-drift{0%{--hx:12%}100%{--hx:88%}}
+
+/* fx-dust (Run a test): the press dissolves the button left to right into fine dust that swirls away (app.js dust),
+   then it comes back out of a blur */
+.btn.fx-dust.dissolving{-webkit-mask:linear-gradient(90deg,transparent 40%,#000 60%) 100% 0/250% 100% no-repeat;mask:linear-gradient(90deg,transparent 40%,#000 60%) 100% 0/250% 100% no-repeat;
+  animation:fx-wipe .5s linear forwards;pointer-events:none}
+@keyframes fx-wipe{to{-webkit-mask-position:0 0;mask-position:0 0}}
+.btn.fx-dust.reform{animation:fx-reform .6s var(--ease) both}
+@keyframes fx-reform{from{opacity:0;filter:blur(10px);transform:scale(.96)}}
+.fx-dustcv{position:fixed;pointer-events:none;z-index:70}
+
+/* fx-aurora (Update all, only while a server is behind): an aurora rises inside a dark face; the press lights the
+   screen's edge in the same colours (app.js edgeGlow) */
+.btn.fx-aurora{background:#0b0b10;color:#fff;box-shadow:inset 0 0 0 1px rgba(170,150,255,.28),0 12px 32px -12px rgba(124,92,255,.65)}
+.btn.fx-aurora .ico{color:#fff}
+.btn.fx-aurora:before{content:"";position:absolute;inset:-10% -15%;z-index:-1;pointer-events:none;filter:blur(7px) saturate(1.35);opacity:.9;
+  background:radial-gradient(30% 95% at 14% 88%,#3d6bff,transparent 72%),radial-gradient(34% 105% at 48% 96%,#9b5bff,transparent 72%),radial-gradient(28% 95% at 84% 86%,#ff5fa2,transparent 72%),radial-gradient(50% 50% at 62% 8%,rgba(90,209,255,.35),transparent 80%);
+  animation:aurora 4.5s ease-in-out infinite alternate}
+.btn.fx-aurora:hover:before{animation-duration:2.2s}
+@keyframes aurora{0%{transform:translate(-10%,30%) scaleY(.85)}50%{transform:translate(8%,8%) scaleY(1.25)}100%{transform:translate(-4%,20%) scaleY(1)}}
 @property --ang{syntax:'<angle>';inherits:false;initial-value:0deg}
-.btn.fx-orbit:before{content:"";position:absolute;inset:0;border-radius:inherit;padding:2.5px;pointer-events:none;z-index:1;
-  background:conic-gradient(from var(--ang),transparent 0 45%,rgba(30,190,110,.35) 70%,#1fc777 90%,#0e8f52 97%,transparent 100%);
-  -webkit-mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0);
-  animation:orbit 3.6s linear infinite}
-.btn.fx-orbit:hover:before{animation-duration:1.4s}
-.btn.pri.fx-orbit{box-shadow:inset 0 -2px 0 rgba(0,0,0,.12),inset 0 1px 0 #fff,0 8px 28px -10px rgba(62,224,138,.55)}
-@keyframes orbit{to{--ang:360deg}}
-/* fx-burst: the click throws the button's dot matrix out as pixels (app.js burst) */
-.burst{position:fixed;left:var(--bx);top:var(--by);width:0;height:0;pointer-events:none;z-index:60}
-.burst i{position:absolute;width:5px;height:5px;margin:-2.5px;border-radius:1.5px;background:var(--c,#3ee08a);
-  animation:burst .8s cubic-bezier(.15,.7,.3,1) var(--dl,0s) both}
-@keyframes burst{0%{transform:translate(0,0) scale(1.4);opacity:1}70%{opacity:1}100%{transform:translate(var(--dx),var(--dy)) scale(.4) rotate(var(--rt));opacity:0}}
-@media (prefers-reduced-motion:reduce){.btn.fx-orbit:before{animation:none}.burst{display:none}}
+.edge-glow{position:fixed;inset:0;pointer-events:none;z-index:80;opacity:0;animation:edge 1.9s var(--ease) forwards}
+.edge-glow i{position:absolute;inset:0;padding:2px;border-radius:var(--eg-r,0);
+  background:conic-gradient(from var(--ang),#3d6bff,#9b5bff,#ff5fa2,#5ad1ff,#3d6bff);animation:edge-spin 1.9s linear forwards;
+  -webkit-mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
+.edge-glow i+i{padding:14px;filter:blur(16px);opacity:.85}
+@keyframes edge{18%{opacity:1}62%{opacity:1}to{opacity:0}}
+@keyframes edge-spin{to{--ang:240deg}}
+@media (prefers-reduced-motion:reduce){.btn.fx-holo,.btn.fx-aurora:before{animation:none}.btn.fx-holo:hover{transform:none}.fx-dustcv,.edge-glow{display:none}}

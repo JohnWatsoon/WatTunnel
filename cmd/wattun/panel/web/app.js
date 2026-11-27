@@ -727,21 +727,35 @@ $('#outAll').addEventListener('click',async()=>{try{await api('logout-all',{meth
 
 /* the light under the pointer: primary buttons bend it like liquid, Kharej cards catch it like foil (--mx/--my in px) */
 if(!RM){let pe=null,raf=0;document.addEventListener('pointermove',e=>{pe=e;if(!raf)raf=requestAnimationFrame(()=>{raf=0;
-  const t=pe.target.closest&&pe.target.closest('.btn.pri,.ksrv');if(!t)return;const r=t.getBoundingClientRect();
-  t.style.setProperty('--mx',(pe.clientX-r.left).toFixed(0)+'px');t.style.setProperty('--my',(pe.clientY-r.top).toFixed(0)+'px')})},{passive:true});
+  const t=pe.target.closest&&pe.target.closest('.btn.pri,.ksrv,.fx-holo');if(!t)return;const r=t.getBoundingClientRect();
+  t.style.setProperty('--mx',(pe.clientX-r.left).toFixed(0)+'px');t.style.setProperty('--my',(pe.clientY-r.top).toFixed(0)+'px');
+  if(t.classList.contains('fx-holo')){t.style.setProperty('--ty',(((pe.clientX-r.left)/r.width-.5)*12).toFixed(1)+'deg');t.style.setProperty('--tx',(-((pe.clientY-r.top)/r.height-.5)*16).toFixed(1)+'deg')}})},{passive:true});
   // a press sends a ripple out from the finger instead of squashing the button
   document.addEventListener('pointerdown',e=>{const b=e.target.closest&&e.target.closest('.btn');if(!b||b.disabled)return;const r=b.getBoundingClientRect();
     b.style.setProperty('--mx',(e.clientX-r.left).toFixed(0)+'px');b.style.setProperty('--my',(e.clientY-r.top).toFixed(0)+'px');
     const s=document.createElement('span');s.className='rip';s.style.setProperty('--rx',(e.clientX-r.left)+'px');s.style.setProperty('--ry',(e.clientY-r.top)+'px');
     s.style.setProperty('--rs',(Math.hypot(r.width,r.height)*2)+'px');b.appendChild(s);setTimeout(()=>s.remove(),700);
-    if(b.classList.contains('fx-burst'))burst(e.clientX,e.clientY)},{passive:true})}
-// a rare button's click scatters dot-matrix pixels from the finger (fx-burst)
-function burst(x,y){const w=document.createElement('div');w.className='burst';w.style.setProperty('--bx',x+'px');w.style.setProperty('--by',y+'px');
-  const C=['#3ee08a','#d4f36a','#ffffff','#5b93ff'];
-  for(let k=0;k<18;k++){const i=document.createElement('i');const a=k/18*Math.PI*2+Math.random()*.4,d=38+Math.random()*46;
-    i.style.setProperty('--dx',(Math.cos(a)*d).toFixed(1)+'px');i.style.setProperty('--dy',(Math.sin(a)*d).toFixed(1)+'px');
-    i.style.setProperty('--rt',((Math.random()*2-1)*180).toFixed(0)+'deg');i.style.setProperty('--dl',(Math.random()*.08).toFixed(2)+'s');i.style.setProperty('--c',C[k%C.length]);w.appendChild(i)}
-  document.body.appendChild(w);setTimeout(()=>w.remove(),1000)}
+    if(b.classList.contains('fx-dust'))dissolve(b);if(b.classList.contains('fx-aurora'))edgeGlow()},{passive:true})}
+// fx-dust: the button's face breaks into ~1000 grains, left to right as the mask wipes it, and they swirl into a
+// vortex beside it and fade; the button then returns out of a blur (one canvas, one rAF loop, gone after 1.6 s)
+function dissolve(b){if(b.classList.contains('dissolving'))return;const r=b.getBoundingClientRect(),pad=150,dpr=Math.min(devicePixelRatio||1,2);
+  const cv=document.createElement('canvas'),W=r.width+pad*2,H=r.height+pad*2;cv.className='fx-dustcv';cv.width=W*dpr;cv.height=H*dpr;
+  cv.style.setProperty('left',(r.left-pad)+'px');cv.style.setProperty('top',(r.top-pad)+'px');cv.style.setProperty('width',W+'px');cv.style.setProperty('height',H+'px');
+  const x=cv.getContext('2d');x.scale(dpr,dpr);const bg=getComputedStyle(b).backgroundColor,col=/rgba\(.*, 0\)|transparent/.test(bg)?'#f1f1f4':bg,rad=Math.min(r.height/2,14),g=[];
+  const vx=pad+r.width+40,vy=pad+r.height*.2;
+  for(let yy=0;yy<r.height;yy+=1.6)for(let xx=0;xx<r.width;xx+=1.6){
+    const cx=Math.min(xx,r.width-xx),cy=Math.min(yy,r.height-yy);if(cx<rad&&cy<rad&&Math.hypot(rad-cx,rad-cy)>rad)continue;if(Math.random()>.42)continue;
+    const px=pad+xx,py=pad+yy;g.push({a:Math.atan2(py-vy,px-vx),d:Math.hypot(px-vx,py-vy),w:1.6+Math.random()*2.6,o:(Math.random()-.5)*90,
+      t0:xx/r.width*.5+Math.random()*.06,s:.5+Math.random()*1.3,k:.35+Math.random()*.65})}
+  document.body.appendChild(cv);b.classList.remove('reform');b.classList.add('dissolving');const st=performance.now();
+  (function fr(now){const t=(now-st)/1000;x.clearRect(0,0,W,H);x.fillStyle=col;let live=0;
+    for(const p of g){const u=t-p.t0;if(u<0){live++;continue}if(u>1.1)continue;live++;const e=1-Math.pow(1-u/1.1,3),an=p.a+e*p.w,dd=p.d*(1-.55*e)+p.o*e;
+      x.globalAlpha=p.k*(1-u/1.1);x.fillRect(vx+Math.cos(an)*dd,vy+Math.sin(an)*dd-e*30,p.s,p.s)}
+    if(live&&t<1.7)requestAnimationFrame(fr);else cv.remove()})(st);
+  setTimeout(()=>{b.classList.remove('dissolving');b.classList.add('reform');setTimeout(()=>b.classList.remove('reform'),700)},1150)}
+// fx-aurora: the screen's edge glows in the aurora's colours once, like a payment going through
+function edgeGlow(){const g=document.createElement('div');g.className='edge-glow';g.append(document.createElement('i'),document.createElement('i'));
+  document.body.appendChild(g);setTimeout(()=>g.remove(),2000)}
 /* phones: the bottom bar and the quick action button are liquid glass. A lens with a squircle bevel: the middle stays
    clear, the rim bends what scrolls under it (Snell, IOR 3) and splits it slightly by colour (blue bends most); a hairline
    catches a light that follows the pointer, the phone's tilt or the scroll. Only Chromium can bend the page

@@ -280,11 +280,11 @@ function renderTunnels(still){
   const rate=el('div','ts-rate');rate.append(el('div','lab','all tunnels, now'));const rv=el('div','big2 n');rv.id='tsRate';rate.appendChild(rv);
   const tools=el('div','ts-tools');
   [['start','Start all'],['restart','Restart all'],['stop','Stop all']].forEach(([a,t])=>tools.appendChild(btn(t,'sec'+(a==='stop'?' danger':''),()=>bulk(a))));
-  tools.appendChild(btn('New tunnel','pri fx-orbit fx-burst',newTunnel));
+  tools.appendChild(btn('New tunnel','fx-holo',newTunnel));
   strip.append(sum,rate,tools);v.appendChild(strip);
   // tiles
   const g=el('div','tgrid');
-  if(!ts.length){const e=el('section','card empty-hero');e.append(el('div','eh-t','No tunnels on this server yet.'),el('p','note','Paste a token from Kharej, or create the tunnel on Kharej and here in one go.'),btn('New tunnel','pri fx-orbit fx-burst',newTunnel));g.appendChild(e)}
+  if(!ts.length){const e=el('section','card empty-hero');e.append(el('div','eh-t','No tunnels on this server yet.'),el('p','note','Paste a token from Kharej, or create the tunnel on Kharej and here in one go.'),btn('New tunnel','fx-holo',newTunnel));g.appendChild(e)}
   ts.forEach((t,i)=>g.appendChild(tile(t,i)));
   v.appendChild(g);liveTunnels();loadPorts();
 }
@@ -556,7 +556,7 @@ async function loadTraffic(){
   // speed tests
   const rows=sp.ok?sp.j.rows:[];const iran=S.ov?S.ov.tunnels.filter(t=>t.role==='Iran'):[];
   const sel=el('select');sel.setAttribute('aria-label','Tunnel');iran.forEach(t=>{const o=el('option',null,t.name);o.value=t.name;sel.appendChild(o)});
-  const tl=el('div','tools');tl.append(P.dd(sel),btn('Run a test','pri fx-burst',()=>sel.value&&act('tunnels/'+enc(sel.value)+'/speedtest',{body:{mb:10}}).then(()=>{})));
+  const tl=el('div','tools');tl.append(P.dd(sel),btn('Run a test','pri fx-dust',()=>sel.value&&act('tunnels/'+enc(sel.value)+'/speedtest',{body:{mb:10}}).then(()=>{})));
   const spc=card('s3','Speed tests','download, MB/s',tl);
   const latest={};rows.forEach(x=>{if(!latest[x.name])latest[x.name]=x});
   const lt=el('div','sp-latest');Object.values(latest).slice(0,4).forEach(x=>{const d=el('div','sp-l');const dot=el('i');dot.style.background=colOf(x.name);const h=el('div','lab');h.append(dot,x.name);const v=el('div','mid n');v.appendChild(split(x.down?x.down.toFixed(1):'–',x.down?'MB/s':''));d.append(h,v,el('div','lab','↑ '+(x.up?x.up.toFixed(1):'–')+' · '+when(x.t)));lt.appendChild(d)});spc.appendChild(lt);
@@ -594,7 +594,7 @@ async function loadSystem(){
   vrow('this server',h.version,true);S.ov.kharej.forEach(k=>vrow(k.host,k.version,k.online));vr.appendChild(vl);vr.classList.add('vcard');
   const behind=latest?[h.version,...S.ov.kharej.filter(k=>k.online).map(k=>k.version)].filter(x=>x&&newer(latest,x)).length:0;
   const vt=el('div','tools vfoot');
-  vt.append(btn(behind?'Update all ('+behind+')':'Update all',behind?'pri fx-orbit fx-burst':'pri',()=>P.updateAll()),
+  vt.append(btn(behind?'Update all ('+behind+')':'Update all',behind?'fx-aurora':'pri',()=>P.updateAll()),
     btn('Update this server','sec',()=>act('update',{full:true,title:'Update this server',confirm:'Downloads the latest release, checks its signature, swaps the binary and restarts the tunnels and this panel. Open connections drop for a few seconds.'})),
     btn('Roll back','sec ic danger push',()=>act('rollback',{full:true,title:'Roll back',confirm:'Goes back to the previous version and restarts the tunnels and this panel.',danger:true})));
   vr.append(el('p','note',behind?'Update all does the Kharej servers first, then this one; the page reconnects by itself.':'Every server runs the newest release.'),vt);g.appendChild(vr);
