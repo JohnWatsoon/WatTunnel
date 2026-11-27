@@ -57,7 +57,8 @@ func (fakeBE) ApplySettings(n string, set map[string]string) error {
 	}
 	return nil
 }
-func (fakeBE) SetBoot(string, bool) error { return nil }
+func (fakeBE) SetBoot(string, bool) error               { return nil }
+func (fakeBE) MovePorts(string, string, []string) error { return nil }
 func (fakeBE) Carriers(string) (int64, string, []string, []string) {
 	return 0, "", nil, nil
 }
@@ -94,7 +95,7 @@ func (fakeBE) KharejCall(via, cmd string, args map[string]any) (map[string]any, 
 	fakeCalls = append(fakeCalls, "kharej "+cmd)
 	return map[string]any{}, "", nil
 }
-func (fakeBE) KharejCreate(via, n, c, p string) (string, error) { return "wat1:new", nil }
+func (fakeBE) KharejCreate(via, n, c, p, d string) (string, error) { return "wat1:new", nil }
 func (fakeBE) KharejKeyRotate(via, n string) (string, string, error) {
 	fakeCalls = append(fakeCalls, "keyrotate "+n)
 	return n, "wat1:rot", nil

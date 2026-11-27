@@ -69,6 +69,7 @@ Usage: $SELF [command]
   auto-optimize         run off-peak carrier re-evaluation for auto tunnels
   auto-test NAME        test every connection type again for an auto Iran tunnel, offer to switch
   auto-ip NAME IP       auto Kharej tunnel: set Iran's IP by hand (creates internal reverse companion)
+  move-ports FROM TO "8443:443[,53/udp]"  move port mappings between Iran tunnels (adds them to TO's Kharej allowlist when paired)
   auto-use NAME "LABEL[,LABEL]"  switch an auto Iran tunnel to tested variants by their result labels, no re-test (several = a bond)
   bond-mode NAME MODE   bonded tunnel: balanced, active-backup or replicate, then restart
   bond-retest NAME      bonded Iran tunnel: re-test every leg plus the last failures and add one that works again

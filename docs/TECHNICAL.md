@@ -542,6 +542,7 @@ wattun auto-test NAME  # re-run the Auto mode test
 wattun cdn-tune NAME   # re-tune a Cloudflare tunnel
 wattun auto-ip NAME IP # tell an auto tunnel Iran's IP (on Kharej)
 wattun bond-retest NAME        # bonded Iran tunnel: re-test its legs and add one that works again
+wattun move-ports FROM TO "8443:443,53/udp" # move port mappings between Iran tunnels (4.0.3)
 wattun auto-use NAME "tcp :443"            # switch an auto Iran tunnel to a tested variant by its result label, no re-test
 wattun auto-use NAME "tcp :443,udp :51820" # several labels of one kind (direct or reverse) = a bond
 wattun bond-mode NAME balanced|active-backup|replicate  # bonded tunnel: set bond-mode and restart
@@ -1443,6 +1444,12 @@ keeps all test carriers open automatically in the background and prints one toke
   when `--cdn-domain` is set, in which case CDN carriers (`wss`, `grpc`, `h2`, `ws`, `h2c`) pick non-443/80 Cloudflare
   proxyable ports (`2053`, `2083`, `2087`, `2096`, `8443` for HTTPS; `2052`, `2082`, `2086`, `2095`, `8880`, `8080` for
   HTTP — falling back to a random open port with an Origin Rules note if all Cloudflare ports are busy).
+  The Go manager of 3.3.9-4.0.2 left `wss`, `h2` and `grpc` out of this list and ignored `--cdn-domain` when it picked
+  ports, so an auto tunnel had no direct rows for them and the test never had a CDN row, domain or not (4.0.3 fixes
+  both; re-create such a tunnel on Kharej with the domain). The CDN rows need the domain at creation on Kharej: a
+  domain given only on Iran cannot help, because the CDN carriers then sit on random ports Cloudflare does not proxy.
+  The panel's *On Kharej and here* form has a *Cloudflare domain* field for auto tunnels (sent as `params.sni` of
+  `tunnel.create`; an older Kharej ignores it and makes the tunnel without CDN ports).
 - **Raw-IP carriers** (`icmp`, `gre`, `ipip`): bare carrier entries with no listen port (`gre`/`ipip` arrived in 3.2.0).
 
 **Token.** `wat1:` + base64 of `carrier|peer|key|path|sni|icmp-type|allowed-ports|reverse|plan`. Field 9 (`plan`) looks
@@ -3663,6 +3670,19 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
   which rebuilds the variants from the tunnel's auto plan and applies them without testing again (no tuning pass;
   the engine's auto values apply). Other jobs show their last steps, the current one pulsing; the raw log is one
   click away.
+- **Tune** (4.0.3) runs the manager's own tools as jobs, each applying its best result: *Find best anti-censorship*
+  (`wattun matrix NAME --yes`, every fake-SNI x mode x ECH combination; Iran pool carriers, not reverse), *Tune
+  Cloudflare path* (`wattun cdn-tune NAME --yes`; Iran CDN carriers with a domain), *Re-test bond legs*
+  (`bond-retest`) and *Reset traffic* (`reset-traffic`). Route: `POST /api/tunnels/NAME/tool {op}` with op
+  `acmatrix|cdntune|bondretest|resettraffic`.
+- **Move ports** (Iran, 4.0.3) moves ticked mappings to another Iran tunnel (`POST /api/tunnels/NAME/move-ports
+  {to, ports}`, CLI `wattun move-ports`). A paired target gets the missing target ports added to its Kharej
+  allowlist first (`tunnel.edit`, which restarts that Kharej unit); an unpaired one must already allow them. The
+  source drops the ports before the target takes them (both cannot listen on one port) and gets them back if the
+  target's write fails. The source keeps at least one port.
+- **System → Speed and access** (4.0.3): kernel speed boost and its undo (`boost --yes|--undo`), re-test every auto
+  tunnel now (`auto-optimize`), and the Iran-only client firewall on or off (`iran-firewall on|off`). Route:
+  `POST /api/server-tool {op}` with op `boost|boost-undo|optimize|fw-on|fw-off`.
 - **Change carrier** (Iran auto tunnels, 4.0.2) opens the last carrier test again, from
   `GET /api/tunnels/NAME/carriers` (`{at, preset, rows, use}`): the same table, the rows the tunnel runs on marked
   *in use*, and the same tick-and-Switch, so changing the carrier needs no new test. The manager keeps every finished

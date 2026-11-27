@@ -1,6 +1,7 @@
 package mgr
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -108,5 +109,34 @@ func TestAutoTestTakesTestFlag(t *testing.T) {
 	Run([]string{"auto-test", "no-such-tunnel", "--yes", "--test", "reverse", "--pick", "bond"})
 	if NI.Test != "reverse" || NI.Pick != "bond" {
 		t.Fatalf("NI.Test=%q NI.Pick=%q, want reverse/bond", NI.Test, NI.Pick)
+	}
+}
+
+// 4.0.3: with a domain, Kharej puts wss/grpc on Cloudflare ports and Iran's normal test gets CDN rows. The 3.3.9 Go
+// port lost wss/h2/grpc from the direct plan, so no auto tunnel ever had a CDN row.
+func TestAutoCDNPortsGiveCDNRows(t *testing.T) {
+	atSetupPresets(t)
+	oldR, oldC := envRandOpenPort, envPickCFPort
+	defer func() { envRandOpenPort, envPickCFPort = oldR, oldC }()
+	n := 20000
+	envRandOpenPort = func(string, []string) (int, error) { n++; return n, nil }
+	cf := map[string]int{"wss": 2053, "grpc": 2083, "h2": 2087, "ws": 8880, "h2c": 2052}
+	envPickCFPort = func(c string, _ []string) (int, bool, error) { return cf[c], false, nil }
+	r := autoPickPorts(true)
+	for c, p := range cf {
+		if planPort(r.D, c) != strconv.Itoa(p) {
+			t.Errorf("plan %q: %s should sit on %d", r.D, c, p)
+		}
+	}
+	atPreset = "normal"
+	autoVariants(Token{Carrier: "auto", Peer: "203.0.113.10", SNI: "cf.example.com", Auto: "d=" + r.D + ";r=tcp:24431"})
+	var cdn []string
+	for _, v := range av {
+		if v.Kind == "c" {
+			cdn = append(cdn, v.Label)
+		}
+	}
+	if len(cdn) != 2 {
+		t.Errorf("CDN rows = %q, want wss and grpc", cdn)
 	}
 }

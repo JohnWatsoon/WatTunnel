@@ -430,10 +430,10 @@ func (mgrBackend) KharejCall(via, cmd string, args map[string]any) (map[string]a
 	return mgr.KharejCall(via, cmd, args)
 }
 
-func (mgrBackend) KharejCreate(via, name, carrier, ports string) (string, error) {
+func (mgrBackend) KharejCreate(via, name, carrier, ports, domain string) (string, error) {
 	kharejMu.Lock()
 	defer kharejMu.Unlock()
-	return mgr.KharejCreate(via, name, carrier, ports)
+	return mgr.KharejCreate(via, name, carrier, ports, domain)
 }
 
 func (mgrBackend) KharejKeyRotate(via, name string) (string, string, error) {
@@ -453,6 +453,12 @@ func (mgrBackend) ApplySettings(name string, set map[string]string) error {
 }
 
 func (mgrBackend) SetBoot(name string, on bool) error { return mgr.SetBoot(name, on) }
+
+func (mgrBackend) MovePorts(from, to string, specs []string) error {
+	kharejMu.Lock()
+	defer kharejMu.Unlock()
+	return mgr.MovePorts(from, to, specs)
+}
 
 func (mgrBackend) Carriers(name string) (int64, string, []string, []string) {
 	at, pr, rows := mgr.AutoResults(name)

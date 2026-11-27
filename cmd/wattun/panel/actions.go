@@ -25,6 +25,9 @@ import (
 
 var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$`)
 
+// domainRe: a DNS name with at least one dot (the Cloudflare domain of an auto tunnel).
+var domainRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
+
 func (s *Server) tunnel(name string) (Tunnel, bool) {
 	for _, t := range s.be.Tunnels() {
 		if t.Name == name {
@@ -467,6 +470,75 @@ func (s *Server) apiDiagnose(c *call) {
 	s.jobReply(c, "diagnose", c.arg[0], id, err)
 }
 
+// apiMovePorts moves port mappings to another Iran tunnel (4.0.3).
+func (s *Server) apiMovePorts(c *call) {
+	var in struct {
+		To    string
+		Ports []string
+	}
+	if c.json(&in) != nil || len(in.Ports) == 0 {
+		c.fail(http.StatusBadRequest, "Tick at least one port.")
+		return
+	}
+	f, ok := s.tunnel(c.arg[0])
+	t, ok2 := s.tunnel(in.To)
+	if !ok || !ok2 || f.Role != "Iran" || t.Role != "Iran" {
+		c.fail(http.StatusBadRequest, "Ports move between two Iran tunnels.")
+		return
+	}
+	err := s.be.MovePorts(f.Name, t.Name, in.Ports)
+	s.audit(c, "move-ports", f.Name+" -> "+t.Name+" "+strings.Join(in.Ports, ","), errText(err))
+	if err != nil {
+		c.fail(http.StatusBadRequest, err.Error())
+		return
+	}
+	c.ok(map[string]any{"ok": true, "note": "Moved to " + t.Name + ". Both tunnels pick it up within a few seconds."})
+}
+
+// The manager's tuning tools as panel jobs (4.0.3): each runs unattended and applies its own best result.
+var tunnelTools = map[string]struct{ title, cmd string }{
+	"acmatrix":     {"Find the best anti-censorship for ", "matrix"},
+	"cdntune":      {"Tune the Cloudflare path of ", "cdn-tune"},
+	"bondretest":   {"Re-test the bond legs of ", "bond-retest"},
+	"resettraffic": {"Reset the traffic counters of ", "reset-traffic"},
+}
+
+func (s *Server) apiTunnelTool(c *call) {
+	var in struct{ Op string }
+	_ = c.json(&in)
+	tool, known := tunnelTools[in.Op]
+	t, ok := s.tunnel(c.arg[0])
+	if !known || !ok || (in.Op != "resettraffic" && t.Role != "Iran") {
+		c.fail(http.StatusBadRequest, "That tool runs on an Iran tunnel.")
+		return
+	}
+	id, err := s.jobs.run("tool", tool.title+t.Name, c.sess.User, s.be.ManagerArgv(tool.cmd, t.Name, "--yes"))
+	s.jobReply(c, tool.cmd, t.Name, id, err)
+}
+
+var serverTools = map[string]struct {
+	title string
+	argv  []string
+}{
+	"boost":      {"Kernel speed boost (BBR, 64 MB buffers, FQ)", []string{"boost", "--yes"}},
+	"boost-undo": {"Undo the kernel speed boost", []string{"boost", "--undo", "--yes"}},
+	"optimize":   {"Re-test every auto tunnel now", []string{"auto-optimize"}},
+	"fw-on":      {"Iranian addresses only on the client ports", []string{"iran-firewall", "on", "--yes"}},
+	"fw-off":     {"Every address on the client ports", []string{"iran-firewall", "off", "--yes"}},
+}
+
+func (s *Server) apiServerTool(c *call) {
+	var in struct{ Op string }
+	_ = c.json(&in)
+	tool, known := serverTools[in.Op]
+	if !known {
+		c.fail(http.StatusBadRequest, "unknown tool")
+		return
+	}
+	id, err := s.jobs.run("tool", tool.title, c.sess.User, s.be.ManagerArgv(tool.argv...))
+	s.jobReply(c, in.Op, "here", id, err)
+}
+
 // apiCarriers is the tunnel's last carrier test, kept by the manager, so a switch needs no new test (4.0.2).
 func (s *Server) apiCarriers(c *call) {
 	t, ok := s.tunnel(c.arg[0])
@@ -572,7 +644,7 @@ var kharejCarriers = map[string]bool{"auto": true, "wss": true, "grpc": true, "t
 	"reverse-h2": true, "reverse-h2c": true, "reverse-udp": true}
 
 func (s *Server) apiNew(c *call) {
-	var in struct{ Where, Token, Map, Name, Via, Carrier, Test, Pick string }
+	var in struct{ Where, Token, Map, Name, Via, Carrier, Test, Pick, Domain string }
 	if c.json(&in) != nil {
 		c.fail(http.StatusBadRequest, "bad request")
 		return
@@ -588,6 +660,11 @@ func (s *Server) apiNew(c *call) {
 	}
 	if !testPresets[in.Test] || !picks[in.Pick] {
 		c.fail(http.StatusBadRequest, "unknown test preset or pick")
+		return
+	}
+	in.Domain = strings.ToLower(strings.TrimSpace(in.Domain))
+	if in.Domain != "" && (in.Carrier != "auto" || !domainRe.MatchString(in.Domain)) {
+		c.fail(http.StatusBadRequest, "Cloudflare domain: a name like cdn.example.com, for an auto tunnel.")
 		return
 	}
 	iranArgs := func(tok string) []string {
@@ -635,7 +712,7 @@ func (s *Server) apiNew(c *call) {
 		}
 		id, err := s.jobs.doID("create", "New tunnel on Kharej and here", c.sess.User, func(id string, say func(string, ...any)) error {
 			say("Creating the tunnel on Kharej (%s, ports %s) ...", in.Carrier, strings.Join(kports, ","))
-			tok, err := s.be.KharejCreate(viaName, in.Name, in.Carrier, strings.Join(kports, ","))
+			tok, err := s.be.KharejCreate(viaName, in.Name, in.Carrier, strings.Join(kports, ","), in.Domain)
 			if err != nil {
 				return err
 			}

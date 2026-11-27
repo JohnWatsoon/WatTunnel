@@ -960,6 +960,8 @@ if [ -t 0 ] && [ -t 1 ]; then
              case "$a" in
                n|N) hint "Later: wattun panel on" ;;
                *) echo; "$BIN" panel on || warn "Web panel could not start. Try later: wattun panel on"
+                  # drop keys typed ahead (the Enter after y) so they cannot skip this pause and the password with it
+                  while IFS= read -rs -t 0.2 -n 1 _; do :; done
                   echo; printf '  %sSave the login above, it is shown once. Press Enter to continue.%s' "$GRY" "$RST"
                   IFS= read -r _ || true; echo ;;
              esac

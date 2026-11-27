@@ -313,6 +313,16 @@ func runCommand(cmd string, args []string) int {
 			return 0
 		}
 		return dispatch("auto_use", posNI(args, 0), posNI(args, 1))
+	case "move-ports":
+		if !NeedTunnel(posNI(args, 0)) || !NeedTunnel(posNI(args, 1)) {
+			return 1
+		}
+		if err := MovePorts(posNI(args, 0), posNI(args, 1), strings.Split(posNI(args, 2), ",")); err != nil {
+			Err(err.Error())
+			return 1
+		}
+		Ok("Moved. Both tunnels pick the change up within a few seconds, no restart.")
+		return 0
 	case "bond-mode":
 		if !NeedTunnel(posNI(args, 0)) {
 			return 1

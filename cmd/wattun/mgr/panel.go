@@ -190,6 +190,8 @@ func panelPrint(cfg *panel.Config, pass string) {
 	fmt.Fprintf(Stdout, "  %sUsername%s  %s\n", GRY, RST, cfg.User)
 	if pass != "" {
 		fmt.Fprintf(Stdout, "  %sPassword%s  %s%s%s   %s(shown once; `%s panel reset` makes a new one)%s\n", GRY, RST, BOLD+YEL, pass, RST, GRY, P.Self, RST)
+	} else { // stored hashed, so it cannot be shown again
+		fmt.Fprintf(Stdout, "  %sPassword%s  %sthe one shown when the panel was first turned on; forgot it? `%s panel reset`%s\n", GRY, RST, GRY, P.Self, RST)
 	}
 	twofa := "off · turn it on in the panel (Settings) or with `" + P.Self + " panel 2fa`"
 	if cfg.TOTP != "" {

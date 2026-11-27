@@ -53,7 +53,7 @@ func wireSystem() {
 		}
 		return fmt.Sprint(p)
 	}
-	envRandOpenPort = randOpenPort
+	envRandOpenPort, envPickCFPort = randOpenPort, pickCFPort
 	p2ShapedSupported = shapedSupportedLive
 	envSystemdRun = systemdRun
 	envLogger = func(tag, msg string) { _ = exec.Command("logger", "-t", tag, msg).Run() }

@@ -196,8 +196,11 @@ func SetPortLimit(name, port, rate, quota, period string) error {
 // KharejCreate creates tunnel NAME (empty: Kharej picks) on Kharej through VIA, carrying CARRIER and allowing the
 // target PORTS ("18999,2000"), and returns the token for this side. CARRIER "reverse-tcp" (any rpool carrier) makes
 // Kharej dial this server instead, on a random free port here, for paths where Iran cannot reach Kharej.
-func KharejCreate(via, name, carrier, ports string) (string, error) {
+func KharejCreate(via, name, carrier, ports, domain string) (string, error) {
 	var params map[string]string
+	if domain != "" && carrier == "auto" { // 4.0.3: Kharej opens wss/grpc on Cloudflare ports; an older Kharej ignores it
+		params = map[string]string{"sni": domain}
+	}
 	if rc, ok := strings.CutPrefix(carrier, "reverse-"); ok {
 		ip := PublicIPCached()
 		if !IsRpool(rc) || ip == "" {

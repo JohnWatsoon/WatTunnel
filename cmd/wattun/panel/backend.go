@@ -14,6 +14,8 @@ type Backend interface {
 	// Actions (phase 2). Each is the console's own function; the panel only asks and shows.
 	Unit(name, action string) error // start | stop | restart a tunnel here
 	SetPorts(name string, specs []string) error
+	// MovePorts moves mappings from one Iran tunnel to another, opening them on the target's Kharej first (4.0.3).
+	MovePorts(from, to string, specs []string) error
 	SetLimit(name, port, rate, quota, period string) error
 	SpeedTest(name, dir string, mb int) (Speed, error)
 	Token(name string) string
@@ -23,7 +25,7 @@ type Backend interface {
 	// KharejCall runs one pairing command through local tunnel VIA; refused is the console's plain-words
 	// refusal ("" = done).
 	KharejCall(via, cmd string, args map[string]any) (params map[string]any, refused string, err error)
-	KharejCreate(via, name, carrier, ports string) (token string, err error)
+	KharejCreate(via, name, carrier, ports, domain string) (token string, err error) // domain: auto only, "" = none
 	KharejKeyRotate(via, name string) (local, token string, err error)
 	KharejBackup(params map[string]any) ([]byte, error)
 	RestartSelf() // restart the panel's own unit (after a certificate or port change)

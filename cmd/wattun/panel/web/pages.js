@@ -325,7 +325,8 @@ async function bulk(a){
 const TESTF={k:'test',label:'Carrier test',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]};
 P.newTunnel=()=>newTunnel();
 // the carrier test only runs for an auto tunnel: a token from Kharej may be one, a carrier picked here is not
-const testVis=inp=>{inp.test&&(inp.test.closest(".fld").hidden=inp.where&&inp.where.value==='both'&&inp.carrier&&inp.carrier.value!=='auto')};
+const testVis=inp=>{const notAuto=inp.where&&inp.where.value==='both'&&inp.carrier&&inp.carrier.value!=='auto';inp.test&&(inp.test.closest(".fld").hidden=notAuto);
+  inp.domain&&(inp.domain.closest(".fld").hidden=notAuto||!inp.where||inp.where.value!=='both')};
 async function newTunnel(){
   const ov=S.ov||{tunnels:[],kharej:[]};const vias=(ov.kharej||[]).filter(k=>k.online);
   const fields=[{k:'where',label:'Where',options:vias.length?[['both','On Kharej and here, in one go'],['here','Here only, from a token']]:[['here','Here only, from a token']],
@@ -337,6 +338,7 @@ async function newTunnel(){
       onchange:(v,inp)=>testVis(inp)},
     {k:'map',label:'Ports',ph:'39901:18999, 8443:443',hint:'public port here : port on Kharej, comma-separated'},
     {k:'name',label:'Name (empty = automatic)'},
+    {k:'domain',label:'Cloudflare domain (optional)',ph:'cdn.example.com',hint:'proxied to Kharej (orange cloud, SSL Full); the test then tries wss and grpc through Cloudflare'},
     {k:'test',label:'Carrier test',options:[['normal','normal'],['fast','fast'],['anti','anti-censor grid'],['reverse','reverse only'],['extended','extended (shaped carriers too)']]}];
   await act('new',{title:'New tunnel',fields,ok:'Create'});
 }
@@ -383,7 +385,13 @@ P.onDrawer=async(name,t)=>{
     t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches; pick bond to join the best ones.',title:'Re-test carriers',fields:[TESTF],ok:'Start the test'})),
     t.role==='Iran'&&btn('Change carrier','sec',()=>changeCarrier(name)),
     btn('Diagnose','sec',()=>act('tunnels/'+enc(name)+'/diagnose'))]);
-  grp('Configure',[btn('Ports','sec',()=>editPorts(name,t)),btn('Limit a port','sec',()=>limitPort(name))]);
+  const cdnc=/^(ws|wss|h2|h2c|grpc)$/.test(t.carrier||''),pool=/^(tcp|tls|ws|wss|h2|h2c|grpc)(\+(tcp|tls|ws|wss|h2|h2c|grpc))*$/.test(t.carrier||'');
+  const tool=(op,label,confirm)=>btn(label,'sec',()=>act('tunnels/'+enc(name)+'/tool',{body:{op},title:label,confirm,ok:'Start'}));
+  grp('Tune',[t.role==='Iran'&&!t.reverse&&pool&&tool('acmatrix','Find best anti-censorship','Tests every fake-SNI, desync mode and ECH combination on this route and applies the fastest. Takes a few minutes; the tunnel restarts once at the end.'),
+    t.role==='Iran'&&!t.reverse&&cdnc&&tool('cdntune','Tune Cloudflare path','Finds the Cloudflare edges that serve this tunnel\'s domain, with ECH and TLS settings, and applies the best. Needs a domain on the tunnel.'),
+    t.role==='Iran'&&/\+/.test(t.carrier||'')&&tool('bondretest','Re-test bond legs','Tests every leg again plus the ones that failed before, and adds one that works again.'),
+    tool('resettraffic','Reset traffic','Zeroes the lifetime traffic counters of this tunnel. It restarts.')]);
+  grp('Configure',[btn('Ports','sec',()=>editPorts(name,t)),t.role==='Iran'&&btn('Move ports','sec',()=>movePorts(name,t)),btn('Limit a port','sec',()=>limitPort(name))]);
   if(/\+/.test(t.carrier||''))bondBlock(a,name);
   grp('Keys and pairing',[btn('Show token','sec',()=>showToken(name)),t.paired&&btn('Forget pairing','sec danger',()=>act('tunnels/'+enc(name)+'/pair-forget',{full:true,danger:true,title:'Forget the pairing of '+name,confirm:'Turns off the management channel of '+name+' (pairing: false) and restarts it. The tunnel keeps working; Kharej is then managed from its own console until you pair again.'}).then(r=>{if(r){toast('Pairing forgotten');P.loadOverview()}}))]);
   grp('Danger',[btn('Delete','sec danger',()=>deleteTunnel(name,t))]);
@@ -433,7 +441,7 @@ async function settingsBlock(name,t){
   if(st.presets&&st.presets.length){
     const aw=el('div','swell acw'),hd=el('div','sw-txt');
     hd.append(el('b',null,'Anti-censorship'),el('span','lab',st.ac_where==='kharej'?'Reverse tunnel: Kharej dials, so the preset is set there':'now: '+(st.ac_now||'none')));
-    const ch=el('div','ochips');
+    const ch=el('div','ochips tiles');
     st.presets.forEach(p=>{const b=el('button','och'+(st.ac_where==='here'&&acMatch(st.ac_now,p.value)?' on':''),p.label);b.type='button';if(p.hint)b.title=p.hint;
       b.onclick=()=>act('tunnels/'+enc(name)+'/ac-preset',{body:{preset:p.value},title:'Anti-censorship: '+p.label,confirm:(p.hint?p.hint[0].toUpperCase()+p.hint.slice(1)+'. ':'')+(st.ac_where==='kharej'?'Kharej applies it and restarts its side; it rolls back if the tunnel does not come up.':name+' restarts with it; open connections drop for a few seconds.'),ok:'Apply'}).then(x=>{if(x){toast('Preset '+p.label+(x.job?' is being applied':' applied on Kharej'));setTimeout(()=>{if(S.drawer===name)settingsBlock(name,t)},x.job?6000:1500)}});
       ch.appendChild(b)});
@@ -494,6 +502,14 @@ function renderDrawerPorts(name,ports){
 }
 async function editPorts(name,t){const v=await ask('Ports of '+name,{fields:[{k:'ports',label:'One mapping per line: 443, 8443:443, 53/udp',area:true,rows:6,value:(t.ports||[]).join('\n')}],ok:'Save'});
   if(!v)return;const r=await act('tunnels/'+enc(name)+'/ports',{method:'PUT',body:{ports:v.ports.split(/[\n,]+/).map(x=>x.trim()).filter(Boolean)}});if(r){toast(r.note||'Saved');P.loadOverview()}}
+// move ports to another Iran tunnel; a paired target gets them added on its Kharej first (4.0.3)
+async function movePorts(name,t){
+  const ps=t.ports||[],to=((S.ov&&S.ov.tunnels)||[]).filter(x=>x.role==='Iran'&&x.name!==name);
+  if(ps.length<2||!to.length){toast(ps.length<2?name+' has one port; a tunnel keeps at least one.':'No other Iran tunnel to move to.',true);return}
+  const fields=[{k:'to',label:'Move to',options:to.map(x=>[x.name,x.name+' · '+x.carrier])}].concat(ps.map((p,i)=>({k:'p'+i,label:p,check:true})));
+  const v=await ask('Move ports of '+name,{text:'Tick the ports to move. The other tunnel takes them over within seconds, no restart.',fields,ok:'Move'});if(!v)return;
+  const ports=ps.filter((p,i)=>v['p'+i]);if(!ports.length){toast('Tick at least one port.',true);return}
+  const r=await act('tunnels/'+enc(name)+'/move-ports',{body:{to:v.to,ports}});if(r){toast(r.note);P.loadOverview()}}
 async function limitPort(name){const v=await ask('Limit a port of '+name,{fields:[{k:'port',label:'Port',mode:'numeric'},{k:'rate',label:'Rate, for example 10mbit (empty = none)'},{k:'quota',label:'Quota, for example 50G (empty = none)'},{k:'period',label:'Quota resets every',options:[['month','month'],['week','week'],['day','day']]}],ok:'Save'});
   if(!v)return;if(await act('tunnels/'+enc(name)+'/limit',{method:'PUT',body:v})){toast('Saved. Limits apply within seconds.');portsAt=0}}
 async function showToken(name){const r=await act('tunnels/'+enc(name)+'/token',{full:true,title:'Show the token of '+name});if(!r)return;
@@ -676,6 +692,12 @@ async function loadSystem(){
     btn('Update this server','sec',()=>act('update',{full:true,title:'Update this server',confirm:'Downloads the latest release, checks its signature, swaps the binary and restarts the tunnels and this panel. Open connections drop for a few seconds.'})),
     btn('Roll back','sec ic danger push',()=>act('rollback',{full:true,title:'Roll back',confirm:'Goes back to the previous version and restarts the tunnels and this panel.',danger:true})));
   vr.append(el('p','note',behind?'Update all does the Kharej servers first, then this one; the page reconnects by itself.':'Every server runs the newest release.'),vt);g.appendChild(vr);
+  // the manager's server tools (4.0.3)
+  const st=card('s2','Speed and access','kernel tuning, auto tunnels, who may connect');const stool=(op,label,cls,confirm)=>btn(label,cls,()=>act('server-tool',{body:{op},title:label,confirm,ok:'Start'}));
+  const sw=el('div','tools');sw.append(stool('boost','Kernel speed boost','pri','Turns on BBR, 64 MB socket buffers and FQ on this server. Safe to run again; Undo puts the old values back.'),stool('boost-undo','Undo boost','sec','Puts the kernel settings back as they were before the boost.'),
+    stool('optimize','Re-test auto tunnels','sec','Tests every auto tunnel again now, as the night run does, and switches where a carrier is clearly better.'),
+    stool('fw-on','Iran-only clients','sec','Only Iranian addresses may connect to the client ports of this server. Others are dropped by the firewall.'),stool('fw-off','Allow every address','sec','Removes the Iran-only rule from the client ports.'));
+  st.appendChild(sw);g.appendChild(st);
   // backups
   const bk=card('s2','Backups','settings and keys of this server',btn('Back up now','pri',async()=>{if(await act('backups'))setTimeout(loadSystem,1500)}));
   const tl=el('div','btl');const list=b.ok?b.j.backups:[];

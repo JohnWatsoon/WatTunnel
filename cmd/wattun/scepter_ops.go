@@ -233,7 +233,7 @@ func (o *fileScepterOps) refuseSelf(name string) (map[string]any, int) {
 
 // createAuto: carrier "auto" is the manager's Kharej auto tunnel (every carrier at once plus the test plan in its
 // token), so Kharej runs its own manager unattended and hands back the token; Iran then tests and picks (3.6.1).
-func (o *fileScepterOps) createAuto(name, ports string) (map[string]any, int) {
+func (o *fileScepterOps) createAuto(name, ports, cdn string) (map[string]any, int) {
 	if p := o.capFull(16); p != nil { // an auto tunnel brings up to 15 helpers
 		return p, wat.CodeRateLimited
 	}
@@ -243,7 +243,11 @@ func (o *fileScepterOps) createAuto(name, ports string) (map[string]any, int) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "kharej", "--carrier", "auto", "--name", name, "--ports", ports, "--yes")
+	argv := []string{"kharej", "--carrier", "auto", "--name", name, "--ports", ports, "--yes"}
+	if cdn != "" { // the Cloudflare domain (4.0.3): CDN carriers on Cloudflare ports, the domain in the token
+		argv = append(argv, "--cdn-domain", cdn)
+	}
+	cmd := exec.CommandContext(ctx, bin, argv...)
 	cmd.Env = append(os.Environ(), "WAT_CONF="+o.conf, "NONINTERACTIVE=1", "NO_COLOR=1", "WAT_NO_ANIM=1")
 	out, err := cmd.CombinedOutput()
 	tok := ""
@@ -282,7 +286,7 @@ func (o *fileScepterOps) Create(spec wat.ScepterTunnelSpec) (map[string]any, int
 		return p, code
 	}
 	if spec.Carrier == "auto" {
-		return o.createAuto(name, spec.Ports)
+		return o.createAuto(name, spec.Ports, spec.Params["sni"])
 	}
 	if code, p := o.checkCarrier(spec.Carrier); code != wat.CodeOK {
 		return p, code

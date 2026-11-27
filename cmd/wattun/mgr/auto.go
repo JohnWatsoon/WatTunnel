@@ -29,11 +29,15 @@ import (
 // =====================================================================================
 
 var (
-	envRandOpenPort    = func(proto string, excl []string) (int, error) { return 0, fmt.Errorf("no free port") } // bash rand_open_port
-	envFreeMetricsPort = func() int { return 19750 }                                                             // bash free_metrics_port
-	envPublicIP        = func() string { return "" }                                                             // bash public_ip
-	envFWOpen          = func(specs ...string) {}                                                                // bash fw_open
-	envFWClose         = func(specs ...string) {}                                                                // bash fw_close
+	envRandOpenPort = func(proto string, excl []string) (int, error) { return 0, fmt.Errorf("no free port") } // bash rand_open_port
+	envPickCFPort   = func(c string, excl []string) (int, bool, error) {
+		p, err := envRandOpenPort("tcp", excl)
+		return p, true, err
+	} // bash pick_cf_cdn_port
+	envFreeMetricsPort = func() int { return 19750 } // bash free_metrics_port
+	envPublicIP        = func() string { return "" } // bash public_ip
+	envFWOpen          = func(specs ...string) {}    // bash fw_open
+	envFWClose         = func(specs ...string) {}    // bash fw_close
 	envSystemdRun      = func(unit string, maxSec int, args ...string) error { return fmt.Errorf("systemd-run") }
 	envLogger          = func(tag, msg string) {} // bash logger -t
 	envSpawnClient     = func(args []string, logFile string) (clientProc, error) {
@@ -62,7 +66,7 @@ const autoTuneBondPool = "conns:4,8,32,64"
 const autoTuneReverse = "conns:4,8,32" // -sessions is refused in reverse mode
 const autoTunePool = "sessions:1,2,4,8,16 conns:4,8,32,64"
 
-const autoVarDirect = "icmp udp tcp tls ws h2c gre ipip"
+const autoVarDirect = "icmp udp tcp tls wss h2 grpc ws h2c gre ipip" // bash AUTO_VAR_DIRECT (3.3.9-4.0.2 lost wss h2 grpc)
 const autoVarCDN = "wss grpc"
 const autoVarReverse = "icmp tcp tls ws wss h2 h2c grpc"
 const autoVarAnti = "tcp tls wss h2 grpc ws h2c"
@@ -441,7 +445,16 @@ func autoPickPorts(cdnMode bool) autoPickPortsResult {
 			list = append(list, c)
 			continue
 		}
-		pick, err := envRandOpenPort(rprotoOf(c), intKeys(used))
+		var pick int
+		var err error
+		if cdnMode && isCDNCarrier(c) { // a Cloudflare-proxyable port, so Iran can test the domain (bash 4453)
+			var fallback bool
+			if pick, fallback, err = envPickCFPort(c, intKeys(used)); err == nil && fallback {
+				r.Note += fmt.Sprintf("  %s: the non-443/80 Cloudflare ports are busy, using random port %d (needs a Cloudflare Origin Rule).\n", c, pick)
+			}
+		} else {
+			pick, err = envRandOpenPort(rprotoOf(c), intKeys(used))
+		}
 		if err != nil {
 			r.FAIL = fmt.Sprintf("%s (%s)", c, rprotoOf(c))
 			return r
