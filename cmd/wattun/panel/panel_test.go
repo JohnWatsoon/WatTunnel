@@ -50,6 +50,17 @@ func setFakeKharej(k []Kharej) {
 	fakeKhMu.Unlock()
 }
 func (fakeBE) Pairing() (string, string) { return "", "" }
+func (fakeBE) Settings(string) any       { return map[string]any{"options": []any{}} }
+func (fakeBE) ApplySettings(n string, set map[string]string) error {
+	if set["mtu"] == "1" {
+		return fmt.Errorf("Packet size (MTU): enter a whole number from 256 to 1500 B")
+	}
+	return nil
+}
+func (fakeBE) SetBoot(string, bool) error { return nil }
+func (fakeBE) ACPreset(n, p string) ([]string, error) {
+	return []string{"preset", n, p}, nil
+}
 
 // fake action state: what the actions called (the panel must only ever call these)
 var (

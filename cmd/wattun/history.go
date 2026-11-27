@@ -21,6 +21,13 @@ type historySample struct {
 	LossPct *float64 `json:"loss_pct,omitempty"` // pointer: 0 is "not measured yet", not a measured zero
 	Streams int      `json:"streams"`
 	Alive   bool     `json:"alive"`
+	// Totals since start (4.0.1): the panel plots real traffic from their deltas (rate_bps is the pacing rate, not
+	// traffic) and loss as retrans/pkts_out over its window (loss_pct is one cc interval, so a quiet interval reads
+	// as 60 %). Older binaries omit them; the panel then falls back to rate_bps.
+	BytesIn  uint64 `json:"bytes_in"`
+	BytesOut uint64 `json:"bytes_out"`
+	PktsOut  uint64 `json:"pkts_out"`
+	Retrans  uint64 `json:"retrans"`
 }
 
 type statsHistory struct {

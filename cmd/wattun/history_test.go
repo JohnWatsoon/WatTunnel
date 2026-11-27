@@ -22,7 +22,7 @@ func TestHistoryRing(t *testing.T) {
 	}
 }
 
-// TestHistoryJSON: stable JSON shape, loss_pct omitted when unset, empty ring marshals as [].
+// TestHistoryJSON: stable JSON shape, loss_pct omitted when unset, byte totals always present (the panel tells a 4.0.1 engine by them), empty ring marshals as [].
 func TestHistoryJSON(t *testing.T) {
 	var b []byte
 	var err error
@@ -35,8 +35,8 @@ func TestHistoryJSON(t *testing.T) {
 	lp := 1.25
 	h.add(historySample{T: 1732161000, RateBps: 5e6, SrttMs: 42.5, LossPct: &lp, Streams: 3, Alive: true})
 	h.add(historySample{T: 1732161005, RateBps: 4e6, SrttMs: 40, Streams: 0, Alive: false})
-	want := `[{"t":1732161000,"rate_bps":5000000,"srtt_ms":42.5,"loss_pct":1.25,"streams":3,"alive":true},` +
-		`{"t":1732161005,"rate_bps":4000000,"srtt_ms":40,"streams":0,"alive":false}]`
+	want := `[{"t":1732161000,"rate_bps":5000000,"srtt_ms":42.5,"loss_pct":1.25,"streams":3,"alive":true,"bytes_in":0,"bytes_out":0,"pkts_out":0,"retrans":0},` +
+		`{"t":1732161005,"rate_bps":4000000,"srtt_ms":40,"streams":0,"alive":false,"bytes_in":0,"bytes_out":0,"pkts_out":0,"retrans":0}]`
 	if b, err = json.Marshal(h.snapshot()); err != nil || string(b) != want {
 		t.Fatalf("json:\n got %s\n want %s (%v)", b, want, err)
 	}

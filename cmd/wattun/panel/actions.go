@@ -384,6 +384,89 @@ func (s *Server) apiUse(c *call) {
 	s.jobReply(c, "switch carrier "+what, t.Name, id, err)
 }
 
+// The Settings tab (4.0.1). Every change goes through the console's own checks (mgr.ApplySettings, the preset
+// and diagnose commands); the panel only shows the choices.
+func (s *Server) apiTunnelSettings(c *call) {
+	if _, ok := s.tunnel(c.arg[0]); !ok {
+		c.fail(http.StatusNotFound, "no such tunnel")
+		return
+	}
+	c.ok(s.be.Settings(c.arg[0]))
+}
+
+func (s *Server) apiTunnelSettingsSet(c *call) {
+	var in struct{ Set map[string]string }
+	if _, ok := s.tunnel(c.arg[0]); !ok || c.json(&in) != nil || len(in.Set) == 0 || len(in.Set) > 32 {
+		c.fail(http.StatusBadRequest, "nothing to change")
+		return
+	}
+	keys := make([]string, 0, len(in.Set))
+	for k, v := range in.Set {
+		keys = append(keys, k+"="+v)
+	}
+	sort.Strings(keys)
+	err := s.be.ApplySettings(c.arg[0], in.Set)
+	s.audit(c, "settings "+strings.Join(keys, " "), c.arg[0], errText(err))
+	if err != nil {
+		c.fail(http.StatusConflict, err.Error())
+		return
+	}
+	c.ok(map[string]bool{"ok": true})
+}
+
+func (s *Server) apiBoot(c *call) {
+	var in struct{ On bool }
+	if _, ok := s.tunnel(c.arg[0]); !ok || c.json(&in) != nil {
+		c.fail(http.StatusBadRequest, "bad request")
+		return
+	}
+	err := s.be.SetBoot(c.arg[0], in.On)
+	s.audit(c, map[bool]string{true: "start at boot", false: "no start at boot"}[in.On], c.arg[0], errText(err))
+	if err != nil {
+		c.fail(http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.ok(map[string]bool{"ok": true})
+}
+
+func (s *Server) apiACPreset(c *call) {
+	var in struct{ Preset string }
+	if _, ok := s.tunnel(c.arg[0]); !ok || c.json(&in) != nil {
+		c.fail(http.StatusBadRequest, "bad request")
+		return
+	}
+	argv, err := s.be.ACPreset(c.arg[0], in.Preset)
+	if err != nil || argv == nil {
+		s.audit(c, "anti-censor "+in.Preset+" on Kharej", c.arg[0], errText(err))
+		if err != nil {
+			c.fail(http.StatusConflict, err.Error())
+			return
+		}
+		c.ok(map[string]bool{"ok": true})
+		return
+	}
+	id, err := s.jobs.run("preset", "Anti-censorship "+in.Preset+" on "+c.arg[0], c.sess.User, s.be.ManagerArgv(argv...))
+	s.jobReply(c, "anti-censor "+in.Preset, c.arg[0], id, err)
+}
+
+func (s *Server) apiACTest(c *call) {
+	if _, ok := s.tunnel(c.arg[0]); !ok {
+		c.fail(http.StatusNotFound, "no such tunnel")
+		return
+	}
+	id, err := s.jobs.run("actest", "Anti-censorship test of "+c.arg[0], c.sess.User, s.be.ManagerArgv("test-anticensor", c.arg[0], "--yes"))
+	s.jobReply(c, "anti-censor test", c.arg[0], id, err)
+}
+
+func (s *Server) apiDiagnose(c *call) {
+	if _, ok := s.tunnel(c.arg[0]); !ok {
+		c.fail(http.StatusNotFound, "no such tunnel")
+		return
+	}
+	id, err := s.jobs.run("diagnose", "Diagnose "+c.arg[0], c.sess.User, s.be.ManagerArgv("test", c.arg[0]))
+	s.jobReply(c, "diagnose", c.arg[0], id, err)
+}
+
 func (s *Server) apiPaths(c *call) {
 	if _, ok := s.tunnel(c.arg[0]); !ok {
 		c.fail(http.StatusNotFound, "no such tunnel")

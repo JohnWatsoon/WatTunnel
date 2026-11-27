@@ -175,6 +175,7 @@ func FmtUptime(s int) string {
 type UnitState struct {
 	Active, Enabled bool
 	Uptime          string // FmtUptime of the time since it went active, "" when down or unknown
+	Restarts        int    // NRestarts: automatic restarts since the last start by hand (a crash loop climbs)
 }
 
 // UnitStates asks systemd about every unit in ONE `systemctl show`. The web panel samples once a second: three
@@ -186,7 +187,7 @@ func UnitStates(units []string) map[string]UnitState {
 		return out
 	}
 	b, err := exec.Command("systemctl", append([]string{"show", "--no-pager",
-		"-p", "ActiveState,UnitFileState,ActiveEnterTimestampMonotonic"}, units...)...).Output()
+		"-p", "ActiveState,UnitFileState,ActiveEnterTimestampMonotonic,NRestarts"}, units...)...).Output()
 	if err != nil {
 		return out
 	}
@@ -217,6 +218,7 @@ func parseUnitStates(s string, units []string, boot float64) map[string]UnitStat
 		case "enabled", "enabled-runtime", "static", "alias", "indirect", "generated", "transient":
 			st.Enabled = true
 		}
+		st.Restarts, _ = strconv.Atoi(kv["NRestarts"])
 		if us, err := strconv.ParseFloat(kv["ActiveEnterTimestampMonotonic"], 64); st.Active && err == nil && us > 0 && boot > 0 {
 			st.Uptime = FmtUptime(int(boot - us/1e6))
 		}

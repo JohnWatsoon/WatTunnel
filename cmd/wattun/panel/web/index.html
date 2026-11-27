@@ -103,7 +103,7 @@
           <div class="big n" id="odo"></div>
           <div class="lab mt10">upload <span class="n fg" id="upNow">0</span> MB/s · peak this visit <span class="n fg" id="peak">0</span></div>
           <svg class="sb" id="sbars" viewBox="0 0 300 84" preserveAspectRatio="none" aria-hidden="true"></svg>
-          <div class="dcx"><span>60 s ago</span><span>now</span></div>
+          <div class="dcx"><span>60 s ago</span><span id="sbTop"></span><span>now</span></div>
         </section>
         <section class="card">
           <div class="ch"><div class="ct">Health</div><span class="lab">tunnels up</span></div>
@@ -149,7 +149,9 @@
             <div class="ring" id="gMem"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="r0" cx="50" cy="50" r="42"/><circle class="r1" cx="50" cy="50" r="42"/></svg><div class="rv"><span class="n"></span><span class="lab">ram</span></div></div>
             <div class="ring" id="gDisk"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="r0" cx="50" cy="50" r="42"/><circle class="r1" cx="50" cy="50" r="42"/></svg><div class="rv"><span class="n"></span><span class="lab">disk</span></div></div>
           </div>
-          <div class="kv mt14"><span>Clock</span><span id="srvClock">–</span></div>
+          <div class="kv mt14"><span>Tunnels use</span><span class="n" id="srvWat">–</span></div>
+          <div class="kv"><span>Everything else</span><span class="n" id="srvOther">–</span></div>
+          <div class="kv"><span>Clock</span><span id="srvClock">–</span></div>
           <div class="kv"><span>Two-factor</span><span id="srv2fa">–</span></div>
         </section>
       <section class="card c-kh">
@@ -228,12 +230,14 @@
         <div><div class="lab">latency</div><div class="mid n" id="dRtt">–</div></div>
         <div><div class="lab">loss</div><div class="mid n" id="dLoss">–</div></div>
       </div>
-      <div class="dsec"><div class="dsh"><span>last 5 minutes</span><span class="lab">— rate · - - latency</span></div>
+      <div class="dsec"><div class="dsh"><span>last 5 minutes</span><span class="lab" id="dLegend"></span></div>
         <div class="tc"><svg id="dChart" viewBox="0 0 640 180" role="img" aria-label="Rate over the last five minutes"></svg></div></div>
       <div class="dsec"><div class="dsh"><span>Ports</span><span class="lab" id="dPortsSub"></span></div><div id="dPorts" class="pgrid"></div></div>
       <div class="dsec"><div class="dsh"><span>Actions</span></div><div id="dActs" class="agrid"></div></div>
+      <div class="dsec"><div class="dsh"><span>Settings</span><span class="lab" id="dSetSub"></span></div><div id="dSet"></div></div>
       <div class="dsec"><div class="dsh"><span>Details</span></div><div class="kvs" id="dInfo"></div></div>
       <div class="dsec"><div class="dsh"><span>Journal</span><button class="btn sec sm" id="dLogR">Refresh</button></div><pre class="log" id="dLog"></pre></div>
+      <div class="applybar" id="dApply" hidden></div>
     </div>
   </aside>
 </section>

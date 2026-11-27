@@ -1232,7 +1232,8 @@ func main() {
 		for range time.Tick(5 * time.Second) {
 			st := stats()
 			s := historySample{T: time.Now().Unix(), RateBps: st.RateBps,
-				SrttMs: float64(st.SRTT) / 1e6, Streams: st.Streams, Alive: alive()}
+				SrttMs: float64(st.SRTT) / 1e6, Streams: st.Streams, Alive: alive(),
+				BytesIn: uint64(st.BytesIn), BytesOut: uint64(st.BytesOut), PktsOut: uint64(st.PktsOut), Retrans: uint64(st.Retrans)}
 			if st.LossPct > 0 { // 0 = not measured yet (cc's last judged interval); omit the key then
 				lp := st.LossPct
 				s.LossPct = &lp

@@ -13,9 +13,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -25,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/acme"
@@ -249,14 +252,18 @@ func sameIPs(r []*net.IPNet, ips []net.IP) bool {
 	return true
 }
 
-// acmeHTTPAddr is where the HTTP-01 check is answered; a test points it elsewhere.
-var acmeHTTPAddr = ":80"
+// acmeHTTPAddr is where the HTTP-01 check is answered, acmeALPNAddr the TLS-ALPN-01 check when port 80 is taken
+// (on an Iran server a tunnel often forwards :80); a test points them elsewhere.
+var (
+	acmeHTTPAddr = ":80"
+	acmeALPNAddr = ":443"
+)
 
 // acmeDirectory is Let's Encrypt production; a test points it at a fake.
 var acmeDirectory = acme.LetsEncryptURL
 
-// useACME gets a certificate for DOMAIN with the HTTP-01 check (tier 3). Port 80 is bound only while the check
-// runs and refused if something else holds it. On any failure the current certificate stays.
+// useACME gets a certificate for DOMAIN with the HTTP-01 check (tier 3), or the TLS-ALPN-01 check on port 443 when
+// port 80 is taken. The port is bound only while the check runs. On any failure the current certificate stays.
 func useACME(ctx context.Context, cfg *Config, domain string, say func(string, ...any)) error {
 	ip := net.ParseIP(domain)
 	ids, opts := acme.DomainIDs(domain), []acme.OrderOption(nil)
@@ -268,21 +275,49 @@ func useACME(ctx context.Context, cfg *Config, domain string, say func(string, .
 		// at a third of the lifetime left, so it renews about every 4 days.
 		ids, opts = acme.IPIDs(domain), []acme.OrderOption{acme.WithOrderIssuanceProfile("shortlived")}
 	}
+	tokens := sync.Map{}                         // http-01: path -> key authorization
+	var alpnCert atomic.Pointer[tls.Certificate] // tls-alpn-01: the one challenge certificate
+	kind, port := "http-01", "80"
 	ln, err := net.Listen("tcp", acmeHTTPAddr)
-	if err != nil {
-		return fmt.Errorf("port 80 is busy or not allowed (%v): the check needs it for a few seconds", err)
-	}
-	tokens := sync.Map{}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if v, ok := tokens.Load(r.URL.Path); ok {
-			w.Write([]byte(v.(string)))
-			return
+	if err == nil {
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if v, ok := tokens.Load(r.URL.Path); ok {
+				w.Write([]byte(v.(string)))
+				return
+			}
+			notFound(w, r)
+		}), ReadHeaderTimeout: 5 * time.Second}
+		go srv.Serve(ln)
+		defer srv.Close()
+	} else {
+		e80 := err
+		kind, port = "tls-alpn-01", "443"
+		if ln, err = net.Listen("tcp", acmeALPNAddr); err != nil {
+			return fmt.Errorf("ports 80 and 443 are both busy (%v; %v): the check needs one of them for a few seconds. Free one (stop the tunnel port on it for a minute), or use your own certificate", e80, err)
 		}
-		notFound(w, r)
-	}), ReadHeaderTimeout: 5 * time.Second}
-	go srv.Serve(ln)
-	defer srv.Close()
-	say("Port 80 is open for the check.")
+		tl := tls.NewListener(ln, &tls.Config{NextProtos: []string{acme.ALPNProto}, MinVersion: tls.VersionTLS12,
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				if c := alpnCert.Load(); c != nil {
+					return c, nil
+				}
+				return nil, errors.New("no check running")
+			}})
+		go func() {
+			for {
+				c, err := tl.Accept()
+				if err != nil {
+					return
+				}
+				go func() { // the handshake is the whole check
+					c.SetDeadline(time.Now().Add(10 * time.Second))
+					c.(*tls.Conn).Handshake()
+					c.Close()
+				}()
+			}
+		}()
+		defer tl.Close()
+	}
+	say("Port %s is open for the check.", port)
 
 	ak, _, err := newKey()
 	if err != nil {
@@ -306,24 +341,32 @@ func useACME(ctx context.Context, cfg *Config, domain string, say func(string, .
 		}
 		var ch *acme.Challenge
 		for _, c := range z.Challenges {
-			if c.Type == "http-01" {
+			if c.Type == kind {
 				ch = c
 			}
 		}
 		if ch == nil {
-			return errors.New("the certificate service offered no HTTP check")
+			return fmt.Errorf("the certificate service offered no %s check", kind)
 		}
-		body, err := cl.HTTP01ChallengeResponse(ch.Token)
+		body, err := cl.HTTP01ChallengeResponse(ch.Token) // the key authorization, for either check
 		if err != nil {
 			return err
 		}
-		tokens.Store(cl.HTTP01ChallengePath(ch.Token), body)
+		if kind == "http-01" {
+			tokens.Store(cl.HTTP01ChallengePath(ch.Token), body)
+		} else {
+			c, err := alpnChallengeCert(body, domain)
+			if err != nil {
+				return err
+			}
+			alpnCert.Store(&c)
+		}
 		say("Asking the certificate service to check %s ...", domain)
 		if _, err := cl.Accept(ctx, ch); err != nil {
 			return err
 		}
 		if _, err := cl.WaitAuthorization(ctx, z.URI); err != nil {
-			return fmt.Errorf("the check failed (does %s point at this server, and is port 80 open in the firewall?): %v", domain, err)
+			return fmt.Errorf("the check failed (does %s point at this server, and is port %s open in the firewall?): %v", domain, port, err)
 		}
 	}
 	if order, err = cl.WaitOrder(ctx, order.URI); err != nil {
@@ -351,6 +394,33 @@ func useACME(ctx context.Context, cfg *Config, domain string, say func(string, .
 	cfg.ACMEName = domain
 	say("Certificate issued for %s.", domain)
 	return nil
+}
+
+// alpnChallengeCert is the TLS-ALPN-01 certificate (RFC 8737): self-signed for NAME (a DNS name, or an IP as RFC
+// 8738 allows), with the critical acmeIdentifier extension holding SHA-256 of the key authorization. Built here
+// because acme.TLSALPN01ChallengeCert puts every name in DNSNames, which an IP check refuses.
+func alpnChallengeCert(keyAuth, name string) (tls.Certificate, error) {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	sum := sha256.Sum256([]byte(keyAuth))
+	ext, err := asn1.Marshal(sum[:])
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+		ExtraExtensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 31}, Critical: true, Value: ext}}}
+	if ip := net.ParseIP(name); ip != nil {
+		tpl.IPAddresses = []net.IP{ip}
+	} else {
+		tpl.DNSNames = []string{name}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: k}, nil
 }
 
 func csrFor(name string) *x509.CertificateRequest {

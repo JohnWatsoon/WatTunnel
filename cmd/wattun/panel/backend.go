@@ -37,6 +37,12 @@ type Backend interface {
 	Paths(name string) (mode string, paths []Path) // bond mode and live legs of a bonded tunnel
 	Geo(addr string) (Geo, error)                  // where an IP or host name is (an outside lookup service; slow, called by a poller)
 	Pairing() (token, state string)                // Kharej: the pairing token ("" = not made yet) and who is paired
+
+	// The Settings tab (4.0.1): the console's Advanced rows with presets, start at boot, anti-censorship.
+	Settings(name string) any                               // JSON: options, boot, where anti-censorship runs
+	ApplySettings(name string, set map[string]string) error // both-ends keys on Kharej first, then here, one restart
+	SetBoot(name string, on bool) error
+	ACPreset(name, preset string) (argv []string, err error) // argv: run here as a job; nil: done on Kharej
 }
 
 // PortUse is one public port of a tunnel, from its /ports.
@@ -74,7 +80,13 @@ type Host struct {
 	MemPct   float64 `json:"mem_pct"`
 	DiskPct  float64 `json:"disk_pct"`
 	ClockNTP bool    `json:"clock_synced"`
-	Role     string  `json:"role"` // this server's side: kharej, iran, mixed, "" (not set, no tunnels)
+	// CPU use since the previous reading (the panel reads every 10 s; 0 on the first): the whole machine, and
+	// every wattun process on it (tunnels, panel, heal) with their memory (4.0.1). -1 = unknown (not Linux).
+	CPUPct    float64 `json:"cpu_pct"`
+	WatCPUPct float64 `json:"wat_cpu_pct"`
+	WatMemMB  float64 `json:"wat_mem_mb"`
+	WatProcs  int     `json:"wat_procs"`
+	Role      string  `json:"role"` // this server's side: kharej, iran, mixed, "" (not set, no tunnels)
 }
 
 // Path is one leg of a bonded tunnel.
@@ -98,6 +110,9 @@ type Tunnel struct {
 	Peer    string   `json:"peer,omitempty"`
 	Ports   []string `json:"ports"`
 	Uptime  string   `json:"uptime,omitempty"`
+	// Restarts: systemd's automatic restarts of the unit (4.0.1); climbing fast = a crash loop the down alert
+	// misses, because the unit is up for a moment between crashes.
+	Restarts int `json:"restarts,omitempty"`
 }
 
 // Counters is the slice of /stats the live view needs. BytesIn/Out are the raw totals; the panel turns them into
@@ -110,6 +125,8 @@ type Counters struct {
 	BytesOut float64
 	Streams  int64
 	Conns    int64
+	PktsOut  float64 // totals since the tunnel started: the live loss is retrans/pkts_out over a window
+	Retrans  float64
 }
 
 type Kharej struct {

@@ -310,6 +310,7 @@ span.dm>i{width:var(--s);height:var(--s);border-radius:50%;background:currentCol
 .tt{position:absolute;top:0;transform:translate(-50%,-6px);background:var(--hov);border-radius:10px;padding:6px 9px;font-size:12px;white-space:nowrap;pointer-events:none}
 .feet{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}
 .feet .v{font-size:17px;margin-top:5px;letter-spacing:-.02em}
+.pgrid .pmore{grid-column:1/-1;justify-self:center}
 .dcx{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:8px}
 
 .res{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px}
@@ -911,7 +912,7 @@ td.ta .btn{margin-left:4px;--h:30px}
 .jc-pre{font-size:12px}
 .jc-row.pend .jc-lab b{color:var(--fg);font-weight:500}
 
-/* ---------- buttons: a ripple on press; three rare buttons carry their own effect (fx-holo, fx-dust, fx-aurora) ---------- */
+/* ---------- buttons: a ripple on press; two rare buttons carry their own effect (fx-holo, fx-aurora) ---------- */
 .rip{position:absolute;left:var(--rx);top:var(--ry);width:var(--rs);height:var(--rs);margin:calc(var(--rs) / -2) 0 0 calc(var(--rs) / -2);border-radius:50%;
   background:currentColor;opacity:.28;pointer-events:none;z-index:-1;transform:scale(0);animation:rip .65s cubic-bezier(.2,.7,.3,1) forwards}
 @keyframes rip{to{transform:scale(1);opacity:0}}
@@ -936,14 +937,6 @@ td.ta .btn{margin-left:4px;--h:30px}
 .btn.fx-holo:hover:before{opacity:1}.btn.fx-holo:hover:after{opacity:1}
 @keyframes holo-drift{0%{--hx:12%}100%{--hx:88%}}
 
-/* fx-dust (Run a test): the press dissolves the button left to right into fine dust that swirls away (app.js dust),
-   then it comes back out of a blur */
-.btn.fx-dust.dissolving{-webkit-mask:linear-gradient(90deg,transparent 40%,#000 60%) 100% 0/250% 100% no-repeat;mask:linear-gradient(90deg,transparent 40%,#000 60%) 100% 0/250% 100% no-repeat;
-  animation:fx-wipe .5s linear forwards;pointer-events:none}
-@keyframes fx-wipe{to{-webkit-mask-position:0 0;mask-position:0 0}}
-.btn.fx-dust.reform{animation:fx-reform .6s var(--ease) both}
-@keyframes fx-reform{from{opacity:0;filter:blur(10px);transform:scale(.96)}}
-.fx-dustcv{position:fixed;pointer-events:none;z-index:70}
 
 /* fx-aurora (Update all, only while a server is behind): an aurora rises inside a dark face; the press lights the
    screen's edge in the same colours (app.js edgeGlow) */
@@ -962,4 +955,35 @@ td.ta .btn{margin-left:4px;--h:30px}
 .edge-glow i+i{padding:14px;filter:blur(16px);opacity:.85}
 @keyframes edge{18%{opacity:1}62%{opacity:1}to{opacity:0}}
 @keyframes edge-spin{to{--ang:240deg}}
-@media (prefers-reduced-motion:reduce){.btn.fx-holo,.btn.fx-aurora:before{animation:none}.btn.fx-holo:hover{transform:none}.fx-dustcv,.edge-glow{display:none}}
+@media (prefers-reduced-motion:reduce){.btn.fx-holo,.btn.fx-aurora:before{animation:none}.btn.fx-holo:hover{transform:none}.edge-glow{display:none}}
+
+/* tunnel settings (4.0.1): presets as chips, one apply bar */
+.sgrid{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;margin-bottom:8px}
+@media (min-width:600px){.sgrid:not(.one){grid-template-columns:minmax(0,2fr) minmax(0,3fr)}}
+.swell{background:var(--well);border-radius:14px;padding:14px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.bootw{flex-direction:row;align-items:center;justify-content:space-between;gap:12px;align-self:start}
+.sw-txt{display:flex;flex-direction:column;gap:4px;min-width:0}.sw-txt b{font-weight:500;font-size:13.5px}
+.acw .btn{align-self:flex-start}.acw .btn.sec{background:var(--card)}
+.tgl{flex:none;width:46px;height:28px;border-radius:999px;border:0;background:var(--line2);position:relative;cursor:pointer;transition:background .25s var(--ease)}
+.tgl i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--fg);transition:transform .35s var(--spring)}
+.tgl.on{background:var(--green)}.tgl.on i{transform:translateX(18px);background:#0a0a0b}
+.ogrp{background:var(--well);border-radius:14px;padding:4px 14px;margin-top:8px}
+.og-t{font:500 12px var(--sans);color:var(--dim);padding:12px 0 4px}
+.orow{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;padding:12px 0;border-top:1px solid var(--line)}
+.og-t+.orow{border-top:0}
+@media (min-width:600px){.orow{grid-template-columns:minmax(0,5fr) minmax(0,6fr);align-items:center}.orow .ochips{justify-content:flex-end}}
+.or-l{display:flex;flex-direction:column;gap:4px;min-width:0}.or-l .lab,.sw-txt .lab{font:400 12.5px/1.45 var(--sans);color:var(--mut)}
+.or-n{font-weight:500;font-size:13.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tag{font:500 11px var(--sans);color:var(--blue);background:rgba(91,147,255,.12);padding:2px 8px;border-radius:999px}
+.ochips{display:flex;flex-wrap:wrap;gap:6px}
+.och{height:32px;padding:0 12px;border-radius:999px;border:0;background:var(--card);color:var(--mut);font:400 12.5px var(--sans);cursor:pointer;white-space:nowrap;transition:background .2s,color .2s,box-shadow .2s}
+.och:hover{background:var(--hov);color:var(--fg)}
+.och.on{color:var(--fg);box-shadow:inset 0 0 0 1px var(--green)}
+.och.pend{color:#0a0a0b;background:var(--lime)}
+.ocust{display:inline-flex;align-items:center;gap:6px}
+.ocust input{width:100px;height:32px;border-radius:999px;border:1px solid var(--line2);background:var(--card);color:var(--fg);font:400 12.5px var(--mono);padding:0 12px;outline:0}
+.ocust input:focus{border-color:var(--fg)}
+.applybar{position:sticky;bottom:-22px;margin:22px -22px -22px;padding:14px 22px calc(14px + env(safe-area-inset-bottom,0px));background:rgba(20,20,22,.92);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-top:1px solid var(--line2);display:flex;align-items:center;gap:8px;animation:abIn .35s var(--ease) both}
+@keyframes abIn{from{transform:translateY(12px);opacity:0}to{transform:none;opacity:1}}
+.ab-t{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}.ab-t .lab{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (prefers-reduced-motion:reduce){.tgl,.tgl i{transition:none}.applybar{animation:none}}

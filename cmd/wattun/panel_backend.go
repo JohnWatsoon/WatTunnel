@@ -38,7 +38,76 @@ func (mgrBackend) Host() panel.Host {
 	h.Name, _ = os.Hostname()
 	hostRes(&h)
 	h.ClockNTP = clockSynced()
+	h.CPUPct, h.WatCPUPct, h.WatMemMB, h.WatProcs = cpuUse()
 	return h
+}
+
+// cpuUse is the machine's CPU use and wattun's share since the last call, from /proc: the busy jiffies of
+// /proc/stat, and utime+stime of every process whose command is wattun (tunnels, the panel, heal), with their RSS.
+// A Kharej often runs other heavy services (xray, panels, bots); this tells the owner which part is ours.
+var cpuPrev struct {
+	sync.Mutex
+	at          time.Time
+	busy, total float64
+	wat         map[int]float64
+}
+
+func cpuUse() (cpu, wat, memMB float64, procs int) {
+	b, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return -1, -1, 0, 0
+	}
+	line := strings.SplitN(string(b), "\n", 2)[0]
+	var busy, total float64
+	for i, f := range strings.Fields(line)[1:] {
+		v, _ := strconv.ParseFloat(f, 64)
+		total += v
+		if i != 3 && i != 4 { // idle, iowait
+			busy += v
+		}
+	}
+	cur := map[int]float64{}
+	ents, _ := os.ReadDir("/proc")
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		st, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		s := string(st)
+		o, c := strings.IndexByte(s, '('), strings.LastIndexByte(s, ')')
+		if o < 0 || c < o || s[o+1:c] != "wattun" {
+			continue
+		}
+		f := strings.Fields(s[c+1:]) // f[0] is the state; utime, stime are fields 14, 15 of the line
+		if len(f) < 22 {
+			continue
+		}
+		u, _ := strconv.ParseFloat(f[11], 64)
+		k, _ := strconv.ParseFloat(f[12], 64)
+		rss, _ := strconv.ParseFloat(f[21], 64)
+		cur[pid] = u + k
+		memMB += rss * float64(os.Getpagesize()) / (1 << 20)
+		procs++
+	}
+	cpuPrev.Lock()
+	defer cpuPrev.Unlock()
+	if dt := total - cpuPrev.total; cpuPrev.total > 0 && dt > 0 {
+		cpu = (busy - cpuPrev.busy) / dt * 100
+		var w float64
+		for pid, t := range cur {
+			if p, ok := cpuPrev.wat[pid]; ok && t >= p {
+				w += t - p
+			}
+		}
+		// /proc/stat sums every core; a process's jiffies are per process: both share USER_HZ
+		wat = w / dt * 100
+	}
+	cpuPrev.busy, cpuPrev.total, cpuPrev.wat, cpuPrev.at = busy, total, cur, time.Now()
+	return
 }
 
 // hostRes fills the cheap /proc numbers: uptime, load, cores, memory and disk use.
@@ -79,7 +148,9 @@ func init() {
 	wat.ScepterHostInfo = func() map[string]any {
 		var h panel.Host
 		hostRes(&h)
-		return map[string]any{"load1": h.Load1, "cpus": h.CPUs, "mem_pct": h.MemPct, "disk_pct": h.DiskPct, "uptime_s": h.Uptime}
+		// ip (4.0.1): an Iran tunnel with no peer address (reverse, auto-linked) learns which server this is from it
+		return map[string]any{"load1": h.Load1, "cpus": h.CPUs, "mem_pct": h.MemPct, "disk_pct": h.DiskPct, "uptime_s": h.Uptime,
+			"ip": mgr.PublicIPCached()}
 	}
 }
 
@@ -120,7 +191,7 @@ func (mgrBackend) Tunnels() []panel.Tunnel {
 		u := st[mgr.Unit(n)]
 		t := panel.Tunnel{
 			Name: n, Role: mgr.Role(n), Carrier: mgr.Cfg(n, "carrier"), Reverse: mgr.IsReverse(n),
-			Active: u.Active, Enabled: u.Enabled, Paired: mgr.IsPaired(n), Uptime: u.Uptime,
+			Active: u.Active, Enabled: u.Enabled, Paired: mgr.IsPaired(n), Uptime: u.Uptime, Restarts: u.Restarts,
 		}
 		if t.Role == "Iran" {
 			t.Peer = mgr.Cfg(n, "peer")
@@ -160,7 +231,7 @@ func (mgrBackend) Stats(name string) (panel.Counters, bool) {
 	in, _ := strconv.ParseFloat(st.BytesIn, 64)
 	out, _ := strconv.ParseFloat(st.BytesOut, 64)
 	return panel.Counters{Alive: st.Alive, RTTms: st.RTTms, LossPct: st.LossPct, BytesIn: in, BytesOut: out,
-		Streams: st.Streams, Conns: st.ConnsActive}, true
+		Streams: st.Streams, Conns: st.ConnsActive, PktsOut: float64(st.PktsOut), Retrans: float64(st.Retrans)}, true
 }
 
 var panelHTTP = &http.Client{Timeout: 2 * time.Second}
@@ -207,7 +278,7 @@ func (mgrBackend) Kharej() []panel.Kharej {
 		}
 		host := mgr.PairHost(n)
 		if host == "" {
-			host = n
+			host = learnedHost(n)
 		}
 		k := byHost[host]
 		if k == nil {
@@ -251,6 +322,22 @@ func (mgrBackend) Kharej() []panel.Kharej {
 	return out
 }
 
+// learned is the Kharej address a tunnel without a peer address (reverse, auto-linked) heard in the hello: the panel
+// lists that server by its address, not by the tunnel's name. Until the first answer the name stands in.
+var (
+	learnMu sync.Mutex
+	learned = map[string]string{}
+)
+
+func learnedHost(n string) string {
+	learnMu.Lock()
+	defer learnMu.Unlock()
+	if ip := learned[n]; ip != "" {
+		return ip
+	}
+	return n
+}
+
 // kharejMu serializes every pairing call of the panel (the 15 s poller and the actions): one channel at a time.
 var kharejMu sync.Mutex
 
@@ -273,6 +360,11 @@ func askKharej(k *panel.Kharej, via string) error {
 	if m, ok := r.Params["host"].(map[string]any); ok {
 		f := func(k string) float64 { v, _ := m[k].(float64); return v }
 		k.Res = &panel.Host{Load1: f("load1"), CPUs: int(f("cpus")), MemPct: f("mem_pct"), DiskPct: f("disk_pct"), Uptime: int64(f("uptime_s"))}
+		if ip, _ := m["ip"].(string); ip != "" && mgr.PairHost(via) == "" {
+			learnMu.Lock()
+			learned[via] = ip
+			learnMu.Unlock()
+		}
 	}
 	r, err = cl.Call("tunnels.list", nil)
 	if err != nil {
@@ -351,6 +443,22 @@ func (mgrBackend) KharejKeyRotate(via, name string) (string, string, error) {
 }
 
 func (mgrBackend) KharejBackup(p map[string]any) ([]byte, error) { return mgr.KharejBackup(p) }
+
+func (mgrBackend) Settings(name string) any { return mgr.Settings(name) }
+
+func (mgrBackend) ApplySettings(name string, set map[string]string) error {
+	kharejMu.Lock()
+	defer kharejMu.Unlock()
+	return mgr.ApplySettings(name, set)
+}
+
+func (mgrBackend) SetBoot(name string, on bool) error { return mgr.SetBoot(name, on) }
+
+func (mgrBackend) ACPreset(name, preset string) ([]string, error) {
+	kharejMu.Lock()
+	defer kharejMu.Unlock()
+	return mgr.ACPreset(name, preset)
+}
 
 func (mgrBackend) RestartSelf() {
 	_ = exec.Command("systemctl", "--no-block", "restart", mgr.PanelUnit()+".service").Run()

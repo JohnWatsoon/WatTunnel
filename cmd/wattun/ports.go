@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/bits"
 	"net"
 	"net/http"
 	"os"
@@ -303,14 +304,32 @@ const (
 	copyBufMax = 32 << 10
 )
 
+// copyBufs recycles copy buffers, one pool per size (4, 8, 16, 32 KB): a busy port opens hundreds of thousands of
+// connections a day, and a fresh buffer each was ~15 % of the CPU in allocation, zeroing and GC (iran2 profile,
+// 2026-11-27, 4.0.0).
+var copyBufs [4]sync.Pool
+
+func copyBufClass(size int) int { return bits.Len(uint(size/copyBufMin)) - 1 }
+
+func getCopyBuf(size int) []byte {
+	if b, ok := copyBufs[copyBufClass(size)].Get().(*[]byte); ok {
+		return *b
+	}
+	return make([]byte, size)
+}
+
+func putCopyBuf(b []byte) { copyBufs[copyBufClass(len(b))].Put(&b) }
+
 func (p *portStat) copy(dst io.Writer, src io.Reader, up bool) (int64, error) {
-	buf := make([]byte, copyBufMin)
+	buf := getCopyBuf(copyBufMin)
+	defer func() { putCopyBuf(buf) }()
 	var total int64
 	for {
 		n, err := src.Read(buf)
 		if n == len(buf) && len(buf) < copyBufMax {
-			nb := make([]byte, 2*len(buf))
+			nb := getCopyBuf(2 * len(buf))
 			copy(nb, buf[:n])
+			putCopyBuf(buf)
 			buf = nb
 		}
 		if n > 0 {

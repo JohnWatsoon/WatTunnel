@@ -301,8 +301,15 @@ func (s *Server) checkAlerts(tun []Tunnel, rows map[string]*liveRow, now time.Ti
 		}
 		s.al.set(k, "loss", text, lossy, 5*time.Minute, now)
 	}
+	for _, t := range tun {
+		k := "crash:" + t.Name
+		seen[k] = true
+		n := s.crashes(t, now)
+		s.al.set(k, "crash", fmt.Sprintf("%s keeps crashing: systemd restarted it %d times in 5 minutes (the journal says why)", t.Name, n), n >= crashAlert, 0, now)
+	}
 	s.al.keep("down:", seen, now)
 	s.al.keep("loss:", seen, now)
+	s.al.keep("crash:", seen, now)
 	kseen := map[string]bool{}
 	for _, k := range s.kharejSnap() {
 		key := "kharej:" + k.Host
@@ -318,6 +325,30 @@ func (s *Server) checkAlerts(tun []Tunnel, rows map[string]*liveRow, now time.Ti
 		!exp.IsZero() && exp.Sub(now) < min(14*24*time.Hour, life/6), 0, now)
 	n := s.g.recentFails(now, 10*time.Minute)
 	s.al.set("logins", "logins", fmt.Sprintf("%d failed sign-ins in 10 minutes", n), n >= 10, 0, now)
+}
+
+type crashMark struct {
+	at time.Time
+	n  int
+}
+
+const (
+	crashWindow = 5 * time.Minute
+	crashAlert  = 3
+)
+
+// crashes is how many times systemd restarted T over the last crashWindow (checkAlerts' goroutine only). A start
+// by hand zeroes NRestarts: the window then begins again.
+func (s *Server) crashes(t Tunnel, now time.Time) int {
+	w := append(s.crash[t.Name], crashMark{now, t.Restarts})
+	if w[0].n > t.Restarts {
+		w = w[len(w)-1:]
+	}
+	for len(w) > 1 && now.Sub(w[0].at) > crashWindow {
+		w = w[1:]
+	}
+	s.crash[t.Name] = w
+	return t.Restarts - w[0].n
 }
 
 func (s *Server) hostCached(now time.Time) Host {

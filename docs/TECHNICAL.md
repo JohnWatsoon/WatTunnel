@@ -2181,7 +2181,9 @@ out), so `rtt_ms` and `streams_total` can be read with an exact line match. It h
 `GET /stats/history` (3.4.3) returns the last 5 minutes as a JSON array, one sample every 5 s (at most 60
 entries, oldest first; `[]` before the first sample): `t` (unix seconds), `rate_bps`, `srtt_ms`, `loss_pct`
 (omitted until the congestion controller has measured an interval), `streams`, `alive` — the same totals
-`/stats` reports, trended over time. Same localhost-only metrics address and cross-site guard as `/stats`.
+`/stats` reports, trended over time. Since 4.0.1 every sample also carries the running totals `bytes_in`,
+`bytes_out`, `pkts_out` and `retrans`: the panel draws real traffic from their differences (`rate_bps` is the
+pacing rate, not traffic) and its live loss is `retrans / pkts_out` over the last 30 s (0 under 200 packets). Same localhost-only metrics address and cross-site guard as `/stats`.
 
 Since 2.0.2 the metrics address is always loopback: a non-loopback value (`0.0.0.0:19700`, a public IP, a bare
 `:19700`) is rewritten to `127.0.0.1` with the same port, and a log line says so, because `/stats`, pprof and
@@ -3548,7 +3550,7 @@ up at once; a pair that does not load leaves the old one in place):
 | Self-signed | The default. "Back to self-signed" returns to it. |
 | Your own | Paste a PEM certificate and key. Refused when they do not match or the certificate has expired. |
 | Private CA | The panel makes a CA whose name constraints allow only this server's IPs (and no DNS name), and a 397-day leaf. Install the CA on your phone once (Download the CA) and the warning is gone; the CA cannot vouch for any other site. |
-| ACME | Let's Encrypt over HTTP-01, for a domain that points at this server or for the server's public IP. An IP certificate uses the `shortlived` profile (about 6 days). Port 80 is bound only during the check and the request is refused when something else holds it. Runs as a job; on failure the current certificate stays. The scheduler renews it when less than a third of its lifetime is left, at most every 6 hours. |
+| ACME | Let's Encrypt over HTTP-01, for a domain that points at this server or for the server's public IP. An IP certificate uses the `shortlived` profile (about 6 days). Port 80 is bound only during the check. When something else holds port 80 (often a tunnel forwarding it), 4.0.1 uses the TLS-ALPN-01 check on port 443 instead; the request is refused only when both are taken. Runs as a job; on failure the current certificate stays. The scheduler renews it when less than a third of its lifetime is left, at most every 6 hours. |
 
 ### Login and 2FA
 
@@ -3593,15 +3595,25 @@ up at once; a pair that does not load leaves the old one in place):
   coarse hand-drawn dot grid.
 - **Tunnels**: a tile per tunnel with the route, live rate and a 3-minute sparkline, latency, loss, users, the
   24-hour watchdog strip, public ports and quota meters. Start, restart or stop all from the top strip. A tile
-  opens the drawer: live numbers, `/stats/history` (5 minutes), per-port use (bytes, rate, users, rate limit, quota
-  with reset), actions and the journal.
+  opens the drawer: live numbers, `/stats/history` (5 minutes of real download and upload, latency dashed), per-port
+  use (the 4 busiest first; bytes, rate, users, rate limit, quota with reset), actions (start, stop, speed test,
+  carrier re-test with bonding, Diagnose = the console's `test`), Settings and the journal.
+- **Tunnel Settings** (4.0.1): the console's Advanced page as presets, one chip per value plus Custom with the
+  console's ranges: speed limit, sessions, connections, packet size, window, batching, UDP hop, slow down on loss,
+  error correction, padding, idle traffic, probe guard, ICMP type, listen address and counter saving (which rows
+  show follows the role, carrier, direction and engine version, as on the console). Picks collect in one bar and
+  apply with one restart (`PUT tunnels/NAME/settings`). Keys both ends must share (probe guard, ICMP type) go to
+  Kharej first through the pairing (`tunnel.edit`, which rolls back on its own); if Kharej refuses, nothing changes
+  here. Also start at boot (a switch, no restart) and the anti-censorship preset: applied here when this end dials
+  (the console's `preset NAME P`, with "Test what passes the filter" = `test-anticensor`), or on Kharej through
+  `preset.apply` for a reverse tunnel, whose Kharej dials.
 - **Kharej servers**: per paired host, version (and "vX is out" when a newer release exists), capability tier, the
   live rate through its tunnels, and its tunnels as Kharej reports them over the scepter channel (polled every
   15 s; a host that does not answer within 65 s shows as unreachable).
 
 - **Traffic**: bytes per day for 30 days stacked per tunnel, the last 48 hours per hour, each tunnel's share,
   today / 7 days / 30 days, CSV export, speed test history as a timeline.
-- **System**: load, RAM and disk, versions here and on each Kharej against the latest release, update and
+- **System**: CPU use (and how much of it the tunnels take versus everything else on the server, 4.0.1), load, RAM and disk, versions here and on each Kharej against the latest release, update and
   rollback, backups (make, download, delete, restore from a file with a preview), alerts, recent jobs, the panel
   audit log.
 - **Settings**: password, 2FA, signed-in browsers, title, secret path, port, allowlist, certificate, alert
@@ -3677,7 +3689,9 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
 
 ### Alerts and schedules
 
-Checked every 5 seconds: a tunnel down for 30 s, loss above `alert-loss` for 5 minutes, a Kharej server
+Checked every 5 seconds: a tunnel down for 30 s, a tunnel systemd restarted 3 or more times within 5 minutes (a
+crash loop, which the down alert misses because the unit is up for a moment between crashes; 4.0.1, from
+`NRestarts`), loss above `alert-loss` for 5 minutes, a Kharej server
 unreachable for 2 minutes, disk or RAM above the threshold, the panel certificate expiring within 14 days, and 10
 failed sign-ins within 10 minutes. Once a minute it also raises: a port at 90% of its quota or over it, a new
 release for this server or a Kharej server (checked every 6 hours against GitHub's latest release), and a

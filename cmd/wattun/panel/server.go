@@ -55,6 +55,8 @@ type Server struct {
 	live   map[string]*liveRow
 	last   map[string]Counters
 	lastAt time.Time
+	lossW  map[string][]lossMark  // per tunnel, the last lossWindow of packet totals
+	crash  map[string][]crashMark // per tunnel, systemd restart counts over the last crashWindow
 	khMu   sync.Mutex
 	kh     []Kharej
 	wd     *watchdog
@@ -91,7 +93,7 @@ type liveRow struct {
 // New builds a server over cfg and be; dataDir holds the watchdog record.
 func New(cfg *Config, be Backend, dataDir string) *Server {
 	s := &Server{cfg: cfg, be: be, g: newGuard(), base: "/" + cfg.Path + "/", dataDir: dataDir,
-		live: map[string]*liveRow{}, last: map[string]Counters{}, hub: newHub()}
+		live: map[string]*liveRow{}, last: map[string]Counters{}, lossW: map[string][]lossMark{}, crash: map[string][]crashMark{}, hub: newHub()}
 	s.wd = newWatchdog(filepath.Join(dataDir, "outages.jsonl"))
 	s.jobs, s.certs, s.tr, s.al = newJobs(""), &certStore{}, newTraffic(dataDir), newAlerts(dataDir)
 	s.geoLoad()
@@ -578,7 +580,8 @@ func (s *Server) sample(now time.Time) {
 		c, ok := s.be.Stats(t.Name)
 		row.Metrics = ok
 		if ok {
-			row.Alive, row.RTT, row.Loss, row.Streams, row.Conns = c.Alive, c.RTTms, c.LossPct, c.Streams, c.Conns
+			row.Alive, row.RTT, row.Streams, row.Conns = c.Alive, c.RTTms, c.Streams, c.Conns
+			row.Loss = s.windowLoss(t.Name, c, now)
 			in, out := c.BytesIn, c.BytesOut
 			if t.Role == "Kharej" {
 				in, out = out, in
@@ -602,6 +605,8 @@ func (s *Server) sample(now time.Time) {
 	for n := range s.last {
 		if !seen[n] {
 			delete(s.last, n)
+			delete(s.lossW, n)
+			delete(s.crash, n)
 		}
 	}
 	s.lastAt = now
@@ -616,6 +621,39 @@ func (s *Server) sample(now time.Time) {
 	}
 	b, _ := json.Marshal(map[string]any{"t": now.Unix(), "tunnels": rows})
 	s.hub.publish(b)
+}
+
+// lossMark is one sample of a tunnel's packet totals.
+type lossMark struct {
+	at            time.Time
+	pkts, retrans float64
+}
+
+const lossWindow = 30 * time.Second
+
+// windowLoss is the share of packets sent again over the last lossWindow, in percent. The engine's loss_pct is one
+// congestion-control interval, so a quiet interval with two retransmits out of three packets read as 63 % "Lossy"
+// on a tunnel that lost 0.5 % (iran2, 2026-11-27). Below 200 packets in the window there is too little to judge: 0.
+// A binary without the totals (pkts_out = 0) keeps loss_pct. liveMu held.
+func (s *Server) windowLoss(name string, c Counters, now time.Time) float64 {
+	if c.PktsOut == 0 {
+		return c.LossPct
+	}
+	w := append(s.lossW[name], lossMark{now, c.PktsOut, c.Retrans})
+	if w[0].pkts > c.PktsOut { // the tunnel restarted: its totals began again
+		w = w[len(w)-1:]
+	}
+	i := 0
+	for i < len(w)-1 && now.Sub(w[i+1].at) >= lossWindow {
+		i++
+	}
+	w = w[i:]
+	s.lossW[name] = w
+	dp, dr := c.PktsOut-w[0].pkts, c.Retrans-w[0].retrans
+	if dp < 200 || dr <= 0 {
+		return 0
+	}
+	return min(100, dr/dp*100)
 }
 
 func (s *Server) pollKharej(ctx context.Context) {

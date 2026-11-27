@@ -149,7 +149,7 @@ function carrierView(body,id){
   const ctl=(cmd,b)=>P.busy(b,act('jobs/'+id+'/ctl',{body:{cmd,label:now}}));
   end.onclick=()=>ctl('stop',end);
   const pend=el('div','jc-row pend');const pl=el('span','jc-lab lab');const pmx=el('div','mx line');matrix(pmx,new Array(12).fill(0),1,true);
-  const skip=el('button','btn sec','Skip');skip.type='button';skip.onclick=()=>ctl('skip',skip);
+  const skip=el('button','btn sec','Skip');skip.type='button';skip.hidden=true;end.hidden=true;skip.onclick=()=>ctl('skip',skip); // shown only while a carrier is under test
   pend.append(el('span','jc-rank'),pl,pmx);
   $('#dlgA').prepend(skip,end); // next to Close, one row of buttons
   return (lines,state)=>{
@@ -158,7 +158,7 @@ function carrierView(body,id){
       m=/^ATPRESET=(\w+)/.exec(l);if(m)preset=m[1];m=/^ATNOW=(.+)$/.exec(l);if(m)now=m[1].trim();
       m=/^ATROW=(ok|fail)\|([^|]*)\|(.*)$/.exec(l);if(m){const f=m[3].split('|');rows.set(m[2],m[1]==='ok'?{ok:true,down:+f[0],up:+f[1],rtt:+f[2]}:{ok:false,why:f.join('|')});if(m[2]===now)now=''}});
     pre.textContent=preset?PRESETS[preset]||preset:'';pre.hidden=!preset;end.hidden=state!=='running';
-    if(!plan&&!rows.size)return false;
+    if(!plan&&!rows.size){skip.hidden=true;end.hidden=true;return false}
     const done=rows.size,ok=[...rows.values()].filter(r=>r.ok).length;
     cnt.textContent='';cnt.append(el('span','big2 n',String(ok)),el('span','lab',' working of '+done+' tested'+(plan?' · '+plan+' planned':'')));
     prog.textContent='';const N=Math.max(plan,done);for(let i=0;i<N;i++){const d=el('i');const r=[...rows.values()][i];d.className=r?(r.ok?'ok':'bad'):(i===done&&state==='running'?'now':'');prog.appendChild(d)}
@@ -380,12 +380,13 @@ P.onDrawer=async(name,t)=>{
     return act('tunnels/'+enc(name)+'/'+act2,act2==='stop'?{confirm:'Stop '+name+'? Its users lose the connection.',title:'Stop '+name,danger:true}:{}).then(r=>{if(b)b(r);if(r){if(!b)toast(name+': '+act2+' done');P.loadOverview()}})};
   grp('Run',[t.active?btn('Restart','sec',u('restart')):btn('Start','pri',u('start')),t.active&&btn('Stop','sec danger',u('stop'))]);
   grp('Test',[t.role==='Iran'&&btn('Speed test','sec',()=>act('tunnels/'+enc(name)+'/speedtest',{title:'Speed test of '+name,fields:[{k:'mb',label:'Megabytes each way',value:'10',mode:'numeric'}],ok:'Run'})),
-    t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches.',title:'Re-test carriers',fields:[TESTF],ok:'Start the test'}))]);
+    t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches; pick bond to join the best ones.',title:'Re-test carriers',fields:[TESTF],ok:'Start the test'})),
+    btn('Diagnose','sec',()=>act('tunnels/'+enc(name)+'/diagnose'))]);
   grp('Configure',[btn('Ports','sec',()=>editPorts(name,t)),btn('Limit a port','sec',()=>limitPort(name))]);
   if(/\+/.test(t.carrier||''))bondBlock(a,name);
   grp('Keys and pairing',[btn('Show token','sec',()=>showToken(name)),t.paired&&btn('Forget pairing','sec danger',()=>act('tunnels/'+enc(name)+'/pair-forget',{full:true,danger:true,title:'Forget the pairing of '+name,confirm:'Turns off the management channel of '+name+' (pairing: false) and restarts it. The tunnel keeps working; Kharej is then managed from its own console until you pair again.'}).then(r=>{if(r){toast('Pairing forgotten');P.loadOverview()}}))]);
   grp('Danger',[btn('Delete','sec danger',()=>deleteTunnel(name,t))]);
-  renderDrawerPorts(name,[]);
+  renderDrawerPorts(name,[]);settingsBlock(name,t);
   const r=await api('tunnels/'+enc(name)+'/ports').catch(()=>null);
   if(S.drawer===name&&r&&r.ok){PORTS[name]=r.j.ports;renderDrawerPorts(name,r.j.ports)}
 };
@@ -404,15 +405,83 @@ async function bondBlock(a,name){
     row.appendChild(btn(p.muted?'Unmute':'Mute','sec sm',()=>act('tunnels/'+enc(name)+'/mute',{body:{path:p.name,mute:!p.muted}}).then(x=>{if(x)setTimeout(()=>P.openDrawer(name),2500)})));
     legs.appendChild(row)});
 }
+// Settings: the console's Advanced page as presets. A click only marks a change; the bar at the bottom applies them
+// all with one restart (keys both ends must share go to Kharej first, on the server side).
+async function settingsBlock(name,t){
+  const w=$('#dSet'),bar=$('#dApply');w.textContent='';bar.hidden=true;$('#dSetSub').textContent='';
+  const r=await api('tunnels/'+enc(name)+'/settings').catch(()=>null);
+  if(S.drawer!==name)return;
+  if(!r||!r.ok||!r.j.options){w.appendChild(el('div','empty','Could not read the settings.'));return}
+  const st=r.j,pend={},opts=st.options;
+  const top=el('div','sgrid');w.appendChild(top);
+  // start at boot: a switch, applied at once (no restart)
+  const bw=el('div','swell bootw'),sw=el('button','tgl'+(st.boot?' on':''));sw.type='button';sw.setAttribute('role','switch');sw.setAttribute('aria-checked',st.boot);sw.setAttribute('aria-label','Start at boot');sw.appendChild(el('i'));
+  const bt=el('div','sw-txt'),bl=el('span','lab');bt.append(el('b',null,'Start at boot'),bl);
+  const bpaint=()=>{sw.classList.toggle('on',st.boot);sw.setAttribute('aria-checked',st.boot);bl.textContent=st.boot?'comes back after a reboot':'stays down after a reboot'};bpaint();
+  sw.onclick=()=>P.busy(sw,act('tunnels/'+enc(name)+'/boot',{body:{on:!st.boot}}).then(x=>{if(x){st.boot=!st.boot;bpaint();P.loadOverview()}}));
+  bw.append(bt,sw);top.appendChild(bw);
+  // anti-censorship: one preset, applied on the end that dials
+  if(st.presets&&st.presets.length){
+    const aw=el('div','swell acw'),hd=el('div','sw-txt');
+    hd.append(el('b',null,'Anti-censorship'),el('span','lab',st.ac_where==='kharej'?'Reverse tunnel: Kharej dials, so the preset is set there':'now: '+(st.ac_now||'none')));
+    const ch=el('div','ochips');
+    st.presets.forEach(p=>{const b=el('button','och'+(st.ac_where==='here'&&acMatch(st.ac_now,p.value)?' on':''),p.label);b.type='button';if(p.hint)b.title=p.hint;
+      b.onclick=()=>act('tunnels/'+enc(name)+'/ac-preset',{body:{preset:p.value},title:'Anti-censorship: '+p.label,confirm:(p.hint?p.hint[0].toUpperCase()+p.hint.slice(1)+'. ':'')+(st.ac_where==='kharej'?'Kharej applies it and restarts its side; it rolls back if the tunnel does not come up.':name+' restarts with it; open connections drop for a few seconds.'),ok:'Apply'}).then(x=>{if(x){toast('Preset '+p.label+(x.job?' is being applied':' applied on Kharej'));setTimeout(()=>{if(S.drawer===name)settingsBlock(name,t)},x.job?6000:1500)}});
+      ch.appendChild(b)});
+    aw.append(hd,ch);
+    if(st.ac_where==='here')aw.appendChild(btn('Test what passes the filter','sec',()=>act('tunnels/'+enc(name)+'/ac-test')));
+    top.appendChild(aw)}else top.classList.add('one');
+  // the option groups
+  const rows=[];
+  const draw=()=>{
+    const n=Object.keys(pend).length;bar.hidden=!n;bar.textContent='';if(!n)return;
+    const both=Object.keys(pend).some(k=>opts.find(o=>o.key===k).both_ends);
+    const sum=Object.entries(pend).map(([k,v])=>{const o=opts.find(x=>x.key===k);return o.label+' '+labelOf(o,v)}).join(' · ');
+    const tx=el('div','ab-t');tx.append(el('b',null,n+(n===1?' change':' changes')),el('span','lab',sum));
+    bar.append(tx,btn('Discard','sec',()=>{Object.keys(pend).forEach(k=>delete pend[k]);rows.forEach(f=>f());draw()}),
+      btn('Apply and restart','pri',()=>act('tunnels/'+enc(name)+'/settings',{method:'PUT',body:{set:pend},title:'Apply '+n+(n===1?' change':' changes'),
+        confirm:(both?'Kharej changes first; if it refuses, nothing changes here. ':'')+name+' restarts once with the new settings; open connections drop for a few seconds.',ok:'Apply and restart'}).then(x=>{if(x){toast('Settings applied. '+name+' restarted.');P.loadOverview();settingsBlock(name,t)}})))};
+  [...new Set(opts.map(o=>o.group))].forEach(g=>{
+    const box=el('div','ogrp');box.appendChild(el('div','og-t',g));w.appendChild(box);
+    opts.filter(o=>o.group===g).forEach(o=>{
+      const row=el('div','orow'),lt=el('div','or-l'),nm=el('div','or-n',o.label);
+      if(o.both_ends)nm.appendChild(el('span','tag','both ends'));lt.append(nm,el('div','lab',o.help));
+      const ch=el('div','ochips');row.append(lt,ch);box.appendChild(row);
+      const cur=()=>o.key in pend?pend[o.key]:o.value;
+      const set=v=>{if(v===o.value)delete pend[o.key];else pend[o.key]=v;paint();draw()};
+      let cb=null,f=null,inp=null;
+      const paint=()=>{const v=cur(),known=o.choices.some(c=>c.value===v),p=o.key in pend;
+        ch.querySelectorAll('.och[data-v]').forEach(b=>{const on=b.dataset.v===v;b.classList.toggle('on',on&&!p);b.classList.toggle('pend',on&&p)});
+        if(cb){cb.hidden=false;f.hidden=true;cb.textContent=known?'Custom':v+(o.custom.unit?' '+o.custom.unit:'');cb.classList.toggle('on',!known&&!p);cb.classList.toggle('pend',!known&&p)}};
+      o.choices.forEach(c=>{const b=el('button','och',c.label);b.type='button';b.dataset.v=c.value;if(c.hint)b.title=c.hint;b.onclick=()=>set(c.value);ch.appendChild(b)});
+      if(o.custom){cb=el('button','och','Custom');cb.type='button';f=el('span','ocust');f.hidden=true;
+        inp=el('input');inp.inputMode=o.custom.ip?'text':'decimal';inp.spellcheck=false;inp.autocomplete='off';inp.placeholder=o.custom.ip?'10.0.0.5':o.custom.min+'–'+o.custom.max;inp.setAttribute('aria-label',o.label);
+        const ok=el('button','och on','Set');ok.type='button';
+        const take=()=>{const v=inp.value.trim();if(!v){paint();return}const e=checkCustom(o,v);if(e){toast(e,true);inp.focus();return}set(v)};
+        ok.onclick=take;inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();take()}if(e.key==='Escape')paint()};
+        f.append(inp);if(o.custom.unit)f.appendChild(el('span','lab',o.custom.unit));f.appendChild(ok);
+        cb.onclick=()=>{cb.hidden=true;f.hidden=false;const v=cur();inp.value=o.choices.some(c=>c.value===v)?'':v;inp.focus()};ch.append(cb,f)}
+      paint();rows.push(paint)})});
+  $('#dSetSub').textContent=opts.length+' options';
+}
+const AC_WORD={cloudflare:'cloudflare','rst-fast':'rst-fast',mci:'mci',irancell:'irancell',conservative:'conservative',blackout:'blackout'};
+function acMatch(now,v){now=(now||'').toLowerCase();return v==='off'?/none|disabled/.test(now):now.includes(AC_WORD[v])}
+function labelOf(o,v){const c=o.choices.find(x=>x.value===v);return c?c.label:v+(o.custom&&o.custom.unit?' '+o.custom.unit:'')}
+function checkCustom(o,v){const c=o.custom;
+  if(c.ip)return /^\[?[0-9a-fA-F:.]+\]?$/.test(v)?'':o.label+': enter an IPv4 or IPv6 address';
+  const f=Number(v);if(!isFinite(f)||(!c.float&&!Number.isInteger(f))||f<(c.min||0)||f>c.max)return o.label+': enter '+(c.float?'a number':'a whole number')+' from '+c.min+' to '+c.max+(c.unit?' '+c.unit:'');return ''}
 function renderDrawerPorts(name,ports){
   const w=$('#dPorts');w.textContent='';$('#dPortsSub').textContent=ports.length?ports.length+' public':'';
   if(!ports.length){w.appendChild(el('div','empty','No per-port numbers yet (the tunnel is stopped, or has no metrics address).'));return}
-  ports.forEach(p=>{const c=el('div','pcard');
+  // busiest first; only the top 4 until asked, so a 19-port tunnel does not bury the rest of the drawer
+  const all=ports.slice().sort((a,b)=>(b.rate_down+b.rate_up)-(a.rate_down+a.rate_up)||(b.down+b.up)-(a.down+a.up)||b.conns-a.conns),open=S.portsAll===name;
+  (open?all:all.slice(0,4)).forEach(p=>{const c=el('div','pcard');
     const h=el('div','pc-h');h.append(el('span','pc-port n',p.port),el('span','lab',p.conns+' users'));c.appendChild(h);
     const s=el('div','pc-s');s.append(el('span',null,'↓ '+P.fmtBytes(p.down)),el('span',null,'↑ '+P.fmtBytes(p.up)),el('span','lab',P.fmtRate(p.rate_down)+' MB/s now'));c.appendChild(s);
     if(p.rate_limit)c.appendChild(el('div','lab','limited to '+(p.rate_limit*8/1e6).toFixed(0)+' Mbit/s'));
     if(p.quota_limit>0){c.appendChild(quotaBar(p));c.appendChild(btn('Reset quota','sec',()=>act('tunnels/'+enc(name)+'/quota-reset',{body:{port:+p.port},confirm:'Usage of port '+p.port+' goes back to zero now.',title:'Reset the quota'}).then(r=>{if(r){toast('Quota reset');portsAt=0;P.openDrawer(name)}})))}
     w.appendChild(c)});
+  if(all.length>4)w.appendChild(btn(open?'Show the busiest 4':'Show all '+all.length+' ports','sec pmore',()=>{S.portsAll=open?null:name;renderDrawerPorts(name,ports)}));
 }
 async function editPorts(name,t){const v=await ask('Ports of '+name,{fields:[{k:'ports',label:'One mapping per line: 443, 8443:443, 53/udp',area:true,rows:6,value:(t.ports||[]).join('\n')}],ok:'Save'});
   if(!v)return;const r=await act('tunnels/'+enc(name)+'/ports',{method:'PUT',body:{ports:v.ports.split(/[\n,]+/).map(x=>x.trim()).filter(Boolean)}});if(r){toast(r.note||'Saved');P.loadOverview()}}
@@ -556,7 +625,7 @@ async function loadTraffic(){
   // speed tests
   const rows=sp.ok?sp.j.rows:[];const iran=S.ov?S.ov.tunnels.filter(t=>t.role==='Iran'):[];
   const sel=el('select');sel.setAttribute('aria-label','Tunnel');iran.forEach(t=>{const o=el('option',null,t.name);o.value=t.name;sel.appendChild(o)});
-  const tl=el('div','tools');tl.append(P.dd(sel),btn('Run a test','pri fx-dust',()=>sel.value&&act('tunnels/'+enc(sel.value)+'/speedtest',{body:{mb:10}}).then(()=>{})));
+  const tl=el('div','tools');tl.append(P.dd(sel),btn('Run a test','pri',()=>sel.value&&act('tunnels/'+enc(sel.value)+'/speedtest',{body:{mb:10}}).then(()=>{})));
   const spc=card('s3','Speed tests','download, MB/s',tl);
   const latest={};rows.forEach(x=>{if(!latest[x.name])latest[x.name]=x});
   const lt=el('div','sp-latest');Object.values(latest).slice(0,4).forEach(x=>{const d=el('div','sp-l');const dot=el('i');dot.style.background=colOf(x.name);const h=el('div','lab');h.append(dot,x.name);const v=el('div','mid n');v.appendChild(split(x.down?x.down.toFixed(1):'–',x.down?'MB/s':''));d.append(h,v,el('div','lab','↑ '+(x.up?x.up.toFixed(1):'–')+' · '+when(x.t)));lt.appendChild(d)});spc.appendChild(lt);

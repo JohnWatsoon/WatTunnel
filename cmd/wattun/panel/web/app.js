@@ -235,7 +235,8 @@ function startGlobe(){
 let ticket='',clockIv=0;
 const f1=$('#f1'),f2=$('#f2');const otp=[];
 for(let i=0;i<6;i++){const inp=el('input');inp.inputMode='numeric';inp.maxLength=1;inp.setAttribute('aria-label','Digit '+(i+1));if(i===0)inp.autocomplete='one-time-code';$('.otp').appendChild(inp);otp.push(inp)}
-function showLogin(){
+function showLogin(){document.title=preTitle;return showLogin0.apply(this,arguments)}
+function showLogin0(){
   stopApp();$('#app').hidden=true;$('#login').hidden=false;
   f2.hidden=true;f1.hidden=false;$('#p2').classList.remove('on');$('#e1').textContent='';$('#pass').value='';
   if(!globe.stop)startGlobe();
@@ -308,11 +309,14 @@ $('#out').addEventListener('click',async()=>{try{await api('logout',{method:'POS
 
 async function loadOverview(){
   // the first load asks both at once (one round trip on a slow link, not two)
-  if(!S.cli)api('me').then(m=>{if(m.ok){S.cli=m.j.cli;brand(m.j)}}).catch(()=>{});
+  if(!S.me)api('me').then(m=>{if(m.ok){S.me=m.j;S.cli=m.j.cli;brand(m.j)}}).catch(()=>{});else brand(S.me);
   try{const r=await api('overview');if(r.ok){S.ov=r.j;if(S.view==='overview'&&!S.mapStarted)startMap();render()}}catch(e){}
 }
 // the software's name and project page arrive only after sign-in (the login page does not say what this runs)
-function brand(m){if(!m.product)return;$('#brand').textContent=m.product;const g=$('#gh');g.href=m.repo;g.setAttribute('aria-label',m.product+' on GitHub');g.title='Project page';g.hidden=false}
+// the tab says the product only after sign-in (the name comes from an authenticated answer; the page served before sign-in
+// carries the neutral title, which showLogin puts back)
+const preTitle=document.title;
+function brand(m){if(!m.product)return;$('#brand').textContent=m.product;document.title=m.product;const g=$('#gh');g.href=m.repo;g.setAttribute('aria-label',m.product+' on GitHub');g.title='Project page';g.hidden=false}
 function newer(a,b){const x=a.split('.').map(Number),y=b.split('.').map(Number);for(let i=0;i<Math.max(x.length,y.length);i++){if((x[i]||0)!==(y[i]||0))return (x[i]||0)>(y[i]||0)}return false}
 function sideBar(ov){
   const down=ov.tunnels.filter(t=>statusOf(t)[0]==='p-down').length,off=ov.kharej.filter(k=>!k.online).length;
@@ -465,7 +469,13 @@ function ring(id,txt,pct,title){const r=$(id);if(!r)return;const f=Math.max(0,Ma
   r.classList.toggle('warn',pct>=70&&pct<85);r.classList.toggle('hi',pct>=85);r.querySelector('.rv .n').textContent=txt;if(title)r.title=title}
 function renderServer(){
   const h=S.ov.host;
-  ring('#gCpu',h.load1.toFixed(2),h.cpus?h.load1/h.cpus*100:0,(h.cpus||'?')+' cores');
+  // CPU use of the whole machine (load average when the server cannot say), and how much of it is the tunnels: a Kharej
+  // often runs other services too, and the owner should see which part is ours
+  const cp=h.cpu_pct>0||h.wat_procs?h.cpu_pct:-1;
+  if(cp>=0)ring('#gCpu',cp.toFixed(0)+'%',cp,'load '+h.load1.toFixed(2)+' on '+(h.cpus||'?')+' cores');else ring('#gCpu',h.load1.toFixed(2),h.cpus?h.load1/h.cpus*100:0,(h.cpus||'?')+' cores');
+  $('#gCpu .rv .lab').textContent=cp>=0?'cpu':'load';
+  const ws=$('#srvWat');if(ws){ws.textContent=h.wat_procs?h.wat_cpu_pct.toFixed(1)+'% cpu · '+h.wat_mem_mb.toFixed(0)+' MB':'–';ws.title=h.wat_procs+' processes: tunnels, this panel, heal';
+    $('#srvOther').textContent=cp>=0?Math.max(0,cp-h.wat_cpu_pct).toFixed(0)+'% cpu':'–'}
   ring('#gMem',h.mem_pct.toFixed(0)+'%',h.mem_pct);
   ring('#gDisk',h.disk_pct.toFixed(0)+'%',h.disk_pct);
   $('#srvUp').textContent=h.uptime_s?'up '+fmtDur(h.uptime_s):'';
@@ -536,7 +546,9 @@ function renderLive(down,up){
   if(window.PANEL&&PANEL.onLive)PANEL.onLive(down,up);
 }
 function stripes(){
-  const svg=$('#sbars');const last=S.series.slice(-30);const n=30,bw=300/n;const top=Math.max(1,...last.map(s=>s.down));
+  // 30 bars of 2 s each = the last 60 s, so the labels under them are true; each bar is that pair's average
+  const svg=$('#sbars');const src=S.series.slice(-60),last=[];for(let i=src.length%2;i<src.length;i+=2)last.push({down:(src[i].down+(src[i+1]||src[i]).down)/2});
+  const n=30,bw=300/n;const top=Math.max(131072,...last.map(s=>s.down));$('#sbTop').textContent='bar top '+mb(top).toFixed(mb(top)<10?1:0)+' MB/s';
   let s='<defs><pattern id="hz" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.6" height="4" fill="#3a3a41"/></pattern></defs>';
   for(let i=0;i<n-last.length;i++)s+=`<rect x="${(i*bw+1).toFixed(2)}" y="81" width="${(bw-2).toFixed(2)}" height="3" rx="1.5" fill="#232327"/>`;
   last.forEach((p,i)=>{const x=(n-last.length+i)*bw;const hh=Math.max(3,p.down/top*82);s+=`<rect x="${(x+1).toFixed(2)}" y="${(84-hh).toFixed(2)}" width="${(bw-2).toFixed(2)}" height="${hh.toFixed(2)}" rx="1.5" fill="${i===last.length-1?'#3ee08a':'url(#hz)'}"/>`});
@@ -622,7 +634,7 @@ function startMap(){
   const draw=(now)=>{
     requestAnimationFrame(draw);
     if(document.hidden||$('#vOverview').hidden||!map.pts||modal())return;
-    const {x,w,h}=map.g;const t=(now-map.t0)/1000;x.clearRect(0,0,w,h);
+    const {x,w,h}=map.g;const t=(now-map.t0)/1000;x.clearRect(0,0,w,h);const fdt=Math.min(0.1,(now-(map.last||now))/1000);map.last=now;map.ph=map.ph||{};
     const kh=map.pl.kh;
     const intro=RM?1:Math.min(1,t/1.5);const r=map.pitch*0.24;
     for(const p of map.pts){
@@ -642,8 +654,9 @@ function startMap(){
       for(let j=0;j<=n*ar;j++){const q=B(j/n);x.fillStyle='rgba(255,255,255,0.28)';x.beginPath();x.arc(q[0],q[1],0.8,0,6.283);x.fill()}
       // packets: speed follows the live rate to this host; none when unreachable
       const rate=mb(hostRate(k));
-      if(ar>=1&&k.online&&rate>0.01){const sp=0.05+Math.min(0.3,rate/120);
-        for(let m=0;m<2;m++){const head=((t*sp+m*0.5+i*0.27)%1);for(let j=0;j<26;j++){const s=head-j*0.007;if(s<0)break;const q=B(s);const al=1-j/26;x.fillStyle=`rgba(${col},${(al*0.95).toFixed(3)})`;x.beginPath();x.arc(q[0],q[1],j===0?2.2:0.6+1.2*al,0,6.283);x.fill()}}}
+      // the phase advances by speed x frame time, so a new live rate changes the pace, never the position
+      if(ar>=1&&k.online&&rate>0.01){const sp=0.05+Math.min(0.3,rate/120);const ph0=map.ph[k.host]=((map.ph[k.host]??i*0.27)+sp*fdt)%1;
+        for(let m=0;m<2;m++){const head=(ph0+m*0.5)%1;for(let j=0;j<26;j++){const s=head-j*0.007;if(s<0)break;const q=B(s);const al=1-j/26;x.fillStyle=`rgba(${col},${(al*0.95).toFixed(3)})`;x.beginPath();x.arc(q[0],q[1],j===0?2.2:0.6+1.2*al,0,6.283);x.fill()}}}
       const ph=(t*0.5+i*0.3)%1;x.strokeStyle=`rgba(${col},${((1-ph)*0.55).toFixed(3)})`;x.lineWidth=1;x.beginPath();x.arc(b[0],b[1],3+ph*18,0,6.283);x.stroke();
       x.fillStyle='#f3f3f4';x.beginPath();x.arc(b[0],b[1],2.6,0,6.283);x.fill();
     });
@@ -667,7 +680,7 @@ function drawerHead(t){
 }
 function syncDrawer(){if(!S.drawer||!S.ov)return;const t=S.ov.tunnels.find(x=>x.name===S.drawer);if(t)drawerHead(t)}
 async function openDrawer(name){
-  S.drawer=name;S.dKey=null;$('#drawer').hidden=false;const t=S.ov.tunnels.find(x=>x.name===name)||{name};
+  S.drawer=name;S.dKey=null;S.hAt=Date.now();$('#drawer').hidden=false;const t=S.ov.tunnels.find(x=>x.name===name)||{name};
   drawerHead(t);drawerLive();$('#dX').focus();
   const [h,l]=await Promise.all([api('tunnels/'+encodeURIComponent(name)+'/history').catch(()=>null),api('tunnels/'+encodeURIComponent(name)+'/logs?n=200').catch(()=>null)]);
   if(S.drawer!==name)return;
@@ -676,18 +689,29 @@ async function openDrawer(name){
 }
 function showLog(l){const pre=$('#dLog');pre.textContent=l&&l.ok?(l.j.lines.join('\n')||'(empty)'):'Could not read the log.';pre.scrollTop=pre.scrollHeight}
 $('#dLogR').addEventListener('click',async()=>{if(!S.drawer)return;showLog(await api('tunnels/'+encodeURIComponent(S.drawer)+'/logs?n=200').catch(()=>null))});
-function drawerLive(){const l=S.live[S.drawer]||{};const set=(id,v,u)=>{const e=$(id);e.textContent=v;if(u)e.appendChild(el('span','unit',u))};
+function drawerLive(){const l=S.live[S.drawer]||{};const now=Date.now();if(now-(S.hAt||0)>5000){S.hAt=now;const nm=S.drawer;api('tunnels/'+encodeURIComponent(nm)+'/history').then(h=>{if(S.drawer===nm&&h&&h.ok&&Array.isArray(h.j))drawHist(h.j)}).catch(()=>{})}const set=(id,v,u)=>{const e=$(id);e.textContent=v;if(u)e.appendChild(el('span','unit',u))};
   set('#dDown',l.metrics?fmtRate(l.down):'–',l.metrics?'MB/s':'');set('#dUp',l.metrics?fmtRate(l.up):'–',l.metrics?'MB/s':'');set('#dRtt',l.metrics&&l.rtt?l.rtt.toFixed(0):'–',l.metrics&&l.rtt?'ms':'');set('#dLoss',l.metrics?l.loss.toFixed(1):'–',l.metrics?'%':'')}
+// The drawer's 5 minutes: download and upload from the engine's byte totals (4.0.1+; down = bytes in on Iran, bytes
+// out on Kharej, as the live rates), latency dashed. An older engine has no totals: its pacing rate stands in, labelled.
 function drawHist(d){
   const svg=$('#dChart');const W=640,H=180,L=40,T=12,B=24;
-  if(d.length<2){svg.innerHTML='<text x="320" y="90" text-anchor="middle">No history yet: the tunnel keeps 5 minutes once it runs.</text>';return}
-  const v=d.map(s=>mb(s.rate_bps||0)),r=d.map(s=>s.srtt_ms||0);const top=Math.max(1,Math.ceil(Math.max(...v)/5)*5),rt=Math.max(10,Math.max(...r)*1.2);const n=d.length;
-  const X=i=>L+i*(W-L-4)/(n-1),Y=x=>T+(1-x/top)*(H-T-B),YR=x=>T+(1-x/rt)*(H-T-B);
+  if(d.length<2){svg.innerHTML='<text x="320" y="90" text-anchor="middle">No history yet: the tunnel keeps 5 minutes once it runs.</text>';$('#dLegend').textContent='';return}
+  const t=S.ov&&S.ov.tunnels.find(x=>x.name===S.drawer),kh=t&&t.role==='Kharej',real=d.every(s=>s.bytes_in!==undefined);
+  let dn=[],up=[],r=[],ts=[];
+  if(real){for(let i=1;i<d.length;i++){const dt=Math.max(1,d[i].t-d[i-1].t);let a=d[i].bytes_in-d[i-1].bytes_in,b=d[i].bytes_out-d[i-1].bytes_out;if(a<0||b<0){a=0;b=0}if(kh)[a,b]=[b,a];dn.push(mb(a/dt));up.push(mb(b/dt));r.push(d[i].srtt_ms||0);ts.push(d[i].t)}}
+  else{d.forEach(s=>{dn.push(mb(s.rate_bps||0));r.push(s.srtt_ms||0);ts.push(s.t)})}
+  const n=dn.length;if(n<2){svg.innerHTML='<text x="320" y="90" text-anchor="middle">Collecting: the graph fills in over the next seconds.</text>';return}
+  const top=Math.max(1,Math.ceil(Math.max(...dn,...up)/5)*5),rt=Math.max(10,Math.max(...r)*1.2);
+  const X=i=>L+i*(W-L-4)/(n-1),Y=x=>T+(1-x/top)*(H-T-B),YR=x=>T+(1-x/rt)*(H-T-B),path=(v,f)=>v.map((x,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+f(x).toFixed(1)).join('');
   let s='';for(let k=0;k<=4;k++){const y=top*k/4;s+=`<line x1="${L}" x2="${W}" y1="${Y(y).toFixed(1)}" y2="${Y(y).toFixed(1)}" class="gl"/><text x="0" y="${(Y(y)+3.5).toFixed(1)}">${y.toFixed(y<10?1:0)}</text>`}
-  let p='',q='';v.forEach((x,i)=>{p+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(x).toFixed(1)});r.forEach((x,i)=>{q+=(i?'L':'M')+X(i).toFixed(1)+' '+YR(x).toFixed(1)});
-  s+=`<path d="${q}" fill="none" stroke="#9a8cff" stroke-width="1.4" stroke-dasharray="3 3"/><path d="${p}" fill="none" stroke="#3ee08a" stroke-width="2"/>`;
-  s+=`<text x="${L}" y="${H-4}">${fmtDur(d[n-1].t-d[0].t)} ago</text><text x="${W}" y="${H-4}" text-anchor="end">— sending rate MB/s · - - latency (max ${Math.max(...r).toFixed(0)} ms)</text>`;
+  s+=`<path d="${path(r,YR)}" fill="none" stroke="#9a8cff" stroke-width="1.2" stroke-dasharray="3 3" opacity=".8"/>`;
+  if(up.length)s+=`<path d="${path(up,Y)}" fill="none" stroke="#5aa9ff" stroke-width="1.6"/>`;
+  s+=`<path d="${path(dn,Y)}" fill="none" stroke="#3ee08a" stroke-width="2"/>`;
+  s+=`<text x="${L}" y="${H-4}">${fmtDur(ts[n-1]-ts[0])} ago</text><text x="${W}" y="${H-4}" text-anchor="end">MB/s · latency max ${Math.max(...r).toFixed(0)} ms</text>`;
   svg.innerHTML=s;
+  $('#dLegend').textContent=real?'— download · — upload · - - latency':'— pacing rate (update this tunnel for real traffic) · - - latency';
+  svg.onpointermove=e=>{const bx=svg.getBoundingClientRect();const i=Math.max(0,Math.min(n-1,Math.round(((e.clientX-bx.left)/bx.width*W-L)/((W-L-4)/(n-1)))));
+    svg.setAttribute('aria-label',dn[i].toFixed(2)+' MB/s');svg.querySelector('title')||svg.appendChild(document.createElementNS('http://www.w3.org/2000/svg','title'));svg.querySelector('title').textContent=new Date(ts[i]*1000).toLocaleTimeString()+'  ↓ '+dn[i].toFixed(2)+(up.length?'  ↑ '+up[i].toFixed(2):'')+' MB/s  '+r[i].toFixed(0)+' ms'};
 }
 const closeDrawer=()=>{S.drawer=null;$('#drawer').hidden=true};
 $('#dX').addEventListener('click',closeDrawer);$('#drawer').addEventListener('click',e=>{if(e.target===$('#drawer'))closeDrawer()});
@@ -735,24 +759,7 @@ if(!RM){let pe=null,raf=0;document.addEventListener('pointermove',e=>{pe=e;if(!r
     b.style.setProperty('--mx',(e.clientX-r.left).toFixed(0)+'px');b.style.setProperty('--my',(e.clientY-r.top).toFixed(0)+'px');
     const s=document.createElement('span');s.className='rip';s.style.setProperty('--rx',(e.clientX-r.left)+'px');s.style.setProperty('--ry',(e.clientY-r.top)+'px');
     s.style.setProperty('--rs',(Math.hypot(r.width,r.height)*2)+'px');b.appendChild(s);setTimeout(()=>s.remove(),700);
-    if(b.classList.contains('fx-dust'))dissolve(b);if(b.classList.contains('fx-aurora'))edgeGlow()},{passive:true})}
-// fx-dust: the button's face breaks into ~1000 grains, left to right as the mask wipes it, and they swirl into a
-// vortex beside it and fade; the button then returns out of a blur (one canvas, one rAF loop, gone after 1.6 s)
-function dissolve(b){if(b.classList.contains('dissolving'))return;const r=b.getBoundingClientRect(),pad=150,dpr=Math.min(devicePixelRatio||1,2);
-  const cv=document.createElement('canvas'),W=r.width+pad*2,H=r.height+pad*2;cv.className='fx-dustcv';cv.width=W*dpr;cv.height=H*dpr;
-  cv.style.setProperty('left',(r.left-pad)+'px');cv.style.setProperty('top',(r.top-pad)+'px');cv.style.setProperty('width',W+'px');cv.style.setProperty('height',H+'px');
-  const x=cv.getContext('2d');x.scale(dpr,dpr);const bg=getComputedStyle(b).backgroundColor,col=/rgba\(.*, 0\)|transparent/.test(bg)?'#f1f1f4':bg,rad=Math.min(r.height/2,14),g=[];
-  const vx=pad+r.width+40,vy=pad+r.height*.2;
-  for(let yy=0;yy<r.height;yy+=1.6)for(let xx=0;xx<r.width;xx+=1.6){
-    const cx=Math.min(xx,r.width-xx),cy=Math.min(yy,r.height-yy);if(cx<rad&&cy<rad&&Math.hypot(rad-cx,rad-cy)>rad)continue;if(Math.random()>.42)continue;
-    const px=pad+xx,py=pad+yy;g.push({a:Math.atan2(py-vy,px-vx),d:Math.hypot(px-vx,py-vy),w:1.6+Math.random()*2.6,o:(Math.random()-.5)*90,
-      t0:xx/r.width*.5+Math.random()*.06,s:.5+Math.random()*1.3,k:.35+Math.random()*.65})}
-  document.body.appendChild(cv);b.classList.remove('reform');b.classList.add('dissolving');const st=performance.now();
-  (function fr(now){const t=(now-st)/1000;x.clearRect(0,0,W,H);x.fillStyle=col;let live=0;
-    for(const p of g){const u=t-p.t0;if(u<0){live++;continue}if(u>1.1)continue;live++;const e=1-Math.pow(1-u/1.1,3),an=p.a+e*p.w,dd=p.d*(1-.55*e)+p.o*e;
-      x.globalAlpha=p.k*(1-u/1.1);x.fillRect(vx+Math.cos(an)*dd,vy+Math.sin(an)*dd-e*30,p.s,p.s)}
-    if(live&&t<1.7)requestAnimationFrame(fr);else cv.remove()})(st);
-  setTimeout(()=>{b.classList.remove('dissolving');b.classList.add('reform');setTimeout(()=>b.classList.remove('reform'),700)},1150)}
+    if(b.classList.contains('fx-aurora'))edgeGlow()},{passive:true})}
 // fx-aurora: the screen's edge glows in the aurora's colours once, like a payment going through
 function edgeGlow(){const g=document.createElement('div');g.className='edge-glow';g.append(document.createElement('i'),document.createElement('i'));
   document.body.appendChild(g);setTimeout(()=>g.remove(),2000)}
