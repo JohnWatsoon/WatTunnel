@@ -289,7 +289,18 @@ func LatestVersion() string {
 	cl := updClient()
 	cl.Timeout = 20 * time.Second
 	cl.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	r, err := cl.Get(uURLPrefix + "https://github.com/" + repo() + "/releases/latest")
+	var r *http.Response
+	var err error
+	for _, pre := range mirrorCandidates() {
+		if r, err = cl.Get(pre + "https://github.com/" + repo() + "/releases/latest"); err == nil {
+			if strings.Contains(r.Header.Get("Location"), "/tag/v") {
+				break
+			}
+			r.Body.Close()
+			err = fmt.Errorf("no release tag")
+		}
+		cl.Timeout = 8 * time.Second // the mirrors after a failed direct try
+	}
 	if err != nil {
 		return ""
 	}

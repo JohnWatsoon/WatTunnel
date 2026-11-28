@@ -142,6 +142,20 @@ func applyUpdateProxy(v string) {
 	}
 }
 
+// updateMirrors are public GitHub prefix mirrors an update tries in turn when github.com itself fails (Iran
+// filters it, 4.0.5). Each file is still checked against SHA256SUMS signed by the pinned release key, so a
+// mirror cannot change what gets installed; it can only fail.
+var updateMirrors = []string{"https://ghfast.top/", "https://gh-proxy.com/", "https://ghproxy.net/", "https://github.moeyy.xyz/"}
+
+// mirrorCandidates: the configured mirror or proxy alone when Settings or the environment set one, else direct
+// first and then each built-in mirror.
+func mirrorCandidates() []string {
+	if uURLPrefix != "" || uProxy != "" {
+		return []string{uURLPrefix}
+	}
+	return append([]string{""}, updateMirrors...)
+}
+
 func updateProxyEnv() {
 	uURLPrefix, uProxy = os.Getenv("WAT_PROXY"), os.Getenv("WAT_CURL_PROXY")
 	if uURLPrefix != "" {
@@ -322,21 +336,35 @@ func update(args []string) bool {
 		}
 		Ok("Installer downloaded UNSIGNED")
 	default:
-		base := uURLPrefix + "https://github.com/" + repo() + "/releases/latest/download"
 		sumsP, sigP := filepath.Join(udir, "SHA256SUMS"), filepath.Join(udir, "SHA256SUMS.sig")
-		dlErr := spin("Downloading the installer and its signature", func() error {
-			for _, f := range [][2]string{{inst, "install.sh"}, {sumsP, "SHA256SUMS"}, {sigP, "SHA256SUMS.sig"}} {
-				if err := download(f[0], base+"/"+f[1]); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
+		var dlErr error
 		verified := false
-		if dlErr == nil {
-			sums, _ := os.ReadFile(sumsP)
-			sig, _ := os.ReadFile(sigP)
-			verified = sumsVerify(sums, sig, "") && sumsHas(sums, "install.sh", fileSHA(inst))
+		for _, pre := range mirrorCandidates() {
+			base := pre + "https://github.com/" + repo() + "/releases/latest/download"
+			what := "Downloading the installer and its signature"
+			if pre != uURLPrefix {
+				what += " through " + pre
+			}
+			dlErr = spin(what, func() error {
+				for _, f := range [][2]string{{inst, "install.sh"}, {sumsP, "SHA256SUMS"}, {sigP, "SHA256SUMS.sig"}} {
+					if err := download(f[0], base+"/"+f[1]); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if dlErr == nil {
+				sums, _ := os.ReadFile(sumsP)
+				sig, _ := os.ReadFile(sigP)
+				verified = sumsVerify(sums, sig, "") && sumsHas(sums, "install.sh", fileSHA(inst))
+			}
+			if verified {
+				if pre != uURLPrefix { // the installer fetches the binaries through the same mirror
+					uURLPrefix = pre
+					ienv = append(ienv, "WAT_PROXY="+pre)
+				}
+				break
+			}
 		}
 		if !verified {
 			if dlErr != nil && IsTTY && !NonInteractive && os.Getenv("WAT_U_RETRIED") == "" {
