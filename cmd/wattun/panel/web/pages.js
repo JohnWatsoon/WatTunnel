@@ -377,7 +377,8 @@ function boot(name,t,verb){
 P.onDrawer=async(name,t)=>{
   const a=$('#dActs');a.textContent='';
   const route=$('#dRoute');route.textContent='';const ln=el('i','t-line'+(t.active?' on':''));ln.appendChild(el('b'));route.append(el('span','t-end',S.ov.host.name||'here'),ln,el('span','t-end',t.peer||'–'));
-  const grp=(title,items)=>{const g=el('div','agrp');g.appendChild(el('div','lab',title));const w=el('div','tools');items.filter(Boolean).forEach(x=>w.appendChild(x));g.appendChild(w);a.appendChild(g)};
+  // one list per group, the same rows as Settings: equal cells, icon and label, hairlines between them
+  const grp=(title,items)=>{const g=el('div','ogrp');g.appendChild(el('div','og-t',title));const w=el('div','alist');items.filter(Boolean).forEach(x=>w.appendChild(x));g.appendChild(w);a.appendChild(g)};
   const u=act2=>()=>{const b=act2!=='stop'?boot(name,t,act2):null;
     return act('tunnels/'+enc(name)+'/'+act2,act2==='stop'?{confirm:'Stop '+name+'? Its users lose the connection.',title:'Stop '+name,danger:true}:{}).then(r=>{if(b)b(r);if(r){if(!b)toast(name+': '+act2+' done');P.loadOverview()}})};
   grp('Run',[t.active?btn('Restart','sec',u('restart')):btn('Start','pri',u('start')),t.active&&btn('Stop','sec danger',u('stop'))]);
@@ -387,7 +388,8 @@ P.onDrawer=async(name,t)=>{
     btn('Diagnose','sec',()=>act('tunnels/'+enc(name)+'/diagnose'))]);
   const cdnc=/^(ws|wss|h2|h2c|grpc)$/.test(t.carrier||''),pool=/^(tcp|tls|ws|wss|h2|h2c|grpc)(\+(tcp|tls|ws|wss|h2|h2c|grpc))*$/.test(t.carrier||'');
   const tool=(op,label,confirm)=>btn(label,'sec',()=>act('tunnels/'+enc(name)+'/tool',{body:{op},title:label,confirm,ok:'Start'}));
-  grp('Tune',[t.role==='Iran'&&!t.reverse&&pool&&tool('acmatrix','Find best anti-censorship','Tests every fake-SNI, desync mode and ECH combination on this route and applies the fastest. Takes a few minutes; the tunnel restarts once at the end.'),
+  grp('Tune',[t.role==='Iran'&&btn('Auto tune','sec',()=>act('tunnels/'+enc(name)+'/retest',{body:{test:'normal',pick:'best'},title:'Auto tune '+name,confirm:'Tests every carrier of this auto tunnel, takes the fastest, tunes it and switches to it. A few minutes; the tunnel restarts once if it switches.',ok:'Start'})),
+    t.role==='Iran'&&!t.reverse&&pool&&tool('acmatrix','Find best anti-censorship','Tests every fake-SNI, desync mode and ECH combination on this route and applies the fastest. Takes a few minutes; the tunnel restarts once at the end.'),
     t.role==='Iran'&&!t.reverse&&cdnc&&tool('cdntune','Tune Cloudflare path','Finds the Cloudflare edges that serve this tunnel\'s domain, with ECH and TLS settings, and applies the best. Needs a domain on the tunnel.'),
     t.role==='Iran'&&/\+/.test(t.carrier||'')&&tool('bondretest','Re-test bond legs','Tests every leg again plus the ones that failed before, and adds one that works again.'),
     tool('resettraffic','Reset traffic','Zeroes the lifetime traffic counters of this tunnel. It restarts.')]);

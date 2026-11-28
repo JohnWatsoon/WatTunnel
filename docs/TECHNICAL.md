@@ -426,7 +426,11 @@ signature and SHA-256 digests, and packs `wattun-offline-<arch>.tar.gz`. On an I
 extract and run `bash install.sh` for a fresh install, or run `wattun update --from wattun-offline-<arch>.tar.gz` to
 update an existing install. For proxy/mirror updates, Settings → `p` saves `update-proxy` in `/etc/wattun/.manager.conf`
 (a URL prefix such as `https://ghproxy.net/` sets `WAT_PROXY`; a `socks5h://` or `http://host:port` proxy sets
-`WAT_CURL_PROXY`). Unsigned installs remain explicit opt-ins (`WAT_ALLOW_UNSIGNED_MANAGER=1`,
+`WAT_CURL_PROXY`). With no mirror or proxy set, `update` (both managers, and so the panel's Update) tries
+github.com first and then the public prefix mirrors `https://ghfast.top/`, `https://gh-proxy.com/`,
+`https://ghproxy.net/` and `https://github.moeyy.xyz/` in turn (4.0.5), and hands the one that worked to the
+installer. Every file is still checked against the release's `SHA256SUMS` signed by the pinned key, so a mirror can
+only fail, never change what gets installed. Unsigned installs remain explicit opt-ins (`WAT_ALLOW_UNSIGNED_MANAGER=1`,
 `WAT_ALLOW_UNSIGNED_UPDATE=1`).
 
 Manager-created tunnels pick verified-free random high ports (`10000..32767`, below Linux's default ephemeral range and
@@ -1535,6 +1539,10 @@ Since 4.0.2 the same helpers also carry **ptcp** (one random TCP port, `ptcp:P`)
 ports P..P+999, opened as one range) when Kharej's engine is 3.4.3+. The engine refuses to bond either, so they are
 never legs of the main unit. Iran tests them in every preset (they are not shapes); like any carrier they need Linux
 and root on both ends. An auto tunnel made before 4.0.2 has no such entries: re-create it on Kharej to gain them.
+The bash manager of 4.0.2-4.0.4 did not know this: its heal reopened ptcp and spray into the main bond, which the
+engine refuses at start (`ptcp is a shaped carrier and works as a single carrier`), so the main unit crash-looped and
+every direct carrier answered "no link" in a test or a switch. Since 4.0.5 both managers treat a main bond with ptcp
+or spray as needing a reopen, and the next heal run writes it back without them.
 
 **Auto tuning (3.3.0).** After the type (or the bond) is chosen, the manager tries the settings that change its speed,
 one setting at a time, starting from the engine auto values and keeping a value only when it beats the best so far by
@@ -3670,6 +3678,8 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
   which rebuilds the variants from the tunnel's auto plan and applies them without testing again (no tuning pass;
   the engine's auto values apply). Other jobs show their last steps, the current one pulsing; the raw log is one
   click away.
+- **Auto tune** (4.0.5, every Iran tunnel) is a carrier re-test with the normal preset that takes the best row,
+  tunes it and switches to it (`wattun auto-test NAME --yes --test normal --pick best`).
 - **Tune** (4.0.3) runs the manager's own tools as jobs, each applying its best result: *Find best anti-censorship*
   (`wattun matrix NAME --yes`, every fake-SNI x mode x ECH combination; Iran pool carriers, not reverse), *Tune
   Cloudflare path* (`wattun cdn-tune NAME --yes`; Iran CDN carriers with a domain), *Re-test bond legs*
@@ -3689,6 +3699,8 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
   test's rows in `NAME.atres` and the labels in use in `NAME.atuse` (both 0600 next to `NAME.yml`; a new key or a
   delete removes them). With no saved test the button says to run Re-test carriers once. Labels may hold
   parentheses since 4.0.2 (before, `l2tpv3 (shape only)` failed with `bad carrier label`).
+- **Job logs** show terminal output as plain text (4.0.5): escape sequences and progress-bar glyphs are dropped,
+  and a redraw (cursor up) replaces the lines it covers, so a speed bar shows its last value once.
 - **Re-test carriers** asks for the test preset and best or bond, then runs `wattun auto-test NAME --yes [--test
   PRESET] [--pick best|bond]`. (Before this, `auto-test NAME --yes` still asked the preset and the pick on a
   terminal and could not finish unattended.)

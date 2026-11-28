@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -262,7 +263,8 @@ func tailLog(file string, n int) ([]string, map[string]string) {
 	sc := bufio.NewScanner(io.LimitReader(f, 8<<20))
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
-		l := sc.Text()
+		l, up := termLine(sc.Text())
+		lines = lines[:max(0, len(lines)-up)] // a redraw replaces the lines it moved up over
 		if k, v, ok := strings.Cut(l, "="); ok && k != "" && strings.ToUpper(k) == k && !strings.ContainsAny(k, " \t") {
 			res[k] = v
 		}
@@ -278,6 +280,33 @@ func tailLog(file string, n int) ([]string, map[string]string) {
 		res = nil
 	}
 	return lines, res
+}
+
+var (
+	ansiUp  = regexp.MustCompile(`^\x1b\[(\d*)A`)
+	ansiCSI = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+)
+
+// termLine turns one line of terminal output into page text: the text after the last carriage return, no escape
+// sequences and no block glyphs (progress bars), plus how many earlier lines a leading cursor-up redraws.
+func termLine(l string) (string, int) {
+	up := 0
+	if m := ansiUp.FindStringSubmatch(l); m != nil {
+		up = 1
+		if m[1] != "" {
+			up, _ = strconv.Atoi(m[1])
+		}
+	}
+	if i := strings.LastIndexByte(l, '\r'); i >= 0 {
+		l = l[i+1:]
+	}
+	l = strings.Map(func(r rune) rune {
+		if r >= 0x2580 && r <= 0x259f { // block elements
+			return -1
+		}
+		return r
+	}, ansiCSI.ReplaceAllString(l, ""))
+	return strings.TrimRight(l, " "), up
 }
 
 // list returns the newest jobs first (no logs).
