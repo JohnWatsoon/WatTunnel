@@ -533,7 +533,9 @@ async function limitPort(name){const v=await ask('Limit a port of '+name,{fields
 async function showToken(name){const r=await act('tunnels/'+enc(name)+'/token',{title:'Show the token of '+name});if(!r)return;
   const b=el('div');b.appendChild(el('p','note','Anyone with this token can connect to the Kharej side. Paste it only into your own servers.'));b.appendChild(tokenBox(r.token,r.svg));info('Token of '+name,b)}
 async function deleteTunnel(name,t){
-  const k=S.ov.kharej.find(x=>x.via.includes(name));const twin=k&&(k.tunnels||[]).find(x=>x.name===name);
+  // paired: its Kharej; not paired: the one Kharej that has a tunnel of the same name (the panel makes both halves so)
+  const same=S.ov.kharej.filter(x=>(x.tunnels||[]).some(r=>r.name===name));
+  const k=S.ov.kharej.find(x=>x.via.includes(name))||(same.length===1?same[0]:null);const twin=k&&(k.tunnels||[]).find(x=>x.name===name);
   const fields=[];if(twin)fields.push({k:'alsoK',label:'Also delete '+twin.name+' on '+k.host,check:true,value:true});
   const v=await ask('Delete '+name,{full:true,danger:true,ok:'Delete',fields,text:'Stops '+name+' and deletes its config, key and token on this server.'+(k&&!twin?' Its Kharej side stays (no tunnel of the same name there).':'')});
   if(!v)return;const body={password:v.password,code:v.code};if(v.alsoK)body.kharej=twin.name;

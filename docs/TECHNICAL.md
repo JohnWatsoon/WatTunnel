@@ -3718,6 +3718,12 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
   keeps carrying traffic, the management channel is gone. The last-link rule applies.
 - **Quota reset.** Per port in the drawer; sets that port's usage back to zero (`/quota/reset` on the tunnel's
   metrics address).
+- **Delete** a tunnel here offers "Also delete NAME on Kharej" for a paired tunnel and, since 4.0.10, for an
+  unpaired one too when exactly one Kharej has a tunnel of the same name (the panel makes both halves under one
+  name). Before, deleting an unpaired tunnel here kept its Kharej half, and a new tunnel of that name was then
+  refused as "already used on Kharej".
+- **New tunnel on Kharej and here** undoes itself when it fails after Kharej made its half (4.0.10): this side is
+  deleted if it was written, and the tunnel is deleted on Kharej, so the same name can be tried again.
 - **Update here** runs `wattun update` as a job and restarts the panel; the page waits and reconnects.
   **Check for updates** (4.0.9, in place of the Roll back button) asks GitHub now instead of waiting for the
   6-hourly check (`POST /api/update-check`, answers `{latest, here}`). **Update all** runs the same fresh check

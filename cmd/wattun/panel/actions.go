@@ -624,6 +624,9 @@ func (s *Server) apiDelete(c *call) {
 	}
 	if in.Kharej != "" { // delete on Kharej too: first, while this tunnel's channel still exists
 		host := s.hostOf(name)
+		if host == "" { // not paired: the Kharej half the panel made under the same name
+			host = s.kharejWith(in.Kharej)
+		}
 		if host == "" || !nameRe.MatchString(in.Kharej) {
 			c.fail(http.StatusBadRequest, "This tunnel has no pairing to delete through.")
 			return
@@ -721,7 +724,19 @@ func (s *Server) apiNew(c *call) {
 				return err
 			}
 			say("Kharej made it. Writing this side and starting it ...")
-			return runInto(s.be.ManagerArgv(iranArgs(tok)...), say, "WAT_AT_CTL="+s.jobs.path(id, "ctl"))
+			err = runInto(s.be.ManagerArgv(iranArgs(tok)...), say, "WAT_AT_CTL="+s.jobs.path(id, "ctl"))
+			if err != nil && in.Name != "" {
+				// undo both halves, so the same name can be tried again (a kept half blocked it: "already used")
+				say("This side failed: removing %s here and on Kharej so the name is free again ...", in.Name)
+				if _, ok := s.tunnel(in.Name); ok {
+					_ = runInto(s.be.ManagerArgv("delete", in.Name, "--yes"), say)
+				}
+				if _, refused, derr := s.be.KharejCall(viaName, "tunnel.delete", map[string]any{"name": in.Name, "confirm": in.Name}); derr != nil || refused != "" {
+					say("Could not delete %s on Kharej (%v %s): delete it there by hand.", in.Name, derr, refused)
+				}
+				s.refreshKharej()
+			}
+			return err
 		})
 		s.jobReply(c, "new tunnel (both sides)", in.Name, id, err)
 	default:

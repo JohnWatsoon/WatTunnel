@@ -221,6 +221,12 @@ func KharejCreate(via, name, carrier, ports, domain string) (string, error) {
 	}
 	tok := scepterCreatedToken(via, p, nil)
 	if tok == "" {
+		// take Kharej's half back, or it keeps the name and the next try is refused as "already used"
+		if n, _ := p["name"].(string); n != "" {
+			if _, refused, err := KharejCall(via, "tunnel.delete", map[string]any{"name": n, "confirm": n}); err == nil && refused == "" {
+				return "", fmt.Errorf("Kharej made the tunnel but its token could not be built here; it was deleted on Kharej again")
+			}
+		}
 		return "", fmt.Errorf("Kharej made the tunnel but its token could not be built here: read it on Kharej's console (token NAME)")
 	}
 	return tok, nil

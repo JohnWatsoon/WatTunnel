@@ -133,6 +133,23 @@ func (s *Server) kharejDelete(c *call, host, name string) error {
 	return nil
 }
 
+// kharejWith is the one Kharej that has a tunnel called NAME ("" = none, or more than one): the Kharej half of a
+// tunnel here that is not paired, which the panel made with the same name on both sides.
+func (s *Server) kharejWith(name string) string {
+	host := ""
+	for _, k := range s.kharejSnap() {
+		for _, t := range k.Tunnels {
+			if t.Name == name {
+				if host != "" && host != k.Host {
+					return ""
+				}
+				host = k.Host
+			}
+		}
+	}
+	return host
+}
+
 // hostOf is the Kharej host a local tunnel is paired with ("" = none).
 func (s *Server) hostOf(name string) string {
 	for _, k := range s.kharejSnap() {

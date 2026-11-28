@@ -110,6 +110,24 @@ func TestDeleteAlsoOnKharej(t *testing.T) {
 	}
 }
 
+// An unpaired tunnel here (made by the panel on both sides) still deletes its Kharej half: found by name.
+func TestDeleteUnpairedAlsoOnKharej(t *testing.T) {
+	fakeCalls = nil
+	setFakeKharej([]Kharej{{Host: "1.2.3.4", Via: []string{"lnk"}, Link: "lnk", Online: true, Tunnels: []RemoteTunnel{{Name: "t1"}}}})
+	defer setFakeKharej(nil)
+	sec := NewTOTPSecret()
+	s, _ := newTestServer(t, sec)
+	s.kh = fakeBE{}.Kharej()
+	ck := signIn(t, s, codeAt(sec, time.Now()))
+	body := fmt.Sprintf(`{"password":"correct horse battery","code":%q,"kharej":"t1"}`, codeAt(sec, time.Now().Add(30*time.Second)))
+	if w := do(s, "POST", api+"tunnels/t1/delete", body, xr, ck); w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if len(fakeCalls) == 0 || fakeCalls[0] != "kharej tunnel.delete" {
+		t.Fatalf("Kharej half must be deleted: %v", fakeCalls)
+	}
+}
+
 func TestKharejTunnelAction(t *testing.T) {
 	fakePaired, fakeCalls = true, nil
 	setFakeKharej([]Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true}})
