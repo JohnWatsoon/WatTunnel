@@ -2770,7 +2770,7 @@ func autoApply(name string, ch atChoice, tuneKeys []string) error {
 		_ = SetValue(name, "reverse", "true")
 		if !strings.Contains(ch.Carrier, "+") && isRpool(ch.Carrier) {
 			if rport := portOf(ch.Peer); rport != "" {
-				_ = SetValue(name, "listen", "\""+rport+"\"")
+				_ = SetValue(name, "listen", "\":"+rport+"\"")
 			}
 		}
 	}
@@ -2791,7 +2791,8 @@ func autoApply(name string, ch atChoice, tuneKeys []string) error {
 		atSaveUse(name)
 		return nil
 	}
-	if linkAlive(name) {
+	// wait like the bash wait_link: a restarted unit needs seconds, a reverse one longer
+	if waitLink(name, 25) {
 		Ok(fmt.Sprintf("CONNECTED — %s", ch.Label))
 		os.Remove(bak)
 		atSaveUse(name)
@@ -2808,10 +2809,6 @@ func autoApply(name string, ch atChoice, tuneKeys []string) error {
 		return nil
 	}
 	return fmt.Errorf("Could not restore %s; the backup is kept at %s", f, bak)
-}
-
-func linkAlive(name string) bool {
-	return strings.Contains(StatsRaw(name), `"alive": true`)
 }
 
 // at_tune — try the settings that actually moved speed in the field, one setting at a
