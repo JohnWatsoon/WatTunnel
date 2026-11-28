@@ -2504,5 +2504,9 @@ EOF
   exit "$fail"
 ) || fail=1
 
+# ptcp/spray are hidden NAME-e-* helpers, never legs of the main bond (the engine refuses them there; 4.0.5)
+auto_plan_lists "d=udp:1,tcp:2,ptcp:3,spray:4;r=tcp:5"
+chk "plan lists: ptcp/spray stay out of the bond" "$AP_D" "icmp udp tcp"
+
 [ "$fail" = 0 ] && echo "ALL OK" || echo "FAILURES: $fail"
 exit "$fail"

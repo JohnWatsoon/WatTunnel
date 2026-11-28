@@ -1701,6 +1701,7 @@ SHAPED_UDP='fou-gre gue-ipip vxlan geneve dnscrypt-udp ntp-direct openvpn-dco sr
 is_shaped_raw() { case " $SHAPED_RAW " in *" $1 "*) return 0 ;; esac; return 1; }
 is_shaped_udp() { case " $SHAPED_UDP " in *" $1 "*) return 0 ;; esac; return 1; }
 is_shaped_carrier() { is_shaped_raw "$1" || is_shaped_udp "$1"; }
+is_ext_carrier() { is_shaped_carrier "$1" || [ "$1" = ptcp ] || [ "$1" = spray ]; } # a hidden NAME-e-* helper, never a bond leg (ptcp/spray: 4.0.2)
 is_shaped_list() { local c; for c in ${1//+/ }; do is_shaped_carrier "$c" && return 0; done; return 1; }
 is_raw_carrier() { case "$1" in icmp|gre|ipip) return 0 ;; esac; is_shaped_raw "$1"; }
 is_udp_carrier() { [ "$1" = udp ] || is_shaped_udp "$1"; }
@@ -4271,7 +4272,7 @@ plan_has() { # list carrier -> 0 when the plan has that carrier (bare `gre` or `
 # what is really measured.
 auto_plan_standard() { # plan-d -> its non-shaped carrier names in plan order
   local c n out=''
-  for c in ${1//,/ }; do n=${c%%:*}; is_shaped_carrier "$n" && continue; out="${out:+$out }$n"; done
+  for c in ${1//,/ }; do n=${c%%:*}; is_ext_carrier "$n" && continue; out="${out:+$out }$n"; done
   printf '%s' "$out"
 }
 auto_plan_extnames() { # plan-d -> its shaped carrier names in plan order (empty for a normal token)
@@ -4792,7 +4793,7 @@ auto_plan_lists() { # plan -> AP_D, AP_R: the carriers of the token's plan; shap
   local c
   AP_D='icmp'; AP_R='icmp'
   for c in $(plan_part "$1" d | tr ',' ' '); do
-    is_shaped_carrier "${c%%:*}" && continue
+    is_ext_carrier "${c%%:*}" && continue
     case "${c%%:*}" in icmp) ;; *) AP_D="$AP_D ${c%%:*}" ;; esac
   done
   for c in $(plan_part "$1" r | tr ',' ' '); do case "${c%%:*}" in icmp) ;; *) AP_R="$AP_R ${c%%:*}" ;; esac; done
@@ -4845,6 +4846,8 @@ auto_needs_reopen() { # name -> 0 when an auto Kharej tunnel was narrowed/finali
   read_token "$(cat "$CONF/$n.token")" >/dev/null 2>&1 && [ -n "$T_AUTO" ] || return 1
   auto_plan_lists "$T_AUTO"
   cur_d=$(cfg "$n" carrier)
+  # 4.0.2-4.0.4 bash reopened ptcp/spray into the main bond, which the engine refuses: repair it
+  case "+$cur_d+" in *+ptcp+*|*+spray+*) return 0 ;; esac
   for c in $AP_D; do
     case "+$cur_d+" in *"+$c+"*) ;; *) return 0 ;; esac
   done
@@ -10284,6 +10287,7 @@ bundle_cmd() { # [amd64|arm64] [dest.tar.gz] : build a signed offline install/up
   hint "3. Offline update: wattun update --from /root/${out##*/}"
   return 0
 }
+UPDATE_MIRRORS="https://ghfast.top/ https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/" # same list as the Go manager
 update() { # [--from <dir|tar.gz>] [installer args...]
   local url="https://raw.githubusercontent.com/$REPO/main/install.sh" tmp before after mbefore imgr a
   local from_src='' pass_args=() ienv=()
@@ -10346,22 +10350,34 @@ update() { # [--from <dir|tar.gz>] [installer args...]
     ok "Installer downloaded UNSIGNED${mref:+ (${mref:0:7})}"
   else
     # Release assets are immutable: verify the installer against the release's RSA-signed SHA256SUMS, then run it.
-    local base="${U_URL_PREFIX}https://github.com/$REPO/releases/latest/download" got verified=0 dl_ok=0
+    local base got verified=0 dl_ok=0 pre pres
     local refusal="Cannot verify the installer against the signed release; refusing to run it unverified. On filtered Iran hosts, build a signed bundle on Kharej ($SELF bundle) and run: $SELF update --from wattun-offline-amd64.tar.gz"
+    # no mirror or proxy set: direct first, then public GitHub mirrors (4.0.5); the pinned-key signature still
+    # checks every file, so a mirror can only fail, not change what is installed
+    pres="$U_URL_PREFIX"
+    [ -z "$U_URL_PREFIX$U_CURL_PROXY" ] && pres="- $UPDATE_MIRRORS"
     if command -v openssl >/dev/null 2>&1; then
-      spin_start "Downloading the installer and its signature"
-      u_curl -o "$tmp" "$base/install.sh" \
-        && u_curl -o "$sums" "$base/SHA256SUMS" \
-        && u_curl -o "$sig" "$base/SHA256SUMS.sig"
-      rc=$?
-      spin_stop
-      if [ "$rc" -eq 0 ]; then
-        dl_ok=1
-        if sums_verify "$sums" "$sig"; then
-          got=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
-          if [ -n "$got" ] && sums_has "$sums" install.sh "$got"; then verified=1; fi
+      for pre in $pres; do
+        [ "$pre" = - ] && pre=''
+        base="${pre}https://github.com/$REPO/releases/latest/download"
+        spin_start "Downloading the installer and its signature${pre:+ through $pre}"
+        u_curl -o "$tmp" "$base/install.sh" \
+          && u_curl -o "$sums" "$base/SHA256SUMS" \
+          && u_curl -o "$sig" "$base/SHA256SUMS.sig"
+        rc=$?
+        spin_stop
+        if [ "$rc" -eq 0 ]; then
+          dl_ok=1
+          if sums_verify "$sums" "$sig"; then
+            got=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
+            if [ -n "$got" ] && sums_has "$sums" install.sh "$got"; then verified=1; fi
+          fi
         fi
-      fi
+        if [ "$verified" = 1 ]; then
+          [ "$pre" != "$U_URL_PREFIX" ] && { U_URL_PREFIX=$pre; ienv+=("WAT_PROXY=$pre"); }
+          break
+        fi
+      done
     else
       warn "openssl is required to check the release signature."
     fi

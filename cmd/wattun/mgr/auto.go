@@ -1399,6 +1399,12 @@ func autoNeedsReopen(n string) bool {
 	}
 	apD, apR := autoPlanLists(tok.Auto)
 	curD := Cfg(n, "carrier")
+	// the 4.0.2-4.0.4 bash manager reopened ptcp/spray into the main bond, which the engine refuses: repair it
+	for _, c := range strings.Split(curD, "+") {
+		if c == "ptcp" || c == "spray" {
+			return true
+		}
+	}
 	for _, c := range apD {
 		if !strings.Contains("+"+curD+"+", "+"+c+"+") {
 			return true
