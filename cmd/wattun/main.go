@@ -517,7 +517,8 @@ func main() {
 		*conns = hp.DefaultPoolConns
 	}
 	if *nSess <= 0 {
-		if !server && !*reverse && len(names) == 1 && !rawIPCarrier[names[0]] && !shapedUDPCarrier[names[0]] {
+		// only the carriers the -sessions clone loop below supports; ptcp and spray got 2+ here and exited (4.0.6)
+		if !server && !*reverse && len(names) == 1 && (poolCarriers[bases[0]] || bases[0] == "udp") {
 			*nSess = hp.DefaultSessions
 		} else {
 			*nSess = 1
