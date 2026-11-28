@@ -723,9 +723,17 @@ func TestScepterCreatedToken(t *testing.T) {
 	if scepterCreatedToken("pair", map[string]any{"carrier": "udp", "key": "k1"}, nil) != "" {
 		t.Fatal("a port carrier without listen_port must not guess the port")
 	}
+	// 4.0.8: a reverse pair whose peer is Kharej builds from it; one whose peer is this server, with nobody dialing in, builds none
 	writeTestYml(t, dir, "rev", "mode: client\ncarrier: tcp\npeer: 203.0.113.5:9000\nreverse: true\n")
-	if scepterCreatedToken("rev", ans, nil) != "" {
-		t.Fatal("a reverse pair's peer is this server, not Kharej")
+	if got, _ := ReadToken(scepterCreatedToken("rev", ans, nil)); got.Peer != "203.0.113.5:8443" {
+		t.Fatalf("reverse pair with Kharej's address: %+v", got)
+	}
+	writeTestYml(t, dir, "revown", "mode: client\ncarrier: tcp\npeer: 127.0.0.1:9000\nreverse: true\nlisten: \":9000\"\n")
+	oldE := envEstablished
+	envEstablished = func(string) string { return "" }
+	defer func() { envEstablished = oldE }()
+	if scepterCreatedToken("revown", ans, nil) != "" {
+		t.Fatal("a reverse pair's own address is not Kharej")
 	}
 	if tok := scepterCreatedToken("rev", map[string]any{"token": "wat1:x"}, nil); tok != "wat1:x" {
 		t.Fatal("Kharej's own token wins")

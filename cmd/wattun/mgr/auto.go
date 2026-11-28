@@ -2523,6 +2523,13 @@ func autoRefine(rank []int) []int {
 	if len(top) > 3 {
 		top = top[:3]
 	}
+	if NonInteractive { // the panel's card switches to the re-measure stage and lights these rows (4.0.8)
+		labs := make([]string, len(top))
+		for k, i := range top {
+			labs[k] = av[i].Label
+		}
+		fmt.Fprintf(Stdout, "ATREFINE=%s\n", strings.Join(labs, "|"))
+	}
 	saved, savedStreams := atMB, atStreams
 	atStreams = 16
 	for _, i := range top {

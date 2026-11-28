@@ -215,6 +215,15 @@ func cachedPublicIP() string {
 	return hostIP
 }
 
+var ownIPOnce sync.Once
+
+// OwnPublicIP is cachedPublicIP for a tunnel process, which never wires p2PublicIP (its stub answers ""): Kharej's
+// scepter hello sent an empty ip, so Iran never learned which server a reverse tunnel reaches (4.0.8).
+func OwnPublicIP() string {
+	ownIPOnce.Do(func() { p2PublicIP = publicIP })
+	return cachedPublicIP()
+}
+
 // serverSide mirrors server_side(): saved role, else read from the tunnels.
 func serverSide() string {
 	if s := ConfGet("side", ""); s == "kharej" || s == "iran" {

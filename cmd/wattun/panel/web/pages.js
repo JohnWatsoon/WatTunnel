@@ -154,14 +154,23 @@ function carrierView(body,id){
   $('#dlgA').prepend(skip,end); // next to Close, one row of buttons
   return (lines,state)=>{
     let plan=0,preset='';const picks=new Set();const rows=new Map();now='';
+    // ATREFINE=a|b|c (4.0.8): the re-measure stage starts, with these rows; each finishes with its ATROW after its ATNOW
+    let rq=[];const rnow=new Set(),rdone=new Set();
     lines.forEach(l=>{let m=/^ATPLAN=(\d+)/.exec(l);if(m)plan=+m[1];m=/^ATPICK=(.+)$/.exec(l);if(m)picks.add(m[1].trim());m=/^TUNNEL=(.+)$/.exec(l);if(m)tun=m[1].trim();
-      m=/^ATPRESET=(\w+)/.exec(l);if(m)preset=m[1];m=/^ATNOW=(.+)$/.exec(l);if(m)now=m[1].trim();
-      m=/^ATROW=(ok|fail)\|([^|]*)\|(.*)$/.exec(l);if(m){const f=m[3].split('|');rows.set(m[2],m[1]==='ok'?{ok:true,down:+f[0],up:+f[1],rtt:+f[2]}:{ok:false,why:f.join('|')});if(m[2]===now)now=''}});
+      m=/^ATPRESET=(\w+)/.exec(l);if(m)preset=m[1];m=/^ATNOW=(.+)$/.exec(l);if(m){now=m[1].trim();if(rq.includes(now))rnow.add(now)}
+      m=/^ATREFINE=(.+)$/.exec(l);if(m)rq=m[1].split('|').map(x=>x.trim());
+      m=/^ATROW=(ok|fail)\|([^|]*)\|(.*)$/.exec(l);if(m){const f=m[3].split('|');rows.set(m[2],m[1]==='ok'?{ok:true,down:+f[0],up:+f[1],rtt:+f[2]}:{ok:false,why:f.join('|')});if(rnow.has(m[2]))rdone.add(m[2]);if(m[2]===now)now=''}});
+    const refine=state==='running'&&rq.length>0;
     pre.textContent=preset?PRESETS[preset]||preset:'';pre.hidden=!preset;end.hidden=state!=='running';
     if(!plan&&!rows.size){skip.hidden=true;end.hidden=true;return false}
     const done=rows.size,ok=[...rows.values()].filter(r=>r.ok).length;
-    cnt.textContent='';cnt.append(el('span','big2 n',String(ok)),el('span','lab',' working of '+done+' tested'+(plan?' · '+plan+' planned':'')));
-    prog.textContent='';const N=Math.max(plan,done);for(let i=0;i<N;i++){const d=el('i');const r=[...rows.values()][i];d.className=r?(r.ok?'ok':'bad'):(i===done&&state==='running'?'now':'');prog.appendChild(d)}
+    cnt.textContent='';
+    if(refine){const k=Math.min(rq.length,Math.max(1,rdone.size+(now&&rq.includes(now)?1:0)));
+      cnt.append(el('span','lab','Re-measuring '),el('span','big2 n',String(k)),el('span','lab',' of '+rq.length),el('span','lab jc-sub','the fastest get a longer run to rank them'))}
+    else cnt.append(el('span','big2 n',String(ok)),el('span','lab',' working of '+done+' tested'+(plan?' · '+plan+' planned':'')));
+    prog.textContent='';prog.classList.toggle('refine',refine);const labs=[...rows.keys()];const N=Math.max(plan,done);
+    for(let i=0;i<N;i++){const d=el('i');const lab=labs[i],r=rows.get(lab);d.className=r?(r.ok?'ok':'bad'):(i===done&&state==='running'&&!refine?'now':'');
+      if(refine&&rq.includes(lab))d.classList.add('rq',rdone.has(lab)?'rdone':lab===now?'rnow':'rwait');prog.appendChild(d)}
     const peak=Math.max(1,...[...rows.values()].map(r=>r.ok?Math.max(r.down,r.up):0));
     const sorted=[...rows.entries()].sort((a,b)=>(b[1].ok-a[1].ok)||((b[1].down||0)-(a[1].down||0)));
     [...list.children].forEach(c=>{if(c!==pend)c.remove()});
@@ -173,7 +182,7 @@ function carrierView(body,id){
       if(picks.has(lab))row.appendChild(el('span','chip jc-pick',picks.size>1?'bonded':'in use'));
       list.insertBefore(row,pend.parentNode===list?pend:null)});
     if(state==='done'&&tun&&!w.querySelector('.jc-use'))chooser(w,list,tun,picks);
-    if(state==='running'){const re=plan&&done>=plan;pl.textContent='';
+    if(state==='running'){const re=rq.length>0||(plan&&done>=plan);pl.textContent='';
       if(now)pl.append(re?'re-measuring ':'testing ',el('b',null,now));else pl.textContent=re?'re-measuring the best ones':'starting the next carrier';
       skip.hidden=!now;skip.textContent='Skip '+now;if(pend.parentNode!==list)list.appendChild(pend)}else{pend.remove();skip.hidden=true}
     return true;
@@ -245,7 +254,7 @@ async function download(path,body){
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=m?m[1]:'download';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
 }
 function askDownload(title,path,what){
-  ask(title,{full:true,text:what+' Add a passphrase to encrypt the file (10+ characters); without one it downloads as it is.',
+  ask(title,{text:what+' Add a passphrase to encrypt the file (10+ characters); without one it downloads as it is.',
     fields:[{k:'passphrase',label:'Passphrase (optional)',type:'password',hint:'Needed again to restore it. It is not stored anywhere.'}],ok:'Download'}).then(v=>{if(v)download(path,v)});
 }
 
@@ -402,7 +411,7 @@ P.onDrawer=async(name,t)=>{
     row('Limit a port','Speed cap or monthly quota for one port',()=>limitPort(name)),
     tool('resettraffic','Reset traffic','Zero the lifetime counters','Zeroes the lifetime traffic counters of this tunnel. It restarts.')]);
   grp('Pairing and removal',[row('Show token','The token Kharej made for this tunnel',()=>showToken(name)),
-    t.paired&&row('Forget pairing','Manage Kharej from its own console instead',()=>act('tunnels/'+enc(name)+'/pair-forget',{full:true,danger:true,title:'Forget the pairing of '+name,confirm:'Turns off the management channel of '+name+' (pairing: false) and restarts it. The tunnel keeps working; Kharej is then managed from its own console until you pair again.'}).then(r=>{if(r){toast('Pairing forgotten');P.loadOverview()}})),
+    t.paired&&row('Forget pairing','Manage Kharej from its own console instead',()=>act('tunnels/'+enc(name)+'/pair-forget',{danger:true,title:'Forget the pairing of '+name,confirm:'Turns off the management channel of '+name+' (pairing: false) and restarts it. The tunnel keeps working; Kharej is then managed from its own console until you pair again.'}).then(r=>{if(r){toast('Pairing forgotten');P.loadOverview()}})),
     row('Delete','Stop it and remove its config, key and token',()=>deleteTunnel(name,t),'bad')]);
   renderDrawerPorts(name,[]);settingsBlock(name,t);
   const r=await api('tunnels/'+enc(name)+'/ports').catch(()=>null);
@@ -521,7 +530,7 @@ async function movePorts(name,t){
   const r=await act('tunnels/'+enc(name)+'/move-ports',{body:{to:v.to,ports}});if(r){toast(r.note);P.loadOverview()}}
 async function limitPort(name){const v=await ask('Limit a port of '+name,{fields:[{k:'port',label:'Port',mode:'numeric'},{k:'rate',label:'Rate, for example 10mbit (empty = none)'},{k:'quota',label:'Quota, for example 50G (empty = none)'},{k:'period',label:'Quota resets every',options:[['month','month'],['week','week'],['day','day']]}],ok:'Save'});
   if(!v)return;if(await act('tunnels/'+enc(name)+'/limit',{method:'PUT',body:v})){toast('Saved. Limits apply within seconds.');portsAt=0}}
-async function showToken(name){const r=await act('tunnels/'+enc(name)+'/token',{full:true,title:'Show the token of '+name});if(!r)return;
+async function showToken(name){const r=await act('tunnels/'+enc(name)+'/token',{title:'Show the token of '+name});if(!r)return;
   const b=el('div');b.appendChild(el('p','note','Anyone with this token can connect to the Kharej side. Paste it only into your own servers.'));b.appendChild(tokenBox(r.token,r.svg));info('Token of '+name,b)}
 async function deleteTunnel(name,t){
   const k=S.ov.kharej.find(x=>x.via.includes(name));const twin=k&&(k.tunnels||[]).find(x=>x.name===name);
@@ -565,11 +574,11 @@ function renderKharejPage(still){
     if(k.online&&!(k.tunnels||[]).length)list.appendChild(el('div','empty','No tunnels listed on that server.'));
     c.appendChild(list);
     if(k.online){const t=el('div','k-acts');
-      t.append(btn('Update','sec sm',()=>act('kharej/'+enc(k.host)+'/update',{full:true,title:'Update '+k.host,confirm:'Kharej downloads the latest release, checks its signature and restarts its tunnels. It rolls back by itself if the new version fails.'}).then(r=>r&&toast(r.note||'Update started'))),
+      t.append(btn('Update','sec sm',()=>act('kharej/'+enc(k.host)+'/update',{title:'Update '+k.host,confirm:'Kharej downloads the latest release, checks its signature and restarts its tunnels. It rolls back by itself if the new version fails.'}).then(r=>r&&toast(r.note||'Update started'))),
         btn('Backup','sec sm',()=>askDownload('Back up '+k.host,'kharej/'+enc(k.host)+'/backup','It holds every tunnel key of that server.')),
         btn('Update status','sec ic push',async()=>{const r=await api('kharej/'+enc(k.host)+'/status');const pre=el('pre','log',r.ok?JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Update status of '+k.host,pre)}),
         btn('Audit','sec ic',async()=>{const r=await api('kharej/'+enc(k.host)+'/audit');const pre=el('pre','log',r.ok?(r.j.logs||[]).join('\n')||JSON.stringify(r.j,null,2):(r.j.error||'Failed'));info('Audit of '+k.host,pre)}),
-        btn('Rotate pairing','sec ic',()=>act('kharej/'+enc(k.host)+'/pair-rotate',{full:true,title:'New pairing credential for '+k.host,confirm:'Kharej makes a new pairing credential; '+k.via.join(', ')+' switch to it and restart. The old one keeps working for 5 minutes.'}).then(r=>r&&toast('Pairing rotated'))));
+        btn('Rotate pairing','sec ic',()=>act('kharej/'+enc(k.host)+'/pair-rotate',{title:'New pairing credential for '+k.host,confirm:'Kharej makes a new pairing credential; '+k.via.join(', ')+' switch to it and restart. The old one keeps working for 5 minutes.'}).then(r=>r&&toast('Pairing rotated'))));
       if(k.link)t.appendChild(removeBtn(k));c.appendChild(t)}
     else if(k.link){const t=el('div','k-acts');t.appendChild(removeBtn(k));c.appendChild(t)}
     g.appendChild(c);
@@ -579,7 +588,7 @@ function renderKharejPage(still){
 function removeBtn(k){return btn('Remove','sec sm danger',()=>act('kharej/'+enc(k.host)+'/remove',{full:true,danger:true,title:'Remove Kharej '+k.host,confirm:'Deletes the pairing link to '+k.host+'. Your tunnels to it keep running; they are no longer managed from here. Add it again with its pairing token.'}).then(r=>{if(r)setTimeout(()=>P.loadOverview(),1500)}))}
 // Iran: pair with one more Kharej from its pairing token (wattun add-kharej as a job; the carrier board shows the test)
 P.addKharej=()=>addKharej();
-function addKharej(){return act('kharej-add',{full:true,title:'Add Kharej',ok:'Add',fields:[{k:'token',label:'Pairing token from Kharej (wat1:...)',area:true,rows:3,hint:'On the Kharej server: '+(S.cli||'wattun')+', then t. Or its panel: Kharej servers.'},
+function addKharej(){return act('kharej-add',{title:'Add Kharej',ok:'Add',fields:[{k:'token',label:'Pairing token from Kharej (wat1:...)',area:true,rows:3,hint:'On the Kharej server: '+(S.cli||'wattun')+', then t. Or its panel: Kharej servers.'},
   {k:'test',label:'Carrier test',options:[['fast','fast (a few minutes)'],['normal','normal'],['anti','anti-censor grid']]}]})}
 // Kharej: its pairing token and who is paired; made on first use, rotate makes a new one
 async function pairingCard(v){
@@ -589,18 +598,18 @@ async function pairingCard(v){
   const r=await api('pairing').catch(()=>null);if(!r||!r.ok){st.appendChild(el('span','lab bad','The pairing state could not be read.'));return}
   st.append(el('span','lab','pairing'),el('span',null,r.j.state));
   if(!r.j.made){acts.appendChild(btn('Make the pairing token','pri',()=>act('pairing',{body:{action:'make'},title:'Make the pairing token',confirm:'Opens the hidden pairing link on this server (a minute at most). The token is shown here afterwards.'})));return}
-  acts.append(btn('Show the pairing token','pri',async()=>{const x=await act('pairing',{body:{action:'show'},full:true,title:'Show the pairing token'});if(!x)return;
+  acts.append(btn('Show the pairing token','pri',async()=>{const x=await act('pairing',{body:{action:'show'},title:'Show the pairing token'});if(!x)return;
       const b=el('div');b.appendChild(el('p','note','It holds the link key. Paste it only into your own Iran server.'));b.appendChild(tokenBox(x.token));info('Pairing token',b)}),
-    btn('Rotate the token','sec danger',()=>act('pairing',{body:{action:'rotate'},full:true,danger:true,title:'New pairing token',confirm:'The old token stops working. The Iran server paired now loses its link and has to add this Kharej again with the new token.'})));
+    btn('Rotate the token','sec danger',()=>act('pairing',{body:{action:'rotate'},danger:true,title:'New pairing token',confirm:'The old token stops working. The Iran server paired now loses its link and has to add this Kharej again with the new token.'})));
 }
 function liveKharej(){document.querySelectorAll('.ksrv').forEach(c=>{const k=S.ov.kharej.find(x=>x.host===c.dataset.host);if(!k)return;let d=0,rtt=0,n=0;k.via.forEach(v=>{const l=S.live[v];if(l&&l.metrics&&l.alive){d+=l.down;rtt+=l.rtt;n++}});
   const st=c.querySelector('[data-k=kst]');if(st)st.textContent=k.online?P.fmtRate(d)+' MB/s'+(n?' · '+(rtt/n).toFixed(0)+' ms':''):'no channel'})}
-async function keyRotate(k,rt){const r=await act('kharej/'+enc(k.host)+'/keyrotate',{full:true,body:{name:rt.name},title:'New key for '+rt.name,danger:true,confirm:'Kharej makes a new key and restarts '+rt.name+'. Its twin here switches by itself; any other Iran server needs the new token.'});
+async function keyRotate(k,rt){const r=await act('kharej/'+enc(k.host)+'/keyrotate',{body:{name:rt.name},title:'New key for '+rt.name,danger:true,confirm:'Kharej makes a new key and restarts '+rt.name+'. Its twin here switches by itself; any other Iran server needs the new token.'});
   if(r){toast(r.local?r.local+' here uses the new key':'Kharej has the new key: paste the token where it is used',!r.ok);if(r.warning)toast(r.warning,true);if(r.token&&!r.local)info('New token for '+rt.name,tokenBox(r.token))}}
 async function kharejDelete(k,rt){const r=await act('kharej/'+enc(k.host)+'/delete',{full:true,danger:true,title:'Delete '+rt.name+' on '+k.host,confirm:'Deletes the tunnel, its key and config on Kharej. Iran tunnels that use it stop working.',fields:[{k:'confirm',label:'Type '+rt.name+' to confirm'}],body:{name:rt.name},ok:'Delete'});if(r){toast(rt.name+' deleted on '+k.host);P.loadOverview()}}
 const newer=P.newer;
 // every server behind the newest release: Kharej first, then this one (the backend's update-all job)
-P.updateAll=()=>act('update-all',{full:true,title:'Update every server',ok:'Update all',confirm:'Each Kharej server that runs an older version updates itself (its tunnels restart, it rolls back by itself if the new version fails), then this server updates and this page reconnects.'});
+P.updateAll=()=>act('update-all',{title:'Update every server',ok:'Update all',confirm:'Each Kharej server that runs an older version updates itself (its tunnels restart, it rolls back by itself if the new version fails), then this server updates and this page reconnects.'});
 $('#sbUpdB').onclick=()=>P.updateAll();
 
 /* ================= TRAFFIC ================= */
@@ -698,8 +707,8 @@ async function loadSystem(){
   const behind=latest?[h.version,...S.ov.kharej.filter(k=>k.online).map(k=>k.version)].filter(x=>x&&newer(latest,x)).length:0;
   const vt=el('div','tools vfoot');
   vt.append(btn(behind?'Update all ('+behind+')':'Update all',behind?'fx-aurora':'pri',()=>P.updateAll()),
-    btn('Update this server','sec',()=>act('update',{full:true,title:'Update this server',confirm:'Downloads the latest release, checks its signature, swaps the binary and restarts the tunnels and this panel. Open connections drop for a few seconds.'})),
-    btn('Roll back','sec ic danger push',()=>act('rollback',{full:true,title:'Roll back',confirm:'Goes back to the previous version and restarts the tunnels and this panel.',danger:true})));
+    btn('Update this server','sec',()=>act('update',{title:'Update this server',confirm:'Downloads the latest release, checks its signature, swaps the binary and restarts the tunnels and this panel. Open connections drop for a few seconds.'})),
+    btn('Roll back','sec ic danger push',()=>act('rollback',{title:'Roll back',confirm:'Goes back to the previous version and restarts the tunnels and this panel.',danger:true})));
   vr.append(el('p','note',behind?'Update all does the Kharej servers first, then this one; the page reconnects by itself.':'Every server runs the newest release.'),vt);g.appendChild(vr);
   // the manager's server tools (4.0.3)
   const st=card('s2','Speed and access','kernel tuning, auto tunnels, who may connect');const stool=(op,label,cls,confirm)=>btn(label,cls,()=>act('server-tool',{body:{op},title:label,confirm,ok:'Start'}));
@@ -799,11 +808,11 @@ async function loadSettings2(){
 }
 async function certPick(k){
   const done=r=>{if(r&&r.cert){toast('The panel uses the new certificate now. Reload if the browser asks.');loadSettings2()}};
-  if(k==='self')return done(await act('settings/cert/self',{full:true,title:'Back to the self-signed certificate'}));
-  if(k==='ca')return done(await act('settings/cert/ca',{full:true,title:'Make the private CA',confirm:'Makes a CA that can only vouch for this server\'s own IPs, and a certificate from it. Download the CA afterwards and install it on your phone.'}));
-  if(k==='owner'){const v=await ask('Use your own certificate',{full:true,fields:[{k:'cert',label:'Certificate (PEM)',area:true,rows:5},{k:'key',label:'Private key (PEM)',area:true,rows:5}],ok:'Use it'});if(!v)return;
+  if(k==='self')return done(await act('settings/cert/self',{title:'Back to the self-signed certificate'}));
+  if(k==='ca')return done(await act('settings/cert/ca',{title:'Make the private CA',confirm:'Makes a CA that can only vouch for this server\'s own IPs, and a certificate from it. Download the CA afterwards and install it on your phone.'}));
+  if(k==='owner'){const v=await ask('Use your own certificate',{fields:[{k:'cert',label:'Certificate (PEM)',area:true,rows:5},{k:'key',label:'Private key (PEM)',area:true,rows:5}],ok:'Use it'});if(!v)return;
     return done(await act('settings/cert',{body:v}))}
-  if(k==='acme'){const ip=S.ov&&S.ov.host.ip||'';const v=await ask('Certificate from Let’s Encrypt',{full:true,text:'For '+(ip||'this server’s IP')+', unless you give a domain that points here. IP certificates last 6 days and renew by themselves. Port 80 opens for a few seconds during the check. If it fails, the current certificate stays.',fields:[{k:'domain',label:'Domain (optional)',ph:ip,hint:'Empty: this server’s IP'}],ok:'Get it'});if(!v)return;
+  if(k==='acme'){const ip=S.ov&&S.ov.host.ip||'';const v=await ask('Certificate from Let’s Encrypt',{text:'For '+(ip||'this server’s IP')+', unless you give a domain that points here. IP certificates last 6 days and renew by themselves. Port 80 opens for a few seconds during the check. If it fails, the current certificate stays.',fields:[{k:'domain',label:'Domain (optional)',ph:ip,hint:'Empty: this server’s IP'}],ok:'Get it'});if(!v)return;
     await act('settings/cert/acme',{body:v})}
 }
 

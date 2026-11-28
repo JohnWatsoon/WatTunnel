@@ -50,27 +50,27 @@ func TestFullTierNeedsFreshPasswordAndCode(t *testing.T) {
 	s, _ := newTestServer(t, "")
 	ck := signIn(t, s, "")
 	// 2FA off: the password alone, asked again
-	if w := do(s, "POST", api+"tunnels/t1/token", `{}`, xr, ck); w.Code != 403 || !strings.Contains(w.Body.String(), "reauth") {
+	if w := do(s, "POST", api+"tunnels/t1/delete", `{}`, xr, ck); w.Code != 403 || !strings.Contains(w.Body.String(), "reauth") {
 		t.Fatalf("no 2FA, no password: %d %s", w.Code, w.Body)
 	}
-	if w := do(s, "POST", api+"tunnels/t1/token", `{"password":"correct horse battery"}`, xr, ck); w.Code != 200 {
+	if w := do(s, "POST", api+"tunnels/t1/delete", `{"password":"correct horse battery"}`, xr, ck); w.Code == 403 {
 		t.Fatalf("no 2FA, password: %d %s", w.Code, w.Body)
 	}
 	sec := NewTOTPSecret()
 	s2, _ := newTestServer(t, sec)
 	ck = signIn(t, s2, codeAt(sec, time.Now()))
-	if w := do(s2, "POST", api+"tunnels/t1/token", `{"password":"correct horse battery","code":"000000"}`, xr, ck); w.Code != 403 || !strings.Contains(w.Body.String(), "reauth") {
+	if w := do(s2, "POST", api+"tunnels/t1/delete", `{"password":"correct horse battery","code":"000000"}`, xr, ck); w.Code != 403 || !strings.Contains(w.Body.String(), "reauth") {
 		t.Fatalf("wrong code: %d %s", w.Code, w.Body)
 	}
 	if n := s2.g.recentFails(time.Now(), time.Minute); n != 1 {
 		t.Fatalf("a failed re-auth must count toward the ban, got %d", n)
 	}
 	body := fmt.Sprintf(`{"password":"correct horse battery","code":%q}`, codeAt(sec, time.Now().Add(30*time.Second)))
-	if w := do(s2, "POST", api+"tunnels/t1/token", body, xr, ck); w.Code != 200 || !strings.Contains(w.Body.String(), "wat1:abc") {
+	if w := do(s2, "POST", api+"tunnels/t1/delete", body, xr, ck); w.Code == 403 {
 		t.Fatalf("good re-auth: %d %s", w.Code, w.Body)
 	}
 	// the same code again is a replay
-	if w := do(s2, "POST", api+"tunnels/t1/token", body, xr, ck); w.Code != 403 {
+	if w := do(s2, "POST", api+"tunnels/t1/delete", body, xr, ck); w.Code != 403 {
 		t.Fatalf("replayed code: %d", w.Code)
 	}
 }
@@ -92,7 +92,14 @@ func TestRouteTable(t *testing.T) {
 			t.Fatalf("%s: a full route needs a body for the password and code", k)
 		}
 	}
-	for _, must := range []string{"POST tunnels/*/delete", "POST kharej/*/update", "POST kharej/*/backup", "POST restore", "POST update", "POST update-all"} {
+	// owner 2026-11-28: only deleting (and restore, panel access) asks for the password again
+	for _, r := range routes {
+		if k := r.method + " " + r.pattern; r.tier == tierFull && !map[string]bool{"POST tunnels/*/delete": true,
+			"POST kharej/*/delete": true, "POST kharej/*/remove": true, "POST restore": true, "PUT settings/panel": true}[k] {
+			t.Fatalf("%s must not ask for the password", k)
+		}
+	}
+	for _, must := range []string{"POST tunnels/*/delete", "POST kharej/*/delete", "POST kharej/*/remove", "POST restore", "PUT settings/panel"} {
 		found := false
 		for _, r := range routes {
 			if r.method+" "+r.pattern == must && r.tier == tierFull {

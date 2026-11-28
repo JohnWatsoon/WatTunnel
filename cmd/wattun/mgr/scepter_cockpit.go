@@ -1021,10 +1021,7 @@ func scepterCreatedToken(pair string, p map[string]any, params map[string]string
 	if tok, _ := p["token"].(string); tok != "" {
 		return tok
 	}
-	host := scepterPeerHost(pair)
-	if Cfg(pair, "reverse") == "true" {
-		host = "" // a reverse pair's peer is this server's own address, not Kharej's
-	}
+	host := scepterPeerHost(pair) // a reverse pair: the Kharej that dials in (4.0.8)
 	cr, _ := p["carrier"].(string)
 	key, _ := p["key"].(string)
 	if host == "" || cr == "" || key == "" {

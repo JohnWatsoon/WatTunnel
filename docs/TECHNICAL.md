@@ -3584,11 +3584,11 @@ up at once; a pair that does not load leaves the old one in place):
 - Turning 2FA on prints 10 one-time recovery codes. Each works once in place of a 6-digit code.
 - Sessions survive a panel restart (`sessions` file above). Settings lists every signed-in browser; sign out one or
   all of them there.
-- **Three tiers.** Reading needs a session. Day-to-day changes (start, stop, ports, limits, speed tests, backups)
-  need a session. Actions that expose a key or cannot be undone (show token, delete, Kharej key rotation, updates,
-  rollback, backup download, restore, Kharej backup, panel settings, certificates) need the password again in the
-  same request, plus a fresh 6-digit code when 2FA is on. A wrong password or code counts toward the 5-failure ban.
-  A stolen session cookie alone never reaches them. (Before 3.6.1 they refused outright with 2FA off.)
+- **Three tiers.** Reading needs a session. Every other action needs a session too, except the ones that remove
+  or overwrite something: deleting a tunnel (here or on Kharej), removing a Kharej, restoring a backup and changing
+  the panel's own access (password, 2FA, address). Those need the password again in the same request, plus a fresh
+  6-digit code when 2FA is on. A wrong password or code counts toward the 5-failure ban. (Before 4.0.8 showing a
+  token, updates, rollback, key and pairing rotation, backup downloads and certificates asked for it too.)
 - **Last link.** Stopping, bulk-stopping, deleting or rotating the key of the last running tunnel paired with a
   Kharej server is refused until you type that tunnel's name: without it that Kharej server can only be managed
   from its own console.

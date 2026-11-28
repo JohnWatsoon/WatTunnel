@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -168,12 +169,55 @@ func scepterParseAutoRows(p map[string]any) (scepterAutoTable, error) {
 // scepterPeerHost is the Kharej address this tunnel dials (probe tests and the
 // follow dial it); "" when the config has no peer.
 func scepterPeerHost(name string) string {
-	peer := Cfg(name, "peer")
-	if peer == "" {
+	host := ""
+	if peer := Cfg(name, "peer"); peer != "" {
+		host, _ = SplitHP(peer)
+	}
+	if Cfg(name, "reverse") != "true" || (host != "" && !ownAddr(host)) {
+		return host
+	}
+	// a reverse tunnel's peer is often this server itself (Kharej dials it) or missing: the Kharej is who dials in
+	_, port := SplitHP(Cfg(name, "listen"))
+	return reverseDialer(port)
+}
+
+// ownAddr: HOST is one of this server's addresses (an interface's, or the public one behind NAT).
+func ownAddr(host string) bool {
+	if host == PublicIPCached() {
+		return true
+	}
+	as, _ := net.InterfaceAddrs()
+	for _, a := range as {
+		if ipn, ok := a.(*net.IPNet); ok && ipn.IP.String() == host {
+			return true
+		}
+	}
+	return false
+}
+
+// envEstablished lists `ss -Htn state established sport = :PORT` (one connection per line, peer address last).
+var envEstablished = func(port string) string {
+	out, _ := exec.Command("ss", "-Htn", "state", "established", "sport", "=", ":"+port).Output()
+	return string(out)
+}
+
+// reverseDialer is the remote address of a TCP connection on this server's reverse listen PORT: the Kharej that
+// dials it. A udp reverse tunnel has none ("").
+func reverseDialer(port string) string {
+	if port == "" {
 		return ""
 	}
-	host, _ := SplitHP(peer)
-	return host
+	for _, l := range strings.Split(envEstablished(port), "\n") {
+		f := strings.Fields(l)
+		if len(f) == 0 {
+			continue
+		}
+		h, _, err := net.SplitHostPort(f[len(f)-1])
+		if h = strings.TrimPrefix(h, "::ffff:"); err == nil && net.ParseIP(h) != nil && !ownAddr(h) {
+			return h
+		}
+	}
+	return ""
 }
 
 // scepterLocalSave is one config key's pre-change value: set=false marks a key

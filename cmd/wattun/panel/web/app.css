@@ -749,6 +749,13 @@ dialog#dlg.wide{width:min(720px,calc(100vw - 32px))}
 .jc-prog{display:flex;gap:4px;flex-wrap:wrap}
 .jc-prog i{width:10px;height:10px;border-radius:3px;background:#232327;transition:background .3s}
 .jc-prog i.ok{background:var(--green)}.jc-prog i.bad{background:var(--red)}.jc-prog i.now{background:var(--blue);animation:blink 1s infinite}
+/* re-measure stage: the rest fades, the top rows stay lit, the one running pulses a ring, a finished one gets a tick */
+.jc-cnt{flex-wrap:wrap}.jc-sub{flex-basis:100%;margin-top:2px}
+.jc-prog.refine i{opacity:.22;transition:opacity .4s,background .3s}
+.jc-prog.refine i.rq{opacity:1;position:relative}.jc-prog.refine i.rwait{opacity:.6}
+.jc-prog.refine i.rnow{outline:1.5px solid var(--green);outline-offset:2px;animation:rq-ring 1.4s ease-in-out infinite}
+.jc-prog.refine i.rdone:after{content:'';position:absolute;left:3.5px;top:1.5px;width:2.5px;height:5px;border:solid #0b0d0c;border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
+@keyframes rq-ring{50%{outline-color:transparent;outline-offset:4px}}
 .jc-list{display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto}
 .jc-row{display:grid;grid-template-columns:22px minmax(96px,150px) minmax(0,1fr) auto auto;gap:12px;align-items:center;background:var(--bg2,#151517);border-radius:12px;padding:10px 14px;font-size:13px}
 .jc-row.new{animation:rise .35s ease both}

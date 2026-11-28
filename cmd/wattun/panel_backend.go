@@ -150,7 +150,7 @@ func init() {
 		hostRes(&h)
 		// ip (4.0.1): an Iran tunnel with no peer address (reverse, auto-linked) learns which server this is from it
 		return map[string]any{"load1": h.Load1, "cpus": h.CPUs, "mem_pct": h.MemPct, "disk_pct": h.DiskPct, "uptime_s": h.Uptime,
-			"ip": mgr.PublicIPCached()}
+			"ip": mgr.OwnPublicIP()}
 	}
 }
 
