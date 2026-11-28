@@ -708,7 +708,7 @@ async function loadSystem(){
   const vt=el('div','tools vfoot');
   vt.append(btn(behind?'Update all ('+behind+')':'Update all',behind?'fx-aurora':'pri',()=>P.updateAll()),
     btn('Update this server','sec',()=>act('update',{title:'Update this server',confirm:'Downloads the latest release, checks its signature, swaps the binary and restarts the tunnels and this panel. Open connections drop for a few seconds.'})),
-    btn('Roll back','sec ic danger push',()=>act('rollback',{title:'Roll back',confirm:'Goes back to the previous version and restarts the tunnels and this panel.',danger:true})));
+    btn('Check for updates','sec push',()=>act('update-check').then(r=>{if(!r)return;toast(newer(r.latest,r.here)?'v'+r.latest+' is out':'Up to date: v'+r.latest+' is the newest');loadSystem()})));
   vr.append(el('p','note',behind?'Update all does the Kharej servers first, then this one; the page reconnects by itself.':'Every server runs the newest release.'),vt);g.appendChild(vr);
   // the manager's server tools (4.0.3)
   const st=card('s2','Speed and access','kernel tuning, auto tunnels, who may connect');const stool=(op,label,cls,confirm)=>btn(label,cls,()=>act('server-tool',{body:{op},title:label,confirm,ok:'Start'}));

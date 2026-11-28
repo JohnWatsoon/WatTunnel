@@ -476,6 +476,28 @@ func (s *Server) latestVersion() string {
 	return s.ver.latest
 }
 
+// noteLatest keeps v as the newest known release when it is newer than the one known: a Kharej that already
+// updated itself marks this server behind even when GitHub is slow or unreachable from here.
+func (s *Server) noteLatest(v string) {
+	s.ver.mu.Lock()
+	defer s.ver.mu.Unlock()
+	if v != "" && (s.ver.latest == "" || newer(v, s.ver.latest)) {
+		s.ver.latest = v
+	}
+}
+
+// refreshLatest asks GitHub now (restarting the 6-hour timer) and takes any newer version a Kharej runs.
+func (s *Server) refreshLatest(now time.Time) string {
+	s.ver.mu.Lock()
+	s.ver.at = now
+	s.ver.mu.Unlock()
+	s.noteLatest(s.be.LatestVersion())
+	for _, k := range s.kharejSnap() {
+		s.noteLatest(k.Version)
+	}
+	return s.latestVersion()
+}
+
 // newer reports a > b for dotted versions ("3.6.10" > "3.6.9").
 func newer(a, b string) bool {
 	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
@@ -519,16 +541,12 @@ func (s *Server) slowChecks(now time.Time) {
 
 	s.ver.mu.Lock()
 	due := now.Sub(s.ver.at) >= 6*time.Hour
-	if due {
-		s.ver.at = now
-	}
 	s.ver.mu.Unlock()
 	if due {
-		if v := s.be.LatestVersion(); v != "" {
-			s.ver.mu.Lock()
-			s.ver.latest = v
-			s.ver.mu.Unlock()
-		}
+		s.refreshLatest(now)
+	}
+	for _, k := range s.kharejSnap() {
+		s.noteLatest(k.Version)
 	}
 	latest := s.latestVersion()
 	here := s.hostCached(now).Version

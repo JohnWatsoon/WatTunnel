@@ -102,6 +102,7 @@ var routes = []route{
 	{"GET", "kharej/*/audit", tierRead, 0, (*Server).apiKharejAudit},
 	{"POST", "update", tierManage, 0, (*Server).apiUpdateHere},
 	{"POST", "update-all", tierManage, 0, (*Server).apiUpdateAll},
+	{"POST", "update-check", tierManage, 0, (*Server).apiUpdateCheck},
 	{"POST", "rollback", tierManage, 0, (*Server).apiRollback},
 	{"GET", "backups", tierRead, 0, (*Server).apiBackups},
 	{"POST", "backups", tierManage, 0, (*Server).apiBackupNow},

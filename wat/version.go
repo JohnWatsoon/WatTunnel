@@ -1,4 +1,4 @@
 package wat
 
 // Version is shown by `wattun -version`; the bot compares it with the installed binaries.
-const Version = "4.0.8"
+const Version = "4.0.9"

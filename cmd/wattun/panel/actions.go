@@ -907,13 +907,13 @@ func (s *Server) apiUpdateAll(c *call) {
 		c.fail(http.StatusConflict, "An update is already running.")
 		return
 	}
-	latest := s.latestVersion()
-	if latest == "" {
-		c.fail(http.StatusBadGateway, "The newest version is not known yet: GitHub did not answer. Try again in a minute.")
-		return
-	}
-	here := s.be.Host().Version
-	id, err := s.jobs.do("update-all", "Update every server to "+latest, c.sess.User, func(say func(string, ...any)) error {
+	id, err := s.jobs.do("update-all", "Update every server", c.sess.User, func(say func(string, ...any)) error {
+		latest := s.refreshLatest(time.Now()) // fresh, not the 6-hourly cache: that cache kept a stale release here
+		if latest == "" {
+			return fmt.Errorf("the newest version is not known: GitHub did not answer and no Kharej reported one")
+		}
+		here := s.be.Host().Version
+		say("Newest release: %s.", latest)
 		for _, k := range s.kharejSnap() {
 			switch {
 			case !k.Online:
@@ -946,7 +946,7 @@ func (s *Server) apiUpdateAll(c *call) {
 		_, err := s.jobs.run("update", "Update this server", c.sess.User, s.be.ManagerArgv("update"))
 		return err
 	})
-	s.jobReply(c, "update all", latest, id, err)
+	s.jobReply(c, "update all", "every server", id, err)
 }
 
 func orAny(v any, def string) any {
@@ -954,6 +954,16 @@ func orAny(v any, def string) any {
 		return def
 	}
 	return v
+}
+
+// apiUpdateCheck runs the release check now instead of waiting for the 6-hourly one.
+func (s *Server) apiUpdateCheck(c *call) {
+	latest := s.refreshLatest(time.Now())
+	if latest == "" {
+		c.fail(http.StatusBadGateway, "GitHub did not answer and no Kharej reported a version. Try again in a minute.")
+		return
+	}
+	c.ok(map[string]any{"latest": latest, "here": s.be.Host().Version})
 }
 
 func (s *Server) apiRollback(c *call) {

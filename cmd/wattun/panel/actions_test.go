@@ -135,6 +135,19 @@ func TestUpdateAll(t *testing.T) {
 	}
 }
 
+// A stale cached release must not hide a newer one: the check-now route asks GitHub and takes a newer Kharej.
+func TestUpdateCheckFresh(t *testing.T) {
+	setFakeKharej([]Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true, Version: "10.0.1"}})
+	defer setFakeKharej(nil)
+	s, _ := newTestServer(t, "")
+	s.kh = fakeBE{}.Kharej()
+	s.ver.latest = "4.0.7"
+	w := do(s, "POST", api+"update-check", `{}`, xr, signIn(t, s, ""))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"latest":"10.0.1"`) {
+		t.Fatalf("update-check: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestLastLinkGuard(t *testing.T) {
 	fakePaired, fakeCalls = true, nil
 	setFakeKharej([]Kharej{{Host: "1.2.3.4", Via: []string{"t1"}, Online: true}})

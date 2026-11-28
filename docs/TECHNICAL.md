@@ -3718,8 +3718,13 @@ results; the page never prints a `TOKEN=` line, it offers a Show button.
   keeps carrying traffic, the management channel is gone. The last-link rule applies.
 - **Quota reset.** Per port in the drawer; sets that port's usage back to zero (`/quota/reset` on the tunnel's
   metrics address).
-- **Update here** runs `wattun update` as a job and restarts the panel; the page waits and reconnects. **Roll back**
-  runs `wattun rollback --yes`.
+- **Update here** runs `wattun update` as a job and restarts the panel; the page waits and reconnects.
+  **Check for updates** (4.0.9, in place of the Roll back button) asks GitHub now instead of waiting for the
+  6-hourly check (`POST /api/update-check`, answers `{latest, here}`). **Update all** runs the same fresh check
+  before it starts. The newest version known is the newest of GitHub's answer and every Kharej's version, so a
+  Kharej that already updated itself marks this server behind even when GitHub is slow from Iran. Before 4.0.9 the
+  panel kept the release it saw at start-up for 6 hours, and Update all then said "already on" the old version.
+  Rolling back stays in the manager (Settings), `wattun rollback` and `POST /api/rollback`.
 - **Backup downloads** can be encrypted: give a passphrase (10 characters or more) and the file comes as `.wbk`
   (`WATBK1` header, scrypt N=32768 r=8 p=1, XChaCha20-Poly1305). The passphrase is stored nowhere. Without one the
   `.tar.gz` comes as it is. Kharej backups work the same way.
