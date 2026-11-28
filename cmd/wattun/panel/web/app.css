@@ -490,12 +490,15 @@ dialog#dlg[open]::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12
 .agrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .agrp{background:var(--well);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:9px}
 .agrp .btn.sec{background:var(--card)}.agrp .btn.sec:hover{background:var(--hov)}
-.acts{display:flex;flex-direction:column}.acts>.ogrp:first-child{margin-top:0}.acts>.agrp{margin-top:8px}
-.alist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:20px;padding-bottom:4px}
-.alist .btn{justify-content:flex-start;width:100%;height:44px;padding:0;gap:10px;background:none;border:0;border-top:1px solid var(--line);border-radius:0;box-shadow:none;color:var(--fg);font-weight:400}
-.alist .btn:nth-child(-n+2){border-top:0}
-.alist .btn:hover{background:none;color:var(--green)}.alist .btn svg{color:var(--mut)}.alist .btn:hover svg{color:inherit}
-.alist .btn.sec.danger,.alist .btn.sec.danger:hover{background:none;box-shadow:none;color:#ff8f93}.alist .btn.sec.danger:hover{color:#ffb3b6}.alist .btn.danger svg{color:inherit}
+.acts{display:flex;flex-direction:column}.acts>.agrp{margin-top:8px}
+.ochips.qbar.qbar{grid-auto-columns:minmax(0,1fr);justify-self:stretch;margin-bottom:4px;background:var(--well);padding:4px;border-radius:14px}.qbar .och:hover{background:var(--card)}.qbar .och{height:36px;color:var(--fg)}.qbar .och.bad{color:#ff8f93}
+.btn.arow{display:grid;grid-template-columns:18px minmax(0,1fr) auto;grid-template-rows:auto auto;column-gap:12px;row-gap:2px;align-items:center;justify-items:start;width:100%;height:auto;padding:12px 0;background:none;border:0;border-top:1px solid var(--line);border-radius:0;box-shadow:none;color:var(--fg);text-align:left}
+.og-t+.btn.arow{border-top:0}
+.btn.arow>svg{grid-row:1/3;color:var(--mut)}
+.ar-c{grid-column:3;grid-row:1/3;width:7px;height:7px;border-right:1.5px solid var(--dim);border-bottom:1.5px solid var(--dim);transform:rotate(-45deg);margin-right:4px}
+.ar-n{grid-column:2;font:500 13.5px var(--sans)}.ar-d{grid-column:2;font:400 12.5px/1.4 var(--sans);color:var(--mut)}
+.btn.arow:hover{background:none}.btn.arow:hover .ar-n{color:var(--green)}.btn.arow:hover .ar-c{border-color:var(--fg)}
+.btn.arow.bad .ar-n,.btn.arow.bad>svg{color:#ff8f93}.btn.arow.bad:hover .ar-n{color:#ffb3b6}
 
 /* kharej */
 .kgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:12px}
@@ -704,7 +707,6 @@ dialog#dlg[open]::backdrop{background:rgba(10,10,11,.55);backdrop-filter:blur(12
   .tstrip{grid-template-columns:minmax(0,1fr)}.ts-n{font-size:52px}
   .tgrid,.kgrid,.trg{grid-template-columns:minmax(0,1fr)}
   .pgrid,.agrid,.cetiles,.kvrow{grid-template-columns:minmax(0,1fr)}
-  .alist{grid-template-columns:minmax(0,1fr)}.alist .btn:nth-child(2){border-top:1px solid var(--line)}
   .flaps.big .flap,.flaps.big.long .flap{width:19px;height:28px;font-size:14px}
   .k-link{grid-template-columns:minmax(0,1fr)}
   .au{grid-template-columns:1fr 1fr}

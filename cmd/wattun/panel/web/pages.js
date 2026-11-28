@@ -377,26 +377,33 @@ function boot(name,t,verb){
 P.onDrawer=async(name,t)=>{
   const a=$('#dActs');a.textContent='';
   const route=$('#dRoute');route.textContent='';const ln=el('i','t-line'+(t.active?' on':''));ln.appendChild(el('b'));route.append(el('span','t-end',S.ov.host.name||'here'),ln,el('span','t-end',t.peer||'–'));
-  // one list per group, the same rows as Settings: equal cells, icon and label, hairlines between them
-  const grp=(title,items)=>{const g=el('div','ogrp');g.appendChild(el('div','og-t',title));const w=el('div','alist');items.filter(Boolean).forEach(x=>w.appendChild(x));g.appendChild(w);a.appendChild(g)};
+  // a quick bar for the everyday four, then one-column rows like Settings: icon, name, what it does
+  const quick=el('div','ochips qbar');a.appendChild(quick);
+  const qb=(label,fn,cls)=>{const b=el('button','och'+(cls?' '+cls:''),label);b.type='button';b.onclick=e=>P.busy(b,fn(e));quick.appendChild(b)};
+  const grp=(title,items)=>{items=items.filter(Boolean);if(!items.length)return;const g=el('div','ogrp');g.appendChild(el('div','og-t',title));items.forEach(x=>g.appendChild(x));a.appendChild(g)};
+  const row=(label,desc,fn,cls)=>{const b=el('button','btn arow'+(cls?' '+cls:''));b.type='button';b.append(el('span','ar-n',label),el('span','ar-d',desc),el('i','ar-c'));b.onclick=e=>P.busy(b,fn(e));return b};
   const u=act2=>()=>{const b=act2!=='stop'?boot(name,t,act2):null;
     return act('tunnels/'+enc(name)+'/'+act2,act2==='stop'?{confirm:'Stop '+name+'? Its users lose the connection.',title:'Stop '+name,danger:true}:{}).then(r=>{if(b)b(r);if(r){if(!b)toast(name+': '+act2+' done');P.loadOverview()}})};
-  grp('Run',[t.active?btn('Restart','sec',u('restart')):btn('Start','pri',u('start')),t.active&&btn('Stop','sec danger',u('stop'))]);
-  grp('Test',[t.role==='Iran'&&btn('Speed test','sec',()=>act('tunnels/'+enc(name)+'/speedtest',{title:'Speed test of '+name,fields:[{k:'mb',label:'Megabytes each way',value:'10',mode:'numeric'}],ok:'Run'})),
-    t.role==='Iran'&&btn('Re-test carriers','sec',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches; pick bond to join the best ones.',title:'Re-test carriers',fields:[TESTF],ok:'Start the test'})),
-    t.role==='Iran'&&btn('Change carrier','sec',()=>changeCarrier(name)),
-    btn('Diagnose','sec',()=>act('tunnels/'+enc(name)+'/diagnose'))]);
+  if(t.active){qb('Restart',u('restart'));qb('Stop',u('stop'),'bad')}else qb('Start',u('start'));
+  if(t.role==='Iran')qb('Speed test',()=>act('tunnels/'+enc(name)+'/speedtest',{title:'Speed test of '+name,fields:[{k:'mb',label:'Megabytes each way',value:'10',mode:'numeric'}],ok:'Run'}));
+  qb('Diagnose',()=>act('tunnels/'+enc(name)+'/diagnose'));
   const cdnc=/^(ws|wss|h2|h2c|grpc)$/.test(t.carrier||''),pool=/^(tcp|tls|ws|wss|h2|h2c|grpc)(\+(tcp|tls|ws|wss|h2|h2c|grpc))*$/.test(t.carrier||'');
-  const tool=(op,label,confirm)=>btn(label,'sec',()=>act('tunnels/'+enc(name)+'/tool',{body:{op},title:label,confirm,ok:'Start'}));
-  grp('Tune',[t.role==='Iran'&&btn('Auto tune','sec',()=>act('tunnels/'+enc(name)+'/retest',{body:{test:'normal',pick:'best'},title:'Auto tune '+name,confirm:'Tests every carrier of this auto tunnel, takes the fastest, tunes it and switches to it. A few minutes; the tunnel restarts once if it switches.',ok:'Start'})),
-    t.role==='Iran'&&!t.reverse&&pool&&tool('acmatrix','Find best anti-censorship','Tests every fake-SNI, desync mode and ECH combination on this route and applies the fastest. Takes a few minutes; the tunnel restarts once at the end.'),
-    t.role==='Iran'&&!t.reverse&&cdnc&&tool('cdntune','Tune Cloudflare path','Finds the Cloudflare edges that serve this tunnel\'s domain, with ECH and TLS settings, and applies the best. Needs a domain on the tunnel.'),
-    t.role==='Iran'&&/\+/.test(t.carrier||'')&&tool('bondretest','Re-test bond legs','Tests every leg again plus the ones that failed before, and adds one that works again.'),
-    tool('resettraffic','Reset traffic','Zeroes the lifetime traffic counters of this tunnel. It restarts.')]);
-  grp('Configure',[btn('Ports','sec',()=>editPorts(name,t)),t.role==='Iran'&&btn('Move ports','sec',()=>movePorts(name,t)),btn('Limit a port','sec',()=>limitPort(name))]);
+  const tool=(op,label,desc,confirm)=>row(label,desc,()=>act('tunnels/'+enc(name)+'/tool',{body:{op},title:label,confirm,ok:'Start'}));
+  const ir=t.role==='Iran';
+  grp('Carrier',[ir&&row('Auto tune','Test every carrier, keep the fastest, tune it',()=>act('tunnels/'+enc(name)+'/retest',{body:{test:'normal',pick:'best'},title:'Auto tune '+name,confirm:'Tests every carrier of this auto tunnel, takes the fastest, tunes it and switches to it. A few minutes; the tunnel restarts once if it switches.',ok:'Start'})),
+    ir&&row('Re-test carriers','Pick a test preset, then choose from the results',()=>act('tunnels/'+enc(name)+'/retest',{confirm:'Tests every carrier again (auto tunnels). The tunnel restarts if it switches; pick bond to join the best ones.',title:'Re-test carriers',fields:[TESTF],ok:'Start the test'})),
+    ir&&row('Change carrier','Switch to a row of the last test, no new test',()=>changeCarrier(name)),
+    ir&&!t.reverse&&pool&&tool('acmatrix','Find best anti-censorship','Try every fake-SNI, desync and ECH mix','Tests every fake-SNI, desync mode and ECH combination on this route and applies the fastest. Takes a few minutes; the tunnel restarts once at the end.'),
+    ir&&!t.reverse&&cdnc&&tool('cdntune','Tune Cloudflare path','Find the fastest edges for this domain','Finds the Cloudflare edges that serve this tunnel\'s domain, with ECH and TLS settings, and applies the best. Needs a domain on the tunnel.'),
+    ir&&/\+/.test(t.carrier||'')&&tool('bondretest','Re-test bond legs','Try every leg again and add back what works','Tests every leg again plus the ones that failed before, and adds one that works again.')]);
   if(/\+/.test(t.carrier||''))bondBlock(a,name);
-  grp('Keys and pairing',[btn('Show token','sec',()=>showToken(name)),t.paired&&btn('Forget pairing','sec danger',()=>act('tunnels/'+enc(name)+'/pair-forget',{full:true,danger:true,title:'Forget the pairing of '+name,confirm:'Turns off the management channel of '+name+' (pairing: false) and restarts it. The tunnel keeps working; Kharej is then managed from its own console until you pair again.'}).then(r=>{if(r){toast('Pairing forgotten');P.loadOverview()}}))]);
-  grp('Danger',[btn('Delete','sec danger',()=>deleteTunnel(name,t))]);
+  grp('Ports and traffic',[row('Ports','Public ports here and their targets on Kharej',()=>editPorts(name,t)),
+    ir&&row('Move ports','Hand ports over to another Iran tunnel',()=>movePorts(name,t)),
+    row('Limit a port','Speed cap or monthly quota for one port',()=>limitPort(name)),
+    tool('resettraffic','Reset traffic','Zero the lifetime counters','Zeroes the lifetime traffic counters of this tunnel. It restarts.')]);
+  grp('Pairing and removal',[row('Show token','The token Kharej made for this tunnel',()=>showToken(name)),
+    t.paired&&row('Forget pairing','Manage Kharej from its own console instead',()=>act('tunnels/'+enc(name)+'/pair-forget',{full:true,danger:true,title:'Forget the pairing of '+name,confirm:'Turns off the management channel of '+name+' (pairing: false) and restarts it. The tunnel keeps working; Kharej is then managed from its own console until you pair again.'}).then(r=>{if(r){toast('Pairing forgotten');P.loadOverview()}})),
+    row('Delete','Stop it and remove its config, key and token',()=>deleteTunnel(name,t),'bad')]);
   renderDrawerPorts(name,[]);settingsBlock(name,t);
   const r=await api('tunnels/'+enc(name)+'/ports').catch(()=>null);
   if(S.drawer===name&&r&&r.ok){PORTS[name]=r.j.ports;renderDrawerPorts(name,r.j.ports)}
